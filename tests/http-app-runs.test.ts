@@ -461,6 +461,7 @@ describe("HTTP app — runs API and pages", () => {
         runId: "watchdog-detail",
         sampledAt: "2026-05-22T14:01:00.000Z",
         turnIdSetSize: 1,
+        workspaceDigest: "",
         workspaceMtimeMax: Date.parse("2026-05-22T11:25:30.000Z")
       });
 
@@ -480,6 +481,7 @@ describe("HTTP app — runs API and pages", () => {
         graceRemainingMs: -7_530_000,
         idleSince: "2026-05-22T11:25:30.000Z",
         lastToolCallAt: "2026-05-22T11:25:00.000Z",
+        outputTokenBudget: 150_000,
         outputTokensTotal: 36_365,
         sampledAt: "2026-05-22T14:01:00.000Z",
         turnIdSetSize: 1,
@@ -510,11 +512,16 @@ describe("HTTP app — runs API and pages", () => {
         runId: "watchdog-disabled",
         sampledAt: "2026-05-22T11:59:00.000Z",
         turnIdSetSize: 1,
+        workspaceDigest: "",
         workspaceMtimeMax: Date.parse("2026-05-22T11:41:00.000Z")
       });
 
       const app = createHttpApp({
-        getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),
+        getWatchdogConfig: () => ({
+          enabled: false,
+          graceMinutes: 30,
+          outputTokenBudget: 0
+        }),
         runStore: test.runStore,
         stateRoot: test.stateRoot,
         version: "0.1.0"
@@ -1823,6 +1830,7 @@ describe("HTTP app — runs API and pages", () => {
         runId: "idle-active",
         sampledAt: "2026-05-22T11:45:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: 0
       });
 
@@ -1855,13 +1863,18 @@ describe("HTTP app — runs API and pages", () => {
         runId: "retrying-preparing",
         sampledAt: "2026-05-22T11:00:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: 0
       });
       test.runStore.updateRunState("retrying-preparing", "failed");
       test.runStore.updateRunState("retrying-preparing", "preparing_workspace");
 
       const app = createHttpApp({
-        getWatchdogConfig: () => ({ enabled: true, graceMinutes: 30 }),
+        getWatchdogConfig: () => ({
+          enabled: true,
+          graceMinutes: 30,
+          outputTokenBudget: 0
+        }),
         now: () => Date.parse("2026-05-22T12:00:00.000Z"),
         runStore: test.runStore,
         stateRoot: test.stateRoot,
@@ -1882,7 +1895,11 @@ describe("HTTP app — runs API and pages", () => {
       }
 
       const disabledApp = createHttpApp({
-        getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),
+        getWatchdogConfig: () => ({
+          enabled: false,
+          graceMinutes: 30,
+          outputTokenBudget: 0
+        }),
         now: () => Date.parse("2026-05-22T12:00:00.000Z"),
         runStore: test.runStore,
         stateRoot: test.stateRoot,
@@ -1918,11 +1935,16 @@ describe("HTTP app — runs API and pages", () => {
         runId: "progressing-run",
         sampledAt: "2026-05-22T11:59:00.000Z",
         turnIdSetSize: 3,
+        workspaceDigest: "",
         workspaceMtimeMax: Date.parse("2026-05-22T11:50:00.000Z")
       });
 
       const app = createHttpApp({
-        getWatchdogConfig: () => ({ enabled: true, graceMinutes: 30 }),
+        getWatchdogConfig: () => ({
+          enabled: true,
+          graceMinutes: 30,
+          outputTokenBudget: 0
+        }),
         now: () => Date.parse("2026-05-22T12:00:00.000Z"),
         runStore: test.runStore,
         stateRoot: test.stateRoot,
@@ -1985,6 +2007,7 @@ describe("HTTP app — runs API and pages", () => {
         runId: "idle-run",
         sampledAt: "2026-05-22T11:45:00.000Z",
         turnIdSetSize: 1,
+        workspaceDigest: "",
         workspaceMtimeMax: Date.parse("2026-05-22T11:45:00.000Z")
       });
 
@@ -2016,6 +2039,7 @@ describe("HTTP app — runs API and pages", () => {
         // idleSince itself.
         sampledAt: "2026-05-22T09:31:00.000Z",
         turnIdSetSize: 1,
+        workspaceDigest: "",
         workspaceMtimeMax: Date.parse("2026-05-22T09:00:00.000Z")
       });
       // updatedAt is deliberately set to a different timestamp than
@@ -2089,6 +2113,7 @@ describe("HTTP app — runs API and pages", () => {
         runId: "retrying-preparing-detail",
         sampledAt: "2026-05-22T09:00:00.000Z",
         turnIdSetSize: 1,
+        workspaceDigest: "",
         workspaceMtimeMax: Date.parse("2026-05-22T08:50:00.000Z")
       });
       test.runStore.updateRunState("retrying-preparing-detail", "failed");
@@ -2116,11 +2141,16 @@ describe("HTTP app — runs API and pages", () => {
       };
       expect(preparingApiBody.watchdog).toEqual({
         enabled: true,
-        graceMs: 1_800_000
+        graceMs: 1_800_000,
+        outputTokenBudget: 0
       });
 
       const disabledApp = createHttpApp({
-        getWatchdogConfig: () => ({ enabled: false, graceMinutes: 30 }),
+        getWatchdogConfig: () => ({
+          enabled: false,
+          graceMinutes: 30,
+          outputTokenBudget: 0
+        }),
         now: () => Date.parse("2026-05-22T12:00:00.000Z"),
         runStore: test.runStore,
         stateRoot: test.stateRoot,

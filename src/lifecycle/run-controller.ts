@@ -41,6 +41,7 @@ import type {
   ProviderEvent
 } from "../provider.js";
 import type { CancelReason, RunState, RunStore } from "../run-store.js";
+import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
@@ -151,7 +152,7 @@ export type RunControllerProjectConfig = {
   // still-configured routine is never mistaken for one removed from
   // routines:, mirroring trackerlessGitRoutines above. See ADR 0067.
   templateRejectedRoutines?: TargetedRoutineDeclaration[] | undefined;
-  watchdog?: { graceMinutes: number } | undefined;
+  watchdog?: { graceMinutes?: number; outputTokenBudget?: number } | undefined;
 };
 
 // A Dispatch Project's runtime config: the issue-dispatch fields are required.
@@ -2814,28 +2815,34 @@ export class RunController {
       // a run is staled before provider attach. Gate on terminal_reason rather
       // than state === "stale" so the clobber cannot defeat the verdict, and
       // re-assert the stale state when it was overwritten. See ADR 0054.
-      if (preservedRun?.terminalReason === "no_progress") {
+      const watchdogTerminalReason = WATCHDOG_TERMINAL_REASONS.find(
+        (reason) => reason === preservedRun?.terminalReason
+      );
+      if (watchdogTerminalReason !== undefined) {
         // Re-assert the stale verdict if a clobbering updateRunState(.., "running")
-        // overwrote the state. markRunNoProgressStale refuses rows with
+        // overwrote the state. markRunWatchdogStale refuses rows with
         // cancel_requested=1, so if a concurrent operator/closed-issue cancel won
         // the race the re-assert returns false; in that case we must NOT preserve
         // the watchdog verdict — fall through to classifyFailure so the
         // cancellation terminates the run. Otherwise the row would be left stuck
         // in "running" with no provider (a state-machine leak).
         const reasserted =
-          preservedRun.state === "stale" ||
-          this.runStore.markRunNoProgressStale(input.runId);
+          preservedRun?.state === "stale" ||
+          this.runStore.markRunWatchdogStale(
+            input.runId,
+            watchdogTerminalReason
+          );
         if (reasserted) {
           if (attemptCreated) {
             this.runStore.updateAttemptState(attemptId, "stale");
           }
           await this.applyTerminalLabels({
-            cancelReason: CANCEL_REASONS.NO_PROGRESS,
+            cancelReason: watchdogTerminalReason,
             fsmContinuing: false,
             issueNumber: input.issue.number,
             outcome: {
               kind: "cancelled",
-              reason: "no_progress"
+              reason: watchdogTerminalReason
             },
             repository: input.repository,
             willRetry: false
@@ -2848,7 +2855,7 @@ export class RunController {
               project: input.project.name,
               runId: input.runId,
               state: "stale",
-              terminalReason: "no_progress"
+              terminalReason: watchdogTerminalReason
             },
             "symphonika run termination preserved watchdog verdict"
           );

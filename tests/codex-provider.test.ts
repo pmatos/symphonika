@@ -208,6 +208,33 @@ describe("Codex JSON-RPC provider", () => {
         }
       },
       {
+        method: "item/started",
+        params: {
+          item: {
+            command: "cargo test",
+            cwd: "/workspace",
+            id: "exec-1",
+            status: "inProgress",
+            type: "commandExecution"
+          },
+          threadId: "thread-9",
+          turnId: "turn-9"
+        }
+      },
+      {
+        method: "item/started",
+        params: {
+          item: {
+            content: [],
+            id: "rs-1",
+            summary: [],
+            type: "reasoning"
+          },
+          threadId: "thread-9",
+          turnId: "turn-9"
+        }
+      },
+      {
         method: "item/agentMessage/delta",
         params: {
           delta: "done",
@@ -265,6 +292,17 @@ describe("Codex JSON-RPC provider", () => {
         sessionId: "thread-9",
         threadId: "thread-9",
         type: "session_started"
+      },
+      {
+        input: {
+          command: "cargo test",
+          cwd: "/workspace"
+        },
+        threadId: "thread-9",
+        toolCallId: "exec-1",
+        toolName: "commandExecution",
+        turnId: "turn-9",
+        type: "tool_call"
       },
       {
         message: "done",
@@ -1219,6 +1257,8 @@ async function writeFakeCodexAppServer(
       "    if (scenario === 'wait' || scenario === 'term-exit') {",
       "      continue;",
       "    }",
+      "    send({ method: 'item/started', params: { threadId: 'thread-9', turnId: 'turn-9', item: { type: 'commandExecution', id: 'exec-1', command: 'cargo test', cwd: '/workspace', status: 'inProgress' } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thread-9', turnId: 'turn-9', item: { type: 'reasoning', id: 'rs-1', summary: [], content: [] } } });",
       "    send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'item-1', delta: 'done' } });",
       "    send({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread-9', turnId: 'turn-9', tokenUsage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 } } });",
       "    send({ method: 'account/rateLimits/updated', params: { rateLimits: { primary: { remaining: 42, resetAt: 1777470000 } } } });",

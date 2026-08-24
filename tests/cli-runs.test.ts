@@ -212,6 +212,7 @@ describe("CLI run commands", () => {
       runId: "idle-active",
       sampledAt: "2026-05-22T11:59:00.000Z",
       turnIdSetSize: 0,
+      workspaceDigest: "",
       workspaceMtimeMax: 0
     });
     store.upsertWatchdogSample({
@@ -224,6 +225,7 @@ describe("CLI run commands", () => {
       runId: "progressing-active",
       sampledAt: "2026-05-22T11:59:00.000Z",
       turnIdSetSize: 1,
+      workspaceDigest: "",
       workspaceMtimeMax: 0
     });
     store.close();
@@ -270,6 +272,7 @@ describe("CLI run commands", () => {
       runId: "retry-prep",
       sampledAt: "2026-05-22T11:59:00.000Z",
       turnIdSetSize: 1,
+      workspaceDigest: "",
       workspaceMtimeMax: 0
     });
     store.recordTerminalReason(
@@ -459,6 +462,7 @@ describe("CLI run commands", () => {
       runId: "dash-run",
       sampledAt: "2026-05-13T08:59:00.000Z",
       turnIdSetSize: 0,
+      workspaceDigest: "",
       workspaceMtimeMax: 0
     });
     store.close();
@@ -1091,6 +1095,7 @@ describe("CLI run commands", () => {
         runId: "progress-active",
         sampledAt: sample.at,
         turnIdSetSize: 2,
+        workspaceDigest: "",
         workspaceMtimeMax: Date.parse("2026-05-22T11:58:30.000Z")
       });
     }
@@ -1114,7 +1119,8 @@ describe("CLI run commands", () => {
           last tool_call: 2m ago
           workspace mtime: 1m 30s ago
           turn_ids observed: 2
-          output tokens / 5m: +75"
+          output tokens / 5m: +75
+          output tokens: 175 / 150000 budget"
       `);
     } finally {
       vi.useRealTimers();
@@ -1146,6 +1152,7 @@ describe("CLI run commands", () => {
         runId: "progress-idle",
         sampledAt: sample.at,
         turnIdSetSize: 1,
+        workspaceDigest: "",
         workspaceMtimeMax: Date.parse("2026-05-22T11:41:00.000Z")
       });
     }
@@ -1170,6 +1177,7 @@ describe("CLI run commands", () => {
           workspace mtime: 19m ago
           turn_ids observed: 1
           output tokens / 5m: +20
+          output tokens: 70 / 150000 budget
           idle_since: 2026-05-22T11:45:00.000Z
           grace remaining: 15m"
       `);
@@ -1249,6 +1257,7 @@ describe("CLI run commands", () => {
       runId: "override-idle",
       sampledAt: "2026-05-22T11:59:00.000Z",
       turnIdSetSize: 0,
+      workspaceDigest: "",
       workspaceMtimeMax: 0
     });
     store.close();
@@ -1300,6 +1309,7 @@ describe("CLI run commands", () => {
         runId: "progress-terminated",
         sampledAt,
         turnIdSetSize: 1,
+        workspaceDigest: "",
         workspaceMtimeMax: Date.parse("2026-05-22T11:25:30.000Z")
       });
     }
@@ -1331,6 +1341,7 @@ describe("CLI run commands", () => {
           workspace mtime: 2h 35m ago
           turn_ids observed: 1
           output tokens / 5m: 0
+          output tokens: 36365 / 150000 budget
           idle_since: 2026-05-22T11:25:30.000Z
           grace remaining: -2h 5m"
       `);
@@ -1363,6 +1374,7 @@ describe("CLI run commands", () => {
       runId: "progress-terminated-stale-view",
       sampledAt: "2026-05-22T14:01:00.000Z",
       turnIdSetSize: 1,
+      workspaceDigest: "",
       workspaceMtimeMax: Date.parse("2026-05-22T11:25:30.000Z")
     });
     expect(
@@ -1398,6 +1410,7 @@ describe("CLI run commands", () => {
           workspace mtime: 2h 35m ago
           turn_ids observed: 1
           output tokens / 5m: 0
+          output tokens: 36365 / 150000 budget
           idle_since: 2026-05-22T11:25:30.000Z
           grace remaining: -2h 5m"
       `);
@@ -1427,6 +1440,7 @@ describe("CLI run commands", () => {
       runId: "progress-retrying-preparing",
       sampledAt: "2026-05-22T09:00:00.000Z",
       turnIdSetSize: 1,
+      workspaceDigest: "",
       workspaceMtimeMax: Date.parse("2026-05-22T08:50:00.000Z")
     });
     store.updateRunState("progress-retrying-preparing", "failed");

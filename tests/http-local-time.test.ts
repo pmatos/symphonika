@@ -92,6 +92,7 @@ it("renders Run timestamps in the viewer's local time with the UTC value as a fa
       runId: "run-local-time",
       sampledAt: "2026-08-20T14:01:00.000Z",
       turnIdSetSize: 0,
+      workspaceDigest: "",
       workspaceMtimeMax: 0
     });
     const detail = runStore.getRun("run-local-time");

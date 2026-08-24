@@ -173,7 +173,7 @@ export type RegisterPagesOptions = {
   claimMutex?: AsyncMutex;
   getWatchdogConfig?: (
     projectName: string
-  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes">;
+  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes" | "outputTokenBudget">;
   issuePollStatus?: IssuePollStatus;
   // #309 part 3's guarded-merge action. See HttpAppOptions.mergePullRequest
   // (src/http/app.ts).
@@ -6490,7 +6490,7 @@ function collectActiveWatchdogIdleStatuses(
   runs: RunStatus[],
   getWatchdogConfig: (
     projectName: string
-  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes">,
+  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes" | "outputTokenBudget">,
   nowMs: number
 ): Map<string, WatchdogIdleStatus> {
   const statuses = new Map<string, WatchdogIdleStatus>();
@@ -6717,11 +6717,16 @@ function renderWatchdogSection(
     watchdog.graceRemainingMs !== undefined
       ? `<dt>Grace remaining</dt><dd>${escapeHtml(formatWatchdogDuration(watchdog.graceRemainingMs))}</dd>`
       : "";
+  const budgetRow =
+    watchdog.outputTokenBudget > 0
+      ? `<dt>Output tokens</dt><dd>${watchdog.outputTokensTotal ?? 0} / ${watchdog.outputTokenBudget} budget</dd>`
+      : "";
   return `<section>${sectionHead("Watchdog")}<dl class="fields">
   <dt>Last tool_call</dt><dd>${escapeHtml(formatAge(watchdog.lastToolCallAt, nowMs))}</dd>
   <dt>Workspace mtime</dt><dd>${escapeHtml(formatAge(watchdog.workspaceMtimeMax, nowMs))}</dd>
   <dt>turn_ids observed</dt><dd>${watchdog.turnIdSetSize ?? 0}</dd>
   <dt>Output tokens / 5m</dt><dd>${outputTokenGrowth5m === 0 ? "0" : `+${outputTokenGrowth5m}`}</dd>
+  ${budgetRow}
   ${idleRow}
   ${graceRow}
 </dl></section>`;

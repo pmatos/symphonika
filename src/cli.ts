@@ -2569,6 +2569,11 @@ function formatProgressSignal(
     `  turn_ids observed: ${watchdog.turnIdSetSize ?? 0}`,
     `  output tokens / 5m: ${outputTokenGrowth5m === 0 ? "0" : `+${outputTokenGrowth5m}`}`
   ];
+  if (watchdog.outputTokenBudget > 0) {
+    lines.push(
+      `  output tokens: ${watchdog.outputTokensTotal ?? 0} / ${watchdog.outputTokenBudget} budget`
+    );
+  }
   if (watchdog.idleSince !== undefined) {
     lines.push(`  idle_since: ${watchdog.idleSince}`);
   }

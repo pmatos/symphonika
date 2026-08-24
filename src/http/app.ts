@@ -237,7 +237,7 @@ export type HttpAppOptions = {
   getStatusSnapshot?: () => StatusSnapshot;
   getWatchdogConfig?: (
     projectName: string
-  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes">;
+  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes" | "outputTokenBudget">;
   issuePollStatus?: IssuePollStatus;
   monotonicNow?: () => number;
   // Wall clock used by human/API-facing timestamps and ages.

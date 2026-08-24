@@ -277,6 +277,7 @@ describe("run-store lifecycle CRUD", () => {
         runId: id,
         sampledAt: "2026-05-22T09:30:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: 0
       });
       expect(store.getWatchdogSample(id)?.idleSince).toBe(
@@ -466,6 +467,7 @@ describe("run-store lifecycle CRUD", () => {
         "sampled_at",
         "last_tool_call_at",
         "workspace_mtime_max",
+        "workspace_digest",
         "turn_id_set_size",
         "output_tokens_total",
         "normalized_log_offset",
@@ -497,6 +499,7 @@ describe("run-store lifecycle CRUD", () => {
         runId: "run-watchdog",
         sampledAt: "2026-05-22T12:15:00.000Z",
         turnIdSetSize: 2,
+        workspaceDigest: "",
         workspaceMtimeMax: 1_769_000_000_123
       });
     } finally {
@@ -515,6 +518,7 @@ describe("run-store lifecycle CRUD", () => {
         runId: "run-watchdog",
         sampledAt: "2026-05-22T12:15:00.000Z",
         turnIdSetSize: 2,
+        workspaceDigest: "",
         workspaceMtimeMax: 1_769_000_000_123
       });
     } finally {

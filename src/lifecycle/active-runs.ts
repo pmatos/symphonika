@@ -37,6 +37,7 @@ export const CANCEL_REASONS = {
   CLOSED_ISSUE: "closed_issue",
   DAEMON_SHUTDOWN: "daemon_shutdown",
   ELIGIBILITY_LOSS: "eligibility_loss",
+  NO_CONVERGENCE: "no_convergence",
   NO_PROGRESS: "no_progress",
   OPERATOR: "operator"
 } as const satisfies Record<string, CancelReason>;

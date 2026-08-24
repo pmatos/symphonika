@@ -1798,6 +1798,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
       enabled: true,
       graceMinutes: 180,
       mtimeIgnore: ["*.log"],
+      outputTokenBudget: 150_000,
       sampleIntervalSeconds: 45
     });
   });
@@ -1972,6 +1973,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
       enabled: true,
       graceMinutes: 30,
       mtimeIgnore: [],
+      outputTokenBudget: 150_000,
       sampleIntervalSeconds: 60
     });
     const snapshot = reloader.getSnapshot()!;
@@ -2004,6 +2006,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
       enabled: false,
       graceMinutes: 0.5,
       mtimeIgnore: ["*.log", "dist/**"],
+      outputTokenBudget: 150_000,
       sampleIntervalSeconds: 2
     });
   });

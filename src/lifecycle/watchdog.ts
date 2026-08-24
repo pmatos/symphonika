@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, opendir, stat } from "node:fs/promises";
 import path from "node:path";
@@ -13,13 +14,39 @@ import {
 import type {
   RunStore,
   WatchdogCandidateRun,
-  WatchdogSample
+  WatchdogSample,
+  WatchdogTerminalReason
 } from "../run-store.js";
 
 import { ActiveRunRegistry, CANCEL_REASONS } from "./active-runs.js";
 
-const WORKSPACE_EXCLUDED_DIRS = new Set([".git", "target", "node_modules"]);
-const WORKSPACE_PROGRESS_THRESHOLD_MS = 1_000;
+// Directory names whose contents are build or tool output in the ecosystems
+// Symphonika dispatches against. They are never descended into, so a
+// rebuild-and-crash cycle cannot masquerade as workspace progress. A repository
+// adds its own trees through the Workflow Contract's `evidence.ignore` list.
+const WORKSPACE_EXCLUDED_DIRS = new Set([
+  ".cache",
+  ".git",
+  ".gradle",
+  ".mypy_cache",
+  ".next",
+  ".nyc_output",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".stack-work",
+  ".tox",
+  ".turbo",
+  ".venv",
+  "__pycache__",
+  "_build",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "out",
+  "target",
+  "venv"
+]);
 
 export type ReconcileWatchdogInput = {
   activeRuns: ActiveRunRegistry;
@@ -54,12 +81,28 @@ export function watchdogProgressObserved(
 ): boolean {
   return (
     toolCallAdvanced(previous, next) ||
-    next.workspaceMtimeMax - previous.workspaceMtimeMax >=
-      WORKSPACE_PROGRESS_THRESHOLD_MS ||
+    workspaceChanged(previous, next) ||
     next.turnIdSetSize > previous.turnIdSetSize ||
     next.outputTokensTotal > previous.outputTokensTotal ||
     messageAdvanced(previous, next)
   );
+}
+
+// ADR 0086: the workspace signal is a change in the tree's shape — which files
+// exist and how large they are — not a bare mtime advance. A build that
+// reproduces byte-identical output on every cycle refreshes mtimes without
+// carrying new information, which is how the vow#1055 incident kept a wedged
+// Run's workspace signal alive for fourteen hours. Digests are compared
+// literally; an empty previous digest is a pre-upgrade row rather than an
+// observation, so it is not read as a change.
+function workspaceChanged(
+  previous: WatchdogSample,
+  next: WatchdogSample
+): boolean {
+  if (previous.workspaceDigest.length === 0) {
+    return false;
+  }
+  return next.workspaceDigest !== previous.workspaceDigest;
 }
 
 export async function reconcileWatchdog(
@@ -120,15 +163,25 @@ export async function reconcileWatchdog(
     }
     sampled += 1;
 
-    if (progress || idleSince === null) {
-      continue;
-    }
-    if (now.getTime() - Date.parse(idleSince) < config.graceMinutes * 60_000) {
+    // ADR 0086: the convergence budget is checked before the liveness clock and
+    // independently of it. A Run that burns its whole output-token budget
+    // without finishing is busy, not idle — the liveness rule is satisfied on
+    // every tick and would never fire.
+    const terminalReason = watchdogTerminalReason({
+      budget: config.outputTokenBudget,
+      graceMs: config.graceMinutes * 60_000,
+      idleSince,
+      now,
+      outputTokensTotal: persisted.outputTokensTotal,
+      progress
+    });
+    if (terminalReason === undefined) {
       continue;
     }
 
-    const marked = input.runStore.markRunNoProgressStale(
+    const marked = input.runStore.markRunWatchdogStale(
       run.runId,
+      terminalReason,
       sampledAt,
       run.watchdogGeneration
     );
@@ -136,7 +189,12 @@ export async function reconcileWatchdog(
       continue;
     }
     cancellations.push(
-      input.activeRuns.requestCancel(run.runId, CANCEL_REASONS.NO_PROGRESS)
+      input.activeRuns.requestCancel(
+        run.runId,
+        terminalReason === "no_convergence"
+          ? CANCEL_REASONS.NO_CONVERGENCE
+          : CANCEL_REASONS.NO_PROGRESS
+      )
     );
     terminated += 1;
     try {
@@ -154,9 +212,11 @@ export async function reconcileWatchdog(
     input.logger?.warn(
       {
         issueNumber: run.issueNumber,
+        outputTokenBudget: config.outputTokenBudget,
+        outputTokensTotal: persisted.outputTokensTotal,
         project: run.projectName,
         runId: run.runId,
-        terminalReason: "no_progress"
+        terminalReason
       },
       "symphonika watchdog marked run stale"
     );
@@ -166,34 +226,85 @@ export async function reconcileWatchdog(
   return { sampled, terminated };
 }
 
-export async function sampleWorkspaceMtimeMax(
+function watchdogTerminalReason(input: {
+  budget: number;
+  graceMs: number;
+  idleSince: string | null;
+  now: Date;
+  outputTokensTotal: number;
+  progress: boolean;
+}): WatchdogTerminalReason | undefined {
+  if (input.budget > 0 && input.outputTokensTotal >= input.budget) {
+    return "no_convergence";
+  }
+  if (input.progress || input.idleSince === null) {
+    return undefined;
+  }
+  if (input.now.getTime() - Date.parse(input.idleSince) < input.graceMs) {
+    return undefined;
+  }
+  return "no_progress";
+}
+
+export type WorkspaceSample = {
+  digest: string;
+  mtimeMax: number;
+};
+
+export async function sampleWorkspace(
   workspacePath: string,
   mtimeIgnore: readonly string[] = [],
   directoryIgnore: readonly string[] = []
-): Promise<number> {
+): Promise<WorkspaceSample> {
   if (workspacePath.length === 0) {
-    return 0;
+    return { digest: "", mtimeMax: 0 };
   }
 
   try {
     const root = await stat(workspacePath);
     if (!root.isDirectory()) {
-      return Math.floor(root.mtimeMs);
+      return {
+        digest: digestEntries([`${path.basename(workspacePath)}:${root.size}`]),
+        mtimeMax: Math.floor(root.mtimeMs)
+      };
     }
     const ignore = mtimeIgnore.map(globToRegExp);
     const ignoredDirectories = new Set(
       directoryIgnore.map(normalizeDirectoryIgnore)
     );
-    return await walkWorkspaceMtimeMax(
+    const entries: string[] = [];
+    const mtimeMax = await walkWorkspaceMtimeMax(
       workspacePath,
       workspacePath,
       ignore,
       ignoredDirectories,
-      Math.floor(root.mtimeMs)
+      Math.floor(root.mtimeMs),
+      entries
     );
+    return { digest: digestEntries(entries), mtimeMax };
   } catch {
-    return 0;
+    return { digest: "", mtimeMax: 0 };
   }
+}
+
+export async function sampleWorkspaceMtimeMax(
+  workspacePath: string,
+  mtimeIgnore: readonly string[] = [],
+  directoryIgnore: readonly string[] = []
+): Promise<number> {
+  return (await sampleWorkspace(workspacePath, mtimeIgnore, directoryIgnore))
+    .mtimeMax;
+}
+
+// Sorted so the digest is independent of directory-read order, and hashed so a
+// large workspace still costs one short string in the sample row.
+function digestEntries(entries: string[]): string {
+  const hash = createHash("sha1");
+  for (const entry of entries.sort()) {
+    hash.update(entry);
+    hash.update("\n");
+  }
+  return hash.digest("hex");
 }
 
 async function sampleRun(input: {
@@ -227,6 +338,11 @@ async function sampleRun(input: {
   if (turnIdSetSize === undefined) {
     return undefined;
   }
+  const workspace = await sampleWorkspace(
+    input.run.workspacePath,
+    input.mtimeIgnore,
+    input.directoryIgnore
+  );
   return {
     idleSince: null,
     lastMessageAt: latestMessageAt(
@@ -248,11 +364,8 @@ async function sampleRun(input: {
     runId: input.run.runId,
     sampledAt: input.sampledAt,
     turnIdSetSize,
-    workspaceMtimeMax: await sampleWorkspaceMtimeMax(
-      input.run.workspacePath,
-      input.mtimeIgnore,
-      input.directoryIgnore
-    )
+    workspaceDigest: workspace.digest,
+    workspaceMtimeMax: workspace.mtimeMax
   };
 }
 
@@ -296,7 +409,8 @@ async function walkWorkspaceMtimeMax(
   workspaceRoot: string,
   ignore: readonly RegExp[],
   ignoredDirectories: ReadonlySet<string>,
-  currentMax: number
+  currentMax: number,
+  entries: string[]
 ): Promise<number> {
   let max = currentMax;
   let dir;
@@ -337,7 +451,8 @@ async function walkWorkspaceMtimeMax(
           workspaceRoot,
           ignore,
           ignoredDirectories,
-          max
+          max,
+          entries
         )
       );
     } else if (!isMtimeIgnored(workspaceRoot, entryPath, ignore)) {
@@ -345,6 +460,7 @@ async function walkWorkspaceMtimeMax(
       // mtime_ignore glob so build-output churn (e.g. *.log) cannot keep a
       // wedged Run alive through the workspace-mtime signal.
       max = Math.max(max, Math.floor(stats.mtimeMs));
+      entries.push(`${relative}:${stats.size}`);
     }
   }
   return max;
@@ -468,16 +584,37 @@ function outputTokensTotal(
     if (event.type !== "usage_updated") {
       continue;
     }
-    const tokens = outputTokens(event);
-    if (tokens !== undefined) {
-      total = Math.max(total, tokens);
+    const usage = objectField(event, "tokenUsage");
+    if (usage === undefined) {
+      continue;
+    }
+    // Providers report output tokens in two different shapes. Codex nests a
+    // cumulative running total under `tokenUsage.total`; Claude and Oh My Pi
+    // report one completed assistant message's output at the top level. An
+    // absolute total is taken as-is, a per-message count is added, so the
+    // sample is a true cumulative for every provider (ADR 0086).
+    const cumulative = cumulativeOutputTokens(usage);
+    if (cumulative !== undefined) {
+      total = Math.max(total, cumulative);
+      continue;
+    }
+    const increment = perMessageOutputTokens(usage);
+    if (increment !== undefined) {
+      total += increment;
     }
   }
   return total;
 }
 
-function outputTokens(event: NormalizedProviderEvent): number | undefined {
-  const usage = objectField(event, "tokenUsage");
+function cumulativeOutputTokens(
+  usage: Record<string, unknown>
+): number | undefined {
+  return numberField(objectField(usage, "total"), "outputTokens");
+}
+
+function perMessageOutputTokens(
+  usage: Record<string, unknown>
+): number | undefined {
   return (
     numberField(usage, "outputTokens") ??
     numberField(usage, "output_tokens") ??

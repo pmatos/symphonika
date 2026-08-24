@@ -34,6 +34,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import {
   reconcileWatchdog,
+  sampleWorkspace,
   sampleWorkspaceMtimeMax,
   watchdogProgressObserved
 } from "../src/lifecycle/watchdog.js";
@@ -72,6 +73,7 @@ describe("watchdogProgressObserved", () => {
     runId: "run-a",
     sampledAt: "2026-05-22T10:00:00.000Z",
     turnIdSetSize: 2,
+    workspaceDigest: "digest-a",
     workspaceMtimeMax: 1_000
   };
 
@@ -86,7 +88,7 @@ describe("watchdogProgressObserved", () => {
     expect(
       watchdogProgressObserved(previous, {
         ...previous,
-        workspaceMtimeMax: previous.workspaceMtimeMax + 1_000
+        workspaceDigest: "digest-b"
       })
     ).toBe(true);
     expect(
@@ -109,7 +111,10 @@ describe("watchdogProgressObserved", () => {
     ).toBe(true);
   });
 
-  it("ignores sub-second workspace mtime drift and unchanged event counters", () => {
+  it("ignores a restamped workspace and unchanged event counters", () => {
+    // ADR 0086: mtime alone is not progress. A rebuild that restamps identical
+    // output leaves the workspace digest unchanged and must not clear the idle
+    // clock.
     expect(
       watchdogProgressObserved(previous, {
         ...previous,
@@ -117,8 +122,23 @@ describe("watchdogProgressObserved", () => {
         lastToolCallAt: previous.lastToolCallAt,
         outputTokensTotal: previous.outputTokensTotal,
         turnIdSetSize: previous.turnIdSetSize,
-        workspaceMtimeMax: previous.workspaceMtimeMax + 999
+        workspaceDigest: previous.workspaceDigest,
+        workspaceMtimeMax: previous.workspaceMtimeMax + 3_600_000
       })
+    ).toBe(false);
+  });
+
+  it("treats an empty previous digest as a pre-upgrade row, not a change", () => {
+    expect(
+      watchdogProgressObserved(
+        { ...previous, workspaceDigest: "" },
+        {
+          ...previous,
+          lastMessageAt: null,
+          lastToolCallAt: previous.lastToolCallAt,
+          workspaceDigest: "digest-a"
+        }
+      )
     ).toBe(false);
   });
 });
@@ -221,6 +241,56 @@ describe("sampleWorkspaceMtimeMax", () => {
   });
 });
 
+describe("sampleWorkspace", () => {
+  it("excludes common build-output directories from the digest", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "src.ts"), "included\n");
+    const before = await sampleWorkspace(root);
+
+    // vow#1055's workspace wrote generated binaries into build/ and vow/build/
+    // with an empty evidence.ignore, which is what kept the workspace signal
+    // alive across a fourteen-hour crash loop.
+    for (const directory of ["build", "dist", "out", ".venv", "__pycache__"]) {
+      await mkdir(path.join(root, directory), { recursive: true });
+      await writeFile(path.join(root, directory, "artifact.bin"), "output\n");
+    }
+
+    expect((await sampleWorkspace(root)).digest).toBe(before.digest);
+  });
+
+  it("keeps the digest stable when output is restamped but not rewritten", async () => {
+    const root = await makeTempRoot();
+    const artifact = path.join(root, "artifact.bin");
+    await writeFile(artifact, "same bytes\n");
+    const before = await sampleWorkspace(root);
+
+    const later = new Date("2036-05-22T12:00:00.000Z");
+    await utimes(artifact, later, later);
+    const after = await sampleWorkspace(root);
+
+    expect(after.digest).toBe(before.digest);
+    expect(after.mtimeMax).toBe(later.getTime());
+  });
+
+  it("changes the digest when a file is added, resized, or removed", async () => {
+    const root = await makeTempRoot();
+    const source = path.join(root, "src.ts");
+    await writeFile(source, "included\n");
+    const before = await sampleWorkspace(root);
+
+    await writeFile(source, "included\nand extended\n");
+    const resized = await sampleWorkspace(root);
+    expect(resized.digest).not.toBe(before.digest);
+
+    await writeFile(path.join(root, "added.ts"), "added\n");
+    const added = await sampleWorkspace(root);
+    expect(added.digest).not.toBe(resized.digest);
+
+    await rm(path.join(root, "added.ts"));
+    expect((await sampleWorkspace(root)).digest).toBe(resized.digest);
+  });
+});
+
 describe("reconcileWatchdog", () => {
   it("does nothing when disabled", async () => {
     const root = await makeTempRoot();
@@ -233,6 +303,7 @@ describe("reconcileWatchdog", () => {
           enabled: false,
           mtimeIgnore: [],
           graceMinutes: 30,
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -261,6 +332,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           mtimeIgnore: [],
           graceMinutes: 30,
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -319,6 +391,7 @@ describe("reconcileWatchdog", () => {
         runId: "run-a-removed-log",
         sampledAt: "2026-05-22T09:59:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
       });
       normalizedLogRemoval.filePath = removedLogPath;
@@ -330,6 +403,7 @@ describe("reconcileWatchdog", () => {
             enabled: true,
             graceMinutes: 30,
             mtimeIgnore: [],
+            outputTokenBudget: 0,
             sampleIntervalSeconds: 60
           },
           logger,
@@ -412,6 +486,7 @@ describe("reconcileWatchdog", () => {
         runId: "run-idle",
         sampledAt: "2026-05-22T09:30:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax
       });
       const cancel = vi.fn().mockResolvedValue(undefined);
@@ -430,6 +505,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           mtimeIgnore: [],
           graceMinutes: 30,
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -493,6 +569,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           mtimeIgnore: [],
           graceMinutes: 30,
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -549,6 +626,7 @@ describe("reconcileWatchdog", () => {
         runId: "run-vow",
         sampledAt: "2026-05-22T09:00:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
       });
       const cancel = vi.fn().mockResolvedValue(undefined);
@@ -566,6 +644,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -621,6 +700,9 @@ describe("reconcileWatchdog", () => {
         runId: "run-current-policy",
         sampledAt: "2026-05-22T09:00:00.000Z",
         turnIdSetSize: 0,
+        // A prior observation, so the fresh walk's digest is compared against
+        // it rather than treated as a pre-upgrade row.
+        workspaceDigest: "seed-digest",
         workspaceMtimeMax: rootTime.getTime()
       });
       const cancel = vi.fn().mockResolvedValue(undefined);
@@ -638,6 +720,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         evidenceIgnoreForProject: () => [],
@@ -726,6 +809,7 @@ describe("reconcileWatchdog", () => {
         runId: "run-forward",
         sampledAt: "2026-05-22T09:30:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
       });
       const cancel = vi.fn().mockResolvedValue(undefined);
@@ -743,6 +827,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           mtimeIgnore: [],
           graceMinutes: 30,
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -827,6 +912,7 @@ describe("reconcileWatchdog", () => {
         runId: "run-restarted",
         sampledAt: "2026-05-22T09:40:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
       });
     } finally {
@@ -850,6 +936,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           mtimeIgnore: [],
           graceMinutes: 30,
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -938,6 +1025,7 @@ describe("reconcileWatchdog", () => {
       enabled: true,
       mtimeIgnore: [],
       graceMinutes: 30,
+      outputTokenBudget: 0,
       sampleIntervalSeconds: 60
     };
     try {
@@ -1017,6 +1105,7 @@ describe("reconcileWatchdog", () => {
       enabled: true,
       graceMinutes: 30,
       mtimeIgnore: [],
+      outputTokenBudget: 0,
       sampleIntervalSeconds: 60
     };
     const cancel = vi.fn().mockResolvedValue(undefined);
@@ -1161,6 +1250,7 @@ describe("reconcileWatchdog", () => {
         runId: "run-retry-tokens",
         sampledAt: "2026-05-22T09:59:30.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
       });
       const activeRuns = new ActiveRunRegistry();
@@ -1177,6 +1267,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -1261,6 +1352,7 @@ describe("reconcileWatchdog", () => {
         runId: "run-retry-idle",
         sampledAt: "2026-05-22T09:00:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
       });
       const cancel = vi.fn().mockResolvedValue(undefined);
@@ -1278,6 +1370,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -1367,6 +1460,7 @@ describe("reconcileWatchdog", () => {
         runId: "run-streaming",
         sampledAt: "2026-05-22T09:00:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
       });
       const cancel = vi.fn().mockResolvedValue(undefined);
@@ -1384,6 +1478,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -1477,6 +1572,7 @@ describe("reconcileWatchdog", () => {
         runId: "run-ignored-log",
         sampledAt: "2026-05-22T09:00:00.000Z",
         turnIdSetSize: 0,
+        workspaceDigest: "",
         workspaceMtimeMax: rootTime.getTime()
       });
       const cancel = vi.fn().mockResolvedValue(undefined);
@@ -1494,6 +1590,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: ["build.log"],
+          outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
         logger,
@@ -1509,6 +1606,287 @@ describe("reconcileWatchdog", () => {
         terminalReason: "no_progress"
       });
       expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("stales a Run that crosses its output-token budget without converging", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(store, root, workspacePath, "run-budget", 548);
+      // Real work, streamed continuously — every liveness signal is satisfied,
+      // which is exactly why the vow#1055 crash loop survived fourteen hours.
+      await writeFile(
+        path.join(root, "run-budget.normalized.jsonl"),
+        [
+          JSON.stringify({ message: "still going", type: "message" }),
+          JSON.stringify({
+            tokenUsage: { total: { outputTokens: 150_001 } },
+            type: "usage_updated"
+          })
+        ].join("\n") + "\n"
+      );
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel,
+        issueNumber: 548,
+        projectName: "symphonika",
+        runId: "run-budget"
+      });
+
+      const result = await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          outputTokenBudget: 150_000,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      expect(result.terminated).toBe(1);
+      expect(store.getRun("run-budget")).toMatchObject({
+        state: "stale",
+        terminalReason: "no_convergence"
+      });
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("leaves a Run alone below its budget and when the budget is disabled", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(store, root, workspacePath, "run-under", 548);
+      await writeFile(
+        path.join(root, "run-under.normalized.jsonl"),
+        [
+          JSON.stringify({ message: "working", type: "message" }),
+          JSON.stringify({
+            tokenUsage: { total: { outputTokens: 149_999 } },
+            type: "usage_updated"
+          })
+        ].join("\n") + "\n"
+      );
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: vi.fn().mockResolvedValue(undefined),
+        issueNumber: 548,
+        projectName: "symphonika",
+        runId: "run-under"
+      });
+      const config = {
+        enabled: true,
+        graceMinutes: 30,
+        mtimeIgnore: [],
+        outputTokenBudget: 150_000,
+        sampleIntervalSeconds: 60
+      };
+
+      await reconcileWatchdog({
+        activeRuns,
+        config,
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+      expect(store.getRun("run-under")?.state).toBe("running");
+
+      // One token over, but with the guard switched off.
+      await writeFile(
+        path.join(root, "run-under.normalized.jsonl"),
+        JSON.stringify({
+          tokenUsage: { total: { outputTokens: 400_000 } },
+          type: "usage_updated"
+        }) + "\n"
+      );
+      await reconcileWatchdog({
+        activeRuns,
+        config: { ...config, outputTokenBudget: 0 },
+        logger,
+        now: () => new Date("2026-05-22T10:01:00.000Z"),
+        runStore: store
+      });
+      expect(store.getRun("run-under")?.state).toBe("running");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("applies a per-Project output-token budget override", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(store, root, workspacePath, "run-override", 548);
+      await writeFile(
+        path.join(root, "run-override.normalized.jsonl"),
+        [
+          JSON.stringify({ message: "working", type: "message" }),
+          JSON.stringify({
+            tokenUsage: { total: { outputTokens: 200_000 } },
+            type: "usage_updated"
+          })
+        ].join("\n") + "\n"
+      );
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: vi.fn().mockResolvedValue(undefined),
+        issueNumber: 548,
+        projectName: "symphonika",
+        runId: "run-override"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          outputTokenBudget: 150_000,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        // A verification-heavy Project buys headroom above the daemon default.
+        projects: [
+          { name: "symphonika", watchdog: { outputTokenBudget: 500_000 } }
+        ],
+        runStore: store
+      });
+
+      expect(store.getRun("run-override")?.state).toBe("running");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reads Codex's nested cumulative output-token total", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(store, root, workspacePath, "run-codex-tokens", 548);
+      // Codex's thread/tokenUsage/updated payload nests a cumulative running
+      // total under tokenUsage.total; a flat outputTokens key never appears.
+      await writeFile(
+        path.join(root, "run-codex-tokens.normalized.jsonl"),
+        [
+          JSON.stringify({
+            tokenUsage: {
+              last: { outputTokens: 628 },
+              total: { outputTokens: 628 }
+            },
+            type: "usage_updated"
+          }),
+          JSON.stringify({
+            tokenUsage: {
+              last: { outputTokens: 629 },
+              total: { outputTokens: 1_257 }
+            },
+            type: "usage_updated"
+          })
+        ].join("\n") + "\n"
+      );
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: vi.fn().mockResolvedValue(undefined),
+        issueNumber: 548,
+        projectName: "symphonika",
+        runId: "run-codex-tokens"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          outputTokenBudget: 0,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      expect(
+        store.getWatchdogSample("run-codex-tokens")?.outputTokensTotal
+      ).toBe(1_257);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("sums per-message output tokens reported at the top level", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(
+        store,
+        root,
+        workspacePath,
+        "run-claude-tokens",
+        548
+      );
+      // Claude forwards the raw Anthropic per-message usage, so each event is
+      // an increment rather than a running total.
+      await writeFile(
+        path.join(root, "run-claude-tokens.normalized.jsonl"),
+        [
+          JSON.stringify({
+            tokenUsage: { output_tokens: 250 },
+            type: "usage_updated"
+          }),
+          JSON.stringify({
+            tokenUsage: { output_tokens: 100 },
+            type: "usage_updated"
+          })
+        ].join("\n") + "\n"
+      );
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: vi.fn().mockResolvedValue(undefined),
+        issueNumber: 548,
+        projectName: "symphonika",
+        runId: "run-claude-tokens"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          outputTokenBudget: 0,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      // 250 + 100, not Math.max(250, 100).
+      expect(
+        store.getWatchdogSample("run-claude-tokens")?.outputTokensTotal
+      ).toBe(350);
     } finally {
       store.close();
     }
@@ -1574,6 +1952,7 @@ async function prepareIdleRun(
     runId,
     sampledAt: "2026-05-22T09:00:00.000Z",
     turnIdSetSize: 0,
+    workspaceDigest: "",
     workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
   });
 }

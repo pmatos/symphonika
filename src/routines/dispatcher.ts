@@ -8,6 +8,7 @@ import {
   classifyFailure,
   inspectWorkspaceCommitsAhead
 } from "../lifecycle/classify-failure.js";
+import { evaluateConcurrencyCapacity } from "../lifecycle/concurrency-capacity.js";
 import {
   resolveEnvBackedValue,
   tryListIssues,
@@ -2238,17 +2239,14 @@ function capSkipReason(
   globalConcurrency: { maxInFlight: number | undefined },
   project: RunControllerProjectConfig
 ): string | null {
-  if (
-    globalConcurrency.maxInFlight !== undefined &&
-    activeRuns.countInFlight() >= globalConcurrency.maxInFlight
-  ) {
-    return `global max_in_flight (${globalConcurrency.maxInFlight}) reached`;
-  }
-  const projectMax = project.max_in_flight ?? 1;
-  if (activeRuns.countInFlightByProject(project.name) >= projectMax) {
-    return `project ${project.name} max_in_flight (${projectMax}) reached`;
-  }
-  return null;
+  const verdict = evaluateConcurrencyCapacity({
+    configuredProjectMax: project.max_in_flight,
+    globalInFlight: activeRuns.countInFlight(),
+    globalMax: globalConcurrency.maxInFlight,
+    projectInFlight: activeRuns.countInFlightByProject(project.name),
+    projectName: project.name
+  });
+  return verdict.admitted ? null : verdict.reason;
 }
 
 function routineIssueSnapshot(routine: RoutineStatus) {

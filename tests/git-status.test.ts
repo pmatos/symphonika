@@ -18,9 +18,17 @@ async function makeTempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots
-      .splice(0)
-      .map((root) => rm(root, { force: true, recursive: true }))
+    tempRoots.splice(0).map((root) =>
+      // Retries because a background writer inside .git can still make an
+      // otherwise-empty directory fail rmdir with ENOTEMPTY; see the git
+      // maintenance note in tests/setup-env.ts.
+      rm(root, {
+        force: true,
+        maxRetries: 10,
+        recursive: true,
+        retryDelay: 50
+      })
+    )
   );
 });
 

@@ -10,6 +10,10 @@ import type {
 } from "./issue-polling.js";
 import { normalizeProjectWeight } from "./issue-priority.js";
 import { isPathInside } from "./path-safety.js";
+import {
+  decodeJsonArrayColumn,
+  encodeJsonArrayColumn
+} from "./run-store-json-columns.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
 import type {
   RoutineOutcome,
@@ -1757,21 +1761,19 @@ export class RunStore {
       );
       for (const row of input.rows) {
         insert.run({
-          blocked_by:
-            row.blockedBy.length === 0 ? null : JSON.stringify(row.blockedBy),
+          blocked_by: encodeJsonArrayColumn(row.blockedBy),
           blocked_by_truncated: row.blockedByTruncated ? 1 : 0,
           created_at: now,
           issue_number: row.issueNumber,
           kind: row.kind,
-          labels: row.labels.length === 0 ? null : JSON.stringify(row.labels),
+          labels: encodeJsonArrayColumn(row.labels),
           parent_issue_number: row.parentIssueNumber ?? null,
           polled_at: input.polledAt,
           priority: row.priority,
           project_name: input.projectName,
           repository_name: input.repository?.repo ?? null,
           repository_owner: input.repository?.owner ?? null,
-          reasons:
-            row.reasons.length === 0 ? null : JSON.stringify(row.reasons),
+          reasons: encodeJsonArrayColumn(row.reasons),
           title: row.title,
           updated_at: now
         });
@@ -1805,24 +1807,7 @@ export class RunStore {
         ].join(" ")
       )
       .all(projectName) as ProjectIssueSnapshotDbRow[];
-    return rows.map((row) => ({
-      blockedBy:
-        row.blocked_by === null
-          ? []
-          : (JSON.parse(row.blocked_by) as RawGitHubIssueDependencyRef[]),
-      blockedByTruncated: row.blocked_by_truncated === 1,
-      issueNumber: row.issue_number,
-      kind: row.kind,
-      labels: row.labels === null ? [] : (JSON.parse(row.labels) as string[]),
-      ...(row.parent_issue_number === null
-        ? {}
-        : { parentIssueNumber: row.parent_issue_number }),
-      polledAt: row.polled_at,
-      priority: row.priority,
-      reasons:
-        row.reasons === null ? [] : (JSON.parse(row.reasons) as string[]),
-      title: row.title
-    }));
+    return rows.map((row) => mapProjectIssueSnapshotRow(row));
   }
 
   replaceProjectPullRequestSnapshots(
@@ -1858,7 +1843,7 @@ export class RunStore {
           draft: row.draft ? 1 : 0,
           head_ref: row.headRef,
           head_sha: row.headSha,
-          labels: row.labels.length === 0 ? null : JSON.stringify(row.labels),
+          labels: encodeJsonArrayColumn(row.labels),
           mergeable: row.mergeable,
           merged: row.merged ? 1 : 0,
           open: row.open ? 1 : 0,
@@ -1908,25 +1893,7 @@ export class RunStore {
         ].join(" ")
       )
       .all(projectName) as ProjectPullRequestSnapshotDbRow[];
-    return rows.map((row) => ({
-      branchOrigin: row.branch_origin,
-      checks: row.checks,
-      draft: row.draft === 1,
-      headRef: row.head_ref,
-      headSha: row.head_sha,
-      labels: row.labels === null ? [] : (JSON.parse(row.labels) as string[]),
-      mergeable: row.mergeable,
-      merged: row.merged === 1,
-      open: row.open === 1,
-      polledAt: row.polled_at,
-      prNumber: row.pr_number,
-      reviewDecision: row.review_decision,
-      stateAvailable: row.state_available === 1,
-      title: row.title,
-      trackingState: row.tracking_state,
-      unresolvedReviewThreads: row.unresolved_review_threads,
-      url: row.url
-    }));
+    return rows.map((row) => mapProjectPullRequestSnapshotRow(row));
   }
 
   recordPullRequestMergeAttempt(
@@ -5755,6 +5722,51 @@ function snapshotRepository(
     return undefined;
   }
   return { owner: row.repository_owner, repo: row.repository_name };
+}
+
+function mapProjectIssueSnapshotRow(
+  row: ProjectIssueSnapshotDbRow
+): ProjectIssueSnapshotRow {
+  return {
+    blockedBy: decodeJsonArrayColumn<RawGitHubIssueDependencyRef>(
+      row.blocked_by
+    ),
+    blockedByTruncated: row.blocked_by_truncated === 1,
+    issueNumber: row.issue_number,
+    kind: row.kind,
+    labels: decodeJsonArrayColumn<string>(row.labels),
+    ...(row.parent_issue_number === null
+      ? {}
+      : { parentIssueNumber: row.parent_issue_number }),
+    polledAt: row.polled_at,
+    priority: row.priority,
+    reasons: decodeJsonArrayColumn<string>(row.reasons),
+    title: row.title
+  };
+}
+
+function mapProjectPullRequestSnapshotRow(
+  row: ProjectPullRequestSnapshotDbRow
+): ProjectPullRequestSnapshotRow {
+  return {
+    branchOrigin: row.branch_origin,
+    checks: row.checks,
+    draft: row.draft === 1,
+    headRef: row.head_ref,
+    headSha: row.head_sha,
+    labels: decodeJsonArrayColumn<string>(row.labels),
+    mergeable: row.mergeable,
+    merged: row.merged === 1,
+    open: row.open === 1,
+    polledAt: row.polled_at,
+    prNumber: row.pr_number,
+    reviewDecision: row.review_decision,
+    stateAvailable: row.state_available === 1,
+    title: row.title,
+    trackingState: row.tracking_state,
+    unresolvedReviewThreads: row.unresolved_review_threads,
+    url: row.url
+  };
 }
 
 function mapRoutineRow(row: RoutineRow): RoutineStatus {

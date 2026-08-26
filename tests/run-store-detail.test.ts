@@ -1196,6 +1196,51 @@ describe("RunStore detail queries", () => {
     }
   });
 
+  it("replaceProjectIssueSnapshots persists empty label/reason/blockedBy arrays as SQL NULL", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-05-22T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedByTruncated: false,
+            blockedBy: [],
+            issueNumber: 30,
+            kind: "filtered",
+            labels: [],
+            priority: 2,
+            reasons: [],
+            title: "No lists"
+          }
+        ]
+      });
+    } finally {
+      store.close();
+    }
+
+    const reader = new Database(databasePath(stateRoot), { readonly: true });
+    try {
+      const row = reader
+        .prepare(
+          "select labels, reasons, blocked_by from project_issue_snapshots where project_name = ? and issue_number = ?"
+        )
+        .get("alpha", 30) as {
+        blocked_by: string | null;
+        labels: string | null;
+        reasons: string | null;
+      };
+      expect(row).toEqual({
+        blocked_by: null,
+        labels: null,
+        reasons: null
+      });
+    } finally {
+      reader.close();
+    }
+  });
+
   it("replaceProjectIssueSnapshots round-trips blockedBy dependency data", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

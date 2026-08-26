@@ -78,6 +78,11 @@ import {
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import {
+  evaluateConcurrencyCapacity,
+  isGlobalCapReached,
+  isProjectCapReached
+} from "./concurrency-capacity.js";
+import {
   classifyFailure,
   inspectWorkspaceHead,
   type ClassifiedTerminal
@@ -814,28 +819,21 @@ export class RunController {
         shuttingDown = true;
       } else {
         const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
-        if (
-          globalMax !== undefined &&
-          this.activeRuns.countInFlight() >= globalMax
+        const capacity = evaluateConcurrencyCapacity({
+          configuredProjectMax: project.max_in_flight,
+          globalInFlight: this.activeRuns.countInFlight(),
+          globalMax,
+          projectInFlight: this.activeRuns.countInFlightByProject(project.name),
+          projectName: project.name
+        });
+        if (!capacity.admitted) {
+          contention = new CapBreachedError(capacity.reason);
+        } else if (
+          this.activeRuns.isIssueReserved(project.name, refreshed.number)
         ) {
-          contention = new CapBreachedError(
-            `global max_in_flight (${globalMax}) reached`
+          contention = new IssueReservedError(
+            `issue ${project.name}#${refreshed.number} is already reserved`
           );
-        } else {
-          const projectMax = project.max_in_flight ?? 1;
-          if (
-            this.activeRuns.countInFlightByProject(project.name) >= projectMax
-          ) {
-            contention = new CapBreachedError(
-              `project ${project.name} max_in_flight (${projectMax}) reached`
-            );
-          } else if (
-            this.activeRuns.isIssueReserved(project.name, refreshed.number)
-          ) {
-            contention = new IssueReservedError(
-              `issue ${project.name}#${refreshed.number} is already reserved`
-            );
-          }
         }
         if (contention === undefined) {
           // Reserve BEFORE re-asserting the label: when stop() closes the
@@ -2169,10 +2167,7 @@ export class RunController {
     // Global cap check first: if the daemon is already at its global limit,
     // no project's candidate is dispatchable. See ADR 0053.
     const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
-    if (
-      globalMax !== undefined &&
-      this.activeRuns.countInFlight() >= globalMax
-    ) {
+    if (isGlobalCapReached(globalMax, this.activeRuns.countInFlight())) {
       return undefined;
     }
     const states = this.runStore.getProjectStatesByName();
@@ -2209,8 +2204,12 @@ export class RunController {
       }
       // Per-project concurrency cap. Default cap of 1 preserves the legacy
       // serial behavior when max_in_flight is omitted. See ADR 0053.
-      const projectMax = project.max_in_flight ?? 1;
-      if (this.activeRuns.countInFlightByProject(projectName) >= projectMax) {
+      if (
+        isProjectCapReached(
+          project.max_in_flight,
+          this.activeRuns.countInFlightByProject(projectName)
+        )
+      ) {
         continue;
       }
       const candidate = await this.pickProjectCandidate(bucket, project);
@@ -2375,19 +2374,17 @@ export class RunController {
     // have filled the cap. Scheduled callers catch CapBreachedError and
     // reschedule. See ADR 0053.
     const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
-    if (
-      globalMax !== undefined &&
-      this.activeRuns.countInFlight() >= globalMax
-    ) {
-      throw new CapBreachedError(`global max_in_flight (${globalMax}) reached`);
-    }
-    const projectMax = input.project.max_in_flight ?? 1;
-    if (
-      this.activeRuns.countInFlightByProject(input.project.name) >= projectMax
-    ) {
-      throw new CapBreachedError(
-        `project ${input.project.name} max_in_flight (${projectMax}) reached`
-      );
+    const capacity = evaluateConcurrencyCapacity({
+      configuredProjectMax: input.project.max_in_flight,
+      globalInFlight: this.activeRuns.countInFlight(),
+      globalMax,
+      projectInFlight: this.activeRuns.countInFlightByProject(
+        input.project.name
+      ),
+      projectName: input.project.name
+    });
+    if (!capacity.admitted) {
+      throw new CapBreachedError(capacity.reason);
     }
 
     // Re-check per-(project, issue) reservation inside the mutex. With

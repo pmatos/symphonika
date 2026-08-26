@@ -43,6 +43,7 @@ import {
 import { interpretPullRequest } from "./pull-request-state.js";
 import { ActiveRunRegistry, CANCEL_REASONS } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
+import { resolveProjectMaxInFlight } from "./lifecycle/concurrency-capacity.js";
 import { resolveToken } from "./lifecycle/token.js";
 import {
   createDaemonHeartbeat,
@@ -1369,7 +1370,7 @@ export async function startDaemon(
       for (const project of runtimeConfig.projectsByName().values()) {
         perProject.push({
           inFlight: activeRuns.countInFlightByProject(project.name),
-          maxInFlight: project.max_in_flight ?? 1,
+          maxInFlight: resolveProjectMaxInFlight(project.max_in_flight),
           projectName: project.name
         });
       }

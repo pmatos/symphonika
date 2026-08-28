@@ -417,7 +417,7 @@ describe("HTTP app", () => {
   it("POST /api/update-now forces one update cycle and returns its outcome", async () => {
     const requests: { checkOnly: boolean }[] = [];
     const app = createHttpApp({
-      stateRoot: "/tmp/symphonika-state",
+      stateRoot: await makeTempRoot(),
       updateNow: (input) => {
         requests.push(input);
         return Promise.resolve({
@@ -445,7 +445,7 @@ describe("HTTP app", () => {
   it("POST /api/update-now?check=true asks for a dry run", async () => {
     const requests: { checkOnly: boolean }[] = [];
     const app = createHttpApp({
-      stateRoot: "/tmp/symphonika-state",
+      stateRoot: await makeTempRoot(),
       updateNow: (input) => {
         requests.push(input);
         return Promise.resolve({
@@ -468,7 +468,7 @@ describe("HTTP app", () => {
 
   it("POST /api/update-now reports 503 when no update trigger is wired", async () => {
     const app = createHttpApp({
-      stateRoot: "/tmp/symphonika-state",
+      stateRoot: await makeTempRoot(),
       version: "0.1.7"
     });
 

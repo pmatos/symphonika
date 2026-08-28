@@ -84,7 +84,7 @@ export type PollNowFn = () => PollNowResult | Promise<PollNowResult>;
 // #582's `symphonika update`. Driven through the daemon rather than run
 // standalone so the forced cycle shares the one drain gate that keeps a
 // cutover from landing underneath live runs.
-export type UpdateNowFn = (input: {
+type UpdateNowFn = (input: {
   checkOnly: boolean;
 }) => Promise<UpdateActionResult>;
 

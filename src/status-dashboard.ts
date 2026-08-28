@@ -308,6 +308,17 @@ function summarizeNormalizedEvent(event: NormalizedProviderEvent): string {
   if (event.type === "progress" && typeof event.signal === "string") {
     return `progress ${event.signal}`;
   }
+  if (event.type === "thinking") {
+    const summary = Array.isArray(event.summary)
+      ? event.summary
+          .filter((value): value is string => typeof value === "string")
+          .join(" ")
+          .trim()
+      : "";
+    return summary.length > 0
+      ? summary
+      : `thinking ${event.status === "completed" ? "completed" : "started"}`;
+  }
   if (event.type === "usage_updated" && isRecord(event.tokenUsage)) {
     const total =
       numberField(event.tokenUsage, "total_tokens") ??

@@ -529,6 +529,18 @@ describe("doctor", () => {
           expected: "never",
           key: "approval_policy",
           status: "missing"
+        },
+        {
+          actual: null,
+          expected: "detailed",
+          key: "model_reasoning_summary",
+          status: "missing"
+        },
+        {
+          actual: null,
+          expected: "medium",
+          key: "model_verbosity",
+          status: "missing"
         }
       ],
       path: path.join(root, ".codex", "config.toml"),
@@ -539,6 +551,12 @@ describe("doctor", () => {
     );
     expect(report.errors).toContain(
       'Codex profile profiles.symphonika.approval_policy is missing; expected "never"'
+    );
+    expect(report.errors).toContain(
+      'Codex profile profiles.symphonika.model_reasoning_summary is missing; expected "detailed"'
+    );
+    expect(report.errors).toContain(
+      'Codex profile profiles.symphonika.model_verbosity is missing; expected "medium"'
     );
   });
 
@@ -560,6 +578,8 @@ describe("doctor", () => {
         "[profiles.acme]",
         'sandbox_mode = "danger-full-access"',
         'approval_policy = "never"',
+        'model_reasoning_summary = "detailed"',
+        'model_verbosity = "medium"',
         "",
         "[profiles.symphonika]",
         'sandbox_mode = "workspace-write"',
@@ -594,7 +614,7 @@ describe("doctor", () => {
     await mkdir(codexHome, { recursive: true });
     await writeFile(
       path.join(codexHome, "config.toml"),
-      '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
+      '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\nmodel_reasoning_summary = "detailed"\nmodel_verbosity = "medium"\n'
     );
     await writeStubExecutables(binDir, ["codex", "gh"]);
 
@@ -1977,7 +1997,7 @@ async function runDoctorCommand(
   await mkdir(path.join(homeDir, ".codex"), { recursive: true });
   await writeFile(
     path.join(homeDir, ".codex", "config.toml"),
-    '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
+    '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\nmodel_reasoning_summary = "detailed"\nmodel_verbosity = "medium"\n'
   );
   const output = { stderr: "", stdout: "" };
   const program = buildCli({
@@ -2055,7 +2075,7 @@ async function writeValidConfig(
   await mkdir(path.join(configDir, ".codex"), { recursive: true });
   await writeFile(
     path.join(configDir, ".codex", "config.toml"),
-    '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\n'
+    '[profiles.symphonika]\nsandbox_mode = "danger-full-access"\napproval_policy = "never"\nmodel_reasoning_summary = "detailed"\nmodel_verbosity = "medium"\n'
   );
   const binDir = path.join(configDir, "test-bin");
   await mkdir(binDir, { recursive: true });

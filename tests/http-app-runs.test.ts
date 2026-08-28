@@ -928,6 +928,83 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("renders Codex thinking boundaries and reasoning summaries on the run page", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-thinking",
+        issue: sampleIssue({ number: 590, title: "Visible thinking" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-thinking", "running");
+      test.runStore.createAttempt({
+        attemptNumber: 1,
+        branchName: "sym/run-thinking",
+        branchRef: "refs/heads/sym/run-thinking",
+        id: "run-thinking-attempt-1",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        providerCommand: "x",
+        providerName: "codex",
+        rawLogPath: "",
+        runId: "run-thinking",
+        state: "running",
+        workflowGraphPath: "",
+        workspacePath: test.stateRoot
+      });
+      test.runStore.recordProviderEvent({
+        attemptId: "run-thinking-attempt-1",
+        normalized: {
+          itemId: "rs-1",
+          status: "started",
+          summary: [],
+          threadId: "thread-1",
+          timestamp: "2026-08-28T13:43:00.000Z",
+          turnId: "turn-1",
+          type: "thinking"
+        },
+        raw: {},
+        runId: "run-thinking",
+        sequence: 1
+      });
+      test.runStore.recordProviderEvent({
+        attemptId: "run-thinking-attempt-1",
+        normalized: {
+          itemId: "rs-1",
+          status: "completed",
+          summary: ["Solving the congruences"],
+          threadId: "thread-1",
+          timestamp: "2026-08-28T13:44:30.000Z",
+          turnId: "turn-1",
+          type: "thinking"
+        },
+        raw: {},
+        runId: "run-thinking",
+        sequence: 2
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-thinking");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("thinking since");
+      expect(body).toContain('datetime="2026-08-28T13:43:00.000Z"');
+      expect(body).toContain("thinking completed");
+      expect(body).toContain("Solving the congruences");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders the workflow graph summary and link on the run-detail page", async () => {
     const test = await setup();
     try {

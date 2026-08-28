@@ -458,6 +458,9 @@ function mapCodexJsonRpcMessage(
   if (method === "item/started") {
     const item = objectField(params, "item");
     const itemType = stringField(item, "type");
+    if (itemType === "reasoning") {
+      return thinkingEvent(raw, params, item, activeRun, "started");
+    }
     const toolCallInput =
       itemType === undefined ? undefined : codexToolCallInput(itemType, item);
     if (toolCallInput === undefined) {
@@ -502,6 +505,9 @@ function mapCodexJsonRpcMessage(
 
   if (method === "item/completed") {
     const item = objectField(params, "item");
+    if (stringField(item, "type") === "reasoning") {
+      return thinkingEvent(raw, params, item, activeRun, "completed");
+    }
     const phase = stringField(item, "phase");
     if (
       stringField(item, "type") === "agentMessage" &&
@@ -586,6 +592,27 @@ function mapCodexJsonRpcMessage(
   }
 
   return {
+    raw
+  };
+}
+
+function thinkingEvent(
+  raw: unknown,
+  params: JsonObject | undefined,
+  item: JsonObject | undefined,
+  activeRun: ActiveCodexRun,
+  status: "completed" | "started"
+): ProviderEvent {
+  return {
+    normalized: {
+      itemId: stringField(item, "id"),
+      status,
+      summary: stringArrayField(item, "summary"),
+      threadId: stringField(params, "threadId") ?? activeRun.threadId,
+      timestamp: new Date(activeRun.now()).toISOString(),
+      turnId: stringField(params, "turnId") ?? activeRun.turnId,
+      type: "thinking"
+    },
     raw
   };
 }
@@ -1107,6 +1134,8 @@ function missingProfileMessage(profile: string, stderr: string): string {
     `  analytics = { enabled = false }`,
     `  sandbox_mode = "danger-full-access"`,
     `  approval_policy = "never"`,
+    `  model_reasoning_summary = "detailed"`,
+    `  model_verbosity = "medium"`,
     "",
     `  [profiles.${profile}.features]`,
     `  memories         = false`,
@@ -1181,6 +1210,13 @@ function stringField(value: unknown, key: string): string | undefined {
   }
 
   return undefined;
+}
+
+function stringArrayField(value: unknown, key: string): string[] {
+  const valueAtKey = field(value, key);
+  return Array.isArray(valueAtKey)
+    ? valueAtKey.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 function numberField(value: unknown, key: string): number | undefined {

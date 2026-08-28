@@ -26,7 +26,11 @@ type DoctorCodexProfileReport = {
   checks: Array<{
     actual: string | null;
     expected: string;
-    key: "approval_policy" | "sandbox_mode";
+    key:
+      | "approval_policy"
+      | "model_reasoning_summary"
+      | "model_verbosity"
+      | "sandbox_mode";
     status: "match" | "mismatch" | "missing";
   }>;
   error?: string;
@@ -496,7 +500,9 @@ const DEFAULT_CODEX_PROFILE = "symphonika";
 
 const CODEX_PROFILE_REQUIREMENTS = [
   ["sandbox_mode", "danger-full-access"],
-  ["approval_policy", "never"]
+  ["approval_policy", "never"],
+  ["model_reasoning_summary", "detailed"],
+  ["model_verbosity", "medium"]
 ] as const;
 
 async function checkCodexProfile(
@@ -510,7 +516,7 @@ async function checkCodexProfile(
   } catch (error) {
     const detail = `could not read ${configPath}: ${errorMessage(error)}`;
     const checks = codexProfileChecks(undefined, profileName, errors);
-    // An absent file already reads as "both keys missing". Any other read
+    // An absent file already reads as "all required keys missing". Any other read
     // failure (permissions, a directory, an I/O error) would otherwise be
     // reported as missing keys in a file the operator cannot even open.
     if (!isNotFoundError(error)) {
@@ -555,7 +561,7 @@ async function checkCodexProfile(
 
 // An unreadable config is reported the same way as a config whose profile
 // stanza is absent, so an undefined profile must produce the same checks and
-// the same messages as one missing both keys.
+// the same messages as one missing every required key.
 function codexProfileChecks(
   profile: Record<string, unknown> | undefined,
   profileName: string,

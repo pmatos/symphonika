@@ -68,7 +68,7 @@ self_update: false
 # permission_mode: bypass is redundant rather than inert. See ADR 0067.
 providers:
   codex:
-    command: 'codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never {{#model}}-c model="{{model}}" {{/model}}{{#effort}}-c model_reasoning_effort="{{effort}}" {{/effort}}--dangerously-bypass-approvals-and-sandbox app-server'
+    command: 'codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never -c model_reasoning_summary=detailed -c model_verbosity=medium {{#model}}-c model="{{model}}" {{/model}}{{#effort}}-c model_reasoning_effort="{{effort}}" {{/effort}}--dangerously-bypass-approvals-and-sandbox app-server'
   claude:
     command: "claude -p {{#model}}--model {{model}} {{/model}}{{#effort}}--effort {{effort}} {{/effort}}--dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"
   omp:

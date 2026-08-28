@@ -1507,7 +1507,7 @@ function defaultProvidersConfig(): RunControllerProvidersConfig {
     },
     codex: {
       command:
-        "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
+        "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never -c model_reasoning_summary=detailed -c model_verbosity=medium --dangerously-bypass-approvals-and-sandbox app-server"
     },
     omp: {
       command: "omp --mode rpc --auto-approve"

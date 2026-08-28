@@ -2122,6 +2122,53 @@ describe("reconcileWatchdog", () => {
       store.close();
     }
   });
+
+  it("counts a Codex thinking boundary as progress", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const normalizedLogPath = await prepareReplayRun(
+        store,
+        root,
+        workspacePath,
+        "run-thinking-marker"
+      );
+      await appendNormalizedEvents(normalizedLogPath, [
+        {
+          itemId: "rs-1",
+          status: "started",
+          summary: [],
+          timestamp: "2026-08-28T13:43:00.000Z",
+          turnId: "turn-1",
+          type: "thinking"
+        }
+      ]);
+
+      await reconcileWatchdog({
+        activeRuns: new ActiveRunRegistry(),
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          mtimeInclude: [],
+          outputTokenBudget: 0,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-08-28T13:43:05.000Z"),
+        runStore: store
+      });
+
+      const sample = store.getWatchdogSample("run-thinking-marker");
+      expect(sample?.lastProgressAt).toBe("2026-08-28T13:43:05.000Z");
+      expect(sample?.lastToolCallAt).toBeNull();
+      expect(sample?.idleSince).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
 });
 
 function seedRun(

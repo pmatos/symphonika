@@ -18,6 +18,26 @@ afterEach(async () => {
 });
 
 describe("global initialization", () => {
+  it("enables Codex reasoning summaries and medium verbosity by default", async () => {
+    const root = await makeTempRoot();
+    const report = await runInit({
+      env: { XDG_CONFIG_HOME: path.join(root, "config") },
+      homeDir: root,
+      yes: true
+    });
+
+    expect(report.ok).toBe(true);
+    const config = parse(await readFile(report.configPath, "utf8")) as {
+      providers: Record<string, { command: string }>;
+    };
+    expect(config.providers.codex?.command).toContain(
+      "-c model_reasoning_summary=detailed"
+    );
+    expect(config.providers.codex?.command).toContain(
+      "-c model_verbosity=medium"
+    );
+  });
+
   it("uses interactive answers for cross-project settings", async () => {
     const root = await makeTempRoot();
     const configHome = path.join(root, "config");

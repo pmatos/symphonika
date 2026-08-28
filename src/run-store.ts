@@ -464,7 +464,7 @@ export type ProviderEventRecord = {
 export type WatchdogSample = {
   idleSince: string | null;
   lastMessageAt: string | null;
-  // Most recent payload-free provider liveness marker (ADR 0087).
+  // Most recent normalized provider progress or thinking marker.
   lastProgressAt: string | null;
   lastToolCallAt: string | null;
   normalizedLogOffset: number;

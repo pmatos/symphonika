@@ -32,6 +32,7 @@ import type { RoutineFiringState, RoutineState } from "../routines/types.js";
 import type { PullRequestState } from "../pull-request-state.js";
 import type { ReloadOutcome } from "./save-pipeline.js";
 import type { StatusSnapshot } from "../status.js";
+import type { UpdateActionResult } from "../update/coordinator.js";
 import type {
   ChangeEvent,
   ListRunsFilter,
@@ -79,6 +80,13 @@ export type PollNowResult = {
 };
 
 export type PollNowFn = () => PollNowResult | Promise<PollNowResult>;
+
+// #582's `symphonika update`. Driven through the daemon rather than run
+// standalone so the forced cycle shares the one drain gate that keeps a
+// cutover from landing underneath live runs.
+type UpdateNowFn = (input: {
+  checkOnly: boolean;
+}) => Promise<UpdateActionResult>;
 
 // #308 part 2's label-write action: the only mutation the triage UI performs
 // against GitHub directly (everything else in #307 writes local files). See
@@ -267,6 +275,10 @@ export type HttpAppOptions = {
   sseHeartbeatMs?: number;
   startedAtMs?: number;
   stateRoot: string;
+  // #582's `symphonika update`: forces one self-update cycle (or, with
+  // checkOnly, just the release check) without waiting for the coordinator's
+  // own check interval.
+  updateNow?: UpdateNowFn;
   // #308 part 2's label-write action: adds/removes non-sym:* labels on a
   // GitHub issue. See docs/adr/0077-issue-triage-and-label-writes.md.
   writeIssueLabels?: WriteIssueLabelsFn;
@@ -412,6 +424,18 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     }
 
     return context.json(await Promise.resolve(options.pollNow()));
+  });
+
+  app.post("/api/update-now", requireAuthorizedMutation, async (context) => {
+    if (options.updateNow === undefined) {
+      return context.json(
+        { error: "update trigger unavailable", kind: "unavailable" },
+        503
+      );
+    }
+
+    const checkOnly = context.req.query("check") === "true";
+    return context.json(await options.updateNow({ checkOnly }));
   });
 
   app.post(

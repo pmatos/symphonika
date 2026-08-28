@@ -62,6 +62,7 @@ import type { SmokeOptions, SmokeReport } from "./smoke.js";
 import { runSmoke } from "./smoke.js";
 import type { TestEmailOptions, TestEmailReport } from "./test-email.js";
 import { runTestEmail } from "./test-email.js";
+import type { UpdateActionResult, UpdatePhase } from "./update/coordinator.js";
 import type { RollbackResult } from "./update/cutover.js";
 import { rollbackToPreviousRelease as rollbackToPreviousReleaseReal } from "./update/cutover.js";
 import type { SelfCheckResult } from "./update/self-check.js";
@@ -1067,6 +1068,72 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     });
 
   program
+    .command("update")
+    .description(
+      "ask the running daemon to check for a new release now instead of waiting for its next scheduled check"
+    )
+    .option(
+      "--check",
+      "report the latest available release without staging or cutting over"
+    )
+    .option("--config <path>", "service config path")
+    .option("--daemon-url <url>", "local daemon base URL")
+    .action(
+      async (options: {
+        check?: boolean;
+        config?: string;
+        daemonUrl?: string;
+      }) => {
+        const stateRoot = resolveStateRoot(
+          withConfigPath(options.config)
+        ).stateRoot;
+        const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
+        if (daemonUrl === undefined) {
+          const descriptorPath = daemonEndpointPath(stateRoot);
+          writeErr(
+            program,
+            `update failed: daemon endpoint not found at ${descriptorPath}\n`
+          );
+          writeErr(
+            program,
+            "the update runs inside the daemon so it shares the drain gate; start the daemon first\n"
+          );
+          program.error("update failed: daemon endpoint not found", {
+            exitCode: 1
+          });
+          return;
+        }
+
+        const daemonStatus = await fetchDaemonStatus(
+          fetcher,
+          daemonUrl,
+          stateRoot
+        );
+        if (daemonStatus.kind === "unavailable") {
+          writeErr(program, `update failed: ${daemonStatus.error}\n`);
+          program.error(`update failed: ${daemonStatus.error}`, {
+            exitCode: 1
+          });
+          return;
+        }
+
+        const outcome = await postUpdateNow(fetcher, daemonUrl, {
+          checkOnly: options.check === true
+        });
+        if (!outcome.ok) {
+          writeErr(program, `update failed: ${outcome.error}\n`);
+          program.error(`update failed: ${outcome.error}`, { exitCode: 1 });
+          return;
+        }
+
+        printUpdateResult(program, outcome.response);
+        if (isFailedUpdateResult(outcome.response)) {
+          process.exitCode = 1;
+        }
+      }
+    );
+
+  program
     .command("fire-now")
     .description("fire a Routine immediately through the running daemon")
     .argument("<routine>", "Routine name")
@@ -1922,6 +1989,48 @@ async function postPollNow(
   return { ok: true, response: parsed };
 }
 
+async function postUpdateNow(
+  fetcher: FetchFn,
+  daemonUrl: string,
+  options: { checkOnly: boolean }
+): Promise<
+  { ok: false; error: string } | { ok: true; response: UpdateActionResult }
+> {
+  const suffix = options.checkOnly ? "?check=true" : "";
+  let response: Response;
+  try {
+    response = await fetcher(`${daemonUrl}/api/update-now${suffix}`, {
+      method: "POST"
+    });
+  } catch (error) {
+    return { error: errorMessage(error), ok: false };
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+
+  if (!response.ok) {
+    const error =
+      isObject(body) && typeof body.error === "string"
+        ? body.error
+        : `daemon returned HTTP ${response.status}`;
+    return { error, ok: false };
+  }
+
+  const parsed = readUpdateActionResult(body);
+  if (parsed === undefined) {
+    return {
+      error: "daemon returned an unexpected update response",
+      ok: false
+    };
+  }
+  return { ok: true, response: parsed };
+}
+
 async function postFireRoutine(
   fetcher: FetchFn,
   daemonUrl: string,
@@ -2119,6 +2228,84 @@ function readPollNowResponse(value: unknown): PollNowResponse | undefined {
     kind,
     state
   };
+}
+
+function readUpdateActionResult(
+  value: unknown
+): UpdateActionResult | undefined {
+  if (!isObject(value)) {
+    return undefined;
+  }
+  switch (value.kind) {
+    case "disabled":
+    case "in-progress":
+      return { kind: value.kind };
+    case "up-to-date":
+      return typeof value.version === "string"
+        ? { kind: "up-to-date", version: value.version }
+        : undefined;
+    case "available":
+      return typeof value.currentVersion === "string" &&
+        typeof value.latestVersion === "string"
+        ? {
+            currentVersion: value.currentVersion,
+            kind: "available",
+            latestVersion: value.latestVersion,
+            selfUpdateEnabled: value.selfUpdateEnabled === true
+          }
+        : undefined;
+    case "skipped":
+      return typeof value.reason === "string"
+        ? { kind: "skipped", reason: value.reason }
+        : undefined;
+    case "halted":
+      return isUpdatePhase(value.phase)
+        ? { kind: "halted", phase: value.phase }
+        : undefined;
+    case "draining": {
+      const inFlight = readNonnegativeNumber(value.inFlight);
+      return typeof value.fromVersion === "string" &&
+        typeof value.toVersion === "string" &&
+        inFlight !== undefined
+        ? {
+            fromVersion: value.fromVersion,
+            inFlight,
+            kind: "draining",
+            toVersion: value.toVersion
+          }
+        : undefined;
+    }
+    case "updated":
+      return typeof value.fromVersion === "string" &&
+        typeof value.toVersion === "string" &&
+        (value.restart === "requested" || value.restart === "unavailable")
+        ? {
+            fromVersion: value.fromVersion,
+            kind: "updated",
+            restart: value.restart,
+            toVersion: value.toVersion
+          }
+        : undefined;
+    case "refused":
+      return typeof value.reason === "string"
+        ? { kind: "refused", reason: value.reason }
+        : undefined;
+    case "error":
+      return typeof value.error === "string"
+        ? { error: value.error, kind: "error" }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+function isUpdatePhase(value: unknown): value is UpdatePhase {
+  return (
+    value === "cutting-over" ||
+    value === "draining" ||
+    value === "smoke-checking" ||
+    value === "staging"
+  );
 }
 
 function readPollNowIssuePolling(
@@ -2386,6 +2573,92 @@ function formatReloadOutcome(
   }
   const suffix = reload.usingLastKnownGood ? " (using last known good)" : "";
   return `failed${suffix}: ${reload.errors.join("; ")}`;
+}
+
+// Every branch gets its own line so an operator can tell "checked, nothing
+// to do" from "could not check" -- the ambiguity #582 was filed about.
+function printUpdateResult(program: Command, result: UpdateActionResult): void {
+  switch (result.kind) {
+    case "disabled":
+      writeErr(
+        program,
+        "update refused: self_update is disabled; set self_update: true in symphonika.yml to allow it\n"
+      );
+      return;
+    case "in-progress":
+      writeOut(
+        program,
+        "update already in progress; the daemon is running a self-update cycle\n"
+      );
+      return;
+    case "up-to-date":
+      writeOut(program, `already up to date (${result.version})\n`);
+      return;
+    case "available":
+      writeOut(
+        program,
+        `update available: ${result.currentVersion} -> ${result.latestVersion}\n`
+      );
+      writeOut(
+        program,
+        result.selfUpdateEnabled
+          ? "run: symphonika update\n"
+          : "note: self_update is disabled, so the daemon will not install it on its own\n"
+      );
+      return;
+    case "skipped":
+      writeOut(program, `skipped: ${result.reason}\n`);
+      return;
+    case "halted":
+      writeErr(
+        program,
+        `update halted at ${result.phase}: self_update was disabled mid-cycle\n`
+      );
+      return;
+    case "draining":
+      writeOut(
+        program,
+        `staged ${result.fromVersion} -> ${result.toVersion}; waiting for ${result.inFlight} run(s) to finish before cutting over\n`
+      );
+      writeOut(
+        program,
+        "the daemon completes the cutover on its own; in-flight runs are never cancelled\n"
+      );
+      return;
+    case "refused":
+      writeErr(program, `refused: ${result.reason}\n`);
+      return;
+    case "error":
+      writeErr(program, `error: ${result.error}\n`);
+      return;
+    case "updated":
+      writeOut(
+        program,
+        `updated ${result.fromVersion} -> ${result.toVersion}\n`
+      );
+      writeOut(
+        program,
+        result.restart === "requested"
+          ? "the daemon is restarting into the new build\n"
+          : "no systemd --user session available; restart the daemon manually to run the new build\n"
+      );
+      return;
+    default:
+      assertUnreachableUpdateResult(result);
+  }
+}
+
+function assertUnreachableUpdateResult(result: never): never {
+  throw new Error(`unhandled update result: ${JSON.stringify(result)}`);
+}
+
+function isFailedUpdateResult(result: UpdateActionResult): boolean {
+  return (
+    result.kind === "disabled" ||
+    result.kind === "error" ||
+    result.kind === "halted" ||
+    result.kind === "refused"
+  );
 }
 
 function printPollNowResult(program: Command, result: PollNowResponse): void {

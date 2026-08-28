@@ -2,7 +2,10 @@ import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 
 import { UpdateCoordinator } from "../../src/update/coordinator.js";
-import type { UpdateOps } from "../../src/update/coordinator.js";
+import type {
+  UpdateCoordinatorInput,
+  UpdateOps
+} from "../../src/update/coordinator.js";
 import type { LatestRelease } from "../../src/update/release-client.js";
 
 const RELEASE: LatestRelease = {
@@ -131,7 +134,7 @@ describe("UpdateCoordinator", () => {
     expect(ops.calls).toEqual(["getLatestRelease", "pruneStale"]);
   });
 
-  it("does nothing when the release check is skipped or errors", async () => {
+  it("warns without notifying when the release check is skipped or errors", async () => {
     for (const result of [
       { kind: "skipped" as const, reason: "no token" },
       { kind: "error" as const, error: "network down" }
@@ -143,11 +146,13 @@ describe("UpdateCoordinator", () => {
         }
       });
       const notifier = fakeNotifier();
+      const logger = fakeLogger();
       const coordinator = new UpdateCoordinator({
         activeRuns: { countInFlight: () => 0 },
         currentVersion: "1.0.0",
         daemonHealthNotifier: notifier,
         isSelfUpdateEnabled: () => true,
+        logger,
         ops
       });
 
@@ -156,6 +161,14 @@ describe("UpdateCoordinator", () => {
 
       expect(ops.calls).toEqual(["getLatestRelease"]);
       expect(notifier.calls).toEqual([]);
+      // #582: silence here made "no token configured" and "nothing to do"
+      // indistinguishable in the journal.
+      expect(logger.warn).toHaveBeenCalledWith(
+        result.kind === "skipped"
+          ? { reason: "no token" }
+          : { error: "network down" },
+        expect.stringContaining("release check")
+      );
     }
   });
 
@@ -395,5 +408,327 @@ describe("UpdateCoordinator", () => {
 
     resolveDownload?.();
     await flushMicrotasks();
+  });
+});
+
+describe("UpdateCoordinator.runNow", () => {
+  function build(
+    overrides: Partial<UpdateCoordinatorInput> & { ops?: UpdateOps } = {}
+  ): { coordinator: UpdateCoordinator; ops: UpdateOps & { calls: string[] } } {
+    const ops = (overrides.ops ?? fakeOps()) as UpdateOps & {
+      calls: string[];
+    };
+    const coordinator = new UpdateCoordinator({
+      activeRuns: { countInFlight: () => 0 },
+      currentVersion: "1.0.0",
+      daemonHealthNotifier: fakeNotifier(),
+      forcedRestartGraceMs: 0,
+      isSelfUpdateEnabled: () => true,
+      sleepImpl: () => Promise.resolve(),
+      ...overrides,
+      ops
+    });
+    return { coordinator, ops };
+  }
+
+  it("reports disabled without touching the release API", async () => {
+    const { coordinator, ops } = build({ isSelfUpdateEnabled: () => false });
+
+    await expect(coordinator.runNow()).resolves.toEqual({ kind: "disabled" });
+    expect(ops.calls).toEqual([]);
+  });
+
+  it("reports up-to-date with the running version", async () => {
+    const { coordinator } = build({ currentVersion: "1.2.3" });
+
+    await expect(coordinator.runNow()).resolves.toEqual({
+      kind: "up-to-date",
+      version: "1.2.3"
+    });
+  });
+
+  it("reports a skipped release check with its reason", async () => {
+    const ops = fakeOps({
+      getLatestRelease: () =>
+        Promise.resolve({ kind: "skipped", reason: "GITHUB_TOKEN is not set" })
+    });
+    const { coordinator } = build({ ops });
+
+    await expect(coordinator.runNow()).resolves.toEqual({
+      kind: "skipped",
+      reason: "GITHUB_TOKEN is not set"
+    });
+  });
+
+  it("reports a failed release check as an error", async () => {
+    const ops = fakeOps({
+      getLatestRelease: () =>
+        Promise.resolve({ kind: "error", error: "GitHub API 502" })
+    });
+    const { coordinator } = build({ ops });
+
+    await expect(coordinator.runNow()).resolves.toEqual({
+      error: "GitHub API 502",
+      kind: "error"
+    });
+  });
+
+  it("reports a completed cutover and the restart it requested", async () => {
+    const { coordinator, ops } = build();
+
+    await expect(coordinator.runNow()).resolves.toEqual({
+      fromVersion: "1.0.0",
+      kind: "updated",
+      restart: "requested",
+      toVersion: "1.2.3"
+    });
+    await flushMicrotasks();
+    expect(ops.calls).toContain("restartService");
+  });
+
+  it("reports a cutover with no systemd session as needing a manual restart", async () => {
+    const ops = fakeOps({ isSystemdAvailable: () => Promise.resolve(false) });
+    const { coordinator } = build({ ops });
+
+    await expect(coordinator.runNow()).resolves.toEqual({
+      fromVersion: "1.0.0",
+      kind: "updated",
+      restart: "unavailable",
+      toVersion: "1.2.3"
+    });
+    await flushMicrotasks();
+    expect(ops.calls).not.toContain("restartService");
+  });
+
+  it("waits for the response to flush before requesting the restart", async () => {
+    const graceSleeps: number[] = [];
+    const { coordinator, ops } = build({
+      forcedRestartGraceMs: 250,
+      sleepImpl: (ms) => {
+        graceSleeps.push(ms);
+        return Promise.resolve();
+      }
+    });
+
+    const result = await coordinator.runNow();
+
+    expect(result.kind).toBe("updated");
+    // The grace runs after the outcome is reported, so the CLI sees
+    // "updated" instead of a connection dropped by the restart's SIGTERM.
+    expect(ops.calls).not.toContain("restartService");
+    await flushMicrotasks();
+    expect(graceSleeps).toEqual([250]);
+    expect(ops.calls).toContain("restartService");
+  });
+
+  it("reports a distinct refusal rather than a generic error", async () => {
+    const ops = fakeOps({
+      cutOver: () =>
+        Promise.resolve({
+          kind: "refused",
+          reason: "install path is a git checkout"
+        })
+    });
+    const notifier = fakeNotifier();
+    const { coordinator } = build({ daemonHealthNotifier: notifier, ops });
+
+    await expect(coordinator.runNow()).resolves.toEqual({
+      kind: "refused",
+      reason: "install path is a git checkout"
+    });
+    await flushMicrotasks();
+    // A refusal still travels the existing failure path.
+    expect(notifier.calls).toEqual([
+      { broken: true, detail: "install path is a git checkout" }
+    ]);
+  });
+
+  it("reports a staging failure as an error", async () => {
+    const ops = fakeOps({
+      stageExtractedRelease: () =>
+        Promise.resolve({ error: "npm ci failed", kind: "error" })
+    });
+    const { coordinator } = build({ ops });
+
+    await expect(coordinator.runNow()).resolves.toEqual({
+      error: "npm ci failed",
+      kind: "error"
+    });
+  });
+
+  it("reports where a cycle halted when self_update is toggled off mid-flight", async () => {
+    let enabled = true;
+    const ops = fakeOps();
+    const { coordinator } = build({
+      isSelfUpdateEnabled: () => enabled,
+      ops: {
+        ...ops,
+        stageExtractedRelease: () => {
+          ops.calls.push("stageExtractedRelease");
+          enabled = false;
+          return Promise.resolve({ kind: "staged", stagingPath: "/tmp/s" });
+        }
+      }
+    });
+
+    await expect(coordinator.runNow()).resolves.toEqual({
+      kind: "halted",
+      phase: "smoke-checking"
+    });
+    expect(ops.calls).not.toContain("cutOver");
+  });
+
+  it("answers at the drain gate instead of blocking on in-flight runs", async () => {
+    let inFlight = 2;
+    let releaseDrain: (() => void) | undefined;
+    const ops = fakeOps();
+    const { coordinator } = build({
+      activeRuns: { countInFlight: () => inFlight },
+      drainPollIntervalMs: 5,
+      ops,
+      // Parks the drain poll until the test releases it, so "answered while
+      // still draining" is asserted rather than raced. Every later sleep
+      // (the pre-restart grace) resolves at once.
+      sleepImpl: () =>
+        inFlight === 0
+          ? Promise.resolve()
+          : new Promise((resolve) => {
+              releaseDrain = () => {
+                inFlight = 0;
+                resolve();
+              };
+            })
+    });
+
+    await expect(coordinator.runNow()).resolves.toEqual({
+      fromVersion: "1.0.0",
+      inFlight: 2,
+      kind: "draining",
+      toVersion: "1.2.3"
+    });
+    // The caller is answered while live work is still running, and nothing
+    // has cut over underneath it.
+    expect(ops.calls).not.toContain("cutOver");
+    expect(coordinator.isDrainRequested()).toBe(true);
+
+    releaseDrain?.();
+    await flushMicrotasks(50);
+    expect(ops.calls).toContain("cutOver");
+    expect(coordinator.isDrainRequested()).toBe(false);
+  });
+
+  it("reports in-progress rather than starting a second cycle", async () => {
+    let resolveDownload: (() => void) | undefined;
+    const ops = fakeOps({
+      downloadAndVerify: () =>
+        new Promise((resolve) => {
+          resolveDownload = () =>
+            resolve({ archivePath: "/tmp/a.tar.gz", kind: "verified" });
+        })
+    });
+    const { coordinator } = build({ ops });
+
+    const first = coordinator.runNow();
+    await flushMicrotasks(5);
+
+    await expect(coordinator.runNow()).resolves.toEqual({
+      kind: "in-progress"
+    });
+    expect(
+      ops.calls.filter((call) => call === "getLatestRelease")
+    ).toHaveLength(1);
+
+    resolveDownload?.();
+    await expect(first).resolves.toMatchObject({ kind: "updated" });
+    await flushMicrotasks();
+  });
+
+  it("resets the tick interval so a forced run is not immediately repeated", async () => {
+    const ops = fakeOps({
+      getLatestRelease: () => {
+        ops.calls.push("getLatestRelease");
+        return Promise.resolve({ kind: "error", error: "offline" });
+      }
+    });
+    const { coordinator } = build({ checkIntervalMs: 60_000, ops });
+
+    await coordinator.runNow();
+    coordinator.tick();
+    await flushMicrotasks();
+
+    expect(
+      ops.calls.filter((call) => call === "getLatestRelease")
+    ).toHaveLength(1);
+  });
+});
+
+describe("UpdateCoordinator.checkNow", () => {
+  it("reports an available release without staging or cutting over", async () => {
+    const ops = fakeOps();
+    const coordinator = new UpdateCoordinator({
+      activeRuns: { countInFlight: () => 0 },
+      currentVersion: "1.0.0",
+      daemonHealthNotifier: fakeNotifier(),
+      isSelfUpdateEnabled: () => true,
+      ops
+    });
+
+    await expect(coordinator.checkNow()).resolves.toEqual({
+      currentVersion: "1.0.0",
+      kind: "available",
+      latestVersion: "1.2.3",
+      selfUpdateEnabled: true
+    });
+    expect(ops.calls).toEqual(["getLatestRelease"]);
+  });
+
+  it("still reports availability when self_update is disabled", async () => {
+    const ops = fakeOps();
+    const coordinator = new UpdateCoordinator({
+      activeRuns: { countInFlight: () => 0 },
+      currentVersion: "1.0.0",
+      daemonHealthNotifier: fakeNotifier(),
+      isSelfUpdateEnabled: () => false,
+      ops
+    });
+
+    await expect(coordinator.checkNow()).resolves.toEqual({
+      currentVersion: "1.0.0",
+      kind: "available",
+      latestVersion: "1.2.3",
+      selfUpdateEnabled: false
+    });
+  });
+
+  it("reports up-to-date and skipped checks", async () => {
+    const upToDate = new UpdateCoordinator({
+      activeRuns: { countInFlight: () => 0 },
+      currentVersion: "1.2.3",
+      daemonHealthNotifier: fakeNotifier(),
+      isSelfUpdateEnabled: () => true,
+      ops: fakeOps()
+    });
+    await expect(upToDate.checkNow()).resolves.toEqual({
+      kind: "up-to-date",
+      version: "1.2.3"
+    });
+
+    const skipped = new UpdateCoordinator({
+      activeRuns: { countInFlight: () => 0 },
+      currentVersion: "1.0.0",
+      daemonHealthNotifier: fakeNotifier(),
+      isSelfUpdateEnabled: () => true,
+      ops: fakeOps({
+        getLatestRelease: () =>
+          Promise.resolve({
+            kind: "skipped",
+            reason: "GITHUB_TOKEN is not set"
+          })
+      })
+    });
+    await expect(skipped.checkNow()).resolves.toEqual({
+      kind: "skipped",
+      reason: "GITHUB_TOKEN is not set"
+    });
   });
 });

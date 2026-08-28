@@ -1616,6 +1616,8 @@ export async function startDaemon(
     issuePollStatus,
     getReloadStatus: () => runtimeConfig.getStatus(),
     pollNow: triggerPollNow,
+    updateNow: ({ checkOnly }) =>
+      checkOnly ? updateCoordinator.checkNow() : updateCoordinator.runNow(),
     // #307's editors: validate-and-write goes through the save pipeline,
     // reload picks the edit up (routine declarations/workflow contracts
     // take effect on the next dispatch tick; an invalid symphonika.yml

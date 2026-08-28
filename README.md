@@ -141,6 +141,32 @@ If you need the daemon to keep running after logout, `loginctl enable-linger $US
 
 CI publishes a checksummed release artifact (`dist/`, `package.json`, `package-lock.json`, plus a `SHA256SUMS.txt`) to [GitHub Releases](https://github.com/pmatos/symphonika/releases) on every version tag. Set `self_update: true` in `symphonika.yml` to have the daemon check for, stage, verify, and cut over a newer release on its own, draining in-flight work before restarting — see `docs/adr/0079` for the full design and its explicitly deferred edges (no prebuilt native-module binaries, no automatic rollback after a post-cutover crash-loop). `symphonika service rollback` restores the previous install generation manually.
 
+#### Forcing an update
+
+The daemon's own check runs on a fixed six-hour cadence, so a freshly published release can stay invisible for hours — including across a restart, which does not check on boot. `symphonika update` forces one full check/stage/verify/drain/cutover cycle immediately:
+
+```bash
+symphonika update --config symphonika.yml          # force one cycle now
+symphonika update --check --config symphonika.yml  # report what is available, change nothing
+```
+
+The command drives the **running daemon** over its local HTTP endpoint (`daemon.json`) rather than acting on the install directory itself, so the forced cycle uses the same drain gate as a scheduled one: new dispatch is refused, in-flight runs are never cancelled, and the cutover only lands once they finish. It therefore requires a running daemon — with none, it fails rather than cutting over underneath one that might start. It also honours `self_update`: with the flag off, `symphonika update` refuses (`--check` still reports what is available). See `docs/adr/0087`.
+
+If runs are still in flight, the command reports the drain wait and returns instead of holding your terminal open — the daemon finishes the cutover and restarts on its own.
+
+| Output | Exit |
+|---|---|
+| `updated 0.1.7 -> 0.1.8` | 0 |
+| `already up to date (0.1.8)` | 0 |
+| `update available: 0.1.7 -> 0.1.8` (`--check`) | 0 |
+| `staged … waiting for N run(s) to finish before cutting over` | 0 |
+| `update already in progress` | 0 |
+| `skipped: <reason>` — e.g. no release-check token configured | 0 |
+| `update refused: self_update is disabled` | 1 |
+| `update halted at <phase>` | 1 |
+| `refused: <reason>` | 1 |
+| `error: <detail>` | 1 |
+
 ### Built-in workflow templates
 
 Raw-FSM workflows can reference built-in templates by prefix without authoring local YAML, for example:

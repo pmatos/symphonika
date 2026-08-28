@@ -416,6 +416,73 @@ describe("HTTP app", () => {
     });
   });
 
+  it("POST /api/update-now forces one update cycle and returns its outcome", async () => {
+    const requests: { checkOnly: boolean }[] = [];
+    const app = createHttpApp({
+      stateRoot: await makeTempRoot(),
+      updateNow: (input) => {
+        requests.push(input);
+        return Promise.resolve({
+          fromVersion: "0.1.7",
+          kind: "updated",
+          restart: "requested",
+          toVersion: "0.1.8"
+        });
+      },
+      version: "0.1.7"
+    });
+
+    const response = await app.request("/api/update-now", { method: "POST" });
+
+    expect(response.status).toBe(200);
+    expect(requests).toEqual([{ checkOnly: false }]);
+    expect(await response.json()).toEqual({
+      fromVersion: "0.1.7",
+      kind: "updated",
+      restart: "requested",
+      toVersion: "0.1.8"
+    });
+  });
+
+  it("POST /api/update-now?check=true asks for a dry run", async () => {
+    const requests: { checkOnly: boolean }[] = [];
+    const app = createHttpApp({
+      stateRoot: await makeTempRoot(),
+      updateNow: (input) => {
+        requests.push(input);
+        return Promise.resolve({
+          currentVersion: "0.1.7",
+          kind: "available",
+          latestVersion: "0.1.8",
+          selfUpdateEnabled: true
+        });
+      },
+      version: "0.1.7"
+    });
+
+    const response = await app.request("/api/update-now?check=true", {
+      method: "POST"
+    });
+
+    expect(response.status).toBe(200);
+    expect(requests).toEqual([{ checkOnly: true }]);
+  });
+
+  it("POST /api/update-now reports 503 when no update trigger is wired", async () => {
+    const app = createHttpApp({
+      stateRoot: await makeTempRoot(),
+      version: "0.1.7"
+    });
+
+    const response = await app.request("/api/update-now", { method: "POST" });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "update trigger unavailable",
+      kind: "unavailable"
+    });
+  });
+
   it("POST /api/routines/:id/fire routes a manual firing request through the daemon", async () => {
     const requests: unknown[] = [];
     const app = createHttpApp({

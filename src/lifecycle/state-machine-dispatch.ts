@@ -1,3 +1,7 @@
+import {
+  artifactPredicatePaths,
+  workflowPredicateEvaluation
+} from "../workflow/predicates.js";
 import type {
   ExpandedWorkflow,
   ExpandedWorkflowState,
@@ -15,6 +19,12 @@ export type StateMachineDecision =
 
 export type StateMachineSignals = WorkflowPredicateMap;
 
+// Answers whether one workspace-relative path exists in the Run's Workspace.
+// Callers build it from a snapshot taken before the decision so decideNextStep
+// stays synchronous and pure, and so the same answer drives complete_when and
+// every transition in one evaluation.
+export type ArtifactExistsResolver = (relativePath: string) => boolean;
+
 export function findWorkflowState(
   workflow: ExpandedWorkflow,
   stateId: string
@@ -24,10 +34,11 @@ export function findWorkflowState(
 
 export function decideNextStep(input: {
   actionExecuted: boolean;
+  artifactExists?: ArtifactExistsResolver;
   signals: StateMachineSignals;
   state: ExpandedWorkflowState;
 }): StateMachineDecision {
-  const { actionExecuted, signals, state } = input;
+  const { actionExecuted, artifactExists, signals, state } = input;
 
   if (state.terminal !== undefined) {
     return { kind: "terminate", stateId: state.id, terminal: state.terminal };
@@ -40,16 +51,18 @@ export function decideNextStep(input: {
     return { action: state.action, kind: "execute_action", stateId: state.id };
   }
 
-  const unmet = unmetPredicate(state.completeWhen, signals);
+  const unmet = unmetPredicate(state.completeWhen, signals, artifactExists);
   if (unmet !== undefined) {
     return {
       kind: "blocked",
-      reason: `state ${state.id} complete_when predicate ${unmet.key} not satisfied (expected ${describeValue(unmet.expected)}, got ${describeValue(unmet.actual)})`
+      reason: `state ${state.id} complete_when ${unmet}`
     };
   }
 
   for (const transition of state.transitions) {
-    if (predicateMapMatches(transition.when, signals)) {
+    if (
+      unmetPredicate(transition.when, signals, artifactExists) === undefined
+    ) {
       return {
         kind: "advance",
         reason: describeTransition(state.id, transition.when, transition.to),
@@ -75,30 +88,48 @@ export function decideNextStep(input: {
   };
 }
 
+// Returns a description of the first unsatisfied predicate, or undefined when
+// the whole map holds. Signal predicates compare by strict equality against the
+// observed map; artifact predicates ask the resolver instead, because their
+// value is the query's argument rather than an expected observation.
 function unmetPredicate(
   predicates: WorkflowPredicateMap,
-  signals: StateMachineSignals
-):
-  | {
-      actual: WorkflowPredicateValue | undefined;
-      expected: WorkflowPredicateValue;
-      key: string;
-    }
-  | undefined {
+  signals: StateMachineSignals,
+  artifactExists: ArtifactExistsResolver | undefined
+): string | undefined {
   for (const [key, expected] of Object.entries(predicates)) {
+    if (workflowPredicateEvaluation(key) === "artifact") {
+      const unmet = unmetArtifactPredicate(key, expected, artifactExists);
+      if (unmet !== undefined) {
+        return unmet;
+      }
+      continue;
+    }
     const actual = signals[key];
     if (actual !== expected) {
-      return { actual, expected, key };
+      return `predicate ${key} not satisfied (expected ${describeValue(expected)}, got ${describeValue(actual)})`;
     }
   }
   return undefined;
 }
 
-function predicateMapMatches(
-  predicates: WorkflowPredicateMap,
-  signals: StateMachineSignals
-): boolean {
-  return unmetPredicate(predicates, signals) === undefined;
+function unmetArtifactPredicate(
+  key: string,
+  expected: WorkflowPredicateValue,
+  artifactExists: ArtifactExistsResolver | undefined
+): string | undefined {
+  const paths = artifactPredicatePaths(expected);
+  if (paths === undefined) {
+    return `predicate ${key} not satisfied (${describeValue(expected)} is not a workspace-relative path or list of paths)`;
+  }
+  if (artifactExists === undefined) {
+    return `predicate ${key} not satisfied (no run workspace available to check ${paths.join(", ")})`;
+  }
+  const missing = paths.filter((candidate) => !artifactExists(candidate));
+  if (missing.length > 0) {
+    return `predicate ${key} not satisfied (missing from the run workspace: ${missing.join(", ")})`;
+  }
+  return undefined;
 }
 
 function describeTransition(

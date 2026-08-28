@@ -7,6 +7,10 @@ import type { WorkflowFormat } from "../config-schemas.js";
 import { isPathInside } from "../path-safety.js";
 import { locatedYamlErrorMessage } from "../yaml-errors.js";
 import {
+  parseArtifactExistsPaths,
+  workflowPredicateEvaluation
+} from "./predicates.js";
+import {
   parseWorkflowContract,
   projectWorkflowReferences,
   selectProjectWorkflow,
@@ -19,6 +23,7 @@ import type {
   WorkflowAction,
   WorkflowActionKind,
   WorkflowPredicateMap,
+  WorkflowPredicateValue,
   WorkflowSourceKind,
   WorkflowTransition
 } from "./types.js";
@@ -85,22 +90,6 @@ const actionKinds = new Set<WorkflowActionKind>([
 ]);
 
 const mergeMethods = new Set<string>(["merge", "rebase", "squash"]);
-
-const completionPredicateKeys = new Set([
-  "artifact_exists",
-  "branch_advanced_since_attempt_start",
-  "branch_ahead_of_base",
-  "branch_pushed",
-  "checks",
-  "has_unresolved_reviews",
-  "mergeable",
-  "pr_merged",
-  "pr_open",
-  "provider_success",
-  "review_decision",
-  "timeout",
-  "unresolved_review_threads"
-]);
 
 const terminalStates = new Set(["blocked", "failure", "success"]);
 
@@ -1161,10 +1150,23 @@ function parsePredicateMap(
 
   const predicates: WorkflowPredicateMap = {};
   for (const [key, value] of Object.entries(rawValue)) {
-    if (!completionPredicateKeys.has(key)) {
+    const evaluation = workflowPredicateEvaluation(key);
+    if (evaluation === undefined) {
       errors.push(
         `workflow state ${stateId} at ${workflowPath} ${field} uses unknown predicate ${key}`
       );
+      continue;
+    }
+    if (evaluation === "artifact") {
+      const parsed = parseArtifactExistsPaths(value);
+      if ("error" in parsed) {
+        errors.push(
+          `workflow state ${stateId} at ${workflowPath} ${field}.${key} ${parsed.error}`
+        );
+        continue;
+      }
+      predicates[key] =
+        parsed.paths.length === 1 ? parsed.paths[0]! : parsed.paths;
       continue;
     }
     if (
@@ -1237,8 +1239,14 @@ function formatWorkflowAction(action: WorkflowAction): string {
 
 function formatPredicateMap(predicates: WorkflowPredicateMap): string {
   return Object.entries(predicates)
-    .map(([key, value]) => `${key}=${value}`)
+    .map(([key, value]) => `${key}=${formatPredicateValue(value)}`)
     .join(", ");
+}
+
+// A list value is bracketed so its own comma separator cannot be misread as the
+// separator between two predicates in the same map.
+function formatPredicateValue(value: WorkflowPredicateValue): string {
+  return Array.isArray(value) ? `[${value.join(", ")}]` : `${value}`;
 }
 
 function stringProperty(

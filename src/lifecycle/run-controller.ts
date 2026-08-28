@@ -75,6 +75,7 @@ import {
   RegistryShutdownError,
   type LifecyclePolicy
 } from "./active-runs.js";
+import { probeStateArtifacts } from "./artifact-probe.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import {
@@ -1213,8 +1214,15 @@ export class RunController {
       }
     }
 
+    const waitArtifactExists = await probeStateArtifacts({
+      state: waitState,
+      workspacePath: row.workspacePath
+    });
     const decision = decideNextStep({
       actionExecuted: true,
+      ...(waitArtifactExists === undefined
+        ? {}
+        : { artifactExists: waitArtifactExists }),
       signals,
       state: waitState
     });
@@ -2901,7 +2909,7 @@ export class RunController {
         // before currentState was set; in that case we run the bare
         // classifyFailure outcome without an FSM-driven overlay.
         if (currentState !== undefined && loadedWorkflow !== undefined) {
-          workflowOutcome = this.applyWorkflowOutcome({
+          workflowOutcome = await this.applyWorkflowOutcome({
             actionExecuted: attemptCreated,
             currentState,
             deferRetryableTransientAdvance,
@@ -2909,7 +2917,8 @@ export class RunController {
             project: input.project,
             runId: input.runId,
             terminal,
-            workflow: loadedWorkflow.expandedWorkflow
+            workflow: loadedWorkflow.expandedWorkflow,
+            workspacePath: started?.evidence.workspacePath
           });
         }
         const effectiveOutcome = fuseWorkflowTerminal(
@@ -3160,7 +3169,7 @@ export class RunController {
     };
   }
 
-  private applyWorkflowOutcome(input: {
+  private async applyWorkflowOutcome(input: {
     actionExecuted: boolean;
     currentState: ExpandedWorkflowState;
     deferRetryableTransientAdvance?: boolean;
@@ -3169,10 +3178,16 @@ export class RunController {
     runId: string;
     terminal: ClassifiedTerminal;
     workflow: ExpandedWorkflow;
-  }): WorkflowOutcomeResult {
+    workspacePath: string | undefined;
+  }): Promise<WorkflowOutcomeResult> {
     const signals = signalsFromTerminal(input.terminal);
+    const artifactExists = await probeStateArtifacts({
+      state: input.currentState,
+      workspacePath: input.workspacePath
+    });
     const decision = decideNextStep({
       actionExecuted: input.actionExecuted,
+      ...(artifactExists === undefined ? {} : { artifactExists }),
       signals,
       state: input.currentState
     });

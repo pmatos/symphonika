@@ -857,6 +857,178 @@ describe("state machine workflow definitions", () => {
     );
   });
 
+  it("accepts artifact_exists on a transition and renders it in the explanation", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: gated_planning",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/plan.md",
+        "      transitions:",
+        "        - to: implementing",
+        "          when:",
+        "            provider_success: true",
+        "            artifact_exists: PLAN.md",
+        "        - to: needs_plan",
+        "    implementing:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/impl.md",
+        "      complete_when:",
+        "        artifact_exists:",
+        "          - PLAN.md",
+        "          - docs/notes.md",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        "    needs_plan:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    const explanation = explainWorkflow(result.workflow);
+
+    expect(result.errors).toEqual([]);
+    const planning = result.workflow.states.find(
+      (state) => state.id === "planning"
+    );
+    expect(planning?.transitions).toEqual([
+      {
+        to: "implementing",
+        when: { artifact_exists: "PLAN.md", provider_success: true }
+      },
+      { to: "needs_plan", when: {} }
+    ]);
+    const implementing = result.workflow.states.find(
+      (state) => state.id === "implementing"
+    );
+    expect(implementing?.completeWhen).toEqual({
+      artifact_exists: ["PLAN.md", "docs/notes.md"]
+    });
+
+    // `workflow validate`/`explain` must render the predicate, so an author can
+    // see the gate they wrote rather than guessing whether it took effect.
+    expect(explanation).toContain(
+      "-> implementing when provider_success=true, artifact_exists=PLAN.md"
+    );
+    expect(explanation).toContain(
+      "complete_when: artifact_exists=[PLAN.md, docs/notes.md]"
+    );
+  });
+
+  it("rejects artifact_exists paths that are absolute, escaping, or not strings", async () => {
+    const root = await makeTempRoot();
+    const cases: Array<{ error: string; value: string[] }> = [
+      {
+        error: "path /etc/passwd must be workspace-relative, not absolute",
+        value: ["        artifact_exists: /etc/passwd"]
+      },
+      {
+        error: "path ../PLAN.md must stay inside the run workspace",
+        value: ["        artifact_exists: ../PLAN.md"]
+      },
+      {
+        error: "must be a path string or a sequence of path strings",
+        value: ["        artifact_exists: true"]
+      },
+      {
+        error: "must not contain an empty path",
+        value: ['        artifact_exists: ""']
+      },
+      {
+        error: "must list at least one path",
+        value: ["        artifact_exists: []"]
+      },
+      {
+        error: "must be a path string or a sequence of path strings",
+        value: [
+          "        artifact_exists:",
+          "          - PLAN.md",
+          "          - 7"
+        ]
+      }
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      const workflowPath = path.join(root, `workflow-${index}.yml`);
+      await writeFile(
+        workflowPath,
+        [
+          "workflow:",
+          "  name: gated_planning",
+          "  initial: planning",
+          "  states:",
+          "    planning:",
+          "      action:",
+          "        kind: agent",
+          "        provider: codex",
+          "        prompt: prompts/plan.md",
+          "      complete_when:",
+          ...testCase.value,
+          "      transitions:",
+          "        - to: done",
+          "    done:",
+          "      terminal: success",
+          ""
+        ].join("\n")
+      );
+
+      const result = await loadExpandedWorkflow(workflowPath);
+      expect(result.errors, testCase.error).toContain(
+        `workflow state planning at ${workflowPath} complete_when.artifact_exists ${testCase.error}`
+      );
+    }
+  });
+
+  it("rejects the previously reserved branch_pushed and timeout predicates", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: dead_predicates",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/plan.md",
+        "      complete_when:",
+        "        branch_pushed: true",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            timeout: 30",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state planning at ${workflowPath} complete_when uses unknown predicate branch_pushed`
+    );
+    expect(result.errors).toContain(
+      `workflow state planning at ${workflowPath} transitions[0].when uses unknown predicate timeout`
+    );
+  });
+
   it("accepts pull request review-state predicates in raw FSM transitions", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");
@@ -1371,16 +1543,70 @@ describe("built-in workflow templates", () => {
       throw new Error("expected build.planning");
     }
 
-    // planning.complete_when must be satisfiable from ordinary successful
-    // agent-result signals or the state parks indefinitely after a planner run.
+    // planning's transition must be satisfiable from ordinary successful
+    // agent-result signals plus the plan file, or the state parks indefinitely
+    // after a planner run.
     const decision = decideNextStep({
       actionExecuted: true,
+      artifactExists: (candidate) => candidate === "PLAN.md",
       signals: { branch_ahead_of_base: true, provider_success: true },
       state: planning
     });
     expect(decision).toMatchObject({
       kind: "advance",
       to: "build.implementing"
+    });
+
+    // ...and must not be satisfiable without it: #583's eight vow planning
+    // runs each returned provider_success with an empty workspace and still
+    // advanced, because provider_success was the whole gate.
+    expect(
+      decideNextStep({
+        actionExecuted: true,
+        artifactExists: () => false,
+        signals: { branch_ahead_of_base: true, provider_success: true },
+        state: planning
+      })
+    ).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
+    });
+  });
+
+  it("honors a plan_artifact override in builtin:plan-tdd-pr's planning gate", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_pr",
+        "  initial: build",
+        "  use:",
+        "    build:",
+        "      template: builtin:plan-tdd-pr",
+        "      with:",
+        "        plan_artifact: docs/plan.md",
+        "      exits:",
+        "        success: shipped",
+        "        blocked: needs_human",
+        "  states:",
+        "    shipped:",
+        "      terminal: success",
+        "    needs_human:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    expect(result.errors).toEqual([]);
+    const planning = result.workflow.states.find(
+      (state) => state.id === "build.planning"
+    );
+    expect(planning?.transitions[0]?.when).toEqual({
+      artifact_exists: "docs/plan.md",
+      provider_success: true
     });
   });
 
@@ -1522,10 +1748,12 @@ describe("built-in workflow templates", () => {
 
     const decide = (
       id: string,
-      signals: Record<string, string | number | boolean>
+      signals: Record<string, string | number | boolean>,
+      artifactExists: (candidate: string) => boolean = () => false
     ) =>
       decideNextStep({
         actionExecuted: true,
+        artifactExists,
         signals,
         state: stateById(result.workflow, id)
       });
@@ -1557,11 +1785,23 @@ describe("built-in workflow templates", () => {
       kind: "advance",
       to: "needs_human"
     });
-    // Planning that succeeded without a commit advances — PLAN.md may be
-    // uncommitted scratch the implementer reads.
-    expect(decide("build.planning", noChangeSignals)).toMatchObject({
+    // Planning that succeeded without a commit advances on the plan file
+    // alone — PLAN.md may be uncommitted scratch the implementer reads — but a
+    // planner that wrote nothing at all routes through the blocked exit rather
+    // than handing an empty plan to the implementer (#583).
+    expect(
+      decide(
+        "build.planning",
+        noChangeSignals,
+        (candidate) => candidate === "PLAN.md"
+      )
+    ).toMatchObject({
       kind: "advance",
       to: "build.implementing"
+    });
+    expect(decide("build.planning", noChangeSignals)).toMatchObject({
+      kind: "advance",
+      to: "needs_human"
     });
 
     expect(decide("build.implementing", failureSignals)).toMatchObject({

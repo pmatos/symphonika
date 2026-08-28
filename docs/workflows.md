@@ -308,9 +308,7 @@ The parser recognizes the following keys:
 | `review_decision` | `approved`, `changes_requested`, `review_required`, `none` | no | always | supported |
 | `has_unresolved_reviews` | `true`, `false` | no | always | supported |
 | `unresolved_review_threads` | non-negative integer | no | always | supported, exact count only |
-| `artifact_exists` | string path | no | no | reserved; not emitted |
-| `branch_pushed` | `true`, `false` | no | no | reserved; not emitted |
-| `timeout` | scalar | no | no | reserved; not implemented |
+| `artifact_exists` | path, or a sequence of paths | yes | yes | supported, existence only |
 
 `branch_ahead_of_base` counts commits ahead of `origin/<base_branch>`, not ahead of the commit the
 attempt started from. It is a property of the branch, not of the attempt: in a multi-state walk it
@@ -321,6 +319,35 @@ preparation and before the provider runs. The signal is true only when completio
 from that snapshot and the snapshot remains its ancestor, so a no-op or amended/rewritten earlier
 commit does not satisfy it. Combine it with `branch_ahead_of_base` when a state must create and
 retain its own commit without changing the cumulative predicate's compatibility semantics.
+
+`artifact_exists` is the one predicate whose value is a query argument rather than an expected
+observation, so it is not compared against a signal at all — Symphonika resolves each path against
+the Run Workspace and checks whether it is there:
+
+```yaml
+transitions:
+  - to: implementing
+    when:
+      provider_success: true
+      artifact_exists: PLAN.md
+  - to: needs_plan
+```
+
+Rules:
+
+- Paths are Workspace-relative. Absolute paths and paths escaping the Workspace are rejected by
+  `workflow validate` rather than silently never matching.
+- A sequence gates on **all** listed paths existing: `artifact_exists: [PLAN.md, docs/notes.md]`.
+- Existence only. There is no content inspection, no non-empty check, and no "does not exist" form.
+  A directory counts as existing; a dangling symlink does not.
+- The file does not have to be committed. Reading uncommitted Workspace state is the point: a
+  planning stage can hand a plan to the next stage without pushing it into the branch history.
+- Because Workspaces are reused across attempts (ADR 0040), an artefact a *previous* attempt wrote
+  still satisfies the predicate. `artifact_exists` answers "is the artefact there", not "did this
+  attempt just produce it" — pair it with `branch_advanced_since_attempt_start` when a state must
+  also have moved the branch.
+- A state whose predicate names an artefact but which never had a Workspace prepared blocks, with
+  the reason naming the paths it could not check.
 
 Because missing and `false` are different, `pr_merged: false` does not match an ordinary open PR:
 the signal is omitted until the PR is merged. Likewise, `mergeable: false` means GitHub explicitly
@@ -500,7 +527,7 @@ Built-ins use the same expansion machinery and are referenced with `builtin:<nam
 | Template | Entry behavior | Inputs and defaults | Exits |
 | --- | --- | --- | --- |
 | `builtin:single-agent-pr` | One agent must succeed with commits ahead of base | `provider: codex`, `prompt: WORKFLOW.md` | `success`, `blocked` |
-| `builtin:plan-tdd-pr` | Planning agent, then implementation agent | `planner: codex`, `implementer: codex`, `plan_prompt: prompts/plan.md`, `impl_prompt: prompts/impl.md` | `success`, `blocked` |
+| `builtin:plan-tdd-pr` | Planning agent, then implementation agent | `planner: codex`, `implementer: codex`, `plan_prompt: prompts/plan.md`, `impl_prompt: prompts/impl.md`, `plan_artifact: PLAN.md` | `success`, `blocked` |
 | `builtin:refactor-swarm` | Characterize current behavior, refactor, then independently verify | `red_teamer: codex`, `refactorer: codex`, `verifier: codex`, `red_team_prompt: prompts/red-team.md`, `refactor_prompt: prompts/refactor.md`, `verify_prompt: prompts/verify.md` | `success`, `blocked` |
 | `builtin:autofix-until-clean` | Wait for checks/reviews, then run an autofix agent and loop | `provider: codex`, `fix_prompt: prompts/autofix.md` | `success`, `blocked` |
 | `builtin:merge-when-green` | Enter a policy-controlled merge state | `method: squash` | `success`, `blocked` |
@@ -510,9 +537,12 @@ Their exact expanded behavior is:
 - **`single-agent-pr`:** run the configured agent and take `success` only when
   `provider_success: true` and `branch_ahead_of_base: true`; every other completed outcome takes
   `blocked`.
-- **`plan-tdd-pr`:** a successful planner advances to the implementer without requiring a commit.
-  The implementer takes `success` only with provider success and commits ahead of base. Either
-  state's fallback takes `blocked`.
+- **`plan-tdd-pr`:** a successful planner advances to the implementer without requiring a commit,
+  but only if it actually wrote `plan_artifact` (default `PLAN.md`) into the Workspace — a planner
+  that returns success having produced no plan takes `blocked` instead of handing an empty plan to
+  the implementer. Set `plan_artifact` to whatever path your plan prompt tells the planner to
+  write. The implementer takes `success` only with provider success and commits ahead of base.
+  Either state's fallback takes `blocked`.
 - **`refactor-swarm`:** the red-team agent must succeed and commit characterization tests before
   the refactorer runs. Both mutating states require `provider_success: true`,
   `branch_ahead_of_base: true`, and `branch_advanced_since_attempt_start: true`, so the refactorer
@@ -694,9 +724,10 @@ The current parser recognizes these action kinds from the broader workflow desig
 - `close_issue`
 - `fail`
 
-It also recognizes the reserved predicates `artifact_exists`, `branch_pushed`, and `timeout`.
-Current runtime paths do not implement those system actions or produce those signals. Do not use
-them in an operational workflow merely because `workflow validate` accepts their names.
+Every predicate the parser accepts now has an evaluator behind it, so there are no reserved
+predicate names. `branch_pushed` and `timeout` were previously accepted and never evaluated; they
+are now rejected as unknown predicates. A `when` clause that validates is a `when` clause that can
+match.
 
 ### Not supported
 

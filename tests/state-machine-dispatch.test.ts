@@ -302,6 +302,161 @@ describe("state-machine-dispatch", () => {
     });
   });
 
+  // artifact_exists is the one predicate whose value is a query argument rather
+  // than an expected observation, so it is answered by the injected resolver and
+  // never by the signal map. See #583.
+  describe("artifact_exists", () => {
+    const gatedPlanning = (
+      when: Record<string, string | string[] | boolean>
+    ): ExpandedWorkflowState => ({
+      action: { kind: "agent", provider: "codex" },
+      completeWhen: {},
+      id: "planning",
+      transitions: [
+        { to: "implementing", when },
+        { to: "needs_plan", when: {} }
+      ]
+    });
+
+    const planningWithCompleteWhen = (
+      completeWhen: Record<string, string | string[] | boolean>
+    ): ExpandedWorkflowState => ({
+      action: { kind: "agent", provider: "codex" },
+      completeWhen,
+      id: "planning",
+      transitions: [{ to: "implementing", when: {} }]
+    });
+
+    it("advances only when the named path exists", () => {
+      const state = gatedPlanning({
+        artifact_exists: "PLAN.md",
+        provider_success: true
+      });
+      const signals = { provider_success: true };
+
+      expect(
+        decideNextStep({
+          actionExecuted: true,
+          artifactExists: (candidate) => candidate === "PLAN.md",
+          signals,
+          state
+        })
+      ).toMatchObject({ kind: "advance", to: "implementing" });
+      expect(
+        decideNextStep({
+          actionExecuted: true,
+          artifactExists: () => false,
+          signals,
+          state
+        })
+      ).toMatchObject({ kind: "advance", to: "needs_plan" });
+    });
+
+    it("gates a list form on every listed path existing", () => {
+      const state = gatedPlanning({
+        artifact_exists: ["PLAN.md", "TESTPLAN.md"]
+      });
+      const present = new Set(["PLAN.md", "TESTPLAN.md"]);
+
+      expect(
+        decideNextStep({
+          actionExecuted: true,
+          artifactExists: (candidate) => present.has(candidate),
+          signals: {},
+          state
+        })
+      ).toMatchObject({ kind: "advance", to: "implementing" });
+
+      present.delete("TESTPLAN.md");
+      expect(
+        decideNextStep({
+          actionExecuted: true,
+          artifactExists: (candidate) => present.has(candidate),
+          signals: {},
+          state
+        })
+      ).toMatchObject({ kind: "advance", to: "needs_plan" });
+    });
+
+    it("never answers from the signal map", () => {
+      const state = gatedPlanning({ artifact_exists: "PLAN.md" });
+
+      expect(
+        decideNextStep({
+          actionExecuted: true,
+          artifactExists: () => false,
+          signals: { artifact_exists: "PLAN.md" },
+          state
+        })
+      ).toMatchObject({ kind: "advance", to: "needs_plan" });
+    });
+
+    it("blocks with the missing paths named when complete_when is unmet", () => {
+      const decision = decideNextStep({
+        actionExecuted: true,
+        artifactExists: (candidate) => candidate === "PLAN.md",
+        signals: {},
+        state: planningWithCompleteWhen({
+          artifact_exists: ["PLAN.md", "TESTPLAN.md"]
+        })
+      });
+
+      expect(decision).toEqual({
+        kind: "blocked",
+        reason:
+          "state planning complete_when predicate artifact_exists not satisfied (missing from the run workspace: TESTPLAN.md)"
+      });
+    });
+
+    it("blocks loudly when no workspace is available to check", () => {
+      const decision = decideNextStep({
+        actionExecuted: true,
+        signals: {},
+        state: planningWithCompleteWhen({ artifact_exists: "PLAN.md" })
+      });
+
+      expect(decision).toEqual({
+        kind: "blocked",
+        reason:
+          "state planning complete_when predicate artifact_exists not satisfied (no run workspace available to check PLAN.md)"
+      });
+    });
+
+    it("blocks on a value the parser would have rejected", () => {
+      const decision = decideNextStep({
+        actionExecuted: true,
+        artifactExists: () => true,
+        signals: {},
+        state: planningWithCompleteWhen({ artifact_exists: true })
+      });
+
+      expect(decision).toEqual({
+        kind: "blocked",
+        reason:
+          "state planning complete_when predicate artifact_exists not satisfied (true is not a workspace-relative path or list of paths)"
+      });
+    });
+
+    it("names the predicate in the advance reason", () => {
+      const decision = decideNextStep({
+        actionExecuted: true,
+        artifactExists: () => true,
+        signals: { provider_success: true },
+        state: gatedPlanning({
+          artifact_exists: ["PLAN.md", "TESTPLAN.md"],
+          provider_success: true
+        })
+      });
+
+      expect(decision).toMatchObject({
+        kind: "advance",
+        reason:
+          'state planning advanced to implementing via artifact_exists=["PLAN.md","TESTPLAN.md"], provider_success=true',
+        to: "implementing"
+      });
+    });
+  });
+
   describe("findWorkflowState", () => {
     it("returns the state with the given id", () => {
       const workflow = makeWorkflow([runAgentState, doneState]);

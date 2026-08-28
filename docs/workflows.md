@@ -348,6 +348,13 @@ Rules:
   also have moved the branch.
 - A state whose predicate names an artefact but which never had a Workspace prepared blocks, with
   the reason naming the paths it could not check.
+- In a `wait` or `merge_pr` state the predicate is checked against the Workspace carried onto the
+  waiting row when the walk parked, so it sees the same files the agent stage left behind. A wait
+  state whose predicates are *only* artefact predicates is polled without a tracked pull request —
+  the poll has everything it needs on disk. A wait state that also names PR predicates, and every
+  `merge_pr` state, still waits for Symphonika to track a pull request first, because an unprojected
+  PR signal reads as unmet and would otherwise drop the state onto a catch-all transition on its
+  first poll.
 
 Because missing and `false` are different, `pr_merged: false` does not match an ordinary open PR:
 the signal is omitted until the PR is merged. Likewise, `mergeable: false` means GitHub explicitly

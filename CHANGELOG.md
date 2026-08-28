@@ -23,7 +23,9 @@
   artefact the stage was asked to produce: `when: { artifact_exists: PLAN.md }`, or a sequence for
   "all of these exist". Paths resolve against the Run Workspace and need not be committed; absolute
   and escaping paths are rejected at validation time. Existence only — freshness stays
-  `branch_advanced_since_attempt_start`'s job. See ADR 0087.
+  `branch_advanced_since_attempt_start`'s job. `wait` and `merge_pr` states evaluate it against the
+  Workspace now carried onto the waiting row; a wait state whose predicates are only artefact
+  predicates is polled without waiting for a tracked pull request. See ADR 0087.
 - A Routine declaration can fan out to multiple explicit Projects. Sibling firings share a durable
   correlation id and produce one grouped per-Project summary after every target finishes or skips.
 - CI now publishes a checksummed GitHub Release (`dist/`, `package.json`, `package-lock.json`, plus

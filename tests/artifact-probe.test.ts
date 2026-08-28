@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { probeStateArtifacts } from "../src/lifecycle/artifact-probe.js";
+import {
+  probeStateArtifacts,
+  statePredicateKeys
+} from "../src/lifecycle/artifact-probe.js";
 import type { ExpandedWorkflowState } from "../src/workflow/types.js";
 
 const tempRoots: string[] = [];
@@ -167,5 +170,27 @@ describe("probeStateArtifacts", () => {
         workspacePath
       })
     ).toBeUndefined();
+  });
+});
+
+describe("statePredicateKeys", () => {
+  it("collects keys from complete_when and every transition", () => {
+    expect(
+      statePredicateKeys(
+        planningState({ provider_success: true }, [
+          { to: "a", when: { artifact_exists: "PLAN.md", checks: "success" } },
+          { to: "b", when: { pr_open: false } },
+          { to: "c", when: {} }
+        ])
+      )
+    ).toEqual(
+      new Set(["provider_success", "artifact_exists", "checks", "pr_open"])
+    );
+  });
+
+  it("is empty for a state that names no predicate", () => {
+    expect(
+      statePredicateKeys(planningState({}, [{ to: "a", when: {} }]))
+    ).toEqual(new Set());
   });
 });

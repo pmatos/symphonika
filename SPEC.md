@@ -545,7 +545,11 @@ existence only — no content inspection, and the artefact need not be committed
 file to the next stage without putting it in the branch history. Because Workspaces are reused across
 attempts (ADR 0040), an artefact written by a previous attempt satisfies the predicate; pair it with
 `branch_advanced_since_attempt_start` when a state must also have advanced the branch. A state whose
-Run has no prepared Workspace cannot satisfy an `artifact_exists` predicate. See ADR 0087.
+Run has no prepared Workspace cannot satisfy an `artifact_exists` predicate. In a `wait` or
+`merge_pr` state the predicate is evaluated against the Workspace carried onto the waiting row; a
+wait state whose predicates are only artefact predicates is polled without a tracked pull request,
+while a wait state that also names PR predicates and every `merge_pr` state still require one. See
+ADR 0087.
 
 The daemon must not dispatch a Dispatch Project when its workflow contract is missing or invalid. A
 Routine Host is never dispatched, so this gate does not apply to it.
@@ -1821,9 +1825,11 @@ Lifecycle:
    Run row with `state = "waiting"`, `current_state_id` set to the wait state id, and
    `continuation_parent_run_id` set to the parent agent run. Both `state` and `current_state_id`
    are written inside a single SQLite transaction so the row is durable as a complete wait
-   (a crash cannot leave a `state = "waiting"` row with `current_state_id IS NULL`). The parent
-   run records the advance via `state_transition_reason` exactly like any other state advance
-   (per ADR 0046).
+   (a crash cannot leave a `state = "waiting"` row with `current_state_id IS NULL`). The row also
+   carries the parent's `workspace_path`, so an `artifact_exists` predicate in the wait state can be
+   evaluated against the same Workspace the agent stage left behind; a wait-to-wait advance carries
+   it forward again. The parent run records the advance via `state_transition_reason` exactly like
+   any other state advance (per ADR 0046).
 2. On each daemon tick (and on `/poll-now`), the reconciliation phase calls
    `reconcileWaitingRuns`, which iterates the rows in `state = "waiting"`, refreshes the issue,
    looks up the tracked pull request, fetches its follow-up state, projects predicates

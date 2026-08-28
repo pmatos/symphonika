@@ -376,6 +376,71 @@ async function writeArtifactWaitProject(root: string): Promise<void> {
   );
 }
 
+// A wait state gated on an artifact ALONE — no PR predicate anywhere. This is
+// the shape reEvaluateWaitingRun can decide before any pull request exists.
+async function writeArtifactOnlyWaitProject(root: string): Promise<void> {
+  await writeWaitStateProject(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: agent_then_artifact_only_wait",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      transitions:",
+      "        - to: holding",
+      "    holding:",
+      "      action:",
+      "        kind: wait",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            artifact_exists: HANDOFF.md",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+}
+
+// A merge_pr state whose only predicate is an artifact. It must STILL stay
+// parked without its Symphonika-owned PR — merging is the point of the state.
+async function writeArtifactMergePrProject(root: string): Promise<void> {
+  await writeWaitStateProject(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: agent_then_artifact_merge",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      transitions:",
+      "        - to: merging",
+      "    merging:",
+      "      action:",
+      "        kind: merge_pr",
+      "        method: squash",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            artifact_exists: HANDOFF.md",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
+  );
+}
+
 async function waitForWaitingRow(
   databasePath: string,
   timeoutMs = 15_000
@@ -1062,6 +1127,212 @@ describe("wait state lifecycle", () => {
       const after = store.getRun("waiting-run");
       expect(after?.state).toBe("waiting");
       expect(after?.currentStateId).toBe("holding");
+    } finally {
+      store.close();
+    }
+  });
+
+  // #583 follow-up: the poll used to return at `tracked === undefined` long
+  // before the artifact probe, so an artifact-only wait stayed parked forever no
+  // matter what the workspace held.
+  it("decides an artifact-only wait with no tracked pull request", async () => {
+    const root = await makeTempRoot();
+    await writeArtifactOnlyWaitProject(root);
+    const workspacePath = path.join(root, "ws", "8-artifact-only");
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(path.join(workspacePath, "HANDOFF.md"), "handoff\n");
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        workspacePath
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn(),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("succeeded");
+      expect(after?.terminalStateId).toBe("done");
+      // No PR was tracked, so the PR observation must never have been attempted.
+      expect(
+        githubIssuesApi.getPullRequestFollowupState
+      ).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps an artifact-only wait with no tracked pull request parked while the artifact is absent", async () => {
+    const root = await makeTempRoot();
+    await writeArtifactOnlyWaitProject(root);
+    const workspacePath = path.join(root, "ws", "8-artifact-only");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        workspacePath
+      });
+
+      const controller = buildController({
+        githubIssuesApi: {
+          getIssue: vi.fn().mockResolvedValue({
+            ...issue,
+            labels: issue.labels.map((name) => ({ name }))
+          }),
+          getPullRequestFollowupState: vi.fn(),
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      expect(store.getRun("waiting-run")?.state).toBe("waiting");
+    } finally {
+      store.close();
+    }
+  });
+
+  // The guard that keeps the early evaluation safe: a state naming PR signals
+  // too must not be decided from an unprojected signal map, or its catch-all
+  // transition would fire on the first poll.
+  it("keeps a mixed artifact-plus-PR wait parked until a pull request is tracked", async () => {
+    const root = await makeTempRoot();
+    await writeArtifactWaitProject(root);
+    const workspacePath = path.join(root, "ws", "8-mixed");
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(path.join(workspacePath, "HANDOFF.md"), "handoff\n");
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        workspacePath
+      });
+
+      const controller = buildController({
+        githubIssuesApi: {
+          getIssue: vi.fn().mockResolvedValue({
+            ...issue,
+            labels: issue.labels.map((name) => ({ name }))
+          }),
+          getPullRequestFollowupState: vi.fn(),
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      expect(store.getRun("waiting-run")?.state).toBe("waiting");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a merge_pr state parked without its pull request even when its artifact predicate is satisfied", async () => {
+    const root = await makeTempRoot();
+    await writeArtifactMergePrProject(root);
+    const workspacePath = path.join(root, "ws", "8-merge");
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(path.join(workspacePath, "HANDOFF.md"), "handoff\n");
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "merging",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        workspacePath
+      });
+
+      const controller = buildController({
+        githubIssuesApi: {
+          getIssue: vi.fn().mockResolvedValue({
+            ...issue,
+            labels: issue.labels.map((name) => ({ name }))
+          }),
+          getPullRequestFollowupState: vi.fn(),
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("waiting");
+      expect(after?.currentStateId).toBe("merging");
     } finally {
       store.close();
     }

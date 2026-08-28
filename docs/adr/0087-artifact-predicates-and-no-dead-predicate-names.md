@@ -86,6 +86,38 @@ different semantics for no gain.
 A state that names an artefact but whose Run never had a Workspace prepared **blocks**, and the
 blocked reason names the paths it could not check. Absent evidence is not evidence of presence.
 
+### Wait and merge states get the predicate too, under one guard
+
+An artefact gate is only worth having where a stage can produce the artefact, which includes the
+poll-driven side of the walk. Two things had to change for that to be true rather than merely
+documented.
+
+First, `createWaitingRun` never wrote `workspace_path`, so a waiting row's Workspace was NULL and
+every artefact predicate in a `wait`/`merge_pr` state was unevaluable — the same silent-never-match
+this ADR exists to abolish, one level in. The Workspace is now carried onto the waiting row at write
+time, from the parent agent Run when the walk parks and from the current waiting row on a
+wait-to-wait advance. Carrying it forward is what makes wait-to-wait chains work: that advance sets
+`continuation_parent_run_id` to the *waiting* Run, so resolving the Workspace by walking parents at
+read time would just find another NULL.
+
+Second, `reEvaluateWaitingRun` returned early when no pull request was tracked, well before the
+predicate was evaluated, so a wait state that needs no pull request could never advance. PR
+observation now lives in its own method and the decision that follows it is reachable without a
+tracked PR — but only for a state whose predicates are *artefact predicates plus at most
+`provider_success`*, the signals this path actually projects. A state naming PR predicates, and every
+`merge_pr` state, still waits for its pull request.
+
+That guard is the load-bearing part. Predicate matching is strict equality over a signal map, and a
+missing key is unmet, not unknown — so evaluating a mixed artefact-plus-PR state with no PR signals
+projected would fail its real transition and fall through to any catch-all, advancing the walk on the
+first poll for the wrong reason. Requiring at least one artefact predicate also means no Workflow
+that exists today changes behaviour: an artefact predicate in a wait state has never once matched, so
+there is nothing in the field to regress.
+
+This supersedes two narrower claims in ADR 0047: that wait re-evaluation "looks up the tracked pull
+request" as an unconditional step, and that `timeout` "stays defined in the predicate set but
+unimplemented" — `timeout` is now rejected outright, per the no-dead-predicate policy below.
+
 ### No predicate name is accepted without an evaluator
 
 The registry is a total map from accepted key to evaluation kind, so a key cannot be allowlisted
@@ -121,6 +153,8 @@ built-in at all after this change.
 - **ADR 0034 (strict simple Templating):** unchanged. `plan_artifact` is an ordinary `path` input and
   substitutes into the predicate value like any other tag.
 - **ADR 0040 (reuse Issue Workspaces across attempts):** the reason staleness is out of scope above.
+- **ADR 0047 (poll-driven wait states):** amended as described above — the tracked-PR lookup is no
+  longer unconditional, and the `timeout` reservation it recorded is withdrawn.
 - **ADR 0045 (persisted expanded Workflow graph):** the graph gains list-valued predicates; the
   operator graph view renders them bracketed.
 - **ADR 0046 (state advance vs. continuation):** unchanged. A blocked artefact gate is an ordinary

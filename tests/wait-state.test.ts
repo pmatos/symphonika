@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -338,6 +338,41 @@ async function writeWaitStateProject(root: string): Promise<void> {
   await writeFile(
     path.join(root, "plan-prompt.md"),
     "Plan work on #{{issue.number}}.\n"
+  );
+}
+
+// A wait state gated on BOTH an artifact and a PR signal. Exercises the
+// carry-forward of workspace_path onto the waiting row (ADR 0087): without it
+// the row's workspacePath is "" and the artifact predicate is unevaluable, so
+// the wait can never advance even with the PR green.
+async function writeArtifactWaitProject(root: string): Promise<void> {
+  await writeWaitStateProject(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: agent_then_artifact_wait",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      transitions:",
+      "        - to: holding",
+      "    holding:",
+      "      action:",
+      "        kind: wait",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            checks: success",
+      "            artifact_exists: HANDOFF.md",
+      "    done:",
+      "      terminal: success",
+      ""
+    ].join("\n")
   );
 }
 
@@ -907,6 +942,126 @@ describe("wait state lifecycle", () => {
       expect(after?.stateTransitionReason).toContain(
         "holding advanced to done"
       );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("evaluates a wait state's artifact predicate against the workspace carried onto the waiting row", async () => {
+    const root = await makeTempRoot();
+    await writeArtifactWaitProject(root);
+    const workspacePath = path.join(root, "ws", "8-artifact-wait");
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(path.join(workspacePath, "HANDOFF.md"), "handoff\n");
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        workspacePath
+      });
+      store.trackPullRequest({
+        branchName: "sym/symphonika/8-wait-state-acceptance-fixture",
+        headSha: "deadbeef",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("succeeded");
+      expect(after?.terminalStateId).toBe("done");
+      expect(after?.stateTransitionReason).toContain("artifact_exists");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a wait state parked when its artifact predicate names a file the workspace does not hold", async () => {
+    const root = await makeTempRoot();
+    await writeArtifactWaitProject(root);
+    const workspacePath = path.join(root, "ws", "8-artifact-wait");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        workspacePath
+      });
+      store.trackPullRequest({
+        branchName: "sym/symphonika/8-wait-state-acceptance-fixture",
+        headSha: "deadbeef",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("waiting");
+      expect(after?.currentStateId).toBe("holding");
     } finally {
       store.close();
     }

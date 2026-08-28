@@ -1287,7 +1287,10 @@ export class RunController {
           id: nextWaitingRunId,
           issue: refreshed,
           parentRunId: runId,
-          projectName: project.name
+          projectName: project.name,
+          ...(row.workspacePath.length === 0
+            ? {}
+            : { workspacePath: row.workspacePath })
         });
         this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
@@ -3225,7 +3228,10 @@ export class RunController {
           id: waitingRunId,
           issue: input.issue,
           parentRunId: input.runId,
-          projectName: input.project.name
+          projectName: input.project.name,
+          ...(input.workspacePath === undefined
+            ? {}
+            : { workspacePath: input.workspacePath })
         });
         return {
           advancedToState: decision.to,

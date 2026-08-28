@@ -105,6 +105,12 @@ export type WatchdogConfig = {
   enabled: boolean;
   graceMinutes: number;
   mtimeIgnore: string[];
+  // Workspace-relative directories re-admitted to the workspace walk despite
+  // the built-in build-output exclusions, together with everything beneath
+  // them (ADR 0087). Empty by default: opting a build tree back in makes its
+  // churn count as progress and makes every walk proportionally more
+  // expensive.
+  mtimeInclude: string[];
   // Cumulative output tokens a single Run may spend before the Watchdog stops
   // it as non-converging (ADR 0086). Zero disables the convergence guard and
   // leaves only the ADR 0054 liveness rule.
@@ -114,6 +120,7 @@ export type WatchdogConfig = {
 
 type ProjectWatchdogConfig = {
   graceMinutes?: number;
+  mtimeInclude?: string[];
   outputTokenBudget?: number;
 };
 
@@ -133,6 +140,7 @@ export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   enabled: true,
   graceMinutes: 30,
   mtimeIgnore: [],
+  mtimeInclude: [],
   outputTokenBudget: 150_000,
   sampleIntervalSeconds: 60
 };
@@ -167,6 +175,9 @@ const watchdogConfigSchema = z
     // Extra workspace-relative globs whose files are dropped from the mtime
     // walk so build-output churn cannot keep a wedged Run alive (ADR 0054).
     mtime_ignore: z.array(z.string().trim().min(1)).default([]),
+    // Workspace-relative directories kept in the walk even when the built-in
+    // build-output exclusion set would drop them (ADR 0087).
+    mtime_include: z.array(z.string().trim().min(1)).default([]),
     output_token_budget: z
       .number()
       .int()
@@ -178,6 +189,7 @@ const watchdogConfigSchema = z
 const projectWatchdogConfigSchema = z
   .object({
     grace_minutes: z.number().int().positive().optional(),
+    mtime_include: z.array(z.string().trim().min(1)).optional(),
     output_token_budget: z.number().int().nonnegative().optional()
   })
   .strict();
@@ -1202,6 +1214,7 @@ function normalizeWatchdogConfig(
     enabled: raw?.enabled ?? DEFAULT_WATCHDOG_CONFIG.enabled,
     graceMinutes: raw?.grace_minutes ?? DEFAULT_WATCHDOG_CONFIG.graceMinutes,
     mtimeIgnore: raw?.mtime_ignore ?? DEFAULT_WATCHDOG_CONFIG.mtimeIgnore,
+    mtimeInclude: raw?.mtime_include ?? DEFAULT_WATCHDOG_CONFIG.mtimeInclude,
     outputTokenBudget:
       raw?.output_token_budget ?? DEFAULT_WATCHDOG_CONFIG.outputTokenBudget,
     sampleIntervalSeconds:
@@ -1221,6 +1234,9 @@ function projectWatchdogOverride(
       ...(raw.grace_minutes === undefined
         ? {}
         : { graceMinutes: raw.grace_minutes }),
+      ...(raw.mtime_include === undefined
+        ? {}
+        : { mtimeInclude: raw.mtime_include }),
       ...(raw.output_token_budget === undefined
         ? {}
         : { outputTokenBudget: raw.output_token_budget })
@@ -1243,6 +1259,9 @@ export function resolveWatchdogConfig(
     ...(projectOverride.graceMinutes === undefined
       ? {}
       : { graceMinutes: projectOverride.graceMinutes }),
+    ...(projectOverride.mtimeInclude === undefined
+      ? {}
+      : { mtimeInclude: projectOverride.mtimeInclude }),
     ...(projectOverride.outputTokenBudget === undefined
       ? {}
       : { outputTokenBudget: projectOverride.outputTokenBudget })

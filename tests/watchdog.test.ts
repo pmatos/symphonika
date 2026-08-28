@@ -1,4 +1,5 @@
 import {
+  appendFile,
   lutimes,
   mkdir,
   mkdtemp,
@@ -66,6 +67,7 @@ describe("watchdogProgressObserved", () => {
   const previous: WatchdogSample = {
     idleSince: null,
     lastMessageAt: null,
+    lastProgressAt: null,
     lastToolCallAt: "2026-05-22T10:00:00.000Z",
     normalizedLogOffset: 10,
     normalizedLogPath: "run-a.normalized.jsonl",
@@ -82,6 +84,7 @@ describe("watchdogProgressObserved", () => {
       watchdogProgressObserved(previous, {
         ...previous,
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T10:01:00.000Z"
       })
     ).toBe(true);
@@ -119,6 +122,7 @@ describe("watchdogProgressObserved", () => {
       watchdogProgressObserved(previous, {
         ...previous,
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: previous.lastToolCallAt,
         outputTokensTotal: previous.outputTokensTotal,
         turnIdSetSize: previous.turnIdSetSize,
@@ -135,6 +139,7 @@ describe("watchdogProgressObserved", () => {
         {
           ...previous,
           lastMessageAt: null,
+          lastProgressAt: null,
           lastToolCallAt: previous.lastToolCallAt,
           workspaceDigest: "digest-a"
         }
@@ -289,6 +294,56 @@ describe("sampleWorkspace", () => {
     await rm(path.join(root, "added.ts"));
     expect((await sampleWorkspace(root)).digest).toBe(resized.digest);
   });
+
+  it("re-admits an mtime_include tree and everything beneath it", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "src.rs"), "included\n");
+    // Rust puts its build output two levels inside a directory whose own name
+    // (`build`) is in the built-in exclusion set, so re-admitting `target`
+    // alone has to carry through the descent to be worth anything.
+    await mkdir(path.join(root, "target", "debug", "build"), {
+      recursive: true
+    });
+    await writeFile(
+      path.join(root, "target", "debug", "build", "artifact.bin"),
+      "output\n"
+    );
+    const excluded = await sampleWorkspace(root);
+
+    const included = await sampleWorkspace(root, [], [], ["target"]);
+    expect(included.digest).not.toBe(excluded.digest);
+
+    await writeFile(
+      path.join(root, "target", "debug", "build", "artifact.bin"),
+      "more output\n"
+    );
+    expect((await sampleWorkspace(root, [], [], ["target"])).digest).not.toBe(
+      included.digest
+    );
+    // The opt-in is scoped: an unnamed build tree stays excluded.
+    expect((await sampleWorkspace(root, [], [], ["target"])).digest).toBe(
+      (await sampleWorkspace(root, [], [], ["target", "no-such-directory"]))
+        .digest
+    );
+  });
+
+  it("lets an explicit ignore win over an mtime_include tree", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "src.rs"), "included\n");
+    await mkdir(path.join(root, "target", "debug"), { recursive: true });
+    await writeFile(
+      path.join(root, "target", "debug", "artifact.bin"),
+      "output\n"
+    );
+
+    const baseline = await sampleWorkspace(root);
+    expect(
+      (await sampleWorkspace(root, [], ["target/debug"], ["target"])).digest
+    ).toBe(baseline.digest);
+    expect(
+      (await sampleWorkspace(root, ["target/**"], [], ["target"])).digest
+    ).toBe(baseline.digest);
+  });
 });
 
 describe("reconcileWatchdog", () => {
@@ -302,6 +357,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: false,
           mtimeIgnore: [],
+          mtimeInclude: [],
           graceMinutes: 30,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
@@ -331,6 +387,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           mtimeIgnore: [],
+          mtimeInclude: [],
           graceMinutes: 30,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
@@ -384,6 +441,7 @@ describe("reconcileWatchdog", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:59:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: priorOffset,
         normalizedLogPath: removedLogPath,
@@ -403,6 +461,7 @@ describe("reconcileWatchdog", () => {
             enabled: true,
             graceMinutes: 30,
             mtimeIgnore: [],
+            mtimeInclude: [],
             outputTokenBudget: 0,
             sampleIntervalSeconds: 60
           },
@@ -479,6 +538,7 @@ describe("reconcileWatchdog", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:30:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath: path.join(root, "provider.normalized.jsonl"),
@@ -504,6 +564,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           mtimeIgnore: [],
+          mtimeInclude: [],
           graceMinutes: 30,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
@@ -568,6 +629,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           mtimeIgnore: [],
+          mtimeInclude: [],
           graceMinutes: 30,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
@@ -619,6 +681,7 @@ describe("reconcileWatchdog", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:00:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath,
@@ -644,6 +707,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          mtimeInclude: [],
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -693,6 +757,7 @@ describe("reconcileWatchdog", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:00:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath,
@@ -720,6 +785,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          mtimeInclude: [],
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -802,6 +868,7 @@ describe("reconcileWatchdog", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:30:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T09:00:00.000Z",
         normalizedLogOffset: Buffer.byteLength(oldToolCall),
         normalizedLogPath,
@@ -826,6 +893,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           mtimeIgnore: [],
+          mtimeInclude: [],
           graceMinutes: 30,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
@@ -905,6 +973,7 @@ describe("reconcileWatchdog", () => {
       first.upsertWatchdogSample({
         idleSince: "2026-05-22T09:40:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath: path.join(root, "provider.normalized.jsonl"),
@@ -935,6 +1004,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           mtimeIgnore: [],
+          mtimeInclude: [],
           graceMinutes: 30,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
@@ -1024,6 +1094,7 @@ describe("reconcileWatchdog", () => {
     const config = {
       enabled: true,
       mtimeIgnore: [],
+      mtimeInclude: [],
       graceMinutes: 30,
       outputTokenBudget: 0,
       sampleIntervalSeconds: 60
@@ -1105,6 +1176,7 @@ describe("reconcileWatchdog", () => {
       enabled: true,
       graceMinutes: 30,
       mtimeIgnore: [],
+      mtimeInclude: [],
       outputTokenBudget: 0,
       sampleIntervalSeconds: 60
     };
@@ -1243,6 +1315,7 @@ describe("reconcileWatchdog", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:59:30.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 9_999,
         normalizedLogPath: attempt1,
@@ -1267,6 +1340,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          mtimeInclude: [],
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -1345,6 +1419,7 @@ describe("reconcileWatchdog", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:00:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 50,
         normalizedLogPath: attempt1,
@@ -1370,6 +1445,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          mtimeInclude: [],
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -1453,6 +1529,7 @@ describe("reconcileWatchdog", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:00:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath,
@@ -1478,6 +1555,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          mtimeInclude: [],
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -1565,6 +1643,7 @@ describe("reconcileWatchdog", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:00:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath,
@@ -1590,6 +1669,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: ["build.log"],
+          mtimeInclude: [],
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -1645,6 +1725,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          mtimeInclude: [],
           outputTokenBudget: 150_000,
           sampleIntervalSeconds: 60
         },
@@ -1692,6 +1773,7 @@ describe("reconcileWatchdog", () => {
         enabled: true,
         graceMinutes: 30,
         mtimeIgnore: [],
+        mtimeInclude: [],
         outputTokenBudget: 150_000,
         sampleIntervalSeconds: 60
       };
@@ -1757,6 +1839,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          mtimeInclude: [],
           outputTokenBudget: 150_000,
           sampleIntervalSeconds: 60
         },
@@ -1817,6 +1900,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          mtimeInclude: [],
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -1875,6 +1959,7 @@ describe("reconcileWatchdog", () => {
           enabled: true,
           graceMinutes: 30,
           mtimeIgnore: [],
+          mtimeInclude: [],
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -1887,6 +1972,152 @@ describe("reconcileWatchdog", () => {
       expect(
         store.getWatchdogSample("run-claude-tokens")?.outputTokensTotal
       ).toBe(350);
+    } finally {
+      store.close();
+    }
+  });
+
+  // Replays the shape of vow run 07ba3899 (issue #584): a Codex agent inside a
+  // long `cargo test` emits no item/started, no agentMessage delta and no token
+  // update for nearly thirty-five minutes, but streams command output the whole
+  // time. Before ADR 0087 those output deltas were dropped by the normalizer
+  // and the run was killed 33 seconds after it resumed talking.
+  it("keeps a run alive across a >30-minute tool-call gap carried by progress markers", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const normalizedLogPath = await prepareReplayRun(
+        store,
+        root,
+        workspacePath,
+        "run-long-build"
+      );
+      const activeRuns = new ActiveRunRegistry();
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      activeRuns.register({
+        cancel,
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-long-build"
+      });
+
+      // 09:11:47 -> 09:46:47, the sample cadence from the incident.
+      const start = Date.parse("2026-05-22T09:11:47.000Z");
+      for (let tick = 0; tick <= 7; tick += 1) {
+        const now = new Date(start + tick * 5 * 60_000);
+        // The command is still running: output deltas, nothing else.
+        await appendNormalizedEvents(normalizedLogPath, [
+          { signal: "command_output", turnId: "turn-1", type: "progress" }
+        ]);
+        await reconcileWatchdog({
+          activeRuns,
+          config: {
+            enabled: true,
+            graceMinutes: 30,
+            mtimeIgnore: [],
+            mtimeInclude: [],
+            outputTokenBudget: 0,
+            sampleIntervalSeconds: 300
+          },
+          logger,
+          now: () => now,
+          runStore: store
+        });
+        expect(store.getWatchdogSample("run-long-build")?.idleSince).toBeNull();
+      }
+
+      const run = store.getRun("run-long-build");
+      expect(run?.state).toBe("running");
+      expect(run?.terminalReason).toBeNull();
+      expect(cancel).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
+  // The companion to the replay above: the same 35-minute window with the
+  // output deltas dropped is exactly what killed the real run, so this pins the
+  // window as genuinely longer than the grace rather than accidentally short.
+  it("still stops the same window when no progress marker arrives", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareReplayRun(store, root, workspacePath, "run-silent-build");
+      const activeRuns = new ActiveRunRegistry();
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      activeRuns.register({
+        cancel,
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-silent-build"
+      });
+
+      const start = Date.parse("2026-05-22T09:11:47.000Z");
+      for (let tick = 0; tick <= 7; tick += 1) {
+        await reconcileWatchdog({
+          activeRuns,
+          config: {
+            enabled: true,
+            graceMinutes: 30,
+            mtimeIgnore: [],
+            mtimeInclude: [],
+            outputTokenBudget: 0,
+            sampleIntervalSeconds: 300
+          },
+          logger,
+          now: () => new Date(start + tick * 5 * 60_000),
+          runStore: store
+        });
+      }
+
+      const run = store.getRun("run-silent-build");
+      expect(run?.state).toBe("stale");
+      expect(run?.terminalReason).toBe("no_progress");
+      expect(cancel).toHaveBeenCalledTimes(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("counts a Codex progress marker as its own signal", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const normalizedLogPath = await prepareReplayRun(
+        store,
+        root,
+        workspacePath,
+        "run-diff-marker"
+      );
+      await appendNormalizedEvents(normalizedLogPath, [
+        { signal: "workspace_diff", turnId: "turn-1", type: "progress" }
+      ]);
+
+      await reconcileWatchdog({
+        activeRuns: new ActiveRunRegistry(),
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          mtimeIgnore: [],
+          mtimeInclude: [],
+          outputTokenBudget: 0,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      const sample = store.getWatchdogSample("run-diff-marker");
+      expect(sample?.lastProgressAt).toBe("2026-05-22T10:00:00.000Z");
+      expect(sample?.lastToolCallAt).toBeNull();
+      expect(sample?.idleSince).toBeNull();
     } finally {
       store.close();
     }
@@ -1945,6 +2176,7 @@ async function prepareIdleRun(
   store.upsertWatchdogSample({
     idleSince: "2026-05-22T09:00:00.000Z",
     lastMessageAt: null,
+    lastProgressAt: null,
     lastToolCallAt: null,
     normalizedLogOffset: 0,
     normalizedLogPath,
@@ -1955,4 +2187,57 @@ async function prepareIdleRun(
     workspaceDigest: "",
     workspaceMtimeMax: await sampleWorkspaceMtimeMax(workspacePath)
   });
+}
+
+async function appendNormalizedEvents(
+  normalizedLogPath: string,
+  events: readonly Record<string, unknown>[]
+): Promise<void> {
+  await appendFile(
+    normalizedLogPath,
+    events.map((event) => `${JSON.stringify(event)}\n`).join(""),
+    "utf8"
+  );
+}
+
+// A run that has already been sampled once with no signal at all, so the first
+// replayed tick compares against a real baseline rather than the
+// no-previous-sample case.
+async function prepareReplayRun(
+  store: RunStore,
+  root: string,
+  workspacePath: string,
+  runId: string
+): Promise<string> {
+  seedRun(store, runId);
+  const normalizedLogPath = path.join(root, `${runId}.normalized.jsonl`);
+  await writeFile(normalizedLogPath, "", "utf8");
+  store.updateRunEvidence(runId, {
+    branchName: `sym/symphonika/198-${runId}`,
+    branchRef: `refs/heads/sym/symphonika/198-${runId}`,
+    issueSnapshotPath: path.join(root, runId, "issue.json"),
+    metadataPath: path.join(root, runId, "metadata.json"),
+    normalizedLogPath,
+    promptPath: path.join(root, runId, "prompt.md"),
+    rawLogPath: path.join(root, runId, "raw.jsonl"),
+    workflowGraphPath: path.join(root, runId, "workflow.json"),
+    workspacePath
+  });
+  store.updateRunState(runId, "running");
+  const workspace = await sampleWorkspace(workspacePath);
+  store.upsertWatchdogSample({
+    idleSince: null,
+    lastMessageAt: null,
+    lastProgressAt: null,
+    lastToolCallAt: null,
+    normalizedLogOffset: 0,
+    normalizedLogPath,
+    outputTokensTotal: 0,
+    runId,
+    sampledAt: "2026-05-22T09:06:47.000Z",
+    turnIdSetSize: 0,
+    workspaceDigest: workspace.digest,
+    workspaceMtimeMax: workspace.mtimeMax
+  });
+  return normalizedLogPath;
 }

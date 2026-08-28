@@ -270,6 +270,7 @@ describe("run-store lifecycle CRUD", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T09:30:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath: "logs/runs/run-1/provider.normalized.jsonl",
@@ -466,6 +467,7 @@ describe("run-store lifecycle CRUD", () => {
         "run_id",
         "sampled_at",
         "last_tool_call_at",
+        "last_progress_at",
         "workspace_mtime_max",
         "workspace_digest",
         "turn_id_set_size",
@@ -492,6 +494,7 @@ describe("run-store lifecycle CRUD", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T12:10:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T12:00:00.000Z",
         normalizedLogOffset: 42,
         normalizedLogPath: "logs/runs/run-watchdog/provider.normalized.jsonl",
@@ -511,6 +514,7 @@ describe("run-store lifecycle CRUD", () => {
       expect(reopened.getWatchdogSample("run-watchdog")).toEqual({
         idleSince: "2026-05-22T12:10:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T12:00:00.000Z",
         normalizedLogOffset: 42,
         normalizedLogPath: "logs/runs/run-watchdog/provider.normalized.jsonl",

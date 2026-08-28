@@ -454,6 +454,7 @@ describe("HTTP app — runs API and pages", () => {
       test.runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T11:25:30.000Z",
         lastMessageAt: "2026-05-22T11:25:45.000Z",
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T11:25:00.000Z",
         normalizedLogOffset: 123,
         normalizedLogPath: "/tmp/provider.normalized.jsonl",
@@ -480,6 +481,7 @@ describe("HTTP app — runs API and pages", () => {
         graceMs: 1_800_000,
         graceRemainingMs: -7_530_000,
         idleSince: "2026-05-22T11:25:30.000Z",
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T11:25:00.000Z",
         outputTokenBudget: 150_000,
         outputTokensTotal: 36_365,
@@ -505,6 +507,7 @@ describe("HTTP app — runs API and pages", () => {
       test.runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T11:45:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T11:40:00.000Z",
         normalizedLogOffset: 0,
         normalizedLogPath: "",
@@ -1823,6 +1826,7 @@ describe("HTTP app — runs API and pages", () => {
       test.runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T11:45:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath: "",
@@ -1856,6 +1860,7 @@ describe("HTTP app — runs API and pages", () => {
       test.runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T11:00:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath: "prior-attempt.ndjson",
@@ -1928,6 +1933,7 @@ describe("HTTP app — runs API and pages", () => {
       test.runStore.upsertWatchdogSample({
         idleSince: null,
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T11:55:00.000Z",
         normalizedLogOffset: 0,
         normalizedLogPath: "progressing-run.ndjson",
@@ -2000,6 +2006,7 @@ describe("HTTP app — runs API and pages", () => {
       test.runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T11:45:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T11:45:00.000Z",
         normalizedLogOffset: 0,
         normalizedLogPath: "idle-run.ndjson",
@@ -2028,6 +2035,7 @@ describe("HTTP app — runs API and pages", () => {
       test.runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T09:00:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T09:00:00.000Z",
         normalizedLogOffset: 0,
         normalizedLogPath: "terminated-run.ndjson",
@@ -2106,6 +2114,7 @@ describe("HTTP app — runs API and pages", () => {
       test.runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T08:55:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T08:50:00.000Z",
         normalizedLogOffset: 0,
         normalizedLogPath: "prior-attempt.ndjson",

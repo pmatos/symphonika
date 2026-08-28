@@ -437,6 +437,103 @@ describe("Codex JSON-RPC provider", () => {
     ]);
   });
 
+  it("maps command output and workspace diffs to payload-free progress markers", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    // Every notification lands in its own rate-limit window, so none is
+    // suppressed and the mapping itself is what is under test.
+    let clockMs = 0;
+    const provider = createCodexProvider({
+      now: () => {
+        clockMs += 60_000;
+        return clockMs;
+      },
+      processScope: noopProcessScope()
+    });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} --scenario=long-build app-server`,
+          name: "codex"
+        },
+        workspacePath
+      })
+    );
+
+    const progressEvents = events
+      .map((event) => event.normalized)
+      .filter((normalized) => normalized?.type === "progress");
+    expect(progressEvents).toEqual([
+      ...Array.from({ length: 4 }, () => ({
+        signal: "command_output",
+        threadId: "thread-9",
+        turnId: "turn-9",
+        type: "progress"
+      })),
+      {
+        signal: "workspace_diff",
+        threadId: "thread-9",
+        turnId: "turn-9",
+        type: "progress"
+      }
+    ]);
+    // The chunk and the diff stay in the raw log, which is where the verbatim
+    // record already lives.
+    for (const progress of progressEvents) {
+      expect(progress).not.toHaveProperty("chunk");
+      expect(progress).not.toHaveProperty("diff");
+    }
+    expect(
+      events.filter((event) => JSON.stringify(event.raw).includes('"chunk"'))
+    ).toHaveLength(4);
+  });
+
+  it("rate-limits progress markers so a chatty build cannot flood the log", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const provider = createCodexProvider({
+      now: () => 1_000,
+      processScope: noopProcessScope()
+    });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} --scenario=long-build app-server`,
+          name: "codex"
+        },
+        workspacePath
+      })
+    );
+
+    // A frozen clock keeps every notification after the first inside one
+    // window: the Watchdog still sees the run as alive, and the four
+    // suppressed notifications cost no normalized event and no run-store row.
+    expect(
+      events
+        .map((event) => event.normalized)
+        .filter((normalized) => normalized?.type === "progress")
+    ).toEqual([
+      {
+        signal: "command_output",
+        threadId: "thread-9",
+        turnId: "turn-9",
+        type: "progress"
+      }
+    ]);
+  });
+
   it("maps malformed app-server output to malformed_event and stops the process", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1256,6 +1353,15 @@ async function writeFakeCodexAppServer(
       "    }",
       "    if (scenario === 'wait' || scenario === 'term-exit') {",
       "      continue;",
+      "    }",
+      "    if (scenario === 'long-build') {",
+      "      send({ method: 'item/started', params: { threadId: 'thread-9', turnId: 'turn-9', item: { type: 'commandExecution', id: 'exec-1', command: 'cargo test', cwd: '/workspace', status: 'inProgress' } } });",
+      "      for (let index = 0; index < 4; index += 1) {",
+      "        send({ method: 'item/commandExecution/outputDelta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'exec-1', chunk: `compiling crate ${index}` } });",
+      "      }",
+      "      send({ method: 'turn/diff/updated', params: { threadId: 'thread-9', turnId: 'turn-9', diff: 'diff --git a/src.rs b/src.rs' } });",
+      "      send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
+      "      process.exit(0);",
       "    }",
       "    send({ method: 'item/started', params: { threadId: 'thread-9', turnId: 'turn-9', item: { type: 'commandExecution', id: 'exec-1', command: 'cargo test', cwd: '/workspace', status: 'inProgress' } } });",
       "    send({ method: 'item/started', params: { threadId: 'thread-9', turnId: 'turn-9', item: { type: 'reasoning', id: 'rs-1', summary: [], content: [] } } });",

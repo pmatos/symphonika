@@ -7,6 +7,10 @@ type NormalizedProviderEventType =
   | "session_started"
   | "message"
   | "tool_call"
+  // A payload-free liveness marker: the provider reported observable work
+  // (streaming command output, a changed workspace diff) that carries no
+  // content worth persisting. `signal` names the source (ADR 0087).
+  | "progress"
   | "usage_updated"
   | "rate_limit_updated"
   | "turn_completed"

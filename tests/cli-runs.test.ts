@@ -205,6 +205,7 @@ describe("CLI run commands", () => {
     store.upsertWatchdogSample({
       idleSince: "2026-05-22T11:45:00.000Z",
       lastMessageAt: null,
+      lastProgressAt: null,
       lastToolCallAt: null,
       normalizedLogOffset: 0,
       normalizedLogPath: "",
@@ -218,6 +219,7 @@ describe("CLI run commands", () => {
     store.upsertWatchdogSample({
       idleSince: null,
       lastMessageAt: "2026-05-22T11:59:00.000Z",
+      lastProgressAt: null,
       lastToolCallAt: "2026-05-22T11:59:00.000Z",
       normalizedLogOffset: 0,
       normalizedLogPath: "",
@@ -265,6 +267,7 @@ describe("CLI run commands", () => {
     store.upsertWatchdogSample({
       idleSince: "2026-05-22T11:45:00.000Z",
       lastMessageAt: null,
+      lastProgressAt: null,
       lastToolCallAt: null,
       normalizedLogOffset: 128,
       normalizedLogPath: "provider.normalized.jsonl",
@@ -455,6 +458,7 @@ describe("CLI run commands", () => {
     store.upsertWatchdogSample({
       idleSince: "2026-05-13T08:45:00.000Z",
       lastMessageAt: null,
+      lastProgressAt: null,
       lastToolCallAt: null,
       normalizedLogOffset: 0,
       normalizedLogPath: "/tmp/normalized.jsonl",
@@ -1088,6 +1092,7 @@ describe("CLI run commands", () => {
       store.upsertWatchdogSample({
         idleSince: null,
         lastMessageAt: "2026-05-22T11:58:45.000Z",
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T11:58:00.000Z",
         normalizedLogOffset: 0,
         normalizedLogPath: "/tmp/provider.normalized.jsonl",
@@ -1117,6 +1122,7 @@ describe("CLI run commands", () => {
       expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
         "Progress Signal:
           last tool_call: 2m ago
+          last progress marker: never
           workspace mtime: 1m 30s ago
           turn_ids observed: 2
           output tokens / 5m: +75
@@ -1145,6 +1151,7 @@ describe("CLI run commands", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T11:45:00.000Z",
         lastMessageAt: "2026-05-22T11:41:00.000Z",
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T11:40:00.000Z",
         normalizedLogOffset: 0,
         normalizedLogPath: "/tmp/provider.normalized.jsonl",
@@ -1174,6 +1181,7 @@ describe("CLI run commands", () => {
       expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
         "Progress Signal:
           last tool_call: 20m ago
+          last progress marker: never
           workspace mtime: 19m ago
           turn_ids observed: 1
           output tokens / 5m: +20
@@ -1250,6 +1258,7 @@ describe("CLI run commands", () => {
     store.upsertWatchdogSample({
       idleSince: "2026-05-22T11:45:00.000Z",
       lastMessageAt: null,
+      lastProgressAt: null,
       lastToolCallAt: null,
       normalizedLogOffset: 0,
       normalizedLogPath: "",
@@ -1302,6 +1311,7 @@ describe("CLI run commands", () => {
       store.upsertWatchdogSample({
         idleSince: "2026-05-22T11:25:30.000Z",
         lastMessageAt: "2026-05-22T11:25:15.000Z",
+        lastProgressAt: null,
         lastToolCallAt: "2026-05-22T11:25:00.000Z",
         normalizedLogOffset: 123,
         normalizedLogPath: "/tmp/provider.normalized.jsonl",
@@ -1338,6 +1348,7 @@ describe("CLI run commands", () => {
       expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
         "Progress Signal:
           last tool_call: 2h 36m ago
+          last progress marker: never
           workspace mtime: 2h 35m ago
           turn_ids observed: 1
           output tokens / 5m: 0
@@ -1367,6 +1378,7 @@ describe("CLI run commands", () => {
     store.upsertWatchdogSample({
       idleSince: "2026-05-22T11:25:30.000Z",
       lastMessageAt: "2026-05-22T11:25:15.000Z",
+      lastProgressAt: null,
       lastToolCallAt: "2026-05-22T11:25:00.000Z",
       normalizedLogOffset: 123,
       normalizedLogPath: "/tmp/provider.normalized.jsonl",
@@ -1407,6 +1419,7 @@ describe("CLI run commands", () => {
       expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
         "Progress Signal:
           last tool_call: 2h 36m ago
+          last progress marker: never
           workspace mtime: 2h 35m ago
           turn_ids observed: 1
           output tokens / 5m: 0
@@ -1433,6 +1446,7 @@ describe("CLI run commands", () => {
     store.upsertWatchdogSample({
       idleSince: "2026-05-22T08:55:00.000Z",
       lastMessageAt: null,
+      lastProgressAt: null,
       lastToolCallAt: "2026-05-22T08:50:00.000Z",
       normalizedLogOffset: 0,
       normalizedLogPath: "/tmp/prior-attempt.normalized.jsonl",

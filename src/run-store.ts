@@ -464,6 +464,8 @@ export type ProviderEventRecord = {
 export type WatchdogSample = {
   idleSince: string | null;
   lastMessageAt: string | null;
+  // Most recent payload-free provider liveness marker (ADR 0087).
+  lastProgressAt: string | null;
   lastToolCallAt: string | null;
   normalizedLogOffset: number;
   normalizedLogPath: string;
@@ -643,6 +645,7 @@ type WatchdogCandidateRunRow = {
 type WatchdogSampleRow = {
   idle_since: string | null;
   last_message_at: string | null;
+  last_progress_at: string | null;
   last_tool_call_at: string | null;
   normalized_log_offset: number;
   normalized_log_path: string;
@@ -1288,9 +1291,10 @@ export class RunStore {
       .prepare(
         [
           "select run_id, sampled_at, last_tool_call_at, last_message_at,",
-          "workspace_mtime_max, workspace_digest, turn_id_set_size,",
-          "output_tokens_total, normalized_log_offset, normalized_log_path,",
-          "idle_since from watchdog_samples where run_id = ?"
+          "last_progress_at, workspace_mtime_max, workspace_digest,",
+          "turn_id_set_size, output_tokens_total, normalized_log_offset,",
+          "normalized_log_path, idle_since from watchdog_samples",
+          "where run_id = ?"
         ].join(" ")
       )
       .get(runId) as WatchdogSampleRow | undefined;
@@ -1304,6 +1308,7 @@ export class RunStore {
     const values = {
       idle_since: sample.idleSince,
       last_message_at: sample.lastMessageAt,
+      last_progress_at: sample.lastProgressAt,
       last_tool_call_at: sample.lastToolCallAt,
       normalized_log_offset: sample.normalizedLogOffset,
       normalized_log_path: sample.normalizedLogPath,
@@ -1318,19 +1323,20 @@ export class RunStore {
       [
         "insert into watchdog_samples (",
         "run_id, sampled_at, last_tool_call_at, last_message_at,",
-        "workspace_mtime_max, workspace_digest, turn_id_set_size,",
-        "output_tokens_total, normalized_log_offset, normalized_log_path,",
-        "idle_since",
+        "last_progress_at, workspace_mtime_max, workspace_digest,",
+        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
+        "normalized_log_path, idle_since",
         ") values (",
         "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-        "@workspace_mtime_max, @workspace_digest, @turn_id_set_size,",
-        "@output_tokens_total, @normalized_log_offset, @normalized_log_path,",
-        "@idle_since",
+        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
+        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
+        "@normalized_log_path, @idle_since",
         ")",
         "on conflict(run_id) do update set",
         "sampled_at = excluded.sampled_at,",
         "last_tool_call_at = excluded.last_tool_call_at,",
         "last_message_at = excluded.last_message_at,",
+        "last_progress_at = excluded.last_progress_at,",
         "workspace_mtime_max = excluded.workspace_mtime_max,",
         "workspace_digest = excluded.workspace_digest,",
         "turn_id_set_size = excluded.turn_id_set_size,",
@@ -1344,14 +1350,14 @@ export class RunStore {
       [
         "insert or replace into watchdog_sample_history (",
         "run_id, sampled_at, last_tool_call_at, last_message_at,",
-        "workspace_mtime_max, workspace_digest, turn_id_set_size,",
-        "output_tokens_total, normalized_log_offset, normalized_log_path,",
-        "idle_since",
+        "last_progress_at, workspace_mtime_max, workspace_digest,",
+        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
+        "normalized_log_path, idle_since",
         ") values (",
         "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-        "@workspace_mtime_max, @workspace_digest, @turn_id_set_size,",
-        "@output_tokens_total, @normalized_log_offset, @normalized_log_path,",
-        "@idle_since",
+        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
+        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
+        "@normalized_log_path, @idle_since",
         ")"
       ].join(" ")
     );
@@ -4879,6 +4885,7 @@ export class RunStore {
         run_id text primary key,
         sampled_at text not null,
         last_tool_call_at text,
+        last_progress_at text,
         workspace_mtime_max real not null,
         workspace_digest text not null default '',
         turn_id_set_size integer not null,
@@ -4894,6 +4901,7 @@ export class RunStore {
         run_id text not null,
         sampled_at text not null,
         last_tool_call_at text,
+        last_progress_at text,
         workspace_mtime_max real not null,
         workspace_digest text not null default '',
         turn_id_set_size integer not null,
@@ -5069,6 +5077,8 @@ export class RunStore {
       ["watchdog_samples", "normalized_log_path", "text not null default ''"],
       ["watchdog_samples", "last_message_at", "text"],
       ["watchdog_samples", "workspace_digest", "text not null default ''"],
+      ["watchdog_samples", "last_progress_at", "text"],
+      ["watchdog_sample_history", "last_progress_at", "text"],
       [
         "watchdog_sample_history",
         "workspace_digest",
@@ -5572,6 +5582,7 @@ function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
   return {
     idleSince: row.idle_since,
     lastMessageAt: row.last_message_at,
+    lastProgressAt: row.last_progress_at,
     lastToolCallAt: row.last_tool_call_at,
     normalizedLogOffset: row.normalized_log_offset,
     normalizedLogPath: row.normalized_log_path,

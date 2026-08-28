@@ -305,6 +305,9 @@ function summarizeNormalizedEvent(event: NormalizedProviderEvent): string {
   if (event.type === "tool_call" && typeof event.toolName === "string") {
     return `tool ${event.toolName}`;
   }
+  if (event.type === "progress" && typeof event.signal === "string") {
+    return `progress ${event.signal}`;
+  }
   if (event.type === "usage_updated" && isRecord(event.tokenUsage)) {
     const total =
       numberField(event.tokenUsage, "total_tokens") ??

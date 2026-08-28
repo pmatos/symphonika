@@ -356,6 +356,7 @@ watchdog:
   grace_minutes: 30
   sample_interval_seconds: 60
   mtime_ignore: []
+  mtime_include: []
 
 retention:
   routine_workspaces:
@@ -449,11 +450,13 @@ never polled for issues and exists only to host Routine Firings. A Routine Host 
 host is a declaration-time validation error. See ADR 0062. `symphonika init-project --mode
 routine-host` scaffolds a host without issue-filter, priority, or label-creation prompts.
 
-A Project may override `watchdog.grace_minutes` (a positive integer) and
-`watchdog.output_token_budget` (a non-negative integer); each is optional and merges independently
-over daemon scope. It inherits `watchdog.enabled`, `watchdog.sample_interval_seconds`, and
-`watchdog.mtime_ignore` from daemon scope, so a Project can lengthen its grace window or raise its
-convergence budget but cannot opt into a daemon-disabled Watchdog.
+A Project may override `watchdog.grace_minutes` (a positive integer),
+`watchdog.output_token_budget` (a non-negative integer), and `watchdog.mtime_include` (a list of
+workspace-relative directories); each is optional and merges independently over daemon scope. A
+Project-level `mtime_include` replaces the daemon-scope list rather than adding to it. It inherits
+`watchdog.enabled`, `watchdog.sample_interval_seconds`, and `watchdog.mtime_ignore` from daemon
+scope, so a Project can lengthen its grace window, raise its convergence budget, or opt a build
+tree back into the workspace walk, but cannot opt into a daemon-disabled Watchdog.
 Project overrides are part of the defensive Service Config reload snapshot: any invalid value or
 unknown key rejects the candidate snapshot for all Projects and leaves the last known-good snapshot
 live.
@@ -1434,6 +1437,8 @@ Required normalized events:
 - `session_started`
 - `message`
 - `tool_call`
+- `progress` — a payload-free liveness marker with a `signal` naming its source; the provider
+  observed work whose content belongs only in the raw log (ADR 0087)
 - `usage_updated`
 - `rate_limit_updated`
 - `turn_completed`
@@ -1716,12 +1721,21 @@ when an active Run's Project has been removed from the Service Config, the Watch
 captured on that Run instead. The hard-coded set always remains active. Separately,
 `watchdog.mtime_ignore` adds workspace-relative globs whose matching files are dropped from the
 mtime walk at the individual-file level, so build-output churn (e.g. `*.log`) cannot keep a wedged
-Run alive.
+Run alive. `watchdog.mtime_include` names workspace-relative directories that stay in the walk
+despite the hard-coded set, together with everything beneath them, so a compiled Project can make
+its build tree (e.g. `target`) count as workspace evidence again; an `evidence.ignore` or
+`mtime_ignore` match still wins over an include. It is empty by default, because an included tree
+makes every walk proportionally more expensive and makes that tree's churn count as progress
+(ADR 0087).
 
 A sampled Run is making progress when any one signal advances since the previous sample:
 
 - `last_tool_call_at` increases (both Claude and Codex emit normalized `tool_call` events; the
   Codex provider maps its `commandExecution`, `fileChange`, and `webSearch` items)
+- `last_progress_at` increases — a payload-free `progress` marker arrived. The Codex provider emits
+  one for `item/commandExecution/outputDelta` and `turn/diff/updated`, rate-limited so a chatty
+  build cannot flood the Normalized Event Log. This is the signal that survives a long build or
+  test suite, during which no tool call, assistant message, or token update arrives (ADR 0087).
 - `workspace_digest` changes — a hash over the sorted `relative-path:size` pairs of every
   non-excluded file. A bare `workspace_mtime_max` advance is **not** progress: a build that
   reproduces byte-identical output restamps mtimes without carrying new information (ADR 0086).

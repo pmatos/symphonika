@@ -246,6 +246,7 @@ describe("HTTP app", () => {
       runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T11:45:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath: "",
@@ -314,6 +315,7 @@ describe("HTTP app", () => {
       runStore.upsertWatchdogSample({
         idleSince: "2026-05-22T11:45:00.000Z",
         lastMessageAt: null,
+        lastProgressAt: null,
         lastToolCallAt: null,
         normalizedLogOffset: 0,
         normalizedLogPath: "",

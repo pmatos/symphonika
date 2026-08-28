@@ -147,6 +147,12 @@ _Avoid_: normalized event log
 Provider-neutral run events used by the orchestrator, observability surfaces, and tests.
 _Avoid_: raw provider log
 
+**Thinking Marker**:
+A timestamped normalized event recording that provider reasoning started or completed. It may carry
+a provider-authored reasoning summary for observability, but never raw reasoning content, and counts
+as provider progress for the Watchdog.
+_Avoid_: tool call, chain of thought
+
 **Run Store**:
 The SQLite-backed durable record of projects, runs, attempts, retry state, event metadata, and workspace paths.
 _Avoid_: event log when referring to scheduler state
@@ -286,8 +292,9 @@ _Avoid_: heartbeat checker, liveness probe
 
 **Progress Signal**:
 The tuple of observed Run-progress evidence the Watchdog samples — most recent tool-call timestamp,
-Workspace Digest, distinct turn-id count, output-token growth since the last sample, and
-most recent streamed assistant-message timestamp. Advance of any one signal counts as progress.
+provider progress timestamp (including Thinking Markers), Workspace Digest, distinct turn-id count,
+output-token growth since the last sample, and most recent streamed assistant-message timestamp.
+Advance of any one signal counts as progress.
 _Avoid_: heartbeat when describing observable side-effects — rate-limit events are excluded from
 the Progress Signal outright, and the bare presence of usage events is not progress, though the
 Progress Signal still reads output-token growth from `usage_updated` events (signal 4)

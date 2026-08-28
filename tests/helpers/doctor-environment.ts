@@ -39,6 +39,8 @@ export async function prepareDoctorTestEnvironment(
       "[profiles.symphonika]",
       'sandbox_mode = "danger-full-access"',
       'approval_policy = "never"',
+      'model_reasoning_summary = "detailed"',
+      'model_verbosity = "medium"',
       ""
     ].join("\n")
   );

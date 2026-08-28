@@ -147,7 +147,7 @@ pull_requests:
 
 providers:
   codex:
-    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
+    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never -c model_reasoning_summary=detailed -c model_verbosity=medium --dangerously-bypass-approvals-and-sandbox app-server"
   claude:
     command: "claude -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json"
   omp:
@@ -220,6 +220,8 @@ profile. Add this block to `~/.codex/config.toml`:
 analytics = { enabled = false }
 sandbox_mode = "danger-full-access"
 approval_policy = "never"
+model_reasoning_summary = "detailed"
+model_verbosity = "medium"
 
 [profiles.symphonika.features]
 memories         = false
@@ -228,7 +230,8 @@ codex_hooks      = false
 image_generation = false
 ```
 
-This keeps headless runs from inheriting interactive-only behavior. See
+This keeps headless runs from inheriting interactive-only behavior and enables provider-authored
+reasoning summaries for the run transcript. See
 [ADR-0042](./adr/0042-codex-profile-for-headless-runs.md).
 
 Claude and OMP users do not need this Codex profile.

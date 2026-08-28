@@ -385,7 +385,7 @@ routine_defaults:
 
 providers:
   codex:
-    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"
+    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never -c model_reasoning_summary=detailed -c model_verbosity=medium --dangerously-bypass-approvals-and-sandbox app-server"
   claude:
     command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"
   omp:
@@ -1467,6 +1467,8 @@ Required normalized events:
 - `tool_call`
 - `progress` — a payload-free liveness marker with a `signal` naming its source; the provider
   observed work whose content belongs only in the raw log (ADR 0087)
+- `thinking` — a timestamped reasoning-item boundary with `started` or `completed` status and an
+  optional provider-authored summary; raw reasoning content is not normalized
 - `usage_updated`
 - `rate_limit_updated`
 - `turn_completed`
@@ -1487,13 +1489,15 @@ Symphonika assumes providers run with full local permissions.
 Default Codex command:
 
 ```text
-codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server
+codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never -c model_reasoning_summary=detailed -c model_verbosity=medium --dangerously-bypass-approvals-and-sandbox app-server
 ```
 
 The `-p symphonika` flag selects a named profile that operators define in `~/.codex/config.toml` so
 headless runs do not pick up interactive Codex defaults (memory consolidation, hooks, etc.). See
 ADR-0042 for the contract and the snippet operators paste; `doctor` surfaces the snippet when the
-profile is missing.
+profile is missing. `model_reasoning_summary = "detailed"` makes Codex populate reasoning-item
+summaries, while `model_verbosity = "medium"` keeps final answers at a useful unattended default;
+the command repeats both settings so existing profiles gain them immediately.
 
 Default Claude command:
 
@@ -1760,10 +1764,12 @@ A sampled Run is making progress when any one signal advances since the previous
 
 - `last_tool_call_at` increases (both Claude and Codex emit normalized `tool_call` events; the
   Codex provider maps its `commandExecution`, `fileChange`, and `webSearch` items)
-- `last_progress_at` increases — a payload-free `progress` marker arrived. The Codex provider emits
-  one for `item/commandExecution/outputDelta` and `turn/diff/updated`, rate-limited so a chatty
-  build cannot flood the Normalized Event Log. This is the signal that survives a long build or
-  test suite, during which no tool call, assistant message, or token update arrives (ADR 0087).
+- `last_progress_at` increases — either a payload-free `progress` marker or a `thinking` boundary
+  arrived. The Codex provider emits progress markers for `item/commandExecution/outputDelta` and
+  `turn/diff/updated`, rate-limited so a chatty build cannot flood the Normalized Event Log, and
+  thinking markers for reasoning `item/started` and `item/completed`. Together these signals cover
+  long tools and model reasoning even when no assistant message or token update arrives (ADR 0087,
+  issue #590).
 - `workspace_digest` changes — a hash over the sorted `relative-path:size` pairs of every
   non-excluded file. A bare `workspace_mtime_max` advance is **not** progress: a build that
   reproduces byte-identical output restamps mtimes without carrying new information (ADR 0086).

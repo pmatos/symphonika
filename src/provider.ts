@@ -7,6 +7,9 @@ type NormalizedProviderEventType =
   | "session_started"
   | "message"
   | "tool_call"
+  // A provider-neutral boundary marker for model reasoning. Providers expose
+  // summaries, never raw chain-of-thought content, through this event.
+  | "thinking"
   // A payload-free liveness marker: the provider reported observable work
   // (streaming command output, a changed workspace diff) that carries no
   // content worth persisting. `signal` names the source (ADR 0087).

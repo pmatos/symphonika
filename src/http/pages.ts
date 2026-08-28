@@ -6841,6 +6841,13 @@ function renderEventsTable(
             : `${formatEventSequence(row.firstSequence)}–${formatEventSequence(row.lastSequence)}`;
         return `<tr><td>${seq}</td><td>message</td><td class="c-detail"><div class="msg">${escapeHtml(row.text)}</div></td><td><code>${renderTimestamp(row.createdAt)}</code></td></tr>`;
       }
+      if (row.kind === "thinking") {
+        const detail =
+          row.status === "started"
+            ? `thinking since <code>${renderTimestamp(row.createdAt)}</code>`
+            : `thinking completed${row.summary.length > 0 ? ` &mdash; ${escapeHtml(row.summary)}` : ""}`;
+        return `<tr><td>${formatEventSequence(row.sequence)}</td><td>thinking</td><td class="c-detail">${detail}</td><td><code>${renderTimestamp(row.createdAt)}</code></td></tr>`;
+      }
       return `<tr><td>${formatEventSequence(row.sequence)}</td><td>${escapeHtml(row.type)}</td><td class="c-detail"><code>${escapeHtml(row.detail)}</code></td><td><code>${renderTimestamp(row.createdAt)}</code></td></tr>`;
     })
     .join("");
@@ -6995,6 +7002,13 @@ type EventDisplayRow =
       type: string;
       detail: string;
       createdAt: string;
+    }
+  | {
+      kind: "thinking";
+      sequence: number | null;
+      status: "completed" | "started";
+      summary: string;
+      createdAt: string;
     };
 
 function formatEventSequence(sequence: number | null): string {
@@ -7017,7 +7031,11 @@ function coalesceEvents(
 
   for (const event of events) {
     const message = event.normalized.message;
-    const createdAt = event.createdAt ?? "";
+    const eventTimestamp = event.normalized.timestamp;
+    const createdAt =
+      event.type === "thinking" && typeof eventTimestamp === "string"
+        ? eventTimestamp
+        : (event.createdAt ?? "");
     if (event.type === "message" && typeof message === "string") {
       if (buffer === undefined) {
         buffer = {
@@ -7036,6 +7054,22 @@ function coalesceEvents(
     }
 
     flush();
+    if (event.type === "thinking") {
+      const summary = event.normalized.summary;
+      rows.push({
+        createdAt,
+        kind: "thinking",
+        sequence: event.sequence,
+        status:
+          event.normalized.status === "completed" ? "completed" : "started",
+        summary: Array.isArray(summary)
+          ? summary
+              .filter((value): value is string => typeof value === "string")
+              .join(" ")
+          : ""
+      });
+      continue;
+    }
     rows.push({
       createdAt,
       detail:

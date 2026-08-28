@@ -305,6 +305,14 @@ describe("Codex JSON-RPC provider", () => {
         type: "tool_call"
       },
       {
+        itemId: "rs-1",
+        status: "started",
+        summary: [],
+        threadId: "thread-9",
+        turnId: "turn-9",
+        type: "thinking"
+      },
+      {
         message: "done",
         threadId: "thread-9",
         turnId: "turn-9",
@@ -341,6 +349,59 @@ describe("Codex JSON-RPC provider", () => {
         exitCode: 0,
         signal: null,
         type: "process_exit"
+      }
+    ]);
+  });
+
+  it("normalizes reasoning item boundaries as timestamped thinking events", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const observedAt = [
+      Date.parse("2026-08-28T13:43:00.000Z"),
+      Date.parse("2026-08-28T13:44:30.000Z")
+    ];
+    const provider = createCodexProvider({
+      now: () => observedAt.shift() ?? 0,
+      processScope: noopProcessScope()
+    });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} --scenario=reasoning app-server`,
+          name: "codex"
+        },
+        workspacePath
+      })
+    );
+
+    expect(
+      events
+        .map((event) => event.normalized)
+        .filter((normalized) => normalized?.type === "thinking")
+    ).toEqual([
+      {
+        itemId: "rs-1",
+        status: "started",
+        summary: [],
+        threadId: "thread-9",
+        timestamp: "2026-08-28T13:43:00.000Z",
+        turnId: "turn-9",
+        type: "thinking"
+      },
+      {
+        itemId: "rs-1",
+        status: "completed",
+        summary: ["Solving the congruences"],
+        threadId: "thread-9",
+        timestamp: "2026-08-28T13:44:30.000Z",
+        turnId: "turn-9",
+        type: "thinking"
       }
     ]);
   });
@@ -1360,6 +1421,12 @@ async function writeFakeCodexAppServer(
       "        send({ method: 'item/commandExecution/outputDelta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'exec-1', chunk: `compiling crate ${index}` } });",
       "      }",
       "      send({ method: 'turn/diff/updated', params: { threadId: 'thread-9', turnId: 'turn-9', diff: 'diff --git a/src.rs b/src.rs' } });",
+      "      send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
+      "      process.exit(0);",
+      "    }",
+      "    if (scenario === 'reasoning') {",
+      "      send({ method: 'item/started', params: { threadId: 'thread-9', turnId: 'turn-9', item: { type: 'reasoning', id: 'rs-1', summary: [], content: [] } } });",
+      "      send({ method: 'item/completed', params: { threadId: 'thread-9', turnId: 'turn-9', item: { type: 'reasoning', id: 'rs-1', summary: ['Solving the congruences'], content: [] } } });",
       "      send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
       "      process.exit(0);",
       "    }",

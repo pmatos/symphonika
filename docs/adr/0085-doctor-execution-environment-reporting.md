@@ -28,13 +28,14 @@ stale version-manager directory.
   it from a future issue or Routine Workspace, not the directory where `doctor` was invoked, and no
   single future Workspace exists yet for `doctor` to inspect.
 - When a Project selects Codex, parse the Codex config as TOML and report independent checks for
-  `sandbox_mode = "danger-full-access"` and `approval_policy = "never"` under the profile the
+  `sandbox_mode = "danger-full-access"`, `approval_policy = "never"`,
+  `model_reasoning_summary = "detailed"`, and `model_verbosity = "medium"` under the profile the
   configured command actually selects (`-p` / `--profile`, falling back to `symphonika` when the
   command names none), in `$CODEX_HOME/config.toml` when that names an absolute directory and
-  `~/.codex/config.toml` otherwise. Both follow the same resolution Codex itself uses, so an
-  operator running a custom profile or a Symphonika-specific `CODEX_HOME` (ADR 0042) is not failed
-  for a profile they never selected. A missing file or profile yields two actionable missing-key
-  results rather than only a generic profile error; any other read failure additionally reports the
+  `~/.codex/config.toml` otherwise. All follow the same resolution Codex itself uses, so an operator
+  running a custom profile or a Symphonika-specific `CODEX_HOME` (ADR 0042) is not failed for a
+  profile they never selected. A missing file or profile yields four actionable missing-key results
+  rather than only a generic profile error; any other read failure additionally reports the
   underlying reason. This complements ADR 0042's provider probe: the adapter still validates the
   actual app-server behavior, while the environment report exposes the declared key values directly.
 - Resolve `gh` under the invoking PATH and run `gh auth status --active --hostname github.com`,

@@ -369,19 +369,19 @@ async function sampleRun(input: {
     lastMessageAt: latestEventAt(
       input.previous?.lastMessageAt ?? null,
       log.events,
-      "message",
+      ["message"],
       input.sampledAt
     ),
     lastProgressAt: latestEventAt(
       input.previous?.lastProgressAt ?? null,
       log.events,
-      "progress",
+      ["progress", "thinking"],
       input.sampledAt
     ),
     lastToolCallAt: latestEventAt(
       input.previous?.lastToolCallAt ?? null,
       log.events,
-      "tool_call",
+      ["tool_call"],
       input.sampledAt
     ),
     normalizedLogOffset: log.offset,
@@ -592,18 +592,22 @@ function collectTurnIds(events: NormalizedProviderEvent[]): Set<string> {
 }
 
 // A signal timestamp is "this sample saw at least one such event since the
-// previous one", not the event's own clock: the Normalized Event Log carries
-// no per-event timestamp, and the sample time is what the any-of rule compares.
+// previous one", not the event's own clock: most normalized events carry no
+// timestamp, and the sample time is what the any-of rule compares consistently.
 // `message` covers both providers' streamed assistant deltas (Claude
 // text_delta, Codex item/agentMessage/delta) — ADR 0054 signal 5 — and
-// `progress` covers the payload-free provider liveness markers of ADR 0087.
+// `progress` covers the payload-free provider liveness markers of ADR 0087;
+// `thinking` covers Codex reasoning boundaries even when Codex supplies no
+// summary text (issue #590).
 function latestEventAt(
   previous: string | null,
   events: NormalizedProviderEvent[],
-  type: string,
+  types: readonly string[],
   sampledAt: string
 ): string | null {
-  return events.some((event) => event.type === type) ? sampledAt : previous;
+  return events.some((event) => types.includes(event.type))
+    ? sampledAt
+    : previous;
 }
 
 function outputTokensTotal(

@@ -68,11 +68,11 @@ A Progress Signal is the tuple:
   writes, or a completed turn — e.g. a single long Claude turn whose `usage_updated` does not
   arrive until completion, which signal 4 alone would miss. Streamed messages are genuine output,
   unlike the `usage_updated`/`rate_limit_updated` heartbeats the rule excludes.
-- `last_progress_at` — timestamp of the most recent payload-free `progress` marker (ADR 0087).
-  Only the Codex provider emits these today, from `item/commandExecution/outputDelta` and
-  `turn/diff/updated`, rate-limited to one per five seconds. This is the signal that carries a Run
-  through a long build or test suite, during which none of signals 1–5 advances: issue #584 records
-  a 29.9-minute window with 563 output deltas and 84 diff updates and zero of every other signal.
+- `last_progress_at` — timestamp of the most recent normalized provider `progress` or `thinking`
+  marker. Codex emits payload-free progress from `item/commandExecution/outputDelta` and
+  `turn/diff/updated`, rate-limited to one per five seconds (ADR 0087), and thinking boundaries from
+  reasoning `item/started` and `item/completed` even when no reasoning summary is available (issue
+  #590). This signal carries a Run through both long tools and otherwise-silent model reasoning.
   Claude and Oh My Pi emit no equivalent notification, so the signal reads `null` for them.
 
 What each provider actually emits, per signal:
@@ -84,7 +84,7 @@ What each provider actually emits, per signal:
 | 3. `turn_id_set_size` | never — emits `sessionId`, not `turnId` | one `turnId` per turn; a single-turn Run never advances it | never — no stable turn id (see `turn_end`) |
 | 4. `output_tokens_total` | per-message `usage.output_tokens`, summed | cumulative `tokenUsage.total.outputTokens` | per-message `usage.output` mapped to `outputTokens`, summed |
 | 5. `last_message_at` | `content_block_delta` / `text_delta` | `item/agentMessage/delta` | streamed assistant message text |
-| 6. `last_progress_at` | never | `item/commandExecution/outputDelta`, `turn/diff/updated` | never |
+| 6. `last_progress_at` | never | `item/commandExecution/outputDelta`, `turn/diff/updated`, reasoning item boundaries | never |
 
 No provider is covered by every signal. Claude Runs rely on 1, 2, 4, and 5; Codex Runs can rely on
 any of the six, and signals 1, 4, and 6 were each dead for Codex at some point in this ADR's
@@ -99,7 +99,8 @@ Watchdog sample:
 3. `turn_id_set_size` increased, or
 4. `output_token_growth_since_last_sample` is non-zero, or
 5. `last_message_at` increased (a new streamed assistant message arrived), or
-6. `last_progress_at` increased (a payload-free provider liveness marker arrived — ADR 0087).
+6. `last_progress_at` increased (a provider progress or thinking marker arrived — ADR 0087 and
+   issue #590).
 
 The rule is deliberately permissive. A long ESBMC `make verify` emits no `tool_call` and no
 `usage_updated`, but its child processes write to the workspace; the mtime check keeps it alive.

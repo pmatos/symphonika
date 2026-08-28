@@ -115,6 +115,11 @@ describe("HTTP app — mutation authentication (#306 part 1, ADR 0075)", () => {
         init: { method: "POST" },
         path: "/api/runs/run-a/cancel",
         successStatuses: [200, 503]
+      },
+      {
+        init: { method: "POST" },
+        path: "/api/update-now",
+        successStatuses: [200, 503]
       }
     ];
   }

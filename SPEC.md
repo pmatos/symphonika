@@ -477,6 +477,17 @@ being terminated by the same cgroup-wide `SIGTERM` it requested is expected and 
 that result. Any other automatic restart-request error is logged as a manual-restart warning rather
 than reported as a failed cutover, because the old process cannot observe post-restart liveness.
 
+`symphonika update` forces one such cycle immediately rather than waiting for the daemon's own
+check cadence, and `symphonika update --check` reports the latest available release without
+staging or cutting anything over. Both drive the running daemon over the local HTTP API
+(`/api/update-now`) so the forced cycle uses the same drain gate as a scheduled one; neither acts
+on the install path standalone, and both require a running daemon. `update` honours `self_update`
+and refuses when it is `false`; `--check` reports availability regardless and says whether the flag
+would allow an install. A forced cycle that reaches the drain gate with Runs in flight reports the
+wait and returns, while the daemon completes the cutover on its own. Every terminal branch is
+reported distinctly, and a release check that is skipped (no `GITHUB_TOKEN`) or fails is logged
+rather than swallowed. See ADR 0087.
+
 ### 5.2 Workflow Contract
 
 Each Dispatch Project must reference a valid `WORKFLOW.md`. A Routine Host has no workflow contract.
@@ -1898,6 +1909,7 @@ Bootstrap CLI commands:
 - `symphonika service install [--config <path>] [--force] [--print] [--no-reload]`
 - `symphonika status [--config <path>] [--dashboard] [--watch] [--interval-ms <ms>] [--doctor-ttl-ms <ms>]`
 - `symphonika poll-now [--config <path>]`
+- `symphonika update [--check] [--config <path>] [--daemon-url <url>]`
 - `symphonika fire-now <routine> [--project <project>] [--force] [--wait] [--config <path>]`
 - `symphonika runs [--config <path>]`
 - `symphonika routines [--config <path>] [--project <project>] [--include-inactive]`
@@ -2187,11 +2199,12 @@ other page (`/runs/:id`, `/firings/:id`, `/routines/:name`, `/projects/:name`) s
 manual reload to see a transition — wiring those up is follow-on work. See #305, ADR-0074.
 
 The v1 mutating local HTTP API actions are explicit active-run cancellation, a manual poll-now
-trigger that uses the normal daemon scheduler path, and daemon-owned manual Routine firing. The
-server-rendered dashboard exposes only cancellation and poll-now controls; manual Routine firing is
-a CLI/API action (ADR 0067).
+trigger that uses the normal daemon scheduler path, daemon-owned manual Routine firing, and a
+manual self-update trigger that uses the normal update-coordinator path (ADR 0087). The
+server-rendered dashboard exposes only cancellation and poll-now controls; manual Routine firing and
+the manual self-update trigger are CLI/API actions (ADR 0067).
 
-Every mutating route — the three above and every one a later slice adds — requires the request to
+Every mutating route — those above and every one a later slice adds — requires the request to
 either carry no browser fetch-metadata (`Origin`/`Sec-Fetch-Site` both absent, the CLI's own bare
 `fetch()` calls) or be same-origin and carry a valid CSRF token (ADR-0075). A page GET that renders
 a mutating form (today, only the Run-detail page's cancel form) mints a session cookie on first

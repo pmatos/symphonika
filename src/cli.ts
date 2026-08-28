@@ -2565,6 +2565,7 @@ function formatProgressSignal(
     "",
     "Progress Signal:",
     `  last tool_call: ${formatAge(watchdog.lastToolCallAt, nowMs)}`,
+    `  last progress marker: ${formatAge(watchdog.lastProgressAt, nowMs)}`,
     `  workspace mtime: ${formatAge(watchdog.workspaceMtimeMax, nowMs)}`,
     `  turn_ids observed: ${watchdog.turnIdSetSize ?? 0}`,
     `  output tokens / 5m: ${outputTokenGrowth5m === 0 ? "0" : `+${outputTokenGrowth5m}`}`

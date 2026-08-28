@@ -34,6 +34,17 @@ type JsonObject = Record<string, unknown>;
 
 const PROVIDER_LABEL: ProviderLabel = "Codex";
 
+// Codex streams command output and workspace diffs as high-frequency
+// notifications: one recorded run emitted 563 output deltas and 84 diff
+// updates. Each normalized event costs a Normalized Event Log line and a
+// `provider_events` row holding the raw notification verbatim, so emitting a
+// marker per notification would put whole build transcripts and diffs in the
+// run store. The Watchdog only needs one marker per sample window (60 s by
+// default), so markers are rate-limited well below that (ADR 0087).
+const PROGRESS_MARKER_MIN_INTERVAL_MS = 5_000;
+
+type CodexProgressSignal = "command_output" | "workspace_diff";
+
 type ActiveCodexRun = {
   cancelled: boolean;
   child?: ChildProcessWithoutNullStreams;
@@ -41,7 +52,9 @@ type ActiveCodexRun = {
     itemId: string | undefined;
     text: string;
   };
+  lastProgressMarkerAtMs?: number;
   nextRequestId: number;
+  now: () => number;
   threadId?: string;
   turnId?: string;
 };
@@ -56,6 +69,9 @@ type ResponseReadResult = {
 };
 
 export type CodexProviderOptions = {
+  // Injectable so tests can drive the progress-marker rate limit
+  // deterministically instead of sleeping.
+  now?: () => number;
   processScope?: ProcessScope;
 };
 
@@ -63,6 +79,7 @@ export function createCodexProvider(
   options: CodexProviderOptions = {}
 ): AgentProvider {
   const processScope = options.processScope ?? createProcessScope();
+  const now = options.now ?? (() => Date.now());
   const activeRuns = new Map<string, ActiveCodexRun>();
 
   return {
@@ -115,7 +132,8 @@ export function createCodexProvider(
       // await reopens that exact race one level deeper.
       const activeRun: ActiveCodexRun = {
         cancelled: false,
-        nextRequestId: 4
+        nextRequestId: 4,
+        now
       };
       activeRuns.set(input.run.id, activeRun);
 
@@ -463,6 +481,25 @@ function mapCodexJsonRpcMessage(
     };
   }
 
+  // Codex reports a running command's stdout/stderr and the evolving workspace
+  // diff as notifications rather than items. Both are direct evidence the Run
+  // is alive during a long build or test suite, which is exactly the window in
+  // which no `item/started`, `agentMessage` delta, or token update arrives —
+  // the Watchdog was blind to it (ADR 0087). Only a timestamped marker is
+  // normalized: the command output and the diff stay in the raw log, matching
+  // how `codexToolCallInput` already strips them from tool calls.
+  if (
+    method === "item/commandExecution/outputDelta" ||
+    method === "turn/diff/updated"
+  ) {
+    return progressMarkerEvent(
+      raw,
+      params,
+      activeRun,
+      method === "turn/diff/updated" ? "workspace_diff" : "command_output"
+    );
+  }
+
   if (method === "item/completed") {
     const item = objectField(params, "item");
     const phase = stringField(item, "phase");
@@ -549,6 +586,37 @@ function mapCodexJsonRpcMessage(
   }
 
   return {
+    raw
+  };
+}
+
+// Rate-limited so a chatty build cannot turn every output chunk into a
+// Normalized Event Log line and a `provider_events` row carrying the chunk's
+// raw notification. Suppressed notifications still reach the raw log, and the
+// interval is far below the Watchdog's sample interval, so no sample window
+// that saw activity can read as idle.
+function progressMarkerEvent(
+  raw: unknown,
+  params: JsonObject | undefined,
+  activeRun: ActiveCodexRun,
+  signal: CodexProgressSignal
+): ProviderEvent {
+  const nowMs = activeRun.now();
+  const previous = activeRun.lastProgressMarkerAtMs;
+  if (
+    previous !== undefined &&
+    nowMs - previous < PROGRESS_MARKER_MIN_INTERVAL_MS
+  ) {
+    return { raw };
+  }
+  activeRun.lastProgressMarkerAtMs = nowMs;
+  return {
+    normalized: {
+      signal,
+      threadId: stringField(params, "threadId") ?? activeRun.threadId,
+      turnId: stringField(params, "turnId") ?? activeRun.turnId,
+      type: "progress"
+    },
     raw
   };
 }

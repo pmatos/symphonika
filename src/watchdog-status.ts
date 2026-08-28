@@ -8,6 +8,7 @@ export type WatchdogStatus =
       graceMs: number;
       graceRemainingMs?: number;
       idleSince?: string;
+      lastProgressAt?: string | null;
       lastToolCallAt?: string | null;
       // Zero when no convergence budget is configured (ADR 0086).
       outputTokenBudget: number;
@@ -56,6 +57,7 @@ export function buildWatchdogStatus(input: {
             Date.parse(sample.idleSince) + graceMs - input.nowMs,
           idleSince: sample.idleSince
         }),
+    lastProgressAt: sample.lastProgressAt,
     lastToolCallAt: sample.lastToolCallAt,
     outputTokensTotal: sample.outputTokensTotal,
     sampledAt: sample.sampledAt,

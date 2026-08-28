@@ -27,7 +27,10 @@ clear other `stale` Runs today.
 A Progress Signal is the tuple:
 
 - `last_tool_call_at` — timestamp of the most recent `NormalizedProviderEventType = "tool_call"`
-  event.
+  event. Both providers emit these: Claude from its `tool_use` blocks, Codex from `item/started`
+  for its `commandExecution`, `fileChange`, and `webSearch` items. (This mapping did not exist for
+  Codex when this ADR was written, leaving the signal permanently null for Codex Runs; ADR 0086
+  added it.)
 - `workspace_mtime_max` — maximum file mtime under the Run's `workspacePath`, with build-output
   directories excluded at the directory level. (ADR 0086 replaced bare mtime advance with a
   workspace digest as the progress test and widened the built-in exclusion set; the mtime is still
@@ -65,6 +68,27 @@ A Progress Signal is the tuple:
   writes, or a completed turn — e.g. a single long Claude turn whose `usage_updated` does not
   arrive until completion, which signal 4 alone would miss. Streamed messages are genuine output,
   unlike the `usage_updated`/`rate_limit_updated` heartbeats the rule excludes.
+- `last_progress_at` — timestamp of the most recent payload-free `progress` marker (ADR 0087).
+  Only the Codex provider emits these today, from `item/commandExecution/outputDelta` and
+  `turn/diff/updated`, rate-limited to one per five seconds. This is the signal that carries a Run
+  through a long build or test suite, during which none of signals 1–5 advances: issue #584 records
+  a 29.9-minute window with 563 output deltas and 84 diff updates and zero of every other signal.
+  Claude and Oh My Pi emit no equivalent notification, so the signal reads `null` for them.
+
+What each provider actually emits, per signal:
+
+| Signal | Claude | Codex | Oh My Pi |
+|---|---|---|---|
+| 1. `last_tool_call_at` | `tool_use` content blocks | `item/started` (`commandExecution`, `fileChange`, `webSearch`) | `tool_execution_start` |
+| 2. workspace digest | provider-independent (filesystem walk) | provider-independent | provider-independent |
+| 3. `turn_id_set_size` | never — emits `sessionId`, not `turnId` | one `turnId` per turn; a single-turn Run never advances it | never — no stable turn id (see `turn_end`) |
+| 4. `output_tokens_total` | per-message `usage.output_tokens`, summed | cumulative `tokenUsage.total.outputTokens` | per-message `usage.output` mapped to `outputTokens`, summed |
+| 5. `last_message_at` | `content_block_delta` / `text_delta` | `item/agentMessage/delta` | streamed assistant message text |
+| 6. `last_progress_at` | never | `item/commandExecution/outputDelta`, `turn/diff/updated` | never |
+
+No provider is covered by every signal. Claude Runs rely on 1, 2, 4, and 5; Codex Runs can rely on
+any of the six, and signals 1, 4, and 6 were each dead for Codex at some point in this ADR's
+history (see ADR 0086 and ADR 0087).
 
 A Run is making progress on tick *t* iff **any** of the following advanced since the previous
 Watchdog sample:
@@ -74,7 +98,8 @@ Watchdog sample:
    ADR 0086 workspace digest, or
 3. `turn_id_set_size` increased, or
 4. `output_token_growth_since_last_sample` is non-zero, or
-5. `last_message_at` increased (a new streamed assistant message arrived).
+5. `last_message_at` increased (a new streamed assistant message arrived), or
+6. `last_progress_at` increased (a payload-free provider liveness marker arrived — ADR 0087).
 
 The rule is deliberately permissive. A long ESBMC `make verify` emits no `tool_call` and no
 `usage_updated`, but its child processes write to the workspace; the mtime check keeps it alive.
@@ -95,6 +120,8 @@ watchdog:
   grace_minutes: 30
   sample_interval_seconds: 60
   mtime_ignore: []         # extra workspace-relative globs excluded from the mtime walk
+  mtime_include: []        # workspace-relative directories kept in the walk despite the
+                           # built-in build-output exclusions (ADR 0087)
 projects:
   - name: vow
     watchdog:
@@ -217,6 +244,8 @@ Watchdog fired (e.g. "last tool_call 4h12m ago, workspace mtime 4h08m ago, singl
   `waiting`, `idle_since` is cleared on entry to `waiting` so the grace window cannot accrue across
   an unsampled wait excursion — a Run returning to an active state starts its idle clock fresh on
   its next idle tick rather than inheriting pre-wait idle time.
+- **ADR 0087 (provider progress markers):** adds signal 6 and a `watchdog.mtime_include` opt-in
+  that re-admits a named build tree to signal 2's walk. The any-of rule itself is unchanged.
 - **ADR 0015 (full-permission agent execution):** The Watchdog observes, it does not constrain.
   It does not require sandbox isolation to function and does not change the full-permission
   posture.

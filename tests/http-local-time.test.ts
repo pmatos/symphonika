@@ -85,6 +85,7 @@ it("renders Run timestamps in the viewer's local time with the UTC value as a fa
     runStore.upsertWatchdogSample({
       idleSince: "2026-08-20T14:00:00.000Z",
       lastMessageAt: null,
+      lastProgressAt: null,
       lastToolCallAt: null,
       normalizedLogOffset: 0,
       normalizedLogPath: "",

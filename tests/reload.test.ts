@@ -1798,9 +1798,38 @@ describe("RuntimeConfigReloader watchdog config", () => {
       enabled: true,
       graceMinutes: 180,
       mtimeIgnore: ["*.log"],
+      mtimeInclude: [],
       outputTokenBudget: 150_000,
       sampleIntervalSeconds: 45
     });
+  });
+
+  it("resolves a Project mtime_include override over the daemon list", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: [
+        "    watchdog:",
+        "      mtime_include:",
+        '        - "target"'
+      ],
+      serviceLines: [
+        "watchdog:",
+        "  enabled: true",
+        "  mtime_include:",
+        '    - "_build"'
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    const snapshot = await reloader.reload();
+
+    expect(snapshot?.watchdog.mtimeInclude).toEqual(["_build"]);
+    expect(resolveWatchdogConfig(snapshot!, "symphonika").mtimeInclude).toEqual(
+      ["target"]
+    );
   });
 
   it("keeps every Project on the last-known-good snapshot when one override is invalid", async () => {
@@ -1973,6 +2002,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
       enabled: true,
       graceMinutes: 30,
       mtimeIgnore: [],
+      mtimeInclude: [],
       outputTokenBudget: 150_000,
       sampleIntervalSeconds: 60
     });
@@ -2006,6 +2036,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
       enabled: false,
       graceMinutes: 0.5,
       mtimeIgnore: ["*.log", "dist/**"],
+      mtimeInclude: [],
       outputTokenBudget: 150_000,
       sampleIntervalSeconds: 2
     });

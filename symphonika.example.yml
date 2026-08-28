@@ -85,9 +85,14 @@ projects:
     # max_in_flight: 1
     # Verification-heavy Projects can lengthen the daemon Watchdog grace.
     # enabled, sample_interval_seconds, and mtime_ignore remain daemon-scoped.
+    # mtime_include names build trees the workspace walk keeps despite the
+    # built-in build-output exclusions, so a compiled Project's build progress
+    # counts as workspace evidence (ADR 0087). Walking one costs time on every
+    # sample, so name only the tree that carries the evidence.
     # watchdog:
     #   grace_minutes: 180
     #   output_token_budget: 400000
+    #   mtime_include: ["target"]
     tracker:
       kind: github
       owner: pmatos

@@ -6723,6 +6723,7 @@ function renderWatchdogSection(
       : "";
   return `<section>${sectionHead("Watchdog")}<dl class="fields">
   <dt>Last tool_call</dt><dd>${escapeHtml(formatAge(watchdog.lastToolCallAt, nowMs))}</dd>
+  <dt>Last progress marker</dt><dd>${escapeHtml(formatAge(watchdog.lastProgressAt, nowMs))}</dd>
   <dt>Workspace mtime</dt><dd>${escapeHtml(formatAge(watchdog.workspaceMtimeMax, nowMs))}</dd>
   <dt>turn_ids observed</dt><dd>${watchdog.turnIdSetSize ?? 0}</dd>
   <dt>Output tokens / 5m</dt><dd>${outputTokenGrowth5m === 0 ? "0" : `+${outputTokenGrowth5m}`}</dd>

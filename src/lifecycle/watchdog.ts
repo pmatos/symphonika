@@ -23,7 +23,11 @@ import { ActiveRunRegistry, CANCEL_REASONS } from "./active-runs.js";
 // Directory names whose contents are build or tool output in the ecosystems
 // Symphonika dispatches against. They are never descended into, so a
 // rebuild-and-crash cycle cannot masquerade as workspace progress. A repository
-// adds its own trees through the Workflow Contract's `evidence.ignore` list.
+// adds its own trees through the Workflow Contract's `evidence.ignore` list,
+// and opts a named tree back in through the Watchdog's `mtime_include`
+// (ADR 0087) — for a compiled project every byte of build progress lands under
+// one of these names, so without that opt-in the workspace signal is
+// structurally dead for the whole build.
 const WORKSPACE_EXCLUDED_DIRS = new Set([
   ".cache",
   ".git",
@@ -84,7 +88,8 @@ export function watchdogProgressObserved(
     workspaceChanged(previous, next) ||
     next.turnIdSetSize > previous.turnIdSetSize ||
     next.outputTokensTotal > previous.outputTokensTotal ||
-    messageAdvanced(previous, next)
+    messageAdvanced(previous, next) ||
+    timestampAdvanced(previous.lastProgressAt, next.lastProgressAt)
   );
 }
 
@@ -129,6 +134,7 @@ export async function reconcileWatchdog(
       directoryIgnore:
         input.evidenceIgnoreForProject?.(run.projectName) ?? run.evidenceIgnore,
       mtimeIgnore: config.mtimeIgnore,
+      mtimeInclude: config.mtimeInclude,
       previous,
       run,
       runStore: input.runStore,
@@ -254,7 +260,8 @@ export type WorkspaceSample = {
 export async function sampleWorkspace(
   workspacePath: string,
   mtimeIgnore: readonly string[] = [],
-  directoryIgnore: readonly string[] = []
+  directoryIgnore: readonly string[] = [],
+  directoryInclude: readonly string[] = []
 ): Promise<WorkspaceSample> {
   if (workspacePath.length === 0) {
     return { digest: "", mtimeMax: 0 };
@@ -270,7 +277,10 @@ export async function sampleWorkspace(
     }
     const ignore = mtimeIgnore.map(globToRegExp);
     const ignoredDirectories = new Set(
-      directoryIgnore.map(normalizeDirectoryIgnore)
+      directoryIgnore.map(normalizeDirectoryPath)
+    );
+    const includedDirectories = new Set(
+      directoryInclude.map(normalizeDirectoryPath)
     );
     const entries: string[] = [];
     const mtimeMax = await walkWorkspaceMtimeMax(
@@ -278,6 +288,8 @@ export async function sampleWorkspace(
       workspacePath,
       ignore,
       ignoredDirectories,
+      includedDirectories,
+      false,
       Math.floor(root.mtimeMs),
       entries
     );
@@ -290,10 +302,17 @@ export async function sampleWorkspace(
 export async function sampleWorkspaceMtimeMax(
   workspacePath: string,
   mtimeIgnore: readonly string[] = [],
-  directoryIgnore: readonly string[] = []
+  directoryIgnore: readonly string[] = [],
+  directoryInclude: readonly string[] = []
 ): Promise<number> {
-  return (await sampleWorkspace(workspacePath, mtimeIgnore, directoryIgnore))
-    .mtimeMax;
+  return (
+    await sampleWorkspace(
+      workspacePath,
+      mtimeIgnore,
+      directoryIgnore,
+      directoryInclude
+    )
+  ).mtimeMax;
 }
 
 // Sorted so the digest is independent of directory-read order, and hashed so a
@@ -310,6 +329,7 @@ function digestEntries(entries: string[]): string {
 async function sampleRun(input: {
   directoryIgnore: readonly string[];
   mtimeIgnore: readonly string[];
+  mtimeInclude: readonly string[];
   previous: WatchdogSample | undefined;
   run: WatchdogCandidateRun;
   runStore: RunStore;
@@ -341,18 +361,27 @@ async function sampleRun(input: {
   const workspace = await sampleWorkspace(
     input.run.workspacePath,
     input.mtimeIgnore,
-    input.directoryIgnore
+    input.directoryIgnore,
+    input.mtimeInclude
   );
   return {
     idleSince: null,
-    lastMessageAt: latestMessageAt(
+    lastMessageAt: latestEventAt(
       input.previous?.lastMessageAt ?? null,
       log.events,
+      "message",
       input.sampledAt
     ),
-    lastToolCallAt: latestToolCallAt(
+    lastProgressAt: latestEventAt(
+      input.previous?.lastProgressAt ?? null,
+      log.events,
+      "progress",
+      input.sampledAt
+    ),
+    lastToolCallAt: latestEventAt(
       input.previous?.lastToolCallAt ?? null,
       log.events,
+      "tool_call",
       input.sampledAt
     ),
     normalizedLogOffset: log.offset,
@@ -409,6 +438,8 @@ async function walkWorkspaceMtimeMax(
   workspaceRoot: string,
   ignore: readonly RegExp[],
   ignoredDirectories: ReadonlySet<string>,
+  includedDirectories: ReadonlySet<string>,
+  insideIncluded: boolean,
   currentMax: number,
   entries: string[]
 ): Promise<number> {
@@ -423,10 +454,16 @@ async function walkWorkspaceMtimeMax(
   for await (const entry of dir) {
     const entryPath = path.join(directory, entry.name);
     const relative = workspaceRelativePath(workspaceRoot, entryPath);
+    // An opted-in tree suppresses the built-in name exclusions for everything
+    // beneath it, not just its own entry: a Rust `target/` holds `build/` and
+    // `deps/` directories that the built-in set would otherwise prune again one
+    // level down, leaving the opt-in doing almost nothing. Explicit ignores
+    // still win everywhere, so a repository can name a noisy subtree back out.
+    const included = insideIncluded || includedDirectories.has(relative);
     if (
       entry.isDirectory() &&
-      (WORKSPACE_EXCLUDED_DIRS.has(entry.name) ||
-        ignoredDirectories.has(relative))
+      (ignoredDirectories.has(relative) ||
+        (!included && WORKSPACE_EXCLUDED_DIRS.has(entry.name)))
     ) {
       continue;
     }
@@ -451,6 +488,8 @@ async function walkWorkspaceMtimeMax(
           workspaceRoot,
           ignore,
           ignoredDirectories,
+          includedDirectories,
+          included,
           max,
           entries
         )
@@ -478,7 +517,7 @@ function isMtimeIgnored(
   return ignore.some((pattern) => pattern.test(relative));
 }
 
-function normalizeDirectoryIgnore(directory: string): string {
+function normalizeDirectoryPath(directory: string): string {
   return directory.replace(/^\.\/+/, "").replace(/\/+$/, "");
 }
 
@@ -552,27 +591,19 @@ function collectTurnIds(events: NormalizedProviderEvent[]): Set<string> {
   return turnIds;
 }
 
-function latestToolCallAt(
+// A signal timestamp is "this sample saw at least one such event since the
+// previous one", not the event's own clock: the Normalized Event Log carries
+// no per-event timestamp, and the sample time is what the any-of rule compares.
+// `message` covers both providers' streamed assistant deltas (Claude
+// text_delta, Codex item/agentMessage/delta) — ADR 0054 signal 5 — and
+// `progress` covers the payload-free provider liveness markers of ADR 0087.
+function latestEventAt(
   previous: string | null,
   events: NormalizedProviderEvent[],
+  type: string,
   sampledAt: string
 ): string | null {
-  return events.some((event) => event.type === "tool_call")
-    ? sampledAt
-    : previous;
-}
-
-function latestMessageAt(
-  previous: string | null,
-  events: NormalizedProviderEvent[],
-  sampledAt: string
-): string | null {
-  // Both providers normalize streamed assistant deltas (Claude text_delta,
-  // Codex item/agentMessage/delta) to a `message` event, so a fresh `message`
-  // since the last sample is genuine user-visible output — ADR 0054 signal 5.
-  return events.some((event) => event.type === "message")
-    ? sampledAt
-    : previous;
+  return events.some((event) => event.type === type) ? sampledAt : previous;
 }
 
 function outputTokensTotal(
@@ -626,26 +657,27 @@ function toolCallAdvanced(
   previous: WatchdogSample,
   next: WatchdogSample
 ): boolean {
-  if (next.lastToolCallAt === null) {
-    return false;
-  }
-  if (previous.lastToolCallAt === null) {
-    return true;
-  }
-  return Date.parse(next.lastToolCallAt) > Date.parse(previous.lastToolCallAt);
+  return timestampAdvanced(previous.lastToolCallAt, next.lastToolCallAt);
 }
 
 function messageAdvanced(
   previous: WatchdogSample,
   next: WatchdogSample
 ): boolean {
-  if (next.lastMessageAt === null) {
+  return timestampAdvanced(previous.lastMessageAt, next.lastMessageAt);
+}
+
+function timestampAdvanced(
+  previous: string | null,
+  next: string | null
+): boolean {
+  if (next === null) {
     return false;
   }
-  if (previous.lastMessageAt === null) {
+  if (previous === null) {
     return true;
   }
-  return Date.parse(next.lastMessageAt) > Date.parse(previous.lastMessageAt);
+  return Date.parse(next) > Date.parse(previous);
 }
 
 function objectField(

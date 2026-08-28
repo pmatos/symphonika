@@ -84,6 +84,78 @@ describe("RunStore waiting-run helpers", () => {
     }
   });
 
+  // Without a persisted workspace_path the row's workspacePath is "" and
+  // probeStateArtifacts can never build a resolver, so an `artifact_exists`
+  // predicate in a wait state is unevaluable forever (ADR 0087).
+  it("createWaitingRun carries the parent workspace onto the waiting row", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      seedParent(store, "parent-ws");
+
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "wait-ws",
+        issue: sampleIssue(),
+        parentRunId: "parent-ws",
+        projectName: "symphonika",
+        workspacePath: "/tmp/ws/symphonika/issues/8-thing"
+      });
+
+      expect(store.getRun("wait-ws")?.workspacePath).toBe(
+        "/tmp/ws/symphonika/issues/8-thing"
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("createWaitingRun leaves the workspace empty when none is supplied", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      seedParent(store, "parent-no-ws");
+
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "wait-no-ws",
+        issue: sampleIssue(),
+        parentRunId: "parent-no-ws",
+        projectName: "symphonika"
+      });
+
+      expect(store.getRun("wait-no-ws")?.workspacePath).toBe("");
+    } finally {
+      store.close();
+    }
+  });
+
+  // A waiting row must not become file-overlap-guard footprint just because it
+  // now carries a workspace: the guard only queries runs registered in
+  // activeRuns, and a parked wait holds no in-flight slot.
+  it("findRunWorkspacePaths still reports a waiting row's workspace only when asked for it", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      seedParent(store, "parent-guard");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "wait-guard",
+        issue: sampleIssue(),
+        parentRunId: "parent-guard",
+        projectName: "symphonika",
+        workspacePath: "/tmp/ws/guard"
+      });
+
+      expect(store.findRunWorkspacePaths(["wait-guard"])).toEqual(
+        new Map([["wait-guard", "/tmp/ws/guard"]])
+      );
+      expect(store.findRunWorkspacePaths(["parent-guard"])).toEqual(new Map());
+    } finally {
+      store.close();
+    }
+  });
+
   it("listWaitingRuns surfaces waiting rows including cancel-requested ones so reconciliation can transition them", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

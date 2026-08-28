@@ -9,7 +9,10 @@ export type WorkflowActionKind =
   | "merge_pr"
   | "wait";
 
-export type WorkflowPredicateValue = boolean | number | string;
+// `artifact_exists` takes a path or a list of paths; every other predicate is
+// a scalar compared by strict equality. See src/workflow/predicates.ts for
+// which keys evaluate which way.
+export type WorkflowPredicateValue = boolean | number | string | string[];
 
 export type WorkflowPredicateMap = Record<string, WorkflowPredicateValue>;
 

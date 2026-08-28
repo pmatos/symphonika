@@ -60,6 +60,7 @@ import {
   type WorkflowEvidence
 } from "../workflow/contract-loading.js";
 import { expandWorkflowDefinition } from "../workflow/fsm-expansion.js";
+import { workflowPredicateEvaluation } from "../workflow/predicates.js";
 import type {
   ExpandedWorkflow,
   ExpandedWorkflowState,
@@ -75,6 +76,7 @@ import {
   RegistryShutdownError,
   type LifecyclePolicy
 } from "./active-runs.js";
+import { probeStateArtifacts, statePredicateKeys } from "./artifact-probe.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import {
@@ -1008,95 +1010,54 @@ export class RunController {
     return state?.action?.kind === "merge_pr";
   }
 
-  async reEvaluateWaitingRun(runId: string): Promise<void> {
-    const row = this.runStore.getRun(runId);
-    if (row === undefined || row.state !== "waiting") {
-      return;
-    }
-    if (row.cancelRequested) {
-      const reason: CancelReason = row.cancelReason ?? "operator";
-      this.runStore.markCancelRequested(runId, reason);
-      this.runStore.updateRunState(runId, "cancelled");
-      return;
-    }
-    if (row.currentStateId === null) {
-      return;
-    }
-
-    const projects = await this.projectsLoader();
-    const project = projects.get(row.project);
-    if (
-      project === undefined ||
-      project.disabled === true ||
-      !isDispatchProject(project)
-    ) {
-      return;
-    }
-
-    const token = resolveTokenFromEnv(project.tracker.token, this.env);
-    if (token === undefined) {
-      return;
-    }
-    const repository: GitHubIssueRepositoryInput = {
-      owner: project.tracker.owner,
-      repo: project.tracker.repo,
-      token
-    };
-
-    const refreshed = await this.refreshIssue({
-      project,
-      issueNumber: row.issueNumber,
-      repository
-    });
-    if (refreshed === undefined) {
-      return;
-    }
-    if (
-      refreshed === null ||
-      !evaluateRunContinuationEligibility(refreshed, project, {
-        scope: "fsm_owned"
-      }).eligible
-    ) {
-      this.runStore.markCancelRequested(runId, "closed_issue");
-      this.runStore.updateRunState(runId, "cancelled");
-      return;
-    }
-
-    const loaded = await this.loadWorkflow(project.workflow);
-    const waitState = findWorkflowState(
-      loaded.expandedWorkflow,
-      row.currentStateId
-    );
-    if (waitState === undefined) {
-      this.logger?.warn(
-        { runId, stateId: row.currentStateId },
-        "symphonika wait re-eval skipped: workflow state not found"
-      );
-      return;
-    }
-
-    const isMergePr = waitState.action?.kind === "merge_pr";
+  // Observes the tracked pull request and projects it into the wait state's
+  // signal map, performing the merge attempt for a merge_pr state along the way.
+  // undefined means "stay parked": there is nothing to decide this tick.
+  //
+  // Extracted from reEvaluateWaitingRun so the decision that follows it is
+  // reachable without a tracked pull request. A wait state naming only artifact
+  // predicates is decided from the Workspace alone (ADR 0087) -- the poll has
+  // everything it needs on disk. A state that also names PR predicates, and
+  // every merge_pr state, still waits for its PR: an absent PR signal reads as
+  // unmet under strict equality, so evaluating early would drop such a state
+  // onto a catch-all transition on its first poll.
+  private async observeWaitPullRequestSignals(input: {
+    isMergePr: boolean;
+    issueNumber: number;
+    projectName: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+    waitState: ExpandedWorkflowState;
+  }): Promise<WorkflowPredicateMap | undefined> {
+    const { isMergePr, repository, runId, waitState } = input;
 
     // Use the all-states lookup: a wait state targeting `pr_merged: true` must
     // still see the tracked row after PR follow-up has marked it "merged"; an
     // open-only listing would strand the wait. The dispatcher's own open-only
     // loop is unaffected — only wait re-evaluation widens the lookup.
     const tracked = this.runStore.findTrackedPullRequestByIssue({
-      issueNumber: row.issueNumber,
-      projectName: row.project
+      issueNumber: input.issueNumber,
+      projectName: input.projectName
     });
     if (tracked === undefined) {
+      if (!isMergePr && isArtifactOnlyWaitState(waitState)) {
+        this.logger?.debug(
+          { runId, issueNumber: input.issueNumber },
+          "symphonika wait re-eval: deciding artifact-only wait with no tracked PR"
+        );
+        return { provider_success: true };
+      }
       if (isMergePr) {
         this.runStore.recordWaitingActivity(
           runId,
-          `merge_pr awaiting Symphonika-tracked pull request for issue #${row.issueNumber}`
+          `merge_pr awaiting Symphonika-tracked pull request for issue #${input.issueNumber}`
         );
       }
       this.logger?.debug(
-        { runId, issueNumber: row.issueNumber },
+        { runId, issueNumber: input.issueNumber },
         "symphonika wait re-eval skipped: no PR tracked yet"
       );
-      return;
+      return undefined;
     }
 
     let prState;
@@ -1112,10 +1073,10 @@ export class RunController {
         { err: error, runId },
         "symphonika wait re-eval skipped: PR state fetch failed"
       );
-      return;
+      return undefined;
     }
     if (prState === undefined || prState === null) {
-      return;
+      return undefined;
     }
 
     const pullRequestState = interpretPullRequest(prState);
@@ -1186,7 +1147,7 @@ export class RunController {
               { runId },
               "symphonika merge_pr: tracker has no mergePullRequest support"
             );
-            return;
+            return undefined;
           }
         } catch (error) {
           const message =
@@ -1199,7 +1160,7 @@ export class RunController {
             { err: error, prNumber: tracked.prNumber, runId },
             "symphonika merge_pr attempt failed"
           );
-          return;
+          return undefined;
         }
       } else {
         this.runStore.recordWaitingActivity(
@@ -1213,8 +1174,99 @@ export class RunController {
       }
     }
 
+    return signals;
+  }
+
+  async reEvaluateWaitingRun(runId: string): Promise<void> {
+    const row = this.runStore.getRun(runId);
+    if (row === undefined || row.state !== "waiting") {
+      return;
+    }
+    if (row.cancelRequested) {
+      const reason: CancelReason = row.cancelReason ?? "operator";
+      this.runStore.markCancelRequested(runId, reason);
+      this.runStore.updateRunState(runId, "cancelled");
+      return;
+    }
+    if (row.currentStateId === null) {
+      return;
+    }
+
+    const projects = await this.projectsLoader();
+    const project = projects.get(row.project);
+    if (
+      project === undefined ||
+      project.disabled === true ||
+      !isDispatchProject(project)
+    ) {
+      return;
+    }
+
+    const token = resolveTokenFromEnv(project.tracker.token, this.env);
+    if (token === undefined) {
+      return;
+    }
+    const repository: GitHubIssueRepositoryInput = {
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    };
+
+    const refreshed = await this.refreshIssue({
+      project,
+      issueNumber: row.issueNumber,
+      repository
+    });
+    if (refreshed === undefined) {
+      return;
+    }
+    if (
+      refreshed === null ||
+      !evaluateRunContinuationEligibility(refreshed, project, {
+        scope: "fsm_owned"
+      }).eligible
+    ) {
+      this.runStore.markCancelRequested(runId, "closed_issue");
+      this.runStore.updateRunState(runId, "cancelled");
+      return;
+    }
+
+    const loaded = await this.loadWorkflow(project.workflow);
+    const waitState = findWorkflowState(
+      loaded.expandedWorkflow,
+      row.currentStateId
+    );
+    if (waitState === undefined) {
+      this.logger?.warn(
+        { runId, stateId: row.currentStateId },
+        "symphonika wait re-eval skipped: workflow state not found"
+      );
+      return;
+    }
+
+    const isMergePr = waitState.action?.kind === "merge_pr";
+
+    const signals = await this.observeWaitPullRequestSignals({
+      isMergePr,
+      issueNumber: row.issueNumber,
+      projectName: row.project,
+      repository,
+      runId,
+      waitState
+    });
+    if (signals === undefined) {
+      return;
+    }
+
+    const waitArtifactExists = await probeStateArtifacts({
+      state: waitState,
+      workspacePath: row.workspacePath
+    });
     const decision = decideNextStep({
       actionExecuted: true,
+      ...(waitArtifactExists === undefined
+        ? {}
+        : { artifactExists: waitArtifactExists }),
       signals,
       state: waitState
     });
@@ -1279,7 +1331,10 @@ export class RunController {
           id: nextWaitingRunId,
           issue: refreshed,
           parentRunId: runId,
-          projectName: project.name
+          projectName: project.name,
+          ...(row.workspacePath.length === 0
+            ? {}
+            : { workspacePath: row.workspacePath })
         });
         this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
@@ -2901,7 +2956,7 @@ export class RunController {
         // before currentState was set; in that case we run the bare
         // classifyFailure outcome without an FSM-driven overlay.
         if (currentState !== undefined && loadedWorkflow !== undefined) {
-          workflowOutcome = this.applyWorkflowOutcome({
+          workflowOutcome = await this.applyWorkflowOutcome({
             actionExecuted: attemptCreated,
             currentState,
             deferRetryableTransientAdvance,
@@ -2909,7 +2964,8 @@ export class RunController {
             project: input.project,
             runId: input.runId,
             terminal,
-            workflow: loadedWorkflow.expandedWorkflow
+            workflow: loadedWorkflow.expandedWorkflow,
+            workspacePath: started?.evidence.workspacePath
           });
         }
         const effectiveOutcome = fuseWorkflowTerminal(
@@ -3160,7 +3216,7 @@ export class RunController {
     };
   }
 
-  private applyWorkflowOutcome(input: {
+  private async applyWorkflowOutcome(input: {
     actionExecuted: boolean;
     currentState: ExpandedWorkflowState;
     deferRetryableTransientAdvance?: boolean;
@@ -3169,10 +3225,16 @@ export class RunController {
     runId: string;
     terminal: ClassifiedTerminal;
     workflow: ExpandedWorkflow;
-  }): WorkflowOutcomeResult {
+    workspacePath: string | undefined;
+  }): Promise<WorkflowOutcomeResult> {
     const signals = signalsFromTerminal(input.terminal);
+    const artifactExists = await probeStateArtifacts({
+      state: input.currentState,
+      workspacePath: input.workspacePath
+    });
     const decision = decideNextStep({
       actionExecuted: input.actionExecuted,
+      ...(artifactExists === undefined ? {} : { artifactExists }),
       signals,
       state: input.currentState
     });
@@ -3210,7 +3272,10 @@ export class RunController {
           id: waitingRunId,
           issue: input.issue,
           parentRunId: input.runId,
-          projectName: input.project.name
+          projectName: input.project.name,
+          ...(input.workspacePath === undefined
+            ? {}
+            : { workspacePath: input.workspacePath })
         });
         return {
           advancedToState: decision.to,
@@ -4239,6 +4304,26 @@ function signalsFromTerminal(
 
 function isParkedAction(kind: string | undefined): boolean {
   return kind === "wait" || kind === "merge_pr";
+}
+
+// True when every predicate a wait state names can be answered without
+// observing a pull request: at least one artifact predicate, and nothing beyond
+// artifact predicates and `provider_success`, which wait re-evaluation always
+// supplies. Deliberately strict -- `branch_ahead_of_base` and the PR signals are
+// not projected on this path, and treating an unprojected signal as merely
+// "unmet" would let a catch-all transition fire on the first poll.
+function isArtifactOnlyWaitState(state: ExpandedWorkflowState): boolean {
+  let sawArtifact = false;
+  for (const key of statePredicateKeys(state)) {
+    if (workflowPredicateEvaluation(key) === "artifact") {
+      sawArtifact = true;
+      continue;
+    }
+    if (key !== "provider_success") {
+      return false;
+    }
+  }
+  return sawArtifact;
 }
 
 function coerceMergeMethod(

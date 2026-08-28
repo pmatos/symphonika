@@ -539,7 +539,10 @@ Raw FSM workflows may reference five built-in Workflow Templates through the `bu
 and evidence path as repository-local templates. `refactor-swarm` runs three serial agent states:
 `red_team` and `refactoring` each require provider success, `branch_ahead_of_base`, and
 `branch_advanced_since_attempt_start`, then `verifying` requires provider success alone because
-verification is read-only. `branch_ahead_of_base` remains the cumulative branch-vs-base signal.
+verification is read-only. `plan-tdd-pr`'s `planning` state requires provider success **and**
+`artifact_exists` on its `plan_artifact` input (default `PLAN.md`), so a planner that returns
+success having written no plan takes the `blocked` exit instead of advancing to an unplanned
+implementation stage. `branch_ahead_of_base` remains the cumulative branch-vs-base signal.
 For each agent Attempt, Symphonika also snapshots `HEAD` immediately before provider execution;
 `branch_advanced_since_attempt_start` is true only when completion `HEAD` is a different descendant
 of that snapshot. The second transition therefore requires a distinct refactor commit rather than
@@ -547,6 +550,20 @@ reusing the red-team commit. Any fallback uses the template's `blocked` exit. Re
 explicitly replace a built-in reference with a local
 `.symphonika/workflow-templates/<name>.yml`; local files never auto-shadow the reserved namespace.
 See ADRs 0049 and 0085.
+
+Workflow predicates are compared to observed signals by strict equality, with one exception:
+`artifact_exists` names a path (or a sequence of paths, gating on all of them) that must exist in the
+Run's Workspace, checked when the state's transitions are evaluated. Paths are Workspace-relative;
+absolute paths and paths escaping the Workspace are Workflow Contract validation errors. The check is
+existence only — no content inspection, and the artefact need not be committed, so a stage can hand a
+file to the next stage without putting it in the branch history. Because Workspaces are reused across
+attempts (ADR 0040), an artefact written by a previous attempt satisfies the predicate; pair it with
+`branch_advanced_since_attempt_start` when a state must also have advanced the branch. A state whose
+Run has no prepared Workspace cannot satisfy an `artifact_exists` predicate. In a `wait` or
+`merge_pr` state the predicate is evaluated against the Workspace carried onto the waiting row; a
+wait state whose predicates are only artefact predicates is polled without a tracked pull request,
+while a wait state that also names PR predicates and every `merge_pr` state still require one. See
+ADR 0087.
 
 The daemon must not dispatch a Dispatch Project when its workflow contract is missing or invalid. A
 Routine Host is never dispatched, so this gate does not apply to it.
@@ -1833,9 +1850,11 @@ Lifecycle:
    Run row with `state = "waiting"`, `current_state_id` set to the wait state id, and
    `continuation_parent_run_id` set to the parent agent run. Both `state` and `current_state_id`
    are written inside a single SQLite transaction so the row is durable as a complete wait
-   (a crash cannot leave a `state = "waiting"` row with `current_state_id IS NULL`). The parent
-   run records the advance via `state_transition_reason` exactly like any other state advance
-   (per ADR 0046).
+   (a crash cannot leave a `state = "waiting"` row with `current_state_id IS NULL`). The row also
+   carries the parent's `workspace_path`, so an `artifact_exists` predicate in the wait state can be
+   evaluated against the same Workspace the agent stage left behind; a wait-to-wait advance carries
+   it forward again. The parent run records the advance via `state_transition_reason` exactly like
+   any other state advance (per ADR 0046).
 2. On each daemon tick (and on `/poll-now`), the reconciliation phase calls
    `reconcileWaitingRuns`, which iterates the rows in `state = "waiting"`, refreshes the issue,
    looks up the tracked pull request, fetches its follow-up state, projects predicates
@@ -1860,8 +1879,9 @@ Lifecycle:
 
 Mergeability `UNKNOWN`/`null` is intentionally projected as the predicate key omitted — workflow
 transitions writing `mergeable: false` will not match on unknown values, so the wait stays parked
-until GitHub resolves the mergeability. The `timeout` predicate is reserved in the schema but
-unimplemented in v1.
+until GitHub resolves the mergeability. Every predicate name the parser accepts has a live
+evaluator behind it; the previously reserved-but-unevaluated `timeout` and `branch_pushed` names are
+rejected as unknown predicates (ADR 0087).
 
 Review decisions are projected as `review_decision: approved|changes_requested|review_required|none`.
 The `none` value covers GitHub `null`. Unresolved review feedback is projected both as

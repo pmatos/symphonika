@@ -7158,7 +7158,10 @@ export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
 
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) {
     return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
-  function fmtVal(v) { return typeof v === "string" ? '"' + v + '"' : String(v); }
+  function fmtVal(v) {
+    if (Array.isArray(v)) return "[" + v.map(fmtVal).join(", ") + "]";
+    return typeof v === "string" ? '"' + v + '"' : String(v);
+  }
   function condLines(when) {
     var keys = when ? Object.keys(when) : [];
     return keys.map(function (k) { return k + " = " + fmtVal(when[k]); });

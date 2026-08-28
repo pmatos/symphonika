@@ -915,6 +915,7 @@ type InsertRunRowInput = {
   providerCommand: string | null;
   providerName: AgentProviderName | null;
   state: RunState;
+  workspacePath?: string;
 };
 
 type CreateRoutineFiringInput = {
@@ -1001,12 +1002,18 @@ export class RunStore {
     });
   }
 
+  // workspacePath carries the parent's Workspace onto the waiting row. Without
+  // it the row's workspace_path is NULL, and an `artifact_exists` predicate in
+  // a wait/merge_pr state can never be evaluated (ADR 0087) -- reEvaluateWaitingRun
+  // has no other route to the Workspace, since a wait->wait advance sets
+  // parentRunId to the *waiting* run, so walking parents just finds another NULL.
   createWaitingRun(input: {
     currentStateId: string;
     id: string;
     issue: IssueSnapshot;
     parentRunId: string;
     projectName: string;
+    workspacePath?: string;
   }): void {
     // ADR 0047 depends on the waiting row being durable — `listWaitingRuns`
     // filters out rows whose `current_state_id` is null, so a crash between
@@ -1022,7 +1029,10 @@ export class RunStore {
         projectName: input.projectName,
         providerCommand: null,
         providerName: null,
-        state: "waiting"
+        state: "waiting",
+        ...(input.workspacePath === undefined
+          ? {}
+          : { workspacePath: input.workspacePath })
       });
       this.setRunCurrentState(input.id, input.currentStateId);
       return event;
@@ -1530,12 +1540,12 @@ export class RunStore {
           "insert into runs (",
           "id, project_name, issue_number, issue_title, state, issue_snapshot_json,",
           "evidence_ignore_json, provider_name, provider_command,",
-          "is_continuation, continuation_parent_run_id,",
+          "is_continuation, continuation_parent_run_id, workspace_path,",
           "created_at, updated_at",
           ") values (",
           "@id, @project_name, @issue_number, @issue_title, @state, @issue_snapshot_json,",
           "@evidence_ignore_json, @provider_name, @provider_command,",
-          "@is_continuation, @continuation_parent_run_id,",
+          "@is_continuation, @continuation_parent_run_id, @workspace_path,",
           "@created_at, @updated_at",
           ")"
         ].join(" ")
@@ -1553,7 +1563,8 @@ export class RunStore {
         provider_command: input.providerCommand,
         provider_name: input.providerName,
         state: input.state,
-        updated_at: now
+        updated_at: now,
+        workspace_path: input.workspacePath ?? null
       });
     return this.insertRunTransition(input.id, input.state, now);
   }

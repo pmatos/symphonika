@@ -6,12 +6,13 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## outcome-projection
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 23/25 (leverage 4, locality 5, blast radius 1, heat 5)
 - **Files**: ~3 estimated
 - **Modules**: `src/lifecycle/run-controller.ts` (cluster at 4259-4392), new `src/lifecycle/outcome-projection.ts`, `src/lifecycle/classify-failure.ts` (produces `ClassifiedTerminal`)
 - **Summary**: Extract the pure `ClassifiedTerminal → {RunState, terminal label, WorkflowPredicateMap}` projection cluster out of run-controller into a module beside its producer, mirroring `pr-signal-projection.ts`.
 - **First seen**: 2026-08-31
+- **PR**: #610
 
 ## codex-event-reducer
 

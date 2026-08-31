@@ -1,7 +1,7 @@
 # Architecture review — symphonika — 2026-08-31
 
 **Scope**: Provider and lifecycle hot spots inferred from recent `git log` (codex/claude providers, run-controller, run-store, http/pages, routines). A sub-agent walked the codebase for shallow modules and seams; the persisted `.architecture/backlog.md` was reconciled against `gh` first.
-**Picked**: `codex-event-reducer` — see PR (opened after this report) and `.architecture/backlog.md`.
+**Picked**: `codex-event-reducer` — see [PR #617](https://github.com/pmatos/symphonika/pull/617) and `.architecture/backlog.md`.
 **Degradations**: none. `gh` authenticated; sub-agents available (exploration + design-it-twice); `codebase-design` vocabulary loaded.
 
 **Reconciliation this run**: `outcome-projection` was `in-flight` on PR #610; `gh pr view 610` shows it merged 2026-08-31, so it is now `landed`. That freed the top of the proposed list.

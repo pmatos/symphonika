@@ -17,13 +17,23 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## codex-event-reducer
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 22/25 (leverage 5, locality 4, blast radius 2, heat 4)
-- **Files**: ~3 estimated (`codex.ts`, new `codex-events.ts`, new `codex-events.test.ts`)
-- **Modules**: `src/providers/codex.ts` (`mapCodexJsonRpcMessage` at 427-638, `thinkingEvent`/`progressMarkerEvent`/`jsonRpcErrorEvent`/`codexToolCallInput`/`isInputRequiredMethod` and field accessors), new `src/providers/codex-events.ts`
-- **Summary**: Extract `mapCodexJsonRpcMessage` into a pure `(raw, state) => {event, state}` reducer so mapping is testable without spawning a fake app-server subprocess.
+- **Files**: 4 (`codex.ts`, new `codex-events.ts`, new `codex-json.ts`, new `codex-events.test.ts`)
+- **Modules**: `src/providers/codex.ts` (`mapCodexJsonRpcMessage` + `thinkingEvent`/`progressMarkerEvent`/`jsonRpcErrorEvent`/`codexToolCallInput`/`isInputRequiredMethod` and field accessors), new `src/providers/codex-events.ts`, new `src/providers/codex-json.ts`
+- **Summary**: Extract `mapCodexJsonRpcMessage` into a `createCodexEventReducer(...).reduce(raw)` closure so mapping is testable without spawning a fake app-server subprocess.
 - **First seen**: 2026-08-31
-- **Reason**: Picked by the 2026-08-31 run (top surviving candidate at 22/25; tied with `claude-event-reducer`, won the recency tie-break). Set to `in-flight` when the PR opens.
+- **PR**: #617
+- **Reason**: Picked by the 2026-08-31 run (top surviving candidate at 22/25; tied with `claude-event-reducer`, won the recency tie-break). Implemented via design-it-twice winner C (stateful reducer closure); leaf JSON accessors split into `codex-json.ts`.
+
+### Run 2026-08-31 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M1C8YVN8` (adopted; conditions 1-4 held — non-default, 0 unique commits, no upstream, unpublished on origin)
+- **Committed**: report + backlog (`ac734a4`), design section (`99215f7`), implementation (`173c54e`), this in-flight update
+- **Evidence**: PR #617; quality gate green (lint, typecheck, format:check, knip, test 2345 passed, build)
+- **Next**: human review of #617; `claude-event-reducer` is the natural next firing (tied runner-up)
 
 ## claude-event-reducer
 

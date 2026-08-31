@@ -588,6 +588,14 @@ type RunRow = {
   workspace_path: string | null;
 };
 
+type ActiveRunIdRow = {
+  id: string;
+  issue_number: number;
+  issue_owner: string | null;
+  issue_repo: string | null;
+  project_name: string;
+};
+
 type ProjectLastRunRow = RunRow & {
   last_transition_at: string;
 };
@@ -1275,18 +1283,36 @@ export class RunStore {
     return row?.is_continuation === 1;
   }
 
+  // The repository a Run's Issue lived in when the Run was created.
+  // Undefined for a Run with no row, and for one whose origin could not be
+  // determined (a legacy row, a non-GitHub tracker) — callers treat that as
+  // "no mismatch proven", never as a mismatch. See docs/adr/0089.
+  getRunIssueRepository(
+    runId: string
+  ): { owner: string; repo: string } | undefined {
+    const row = this.database
+      .prepare("select issue_owner, issue_repo from runs where id = ?")
+      .get(runId) as
+      { issue_owner: string | null; issue_repo: string | null } | undefined;
+    return row === undefined
+      ? undefined
+      : toIssueRepository(row.issue_owner, row.issue_repo);
+  }
+
   listActiveRunIds(): {
     runId: string;
     projectName: string;
     issueNumber: number;
+    issueRepository: { owner: string; repo: string } | undefined;
   }[] {
     const rows = this.database
       .prepare(
-        "select id, project_name, issue_number from runs where state in ('queued','preparing_workspace','running')"
+        "select id, project_name, issue_number, issue_owner, issue_repo from runs where state in ('queued','preparing_workspace','running')"
       )
-      .all() as { id: string; project_name: string; issue_number: number }[];
+      .all() as ActiveRunIdRow[];
     return rows.map((row) => ({
       issueNumber: row.issue_number,
+      issueRepository: toIssueRepository(row.issue_owner, row.issue_repo),
       projectName: row.project_name,
       runId: row.id
     }));
@@ -1539,14 +1565,16 @@ export class RunStore {
     runId: string;
     projectName: string;
     issueNumber: number;
+    issueRepository: { owner: string; repo: string } | undefined;
   }[] {
     const rows = this.database
       .prepare(
-        "select id, project_name, issue_number from runs where state = 'waiting'"
+        "select id, project_name, issue_number, issue_owner, issue_repo from runs where state = 'waiting'"
       )
-      .all() as { id: string; project_name: string; issue_number: number }[];
+      .all() as ActiveRunIdRow[];
     return rows.map((row) => ({
       issueNumber: row.issue_number,
+      issueRepository: toIssueRepository(row.issue_owner, row.issue_repo),
       projectName: row.project_name,
       runId: row.id
     }));
@@ -1565,11 +1593,10 @@ export class RunStore {
   listResumableShutdownRuns(): {
     currentStateId: string | null;
     // The repository the Issue actually lived in when the Run was created,
-    // recovered from the persisted snapshot's `html_url`. `runs` stores no
-    // repository columns, and a Project's tracker can be retargeted while a
+    // persisted on the row. A Project's tracker can be retargeted while a
     // resumable row waits, so the caller needs this to refuse acting on a
-    // same-numbered Issue in a different repository. Undefined when the
-    // stored URL is not a GitHub issue URL (legacy or non-GitHub rows) — the
+    // same-numbered Issue in a different repository. Undefined for a row
+    // whose origin could not be determined (legacy or non-GitHub rows) — the
     // caller then has nothing to compare and proceeds as before.
     issueRepository: { owner: string; repo: string } | undefined;
     issueNumber: number;
@@ -1580,7 +1607,7 @@ export class RunStore {
       .prepare(
         [
           "select r.id, r.project_name, r.issue_number, r.current_state_id,",
-          "r.issue_snapshot_json",
+          "r.issue_owner, r.issue_repo",
           "from runs r",
           "where r.cancel_reason = ?",
           "and r.state = 'cancelled'",
@@ -1589,6 +1616,16 @@ export class RunStore {
           "  select 1 from runs n",
           "  where n.project_name = r.project_name",
           "  and n.issue_number = r.issue_number",
+          // `is` rather than `=` so two rows of undetermined origin still
+          // share a history: null is one bucket here, not a value that
+          // matches nothing. `lower` because GitHub owners and repository
+          // names are case-insensitive, and it preserves the null-safety
+          // (`lower(null)` is null). Without this partition a Run from the
+          // Project's previous repository is suppressed by a newer Run from
+          // its current one, and the resumable row that the origin gate
+          // would have accepted never surfaces. See docs/adr/0089.
+          "  and lower(n.issue_owner) is lower(r.issue_owner)",
+          "  and lower(n.issue_repo) is lower(r.issue_repo)",
           "  and (n.created_at > r.created_at",
           "       or (n.created_at = r.created_at and n.id > r.id))",
           ")",
@@ -1600,12 +1637,13 @@ export class RunStore {
       project_name: string;
       issue_number: number;
       current_state_id: string | null;
-      issue_snapshot_json: string;
+      issue_owner: string | null;
+      issue_repo: string | null;
     }[];
     return rows.map((row) => ({
       currentStateId: row.current_state_id,
       issueNumber: row.issue_number,
-      issueRepository: parseIssueRepository(row.issue_snapshot_json),
+      issueRepository: toIssueRepository(row.issue_owner, row.issue_repo),
       projectName: row.project_name,
       runId: row.id
     }));
@@ -1629,16 +1667,24 @@ export class RunStore {
 
   private insertRunRow(input: InsertRunRowInput): RunTransitionChangeEvent {
     const now = timestamp();
+    // Durable repository identity, so every later reader — the newest-Run
+    // relation, stale-claim liveness, reconcile's tracker gate — can key on
+    // `(Project, repository, Issue)` without re-parsing the snapshot. Null
+    // when the URL is not a GitHub issue URL: unknown origin, never a
+    // mismatch. See docs/adr/0089.
+    const repository = parseIssueRepositoryUrl(input.issue.url);
     this.database
       .prepare(
         [
           "insert into runs (",
           "id, project_name, issue_number, issue_title, state, issue_snapshot_json,",
+          "issue_owner, issue_repo,",
           "evidence_ignore_json, provider_name, provider_command,",
           "is_continuation, continuation_parent_run_id, workspace_path,",
           "created_at, updated_at",
           ") values (",
           "@id, @project_name, @issue_number, @issue_title, @state, @issue_snapshot_json,",
+          "@issue_owner, @issue_repo,",
           "@evidence_ignore_json, @provider_name, @provider_command,",
           "@is_continuation, @continuation_parent_run_id, @workspace_path,",
           "@created_at, @updated_at",
@@ -1652,6 +1698,8 @@ export class RunStore {
         id: input.id,
         is_continuation: input.isContinuation ? 1 : 0,
         issue_number: input.issue.number,
+        issue_owner: repository?.owner ?? null,
+        issue_repo: repository?.repo ?? null,
         issue_snapshot_json: JSON.stringify(input.issue),
         issue_title: input.issue.title,
         project_name: input.projectName,
@@ -5185,6 +5233,8 @@ export class RunStore {
       ["runs", "notification_state", "text not null default 'skipped'"],
       ["runs", "notification_error", "text"],
       ["runs", "watchdog_generation", "integer not null default 0"],
+      ["runs", "issue_owner", "text"],
+      ["runs", "issue_repo", "text"],
       [
         "tracked_pull_requests",
         "review_followup_cap_reached",
@@ -5263,6 +5313,7 @@ export class RunStore {
     const apply = this.database.transaction(() => {
       let addedCommitsAhead = false;
       let addedFiringKind = false;
+      let addedIssueRepository = false;
       let addedLastSuccessfulPollAt = false;
       for (const [table, column, decl] of additions) {
         const added = this.ensureColumn(table, column, decl);
@@ -5272,6 +5323,13 @@ export class RunStore {
           column === "commits_ahead"
         ) {
           addedCommitsAhead = true;
+        }
+        if (
+          added &&
+          table === "runs" &&
+          (column === "issue_owner" || column === "issue_repo")
+        ) {
+          addedIssueRepository = true;
         }
         if (added && table === "routine_firings" && column === "kind") {
           addedFiringKind = true;
@@ -5283,6 +5341,19 @@ export class RunStore {
         ) {
           addedLastSuccessfulPollAt = true;
         }
+      }
+
+      if (addedIssueRepository) {
+        // The repository a Run's Issue lived in was only ever recoverable by
+        // parsing the persisted snapshot's `html_url`. Recover it once here
+        // so the newest-Run relation and the liveness gates can partition on
+        // real columns instead of re-parsing JSON per row. A snapshot whose
+        // URL is not a GitHub issue URL (a test fixture, a non-GitHub
+        // tracker, a row written before `url` was populated) leaves both
+        // columns null, which every reader treats as "unknown origin" —
+        // never as a mismatch. Inside the column-add transaction so a crash
+        // cannot expose the null default as if it were a determined answer.
+        this.backfillRunIssueRepositories();
       }
 
       if (addedLastSuccessfulPollAt) {
@@ -5362,6 +5433,27 @@ export class RunStore {
     `);
 
     this.backfillAttemptMetadataPaths();
+  }
+
+  private backfillRunIssueRepositories(): void {
+    const rows = this.database
+      .prepare(
+        "select id, issue_snapshot_json from runs where issue_owner is null or issue_repo is null"
+      )
+      .all() as { id: string; issue_snapshot_json: string }[];
+    if (rows.length === 0) {
+      return;
+    }
+
+    const update = this.database.prepare(
+      "update runs set issue_owner = ?, issue_repo = ? where id = ?"
+    );
+    for (const row of rows) {
+      const repository = parseIssueRepository(row.issue_snapshot_json);
+      if (repository !== undefined) {
+        update.run(repository.owner, repository.repo, row.id);
+      }
+    }
   }
 
   private backfillAttemptMetadataPaths(): void {
@@ -5656,20 +5748,14 @@ function nextRoutineFiringTransitionSequence(
   return row?.next_sequence ?? 1;
 }
 
-// Recovers `{owner, repo}` from a persisted IssueSnapshot's `url`, which is
-// the Issue's GitHub `html_url`. Returns undefined for anything that is not a
-// GitHub issue URL — test fixtures, non-GitHub trackers, or a row written
-// before `url` was populated — so callers treat "cannot tell" as "no
-// mismatch proven" rather than as a mismatch.
-function parseIssueRepository(
-  issueSnapshotJson: string
+// Recovers `{owner, repo}` from an Issue's GitHub `html_url`. Returns
+// undefined for anything that is not a GitHub issue URL — test fixtures,
+// non-GitHub trackers, or a snapshot written before `url` was populated — so
+// callers treat "cannot tell" as "no mismatch proven" rather than as a
+// mismatch.
+function parseIssueRepositoryUrl(
+  url: unknown
 ): { owner: string; repo: string } | undefined {
-  let url: unknown;
-  try {
-    url = (JSON.parse(issueSnapshotJson) as { url?: unknown }).url;
-  } catch {
-    return undefined;
-  }
   if (typeof url !== "string") {
     return undefined;
   }
@@ -5684,6 +5770,32 @@ function parseIssueRepository(
   return owner === undefined || repo === undefined
     ? undefined
     : { owner, repo };
+}
+
+// Reads the persisted `issue_owner`/`issue_repo` pair. Either column being
+// null means the origin was never determined, which readers treat as "no
+// mismatch proven" — so a half-populated pair reads as unknown rather than as
+// a partially matching repository.
+function toIssueRepository(
+  owner: string | null,
+  repo: string | null
+): { owner: string; repo: string } | undefined {
+  return owner === null || repo === null ? undefined : { owner, repo };
+}
+
+// The persisted-snapshot form of the above, used only by the one-time
+// `issue_owner`/`issue_repo` backfill: rows written before those columns
+// existed carry the repository nowhere else.
+function parseIssueRepository(
+  issueSnapshotJson: string
+): { owner: string; repo: string } | undefined {
+  try {
+    return parseIssueRepositoryUrl(
+      (JSON.parse(issueSnapshotJson) as { url?: unknown }).url
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 function timestamp(): string {

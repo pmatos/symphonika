@@ -1403,6 +1403,13 @@ On Watchdog convergence-budget termination, the same steps apply with
 On stale startup state:
 
 - if GitHub has `sym:claimed` or `sym:running` but there is no live local run, mark `sym:stale`
+- liveness is keyed by `(Project, repository, Issue)`: a Run holding `A#42` does not vouch for
+  `B#42` after the Project's tracker is retargeted. A liveness source that cannot name its
+  repository — an in-memory reservation, or a Run row written before repository identity was
+  persisted — vouches for the Issue number in any repository, because over-covering leaves an
+  Issue unmarked while under-covering strands it
+- the `sym:stale` write goes to the repository the Issue was polled from, not to the repository
+  the Project's name-keyed config resolves to
 - treat a Run cancelled with `cancel_reason = "daemon_shutdown"` that is still the newest Run for
   its Issue as live, not stale: it is awaiting resumption (section 12.3), and marking it would
   exclude the Issue from polling permanently
@@ -1741,13 +1748,18 @@ cancel landing during the drain — cannot overwrite `daemon_shutdown` with anot
 
 A shutdown cancellation is a pause, not a verdict on the Issue. The next daemon resumes the Runs
 the previous one cancelled: for each Run cancelled with `cancel_reason = "daemon_shutdown"` that is
-still the newest Run for its `(Project, Issue)` pair, the reconcile pass schedules a State Advance
+still the newest Run for its `(Project, repository, Issue)` triple, the reconcile pass schedules a State Advance
 at the Run's persisted `current_state_id`, so the walk re-enters the state it was executing and
 reuses its deterministic Workspace and Issue Branch. A Run cancelled before that state was
 persisted has no walk to resume; its `sym:claimed` (and any `sym:stale` an earlier boot wrote) is
 released instead, returning the Issue to fresh dispatch. A Project that is missing, disabled, or
 absent from the current poll snapshot defers the Run to a later tick rather than abandoning it.
-See ADR 0088.
+Newestness is scoped by repository so a Project retargeted from repository A to B and back does
+not let B's Run suppress A's still-resumable one; a Run whose persisted repository disagrees with
+the Project's current tracker is deferred, never acted on, by both this pass and the reconcile
+pass. Every Run persists the repository its Issue lived in when it was created; a Run whose origin
+cannot be determined (a legacy row, a non-GitHub tracker) proves no mismatch and is treated as
+before. See ADR 0088 and ADR 0089.
 Delayed-work registration closes with cancellation: the scheduler refuses timers armed after
 that point, so nothing fires against a store that is closing. A Run that was about to park
 into a wait state when cancellation latched is classified `cancelled` instead of flipping to

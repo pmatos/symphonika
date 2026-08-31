@@ -165,6 +165,203 @@ describe("detectStaleClaims", () => {
     });
   });
 
+  it("scopes liveness checks per repository when a project is retargeted", async () => {
+    await withRunStore(async (store) => {
+      // The run is live against the project's *previous* repository, so it
+      // vouches for beta#42 and not for the alpha#42 the tracker now polls.
+      store.createRun({
+        id: "run-in-beta",
+        issue: snapshot({
+          number: 42,
+          url: "https://github.com/acme/beta/issues/42"
+        }),
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+
+      const retargeted: RunControllerProjectConfig = {
+        ...project,
+        tracker: { ...project.tracker!, owner: "acme", repo: "alpha" }
+      };
+      const status = emptyIssuePollStatus();
+      status.filteredIssues = [
+        {
+          issue: snapshot({
+            labels: ["agent-ready", "sym:claimed"],
+            number: 42,
+            url: "https://github.com/acme/alpha/issues/42"
+          }),
+          project: retargeted.name,
+          reasons: ["fixture"],
+          repository: { owner: "acme", repo: "alpha" }
+        }
+      ];
+
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const marks = await detectStaleClaims({
+        activeRuns: new ActiveRunRegistry(),
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        logger,
+        pollStatus: status,
+        projects: new Map([[retargeted.name, retargeted]]),
+        runStore: store
+      });
+
+      expect(marks).toEqual([{ project: retargeted.name, issueNumber: 42 }]);
+      expect(addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: 42,
+          owner: "acme",
+          repo: "alpha"
+        })
+      );
+    });
+  });
+
+  it("treats a live run in the polled repository as live", async () => {
+    await withRunStore(async (store) => {
+      store.createRun({
+        id: "run-in-alpha",
+        issue: snapshot({
+          number: 42,
+          url: "https://github.com/acme/alpha/issues/42"
+        }),
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+
+      const retargeted: RunControllerProjectConfig = {
+        ...project,
+        tracker: { ...project.tracker!, owner: "acme", repo: "alpha" }
+      };
+      const status = emptyIssuePollStatus();
+      status.filteredIssues = [
+        {
+          issue: snapshot({
+            labels: ["agent-ready", "sym:claimed"],
+            number: 42,
+            url: "https://github.com/acme/alpha/issues/42"
+          }),
+          project: retargeted.name,
+          reasons: ["fixture"],
+          // Different casing than the tracker: still the same repository.
+          repository: { owner: "ACME", repo: "Alpha" }
+        }
+      ];
+
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const marks = await detectStaleClaims({
+        activeRuns: new ActiveRunRegistry(),
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        logger,
+        pollStatus: status,
+        projects: new Map([[retargeted.name, retargeted]]),
+        runStore: store
+      });
+
+      expect(marks).toEqual([]);
+      expect(addLabelsToIssue).not.toHaveBeenCalled();
+    });
+  });
+
+  it("lets a run of undetermined origin vouch for the issue in any repository", async () => {
+    await withRunStore(async (store) => {
+      // A legacy row (or a non-GitHub tracker): unknown origin must read as
+      // live, never as a mismatch, or the pass would mark a live issue
+      // `sym:stale` and strand it behind every project's `labels_none`.
+      store.createRun({
+        id: "run-legacy",
+        issue: snapshot({ number: 42, url: "https://example/42" }),
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+
+      const status = emptyIssuePollStatus();
+      status.filteredIssues = [
+        {
+          issue: snapshot({
+            labels: ["agent-ready", "sym:claimed"],
+            number: 42,
+            url: "https://github.com/pmatos/symphonika/issues/42"
+          }),
+          project: project.name,
+          reasons: ["fixture"],
+          repository: { owner: "pmatos", repo: "symphonika" }
+        }
+      ];
+
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const marks = await detectStaleClaims({
+        activeRuns: new ActiveRunRegistry(),
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        logger,
+        pollStatus: status,
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      expect(marks).toEqual([]);
+      expect(addLabelsToIssue).not.toHaveBeenCalled();
+    });
+  });
+
+  it("labels the repository the issue was polled from, not the resolved tracker", async () => {
+    await withRunStore(async (store) => {
+      // Duplicate declarations sharing a name: `projectsByName` keeps the
+      // last, but the poll band still holds the shadowed declaration's issue.
+      const status = emptyIssuePollStatus();
+      status.filteredIssues = [
+        {
+          issue: snapshot({
+            labels: ["agent-ready", "sym:claimed"],
+            number: 42,
+            url: "https://github.com/acme/shadowed/issues/42"
+          }),
+          project: project.name,
+          reasons: ["fixture"],
+          repository: { owner: "acme", repo: "shadowed" }
+        }
+      ];
+
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      await detectStaleClaims({
+        activeRuns: new ActiveRunRegistry(),
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        logger,
+        pollStatus: status,
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      expect(addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: 42,
+          owner: "acme",
+          repo: "shadowed"
+        })
+      );
+    });
+  });
+
   it("skips when githubIssuesApi.addLabelsToIssue is undefined", async () => {
     await withRunStore(async (store) => {
       const issue = snapshot({ labels: ["agent-ready", "sym:claimed"] });

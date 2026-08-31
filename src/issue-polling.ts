@@ -1025,8 +1025,10 @@ export function findPolledIssueSnapshot(
   return undefined;
 }
 
-// GitHub owners and repository names are case-insensitive.
-function sameIssueRepository(
+// GitHub owners and repository names are case-insensitive, so a tracker
+// written with different casing than the Run's stored origin is the same
+// repository.
+export function sameIssueRepository(
   left: { owner: string; repo: string },
   right: { owner: string; repo: string }
 ): boolean {

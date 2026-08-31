@@ -564,6 +564,60 @@ describe("resumeShutdownCancelledRuns", () => {
     });
   });
 
+  it("resumes the original repository's run after an A -> B -> A retarget", async () => {
+    // Issue #602's reproduction. Before the newest-run relation was
+    // partitioned by repository, B's newer row eliminated A's, the pass
+    // refused B at the origin gate, and A#7 was left holding `sym:claimed`
+    // with no live run and nothing that would ever resume it.
+    await withRunStore(async (store, root) => {
+      seedShutdownCancelledRun(store, {
+        currentStateId: "implement",
+        runId: "run-in-a",
+        url: "https://github.com/pmatos/symphonika/issues/7"
+      });
+      seedShutdownCancelledRun(store, {
+        currentStateId: "plan",
+        runId: "run-in-b",
+        url: "https://github.com/pmatos/other-repo/issues/7"
+      });
+
+      const activeRuns = new ActiveRunRegistry();
+      const schedule = vi.fn();
+      const githubIssuesApi: GitHubIssuesApi = {
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+
+      // The tracker has been retargeted back to A.
+      const outcomes = await resumeShutdownCancelledRuns({
+        activeRuns,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi,
+        logger,
+        pollStatus: pollStatusWithFiltered([snapshot()]),
+        projects: new Map([[project.name, project]]),
+        runController: controller({
+          activeRuns,
+          githubIssuesApi,
+          root,
+          runStore: store,
+          schedule
+        }),
+        runStore: store
+      });
+
+      expect(outcomes).toEqual([
+        {
+          issueNumber: 7,
+          kind: "resumed",
+          project: project.name,
+          runId: "run-in-a"
+        }
+      ]);
+      expect(schedule).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("treats an owner/repo casing difference as the same repository", async () => {
     await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, {

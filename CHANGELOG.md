@@ -63,6 +63,15 @@
 
 ### Fixed
 
+- Run history is partitioned by repository, so retargeting a Project's tracker no longer hides a
+  resumable Run. Every Run persists the repository its Issue lived in (`issue_owner`/`issue_repo`,
+  backfilled from the stored snapshot URL on upgrade); the newest-Run relation, stale-claim
+  liveness, and the shutdown-resume and reconcile identity gates all key on
+  `(Project, repository, Issue)`. Previously a Project moved from repository A to B and back had
+  B's newer Run suppress A's still-resumable one, leaving A's Issue holding `sym:claimed` with no
+  live Run and no automatic recovery; a retarget mid-Run could also cancel a live Run with
+  `closed_issue` on a same-numbered Issue in the wrong repository. A Run whose origin cannot be
+  determined (a legacy row, a non-GitHub tracker) is treated exactly as before. See ADR 0089.
 - A daemon restart no longer strands the Issues it was working. Runs cancelled with
   `daemon_shutdown` are resumed on the next boot at the Workflow state they were executing, reusing
   their Workspace and Issue Branch; a Run cancelled before it had a Workflow state releases

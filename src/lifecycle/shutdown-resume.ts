@@ -2,6 +2,7 @@ import type { Logger } from "pino";
 
 import {
   findPolledIssueSnapshot,
+  sameIssueRepository,
   tryRemoveLabelsFromIssue,
   type GitHubIssueRepositoryInput,
   type GitHubIssuesApi,
@@ -95,7 +96,7 @@ export async function resumeShutdownCancelledRuns(
     // is allowed through.
     if (
       row.issueRepository !== undefined &&
-      !sameRepository(row.issueRepository, project.tracker)
+      !sameIssueRepository(row.issueRepository, project.tracker)
     ) {
       input.logger.warn(
         {
@@ -257,18 +258,6 @@ async function releaseIssue(
     return [];
   }
   return (await removeLabels({ ...input, labels })) ? labels : undefined;
-}
-
-// GitHub owners and repository names are case-insensitive, so a tracker
-// written with different casing than the stored URL is the same repository.
-function sameRepository(
-  origin: { owner: string; repo: string },
-  tracker: { owner: string; repo: string }
-): boolean {
-  return (
-    origin.owner.toLowerCase() === tracker.owner.toLowerCase() &&
-    origin.repo.toLowerCase() === tracker.repo.toLowerCase()
-  );
 }
 
 // Drops labels this pass has just removed on GitHub from the poll snapshot

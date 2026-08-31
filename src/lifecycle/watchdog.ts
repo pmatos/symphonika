@@ -17,6 +17,7 @@ import type {
   RunStore,
   WatchdogCandidateRoutineFiring,
   WatchdogCandidateRun,
+  WatchdogProgressSample,
   WatchdogSample,
   WatchdogTerminalReason
 } from "../run-store.js";
@@ -87,8 +88,6 @@ type NormalizedLogRead = {
   offset: number;
 };
 
-type WatchdogProgressSample = Omit<WatchdogSample, "runId">;
-
 // Milliseconds a Run has been alive, or undefined when its claim timestamp is
 // unusable. An unparseable timestamp must read as "age unknown" rather than
 // "infinitely old": the wall-clock cap is the one rule that would otherwise
@@ -100,6 +99,32 @@ export function runElapsedMs(createdAt: string, now: Date): number | undefined {
     return undefined;
   }
   return Math.max(0, now.getTime() - claimedAtMs);
+}
+
+// The idle clock both Watchdog paths run on. ADR 0054: attempt start normally
+// clears the latest sample and advances the generation fence before
+// preparing_workspace. Keep path-change detection as a defensive fallback for
+// legacy or partially-upgraded state so a surviving prior-attempt row still
+// cannot carry its idle clock into the new attempt. Routine Firings have one
+// attempt, but the same reset applies if their evidence path ever changes.
+function watchdogIdleClock(
+  previous: WatchdogProgressSample | undefined,
+  next: WatchdogProgressSample,
+  sampledAt: string
+): { idleSince: string | null; progress: boolean } {
+  const progress =
+    previous === undefined ? false : watchdogProgressObserved(previous, next);
+  const attemptChanged =
+    previous !== undefined &&
+    previous.normalizedLogPath !== next.normalizedLogPath;
+  return {
+    idleSince: progress
+      ? null
+      : attemptChanged
+        ? sampledAt
+        : (previous?.idleSince ?? sampledAt),
+    progress
+  };
 }
 
 export function watchdogProgressObserved(
@@ -166,21 +191,11 @@ export async function reconcileWatchdog(
     if (next === undefined) {
       continue;
     }
-    const progress =
-      previous === undefined ? false : watchdogProgressObserved(previous, next);
-    // ADR 0054: attempt start normally clears the latest sample and advances
-    // the generation fence before preparing_workspace. Keep path-change
-    // detection as a defensive fallback for legacy or partially-upgraded state
-    // so a surviving prior-attempt row still cannot carry its idle clock into
-    // the new attempt.
-    const attemptChanged =
-      previous !== undefined &&
-      previous.normalizedLogPath !== run.normalizedLogPath;
-    const idleSince = progress
-      ? null
-      : attemptChanged
-        ? sampledAt
-        : (previous?.idleSince ?? sampledAt);
+    const { idleSince, progress } = watchdogIdleClock(
+      previous,
+      next,
+      sampledAt
+    );
     const persisted = {
       ...next,
       idleSince
@@ -270,16 +285,11 @@ export async function reconcileWatchdog(
     if (next === undefined) {
       continue;
     }
-    const progress =
-      previous === undefined ? false : watchdogProgressObserved(previous, next);
-    const attemptChanged =
-      previous !== undefined &&
-      previous.normalizedLogPath !== firing.normalizedLogPath;
-    const idleSince = progress
-      ? null
-      : attemptChanged
-        ? sampledAt
-        : (previous?.idleSince ?? sampledAt);
+    const { idleSince, progress } = watchdogIdleClock(
+      previous,
+      next,
+      sampledAt
+    );
     const persisted = { ...next, idleSince };
     if (!input.runStore.upsertRoutineWatchdogSample(persisted)) {
       continue;
@@ -287,9 +297,12 @@ export async function reconcileWatchdog(
     sampled += 1;
 
     if (
-      progress ||
-      idleSince === null ||
-      now.getTime() - Date.parse(idleSince) < config.graceMinutes * 60_000
+      !idleGraceExpired({
+        graceMs: config.graceMinutes * 60_000,
+        idleSince,
+        now,
+        progress
+      })
     ) {
       continue;
     }
@@ -366,13 +379,22 @@ function watchdogTerminalReason(input: {
   if (input.budget > 0 && input.outputTokensTotal >= input.budget) {
     return "no_convergence";
   }
+  return idleGraceExpired(input) ? "no_progress" : undefined;
+}
+
+// The liveness rule itself, shared by both Watchdog paths. ADR 0091 keeps the
+// convergence budget and the wall-clock cap Run-only, so a Routine Firing is
+// bounded by this rule alone.
+function idleGraceExpired(input: {
+  graceMs: number;
+  idleSince: string | null;
+  now: Date;
+  progress: boolean;
+}): boolean {
   if (input.progress || input.idleSince === null) {
-    return undefined;
+    return false;
   }
-  if (input.now.getTime() - Date.parse(input.idleSince) < input.graceMs) {
-    return undefined;
-  }
-  return "no_progress";
+  return input.now.getTime() - Date.parse(input.idleSince) >= input.graceMs;
 }
 
 export type WorkspaceSample = {

@@ -3,7 +3,11 @@ import path from "node:path";
 
 import type { Logger } from "pino";
 
-import type { ActiveRunRegistry } from "../lifecycle/active-runs.js";
+import {
+  CANCEL_REASONS,
+  type ActiveRunEntry,
+  type ActiveRunRegistry
+} from "../lifecycle/active-runs.js";
 import {
   classifyFailure,
   inspectWorkspaceCommitsAhead
@@ -39,7 +43,11 @@ import { deliverRoutineFanoutNotification } from "../notifications/routine-fanou
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
 import { redactAll } from "../redaction.js";
-import type { RoutineFanoutHoldReason, RunStore } from "../run-store.js";
+import type {
+  CancelReason,
+  RoutineFanoutHoldReason,
+  RunStore
+} from "../run-store.js";
 import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
   evaluateRoutineSchedule,
@@ -168,11 +176,28 @@ type RoutineTerminalOutcome =
   | { kind: "succeeded"; reason: string };
 
 function routineCancellationOutcome(
-  cancelReason: string | undefined
+  cancelReason: CancelReason | undefined
 ): RoutineTerminalOutcome {
-  return cancelReason === "no_progress"
-    ? { kind: "failed", reason: "no_progress" }
+  return cancelReason === CANCEL_REASONS.NO_PROGRESS
+    ? { kind: "failed", reason: CANCEL_REASONS.NO_PROGRESS }
     : { kind: "cancelled", reason: "cancelled" };
+}
+
+// The terminal outcome for a cancel observed at any of the re-read points on
+// the failure path, or undefined when none of them saw one. A watchdog
+// no-progress cancel outranks an ordinary one wherever the two overlap, so the
+// verdict does not depend on which re-read happened to notice first.
+function routineCancelOutcome(
+  entries: readonly (ActiveRunEntry | undefined)[]
+): RoutineTerminalOutcome | undefined {
+  const requested = entries.filter((entry) => entry?.cancelRequested === true);
+  return requested.length === 0
+    ? undefined
+    : routineCancellationOutcome(
+        requested.find(
+          (entry) => entry?.cancelReason === CANCEL_REASONS.NO_PROGRESS
+        )?.cancelReason
+      );
 }
 
 // A single firing's before/after GitHub snapshots are captured minutes apart
@@ -1479,21 +1504,15 @@ async function runRoutineFiring(input: {
       await providerAttempt?.catch(() => undefined);
     }
     const cancelEntry = input.activeRuns.get(input.firingId);
-    const watchdogNoProgress =
-      !timedOut &&
-      cancelEntry?.cancelRequested === true &&
-      cancelEntry.cancelReason === "no_progress";
-    const cancelled =
-      !timedOut && !watchdogNoProgress && cancelEntry?.cancelRequested === true;
+    const cancelOutcome = timedOut
+      ? undefined
+      : routineCancelOutcome([cancelEntry]);
     const reason = timedOut
       ? error.terminalReason
-      : watchdogNoProgress
-        ? "no_progress"
-        : cancelled
-          ? "cancelled"
-          : error instanceof RoutinePromptRenderError
-            ? error.terminalReason
-            : errorMessage(error);
+      : (cancelOutcome?.reason ??
+        (error instanceof RoutinePromptRenderError
+          ? error.terminalReason
+          : errorMessage(error)));
     // The deadline may already be expired here (we can be in this catch
     // block precisely because it expired). deadline.race would then reject
     // again immediately with the same timeout error, and — unlike the try
@@ -1557,26 +1576,17 @@ async function runRoutineFiring(input: {
     // during snapshot capture or commit inspection.
     const completionCancelEntry = input.activeRuns.get(input.firingId);
     const timeoutWon = timedOut || failureSnapshotTimedOut;
-    const finalWatchdogNoProgress =
-      !timeoutWon &&
-      [cancelEntry, cancelAfterFailureSnapshot, completionCancelEntry].some(
-        (entry) =>
-          entry?.cancelRequested === true &&
-          entry.cancelReason === "no_progress"
-      );
-    const finalCancelled =
-      !timeoutWon &&
-      !finalWatchdogNoProgress &&
-      (cancelled ||
-        cancelAfterFailureSnapshot?.cancelRequested === true ||
-        completionCancelEntry?.cancelRequested === true);
+    const finalCancelOutcome = timeoutWon
+      ? undefined
+      : routineCancelOutcome([
+          cancelEntry,
+          cancelAfterFailureSnapshot,
+          completionCancelEntry
+        ]);
+    const finalCancelled = finalCancelOutcome?.kind === "cancelled";
     const finalReason = timeoutWon
       ? "firing_timeout"
-      : finalWatchdogNoProgress
-        ? "no_progress"
-        : finalCancelled
-          ? "cancelled"
-          : reason;
+      : (finalCancelOutcome?.reason ?? reason);
     // A firing killed at its deadline reports `firing_timeout` and nothing
     // else; whatever the provider wrote on stderr before dying is the only
     // account of why it went quiet, so it rides along on the reason here as

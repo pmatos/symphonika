@@ -508,7 +508,13 @@ export type WatchdogSample = {
   workspaceMtimeMax: number;
 };
 
-export type RoutineWatchdogSample = Omit<WatchdogSample, "runId"> & {
+// A Progress Signal sample with its owning key removed. Runs key samples by
+// run id and Routine Firings by firing id (ADR 0091 keeps the two tables
+// separate because `watchdog_samples.run_id` carries a real foreign key to
+// `runs`), but everything the Watchdog actually compares is this shared half.
+export type WatchdogProgressSample = Omit<WatchdogSample, "runId">;
+
+export type RoutineWatchdogSample = WatchdogProgressSample & {
   firingId: string;
 };
 
@@ -533,7 +539,6 @@ export type WatchdogCandidateRoutineFiring = {
   normalizedLogPath: string;
   projectName: string;
   routineName: string;
-  state: Extract<RoutineFiringState, "running">;
   workspacePath: string;
 };
 
@@ -719,12 +724,53 @@ type RoutineWatchdogSampleRow = Omit<WatchdogSampleRow, "run_id"> & {
   firing_id: string;
 };
 
+// Every Progress Signal column except the owning key. The Run-keyed and
+// Firing-keyed sample tables are deliberately separate (ADR 0091), but their
+// column set is one thing: spelling it once keeps a future signal column from
+// having to be threaded through eight hand-written statement bodies.
+const WATCHDOG_SAMPLE_COLUMNS = [
+  "sampled_at",
+  "last_tool_call_at",
+  "last_message_at",
+  "last_progress_at",
+  "workspace_mtime_max",
+  "workspace_digest",
+  "turn_id_set_size",
+  "output_tokens_total",
+  "normalized_log_offset",
+  "normalized_log_path",
+  "idle_since"
+] as const;
+
+function watchdogSampleSelectSql(table: string, key: string): string {
+  return `select ${[key, ...WATCHDOG_SAMPLE_COLUMNS].join(", ")} from ${table} where ${key} = ?`;
+}
+
+function watchdogSampleUpsertSql(table: string, key: string): string {
+  const columns = [key, ...WATCHDOG_SAMPLE_COLUMNS];
+  return [
+    `insert into ${table} (${columns.join(", ")})`,
+    `values (${columns.map((column) => `@${column}`).join(", ")})`,
+    `on conflict(${key}) do update set`,
+    WATCHDOG_SAMPLE_COLUMNS.map(
+      (column) => `${column} = excluded.${column}`
+    ).join(", ")
+  ].join(" ");
+}
+
+function watchdogSampleHistorySql(table: string, key: string): string {
+  const columns = [key, ...WATCHDOG_SAMPLE_COLUMNS];
+  return [
+    `insert or replace into ${table} (${columns.join(", ")})`,
+    `values (${columns.map((column) => `@${column}`).join(", ")})`
+  ].join(" ");
+}
+
 type WatchdogCandidateRoutineFiringRow = {
   id: string;
   normalized_log_path: string | null;
   project_name: string;
   routine_name: string;
-  state: WatchdogCandidateRoutineFiring["state"];
   workspace_path: string | null;
 };
 
@@ -1397,7 +1443,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, workspace_path, normalized_log_path",
+          "select id, project_name, routine_name, workspace_path, normalized_log_path",
           "from routine_firings",
           "where state = 'running' and cancel_requested = 0",
           "order by created_at asc, id asc"
@@ -1409,22 +1455,13 @@ export class RunStore {
       normalizedLogPath: row.normalized_log_path ?? "",
       projectName: row.project_name,
       routineName: row.routine_name,
-      state: row.state,
       workspacePath: row.workspace_path ?? ""
     }));
   }
 
   getWatchdogSample(runId: string): WatchdogSample | undefined {
     const row = this.database
-      .prepare(
-        [
-          "select run_id, sampled_at, last_tool_call_at, last_message_at,",
-          "last_progress_at, workspace_mtime_max, workspace_digest,",
-          "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-          "normalized_log_path, idle_since from watchdog_samples",
-          "where run_id = ?"
-        ].join(" ")
-      )
+      .prepare(watchdogSampleSelectSql("watchdog_samples", "run_id"))
       .get(runId) as WatchdogSampleRow | undefined;
     return row === undefined ? undefined : mapWatchdogSampleRow(row);
   }
@@ -1433,15 +1470,7 @@ export class RunStore {
     firingId: string
   ): RoutineWatchdogSample | undefined {
     const row = this.database
-      .prepare(
-        [
-          "select firing_id, sampled_at, last_tool_call_at, last_message_at,",
-          "last_progress_at, workspace_mtime_max, workspace_digest,",
-          "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-          "normalized_log_path, idle_since from routine_watchdog_samples",
-          "where firing_id = ?"
-        ].join(" ")
-      )
+      .prepare(watchdogSampleSelectSql("routine_watchdog_samples", "firing_id"))
       .get(firingId) as RoutineWatchdogSampleRow | undefined;
     return row === undefined ? undefined : mapRoutineWatchdogSampleRow(row);
   }
@@ -1465,46 +1494,10 @@ export class RunStore {
       workspace_mtime_max: sample.workspaceMtimeMax
     };
     const latest = this.database.prepare(
-      [
-        "insert into watchdog_samples (",
-        "run_id, sampled_at, last_tool_call_at, last_message_at,",
-        "last_progress_at, workspace_mtime_max, workspace_digest,",
-        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-        "normalized_log_path, idle_since",
-        ") values (",
-        "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
-        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
-        "@normalized_log_path, @idle_since",
-        ")",
-        "on conflict(run_id) do update set",
-        "sampled_at = excluded.sampled_at,",
-        "last_tool_call_at = excluded.last_tool_call_at,",
-        "last_message_at = excluded.last_message_at,",
-        "last_progress_at = excluded.last_progress_at,",
-        "workspace_mtime_max = excluded.workspace_mtime_max,",
-        "workspace_digest = excluded.workspace_digest,",
-        "turn_id_set_size = excluded.turn_id_set_size,",
-        "output_tokens_total = excluded.output_tokens_total,",
-        "normalized_log_offset = excluded.normalized_log_offset,",
-        "normalized_log_path = excluded.normalized_log_path,",
-        "idle_since = excluded.idle_since"
-      ].join(" ")
+      watchdogSampleUpsertSql("watchdog_samples", "run_id")
     );
     const history = this.database.prepare(
-      [
-        "insert or replace into watchdog_sample_history (",
-        "run_id, sampled_at, last_tool_call_at, last_message_at,",
-        "last_progress_at, workspace_mtime_max, workspace_digest,",
-        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-        "normalized_log_path, idle_since",
-        ") values (",
-        "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
-        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
-        "@normalized_log_path, @idle_since",
-        ")"
-      ].join(" ")
+      watchdogSampleHistorySql("watchdog_sample_history", "run_id")
     );
     return this.database.transaction(() => {
       if (
@@ -1535,46 +1528,10 @@ export class RunStore {
       workspace_mtime_max: sample.workspaceMtimeMax
     };
     const latest = this.database.prepare(
-      [
-        "insert into routine_watchdog_samples (",
-        "firing_id, sampled_at, last_tool_call_at, last_message_at,",
-        "last_progress_at, workspace_mtime_max, workspace_digest,",
-        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-        "normalized_log_path, idle_since",
-        ") values (",
-        "@firing_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
-        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
-        "@normalized_log_path, @idle_since",
-        ")",
-        "on conflict(firing_id) do update set",
-        "sampled_at = excluded.sampled_at,",
-        "last_tool_call_at = excluded.last_tool_call_at,",
-        "last_message_at = excluded.last_message_at,",
-        "last_progress_at = excluded.last_progress_at,",
-        "workspace_mtime_max = excluded.workspace_mtime_max,",
-        "workspace_digest = excluded.workspace_digest,",
-        "turn_id_set_size = excluded.turn_id_set_size,",
-        "output_tokens_total = excluded.output_tokens_total,",
-        "normalized_log_offset = excluded.normalized_log_offset,",
-        "normalized_log_path = excluded.normalized_log_path,",
-        "idle_since = excluded.idle_since"
-      ].join(" ")
+      watchdogSampleUpsertSql("routine_watchdog_samples", "firing_id")
     );
     const history = this.database.prepare(
-      [
-        "insert or replace into routine_watchdog_sample_history (",
-        "firing_id, sampled_at, last_tool_call_at, last_message_at,",
-        "last_progress_at, workspace_mtime_max, workspace_digest,",
-        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-        "normalized_log_path, idle_since",
-        ") values (",
-        "@firing_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
-        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
-        "@normalized_log_path, @idle_since",
-        ")"
-      ].join(" ")
+      watchdogSampleHistorySql("routine_watchdog_sample_history", "firing_id")
     );
     return this.database.transaction(() => {
       if (!this.isRoutineWatchdogCandidate(sample.firingId)) {
@@ -5751,6 +5708,15 @@ export class RunStore {
       on routine_firings(workspace_pruned_at, state, updated_at);
     `);
 
+    // listWatchdogCandidateRoutineFirings runs on every Watchdog tick against a
+    // table that grows with every Firing ever recorded and is never swept. The
+    // retention index above leads with workspace_pruned_at, so without this the
+    // candidate query is a full scan plus a temp b-tree sort.
+    this.database.exec(`
+      create index if not exists routine_firings_watchdog_idx
+      on routine_firings(state, cancel_requested, created_at, id);
+    `);
+
     // run_state_transitions is append-only with no retention sweep and has no
     // other index. nextTransitionSequence's max(sequence) lookup runs on every
     // transition write, and both listRunStateTransitions and
@@ -6194,7 +6160,9 @@ function mapRunRow(row: RunRow): RunStatus {
   };
 }
 
-function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
+function mapWatchdogProgressSampleRow(
+  row: Omit<WatchdogSampleRow, "run_id">
+): WatchdogProgressSample {
   return {
     idleSince: row.idle_since,
     lastMessageAt: row.last_message_at,
@@ -6203,31 +6171,21 @@ function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
     normalizedLogOffset: row.normalized_log_offset,
     normalizedLogPath: row.normalized_log_path,
     outputTokensTotal: row.output_tokens_total,
-    runId: row.run_id,
     sampledAt: row.sampled_at,
     turnIdSetSize: row.turn_id_set_size,
     workspaceDigest: row.workspace_digest,
     workspaceMtimeMax: row.workspace_mtime_max
   };
+}
+
+function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
+  return { ...mapWatchdogProgressSampleRow(row), runId: row.run_id };
 }
 
 function mapRoutineWatchdogSampleRow(
   row: RoutineWatchdogSampleRow
 ): RoutineWatchdogSample {
-  return {
-    firingId: row.firing_id,
-    idleSince: row.idle_since,
-    lastMessageAt: row.last_message_at,
-    lastProgressAt: row.last_progress_at,
-    lastToolCallAt: row.last_tool_call_at,
-    normalizedLogOffset: row.normalized_log_offset,
-    normalizedLogPath: row.normalized_log_path,
-    outputTokensTotal: row.output_tokens_total,
-    sampledAt: row.sampled_at,
-    turnIdSetSize: row.turn_id_set_size,
-    workspaceDigest: row.workspace_digest,
-    workspaceMtimeMax: row.workspace_mtime_max
-  };
+  return { ...mapWatchdogProgressSampleRow(row), firingId: row.firing_id };
 }
 
 const RUN_ARTIFACT_KINDS: readonly RunArtifactKind[] = [

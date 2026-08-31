@@ -128,8 +128,18 @@ describe("daemon health notifications", () => {
     });
 
     notifier.notifyWatchdogTerminations([
-      { issueNumber: 42, projectName: "alpha", runId: "run-42" },
-      { issueNumber: 43, projectName: "alpha", runId: "run-43" }
+      {
+        issueNumber: 42,
+        kind: "issue_run",
+        projectName: "alpha",
+        runId: "run-42"
+      },
+      {
+        issueNumber: 43,
+        kind: "issue_run",
+        projectName: "alpha",
+        runId: "run-43"
+      }
     ]);
     await notifier.settled();
 
@@ -155,7 +165,12 @@ describe("daemon health notifications", () => {
     });
 
     notifier.notifyWatchdogTerminations([
-      { issueNumber: 42, projectName: "alpha", runId: "run-42" },
+      {
+        issueNumber: 42,
+        kind: "issue_run",
+        projectName: "alpha",
+        runId: "run-42"
+      },
       {
         firingId: "fire-1",
         kind: "routine_firing",

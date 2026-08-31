@@ -6860,31 +6860,24 @@ describe("RoutineFiringDispatcher", () => {
       });
       expect(activeRuns.countInFlight()).toBe(1);
 
+      const watchdogConfig = {
+        enabled: true,
+        graceMinutes: 1,
+        maxRunMinutes: 0,
+        mtimeIgnore: [],
+        mtimeInclude: [],
+        outputTokenBudget: 0,
+        sampleIntervalSeconds: 60
+      };
       const baseline = await reconcileWatchdog({
         activeRuns,
-        config: {
-          enabled: true,
-          graceMinutes: 1,
-          maxRunMinutes: 0,
-          mtimeIgnore: [],
-          mtimeInclude: [],
-          outputTokenBudget: 0,
-          sampleIntervalSeconds: 60
-        },
+        config: watchdogConfig,
         now: () => new Date("2026-05-22T10:00:00.000Z"),
         runStore
       });
       const termination = await reconcileWatchdog({
         activeRuns,
-        config: {
-          enabled: true,
-          graceMinutes: 1,
-          maxRunMinutes: 0,
-          mtimeIgnore: [],
-          mtimeInclude: [],
-          outputTokenBudget: 0,
-          sampleIntervalSeconds: 60
-        },
+        config: watchdogConfig,
         now: () => new Date("2026-05-22T10:01:00.000Z"),
         onRoutineTerminated,
         runStore

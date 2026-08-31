@@ -962,7 +962,7 @@ export async function startDaemon(
           logger,
           now: () => new Date(nowMs),
           onTerminated: (run) => {
-            watchdogTerminations.push(run);
+            watchdogTerminations.push({ ...run, kind: "issue_run" });
           },
           onRoutineTerminated: (firing) => {
             watchdogTerminations.push({

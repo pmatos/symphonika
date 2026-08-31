@@ -11,6 +11,7 @@ import type { NotificationMessage, NotificationSink } from "./types.js";
 export type WatchdogTermination =
   | {
       issueNumber: number;
+      kind: "issue_run";
       projectName: string;
       runId: string;
     }
@@ -114,25 +115,19 @@ export class DaemonHealthNotifier {
     if (terminations.length === 0) {
       return;
     }
-    const routineFirings = terminations.filter(isRoutineFiringTermination);
-    const issueRunCount = terminations.length - routineFirings.length;
-    const subject =
-      routineFirings.length === 0
-        ? `Watchdog terminated ${issueRunCount} issue ${
-            issueRunCount === 1 ? "Run" : "Runs"
-          }`
-        : issueRunCount === 0
-          ? `Watchdog terminated ${routineFirings.length} Routine ${
-              routineFirings.length === 1 ? "Firing" : "Firings"
-            }`
-          : `Watchdog terminated ${terminations.length} provider executions`;
+    const firings = terminations.filter(
+      (termination) => termination.kind === "routine_firing"
+    ).length;
     this.enqueue({
       details: terminations.map((termination) =>
-        isRoutineFiringTermination(termination)
+        termination.kind === "routine_firing"
           ? `${termination.projectName}/${termination.routineName} [${termination.firingId}]`
           : `${termination.projectName}#${termination.issueNumber} [${termination.runId}]`
       ),
-      subject
+      subject: watchdogTerminationSubject(
+        terminations.length - firings,
+        firings
+      )
     });
   }
 
@@ -177,10 +172,16 @@ export class DaemonHealthNotifier {
   }
 }
 
-function isRoutineFiringTermination(
-  termination: WatchdogTermination
-): termination is Extract<WatchdogTermination, { kind: "routine_firing" }> {
-  return "kind" in termination && termination.kind === "routine_firing";
+function watchdogTerminationSubject(runs: number, firings: number): string {
+  if (runs > 0 && firings > 0) {
+    return `Watchdog terminated ${runs + firings} provider executions`;
+  }
+  if (firings > 0) {
+    return `Watchdog terminated ${firings} Routine ${
+      firings === 1 ? "Firing" : "Firings"
+    }`;
+  }
+  return `Watchdog terminated ${runs} issue ${runs === 1 ? "Run" : "Runs"}`;
 }
 
 function renderDaemonHealthNotification(event: {

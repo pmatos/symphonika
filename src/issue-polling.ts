@@ -985,6 +985,35 @@ export function emptyIssuePollStatus(): IssuePollStatus {
   };
 }
 
+// Looks one (project, issue) up in a poll snapshot across both bands. The
+// candidate band alone is not enough for the reconciliation passes: an Issue
+// carrying an operational label (`sym:claimed` above all) is filtered rather
+// than a candidate, yet those passes are exactly the ones that need its
+// current state and labels.
+export function findPolledIssueSnapshot(
+  pollStatus: IssuePollStatus,
+  projectName: string,
+  issueNumber: number
+): IssueSnapshot | undefined {
+  for (const candidate of pollStatus.candidateIssues) {
+    if (
+      candidate.project === projectName &&
+      candidate.issue.number === issueNumber
+    ) {
+      return candidate.issue;
+    }
+  }
+  for (const filtered of pollStatus.filteredIssues) {
+    if (
+      filtered.project === projectName &&
+      filtered.issue.number === issueNumber
+    ) {
+      return filtered.issue;
+    }
+  }
+  return undefined;
+}
+
 export function replaceIssuePollStatus(
   target: IssuePollStatus,
   source: IssuePollStatus

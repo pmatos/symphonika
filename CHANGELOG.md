@@ -40,6 +40,14 @@
 
 ### Fixed
 
+- A daemon restart no longer strands the Issues it was working. Runs cancelled with
+  `daemon_shutdown` are resumed on the next boot at the Workflow state they were executing, reusing
+  their Workspace and Issue Branch; a Run cancelled before it had a Workflow state releases
+  `sym:claimed` so the Issue returns to fresh dispatch. Stale-claim detection no longer marks an
+  Issue whose Run is awaiting that resumption, and a resumed Issue has any `sym:stale` an earlier
+  boot wrote cleared. Previously every restart — including an unattended `self_update` — left its
+  in-flight Issues carrying `sym:claimed` + `sym:stale`, which every Project's `labels_none`
+  excludes, with no automatic way back. See ADR 0088.
 - A due recurring Routine Target now holds its original clock event when its selected provider
   adapter is not registered, warns on each daemon tick, and resumes that event after registration
   instead of silently advancing the schedule.

@@ -471,6 +471,137 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("resumes a shutdown-cancelled run on the next boot instead of stranding the issue", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let releaseProvider: (() => void) | undefined;
+    const providerStopped = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const killedProvider = {
+      cancel: vi.fn(() => {
+        releaseProvider?.();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { sessionId: "killed-session", type: "session_started" },
+          raw: { id: "killed-session", kind: "session" }
+        };
+        await providerStopped;
+        yield {
+          normalized: { cancelled: true, exitCode: 143, type: "process_exit" },
+          raw: { code: 143, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const firstBootApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Resume this run after a restart"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const firstBoot = await startDaemon({
+      agentProviders: { codex: killedProvider },
+      createRunId: () => "run-killed-by-shutdown",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: firstBootApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+    let stopPromise: Promise<void> | undefined;
+    try {
+      await waitForRun(firstBoot.url, "running");
+      stopPromise = firstBoot.stop();
+      await stopPromise;
+    } finally {
+      releaseProvider?.();
+      await (stopPromise ?? firstBoot.stop());
+    }
+
+    // The issue now looks exactly as it did for the stranded vow issues:
+    // still eligible on labels, still wearing the claim of a dead run.
+    const resumedProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const claimedIssue = issueFixture({
+      labels: ["agent-ready", "sym:claimed"],
+      number: 8,
+      title: "Resume this run after a restart"
+    });
+    const secondBootApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(claimedIssue),
+      listOpenIssues: vi.fn().mockResolvedValue([claimedIssue]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const secondBoot = await startDaemon({
+      agentProviders: { codex: resumedProvider },
+      createRunId: () => "run-resumed",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: secondBootApi,
+      lifecyclePolicy: {
+        continuation: { cap: 3, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForRun(secondBoot.url, "succeeded");
+      const store = openRunStore({
+        stateRoot: path.join(root, ".symphonika")
+      });
+      try {
+        expect(store.getRun("run-killed-by-shutdown")).toMatchObject({
+          cancelReason: "daemon_shutdown",
+          state: "cancelled"
+        });
+        expect(store.getRun("run-resumed")).toMatchObject({
+          continuationParentRunId: "run-killed-by-shutdown",
+          isContinuation: true,
+          issueNumber: 8,
+          state: "succeeded"
+        });
+        expect(store.listResumableShutdownRuns()).toEqual([]);
+      } finally {
+        store.close();
+      }
+      // The whole point of #594: the restart must never produce sym:stale.
+      expect(
+        secondBootApi.addLabelsToIssue.mock.calls.flatMap(
+          (call) => (call[0] as { labels: string[] }).labels
+        )
+      ).not.toContain("sym:stale");
+    } finally {
+      await secondBoot.stop();
+    }
+  });
+
   it("rolls back a dispatch that claims after stop begins instead of starting its provider", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);

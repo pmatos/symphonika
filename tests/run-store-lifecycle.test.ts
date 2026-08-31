@@ -1315,3 +1315,122 @@ describe("run-store schema migration", () => {
     }
   });
 });
+
+describe("listResumableShutdownRuns", () => {
+  it("returns only the newest shutdown-cancelled run per issue", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const older = seedRun(store, { id: "run-1" });
+      store.setRunCurrentState(older, "plan");
+      store.markCancelRequested(older, "daemon_shutdown");
+      store.updateRunState(older, "cancelled");
+
+      const newer = seedRun(store, { id: "run-2" });
+      store.setRunCurrentState(newer, "implement");
+      store.markCancelRequested(newer, "daemon_shutdown");
+      store.updateRunState(newer, "cancelled");
+
+      expect(store.listResumableShutdownRuns()).toEqual([
+        {
+          currentStateId: "implement",
+          issueNumber: 7,
+          projectName: "symphonika",
+          runId: "run-2"
+        }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("ignores other cancel reasons and non-cancelled states", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const operator = seedRun(store, { id: "run-1", issueNumber: 1 });
+      store.setRunCurrentState(operator, "implement");
+      store.markCancelRequested(operator, "operator");
+      store.updateRunState(operator, "cancelled");
+
+      const running = seedRun(store, { id: "run-2", issueNumber: 2 });
+      store.setRunCurrentState(running, "implement");
+      store.markCancelRequested(running, "daemon_shutdown");
+      store.updateRunState(running, "running");
+
+      expect(store.listResumableShutdownRuns()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reports a null state for a run cancelled before its workflow state was persisted", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const id = seedRun(store);
+      store.markCancelRequested(id, "daemon_shutdown");
+      store.updateRunState(id, "cancelled");
+
+      expect(store.listResumableShutdownRuns()).toEqual([
+        {
+          currentStateId: null,
+          issueNumber: 7,
+          projectName: "symphonika",
+          runId: id
+        }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("drops a declined run and survives a store reopen", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    const id = seedRun(store);
+    try {
+      store.setRunCurrentState(id, "implement");
+      store.markCancelRequested(id, "daemon_shutdown");
+      store.updateRunState(id, "cancelled");
+      expect(store.listResumableShutdownRuns()).toHaveLength(1);
+
+      store.markShutdownResumeDeclined(id);
+      expect(store.listResumableShutdownRuns()).toEqual([]);
+    } finally {
+      store.close();
+    }
+
+    const reopened = openRunStore({ stateRoot: root });
+    try {
+      expect(reopened.listResumableShutdownRuns()).toEqual([]);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("scopes the newest-run guard per project when issue numbers collide", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const alpha = seedRun(store, { id: "run-1", projectName: "alpha" });
+      store.setRunCurrentState(alpha, "implement");
+      store.markCancelRequested(alpha, "daemon_shutdown");
+      store.updateRunState(alpha, "cancelled");
+
+      const beta = seedRun(store, { id: "run-2", projectName: "beta" });
+      store.setRunCurrentState(beta, "plan");
+      store.markCancelRequested(beta, "daemon_shutdown");
+      store.updateRunState(beta, "cancelled");
+
+      expect(
+        store
+          .listResumableShutdownRuns()
+          .map((entry) => `${entry.projectName}:${entry.runId}`)
+          .sort()
+      ).toEqual(["alpha:run-1", "beta:run-2"]);
+    } finally {
+      store.close();
+    }
+  });
+});

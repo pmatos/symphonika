@@ -1373,6 +1373,9 @@ On Watchdog convergence-budget termination, the same steps apply with
 On stale startup state:
 
 - if GitHub has `sym:claimed` or `sym:running` but there is no live local run, mark `sym:stale`
+- treat a Run cancelled with `cancel_reason = "daemon_shutdown"` that is still the newest Run for
+  its Issue as live, not stale: it is awaiting resumption (section 12.3), and marking it would
+  exclude the Issue from polling permanently
 - do not auto-clear stale claims in v1
 - sweep run rows in `queued`, `preparing_workspace`, or `running` to terminal `stale` —
   their scheduler callback and provider stream were lost with the previous daemon
@@ -1703,6 +1706,16 @@ currently in-flight Run and Routine Firing, and requests cancellation through ea
 Provider. The shutdown reason supersedes any cancellation already in progress and is
 sticky in the run store: later cancellation writes — from an in-flight reconcile or a UI
 cancel landing during the drain — cannot overwrite `daemon_shutdown` with another reason.
+
+A shutdown cancellation is a pause, not a verdict on the Issue. The next daemon resumes the Runs
+the previous one cancelled: for each Run cancelled with `cancel_reason = "daemon_shutdown"` that is
+still the newest Run for its `(Project, Issue)` pair, the reconcile pass schedules a State Advance
+at the Run's persisted `current_state_id`, so the walk re-enters the state it was executing and
+reuses its deterministic Workspace and Issue Branch. A Run cancelled before that state was
+persisted has no walk to resume; its `sym:claimed` (and any `sym:stale` an earlier boot wrote) is
+released instead, returning the Issue to fresh dispatch. A Project that is missing, disabled, or
+absent from the current poll snapshot defers the Run to a later tick rather than abandoning it.
+See ADR 0088.
 Delayed-work registration closes with cancellation: the scheduler refuses timers armed after
 that point, so nothing fires against a store that is closing. A Run that was about to park
 into a wait state when cancellation latched is classified `cancelled` instead of flipping to

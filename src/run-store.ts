@@ -1528,6 +1528,66 @@ export class RunStore {
     }));
   }
 
+  // Runs a graceful shutdown cancelled pre-emptively, still owning their
+  // Issue's `sym:claimed` label and still the newest Run for that Issue. A
+  // restart is routine, so these are candidates for resumption rather than
+  // losses: the newest-Run guard is what makes a resumed row drop out of
+  // this list (its continuation is newer), and
+  // `shutdown_resume_declined_at` is what makes a *declined* row drop out.
+  // `currentStateId` is null when the Run was cancelled before its workflow
+  // state was persisted (queued, or a Project with no workflow) — there is
+  // no walk to resume, so the caller releases the claim instead. See
+  // docs/adr/0088.
+  listResumableShutdownRuns(): {
+    currentStateId: string | null;
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select r.id, r.project_name, r.issue_number, r.current_state_id",
+          "from runs r",
+          "where r.cancel_reason = ?",
+          "and r.state = 'cancelled'",
+          "and r.shutdown_resume_declined_at is null",
+          "and not exists (",
+          "  select 1 from runs n",
+          "  where n.project_name = r.project_name",
+          "  and n.issue_number = r.issue_number",
+          "  and (n.created_at > r.created_at",
+          "       or (n.created_at = r.created_at and n.id > r.id))",
+          ")",
+          "order by r.created_at asc"
+        ].join(" ")
+      )
+      .all(SHUTDOWN_PREEMPTIVE_REASON) as {
+      id: string;
+      project_name: string;
+      issue_number: number;
+      current_state_id: string | null;
+    }[];
+    return rows.map((row) => ({
+      currentStateId: row.current_state_id,
+      issueNumber: row.issue_number,
+      projectName: row.project_name,
+      runId: row.id
+    }));
+  }
+
+  // Records that a shutdown-cancelled Run will never be resumed, so
+  // `listResumableShutdownRuns` stops returning it and the daemon stops
+  // retrying it on every tick.
+  markShutdownResumeDeclined(runId: string): void {
+    const now = timestamp();
+    this.database
+      .prepare(
+        "update runs set shutdown_resume_declined_at = ?, updated_at = ? where id = ?"
+      )
+      .run(now, now, runId);
+  }
+
   private recordRunRow(input: InsertRunRowInput): void {
     this.publishChange(this.insertRunRow(input));
   }
@@ -5068,6 +5128,7 @@ export class RunStore {
       ["runs", "terminal_reason", "text"],
       ["runs", "cancel_requested", "integer not null default 0"],
       ["runs", "cancel_reason", "text"],
+      ["runs", "shutdown_resume_declined_at", "text"],
       ["runs", "pr_discovery_attempts", "integer not null default 0"],
       ["runs", "workflow_graph_path", "text"],
       ["runs", "current_state_id", "text"],

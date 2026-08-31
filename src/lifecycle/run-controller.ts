@@ -1398,6 +1398,29 @@ export class RunController {
     }
   }
 
+  // Re-enters a raw-FSM walk that a graceful shutdown cancelled mid-flight,
+  // at the state the killed Run was executing. `toStateId` is that Run's
+  // persisted `current_state_id`, which is also what the continuation
+  // inherits in claimAndPersistRun — so the two agree without a
+  // forward-stamp, unlike the ordinary advance path.
+  //
+  // Goes through the injected scheduler rather than awaiting
+  // executeStateAdvance directly: the resumed attempt runs the provider to
+  // completion, so awaiting it here would block the reconcile tick that
+  // called it for the whole agent run. Scheduling also registers the work in
+  // the Scheduled Work registry, which makes the Issue visibly live to
+  // stale-claim detection from this moment on. See docs/adr/0088.
+  scheduleShutdownResume(payload: StateAdvancePayload): void {
+    this.schedule({
+      delayMs: this.lifecyclePolicy.continuation.delayMs,
+      fire: () => this.executeStateAdvance(payload),
+      issueNumber: payload.issue.number,
+      kind: "state_advance",
+      projectName: payload.projectName,
+      runId: payload.parentRunId
+    });
+  }
+
   async executeStateAdvance(payload: StateAdvancePayload): Promise<void> {
     const projects = await this.projectsLoader();
     const project = projects.get(payload.projectName);

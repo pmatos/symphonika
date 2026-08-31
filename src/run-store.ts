@@ -414,13 +414,16 @@ export type ReplaceProjectPullRequestSnapshotsInput = {
 // than a two-phase "attempting" / "done" pair — see ADR 0078 for why a
 // single post-attempt insert was chosen over that alternative.
 // One directed transition out of a park, for one Issue. The progress guard's
-// unit of history: what it remembers is "this edge, on this observation".
+// unit of history: what it remembers is "this edge, on this observation, after
+// this many accepted claims".
 export type ProgressEdge = {
   fromStateId: string;
   issueNumber: number;
   projectName: string;
   toStateId: string;
 };
+
+type ProgressEdgeClaimResult = "claimed" | "unchanged" | "budget_exhausted";
 
 export type RecordPullRequestMergeAttemptInput = {
   error: string | null;
@@ -4461,41 +4464,76 @@ export class RunStore {
   }
 
   // Claims one park-to-advance transition against the observation it would be
-  // taken on. Returns false when this exact edge was already taken on an
-  // identical observation, which is the progress guard's whole question: the
-  // caller has learned nothing since, so re-taking it cannot make progress.
+  // taken on. An identical observation is unchanged; a distinct observation
+  // is still refused after this edge has consumed its absolute claim budget.
   //
-  // One statement rather than a read followed by a write, so the claim cannot
-  // interleave with another writer's on the same edge. `is not` is SQLite's
-  // null-safe comparison, so a first claim (no row, nothing to compare)
-  // inserts and reports one change, and a repeat claim on an identical
-  // fingerprint updates nothing and reports none.
+  // The upsert and the classification read share one transaction. The upsert
+  // takes SQLite's write lock before a refused claim is classified, so another
+  // writer cannot move the same edge between those steps. `is not` is
+  // SQLite's null-safe comparison: a first claim inserts, an identical repeat
+  // changes nothing, and a distinct observation increments only while the
+  // configured budget still has room.
   //
   // Keyed by issue rather than run id because each park creates a fresh
   // waiting row: a cycle through a park would otherwise never see its own
   // history.
-  claimProgressEdge(edge: ProgressEdge, fingerprint: string): boolean {
-    const result = this.database
-      .prepare(
-        [
-          "insert into workflow_progress",
-          "(project_name, issue_number, from_state_id, to_state_id, fingerprint, recorded_at)",
-          "values (@projectName, @issueNumber, @fromStateId, @toStateId, @fingerprint, @recordedAt)",
-          "on conflict(project_name, issue_number, from_state_id, to_state_id)",
-          "do update set fingerprint = excluded.fingerprint,",
-          "recorded_at = excluded.recorded_at",
-          "where workflow_progress.fingerprint is not excluded.fingerprint"
-        ].join(" ")
-      )
-      .run({
-        fingerprint,
-        fromStateId: edge.fromStateId,
-        issueNumber: edge.issueNumber,
-        projectName: edge.projectName,
-        recordedAt: timestamp(),
-        toStateId: edge.toStateId
-      });
-    return result.changes === 1;
+  claimProgressEdge(
+    edge: ProgressEdge,
+    fingerprint: string,
+    maxClaims = 0
+  ): ProgressEdgeClaimResult {
+    const claim = this.database.transaction((): ProgressEdgeClaimResult => {
+      const result = this.database
+        .prepare(
+          [
+            "insert into workflow_progress",
+            "(project_name, issue_number, from_state_id, to_state_id, fingerprint, claim_count, recorded_at)",
+            "values (@projectName, @issueNumber, @fromStateId, @toStateId, @fingerprint, 1, @recordedAt)",
+            "on conflict(project_name, issue_number, from_state_id, to_state_id)",
+            "do update set fingerprint = excluded.fingerprint,",
+            "claim_count = workflow_progress.claim_count + 1,",
+            "recorded_at = excluded.recorded_at",
+            "where workflow_progress.fingerprint is not excluded.fingerprint",
+            "and (@maxClaims = 0 or workflow_progress.claim_count < @maxClaims)"
+          ].join(" ")
+        )
+        .run({
+          fingerprint,
+          fromStateId: edge.fromStateId,
+          issueNumber: edge.issueNumber,
+          maxClaims,
+          projectName: edge.projectName,
+          recordedAt: timestamp(),
+          toStateId: edge.toStateId
+        });
+      if (result.changes === 1) {
+        return "claimed";
+      }
+
+      const existing = this.database
+        .prepare(
+          [
+            "select fingerprint from workflow_progress",
+            "where project_name = ? and issue_number = ?",
+            "and from_state_id = ? and to_state_id = ?"
+          ].join(" ")
+        )
+        .get(
+          edge.projectName,
+          edge.issueNumber,
+          edge.fromStateId,
+          edge.toStateId
+        ) as { fingerprint: string } | undefined;
+      if (existing === undefined) {
+        throw new Error(
+          "workflow progress claim disappeared during transaction"
+        );
+      }
+      return existing.fingerprint === fingerprint
+        ? "unchanged"
+        : "budget_exhausted";
+    });
+    return claim();
   }
 
   // Called at run-chain boundaries (fresh dispatch, terminal) so a
@@ -5109,15 +5147,16 @@ export class RunStore {
 
       -- One row per (issue, park state, transition target) recording the
       -- observation fingerprint the last advance across that edge was taken
-      -- on. A park re-evaluation that would repeat an edge under an identical
-      -- fingerprint has learned nothing since it last ran, so it stays parked
-      -- instead of looping. This is the state machine's only loop-breaker.
+      -- on and the number of accepted claims in this chain. An identical
+      -- fingerprint or an exhausted absolute budget parks instead of looping.
+      -- Together they are the state machine's only loop-breaker.
       create table if not exists workflow_progress (
         project_name text not null,
         issue_number integer not null,
         from_state_id text not null,
         to_state_id text not null,
         fingerprint text not null,
+        claim_count integer not null default 1,
         recorded_at text not null,
         primary key (project_name, issue_number, from_state_id, to_state_id)
       );
@@ -5334,6 +5373,7 @@ export class RunStore {
       ["watchdog_samples", "workspace_digest", "text not null default ''"],
       ["watchdog_samples", "last_progress_at", "text"],
       ["watchdog_sample_history", "last_progress_at", "text"],
+      ["workflow_progress", "claim_count", "integer not null default 1"],
       [
         "watchdog_sample_history",
         "workspace_digest",

@@ -142,11 +142,19 @@ parked position instead (see docs/adr/0090-fsm-position-is-the-only-start-state.
 _Avoid_: arbitrary PR detection
 
 **Progress Guard**:
-The rule that a parked Run may not re-take a transition it already took under an identical
+The dual rule that a parked Run may not re-take a transition it already took under an identical
 observation — the projected signals, the artefact probe, the tracked head SHA, and the review
-conversation. It is the state machine's only loop-breaker, and it bounds cycles that pass through a
-park; a guarded park raises manual attention naming the edge it refused.
+conversation — or after that directed edge exhausts its Edge Claim Budget. It is the state
+machine's only loop-breaker, and it bounds cycles that pass through a park; a guarded park raises
+manual attention naming the edge and whether observation or budget caused the refusal.
 _Avoid_: review dispatch cap (that is the markdown-workflow mechanism it replaces for FSM work)
+
+**Edge Claim Budget**:
+The maximum accepted advances across one `(Project, Issue, from state, to state)` park edge during
+one workflow chain. It defaults to 10 and is configurable per Dispatch Project; zero disables this
+absolute bound without disabling the Progress Guard's fingerprint rule. The count resets only at a
+run-chain boundary.
+_Avoid_: Convergence Budget, review dispatch cap
 
 **Pull Request State**:
 Symphonika's normalized interpretation of a GitHub PR's merged, mergeable, checks, unresolved-thread, and review-decision state; it is the single source of meaning consumed by both Workflow Predicate projection and PR Follow-up verdicts.
@@ -423,7 +431,8 @@ _Avoid_: chat session
 - A **PR Follow-up** watches only PRs associated with completed Symphonika **Runs**
 - A **PR Follow-up** remains eligible while its Issue is open even when workflow labels drift
 - A **PR Follow-up** defers to the **Workflow** when a raw FSM is parked on the **Issue**
-- A **Progress Guard** bounds every **Workflow** cycle that passes through a park
+- A **Progress Guard** combines observation fingerprinting with an **Edge Claim Budget** and bounds
+  every **Workflow** cycle that passes through a park
 - **Pull Request State** is derived from tracker observations and feeds **Workflow Predicate** projection and **PR Follow-up** verdicts
 - Each dispatched **Issue** has exactly one active **Workspace** per run
 - Each **Workspace** uses one **Issue Branch**

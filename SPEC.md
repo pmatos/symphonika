@@ -419,6 +419,8 @@ projects:
         base_branch: main
     agent:
       provider: codex
+    progress_guard:
+      max_claims_per_edge: 10
     dispatch:
       overlap_guard: false
     workflow: ./WORKFLOW.md
@@ -462,6 +464,11 @@ tree back into the workspace walk, but cannot opt into a daemon-disabled Watchdo
 Project overrides are part of the defensive Service Config reload snapshot: any invalid value or
 unknown key rejects the candidate snapshot for all Projects and leaves the last known-good snapshot
 live.
+
+A Dispatch Project may also declare `progress_guard.max_claims_per_edge` as a non-negative integer.
+It defaults to `10` when omitted and bounds the accepted advances across one directed park edge in
+one workflow chain. `0` disables this absolute edge budget while leaving identical-observation
+fingerprinting active. The setting is dispatch-only; Routine Hosts have no workflow walk to guard.
 
 Routine Workspace Retention is a service-level policy under `retention.routine_workspaces`.
 Automatic reclamation defaults to enabled. Successful firing workspaces are retained for `1` day;
@@ -826,6 +833,7 @@ SQLite stores durable orchestration state:
 - per-Run Workflow Contract `evidence.ignore` snapshots
 - normalized event metadata
 - Watchdog samples for no-progress and convergence-budget detection
+- workflow progress fingerprints and accepted claim counts for park-edge cycle detection
 - raw log file paths
 - routines
 - routine firings
@@ -1992,15 +2000,19 @@ Lifecycle:
    waiting Run row and schedules a `wait_park` re-evaluation. If the destination is terminal, the
    waiting Run records `terminal_state_id` and transitions to `succeeded`.
 4. Progress guard. Symphonika fingerprints what the re-evaluation observed — the projected signal
-   map, the artefact probe results for the paths the state's own predicates name, and the tracked
-   head SHA — and records it against `(project, issue, from state, to state)` when an advance is
-   taken. An advance that would repeat an edge under an identical fingerprint has learned nothing
-   since that edge last ran, so it cannot make progress: the Run stays parked and its detail
-   surfaces report the edge it refused as requiring manual attention. Terminal destinations are
-   exempt, since they end the chain and cannot loop. This is the state machine's only loop-breaker.
-   It bounds cycles that pass through a park, which is every cycle a wait state participates in; a
-   cycle among agent states alone is not guarded. Progress history is cleared when a chain reaches a
-   terminal and when a fresh claim opens a new one. See ADR 0090.
+   map, the artefact probe results for the paths the state's own predicates name, the tracked head
+   SHA, and the review-feedback fingerprint — and records it against `(project, issue, from state,
+   to state)` when an advance is taken. An advance that would repeat an edge under an identical
+   fingerprint has learned nothing since that edge last ran, so it cannot make progress. Alongside
+   that test, an absolute accepted-claim count bounds an edge whose fingerprint keeps changing
+   without the workflow converging. The default is `10` accepted advances per edge; a Dispatch
+   Project may override it with `progress_guard.max_claims_per_edge`, and `0` disables only the
+   absolute budget. Either refusal leaves the Run parked and its detail surfaces report the edge and
+   reason as requiring manual attention. Terminal destinations are exempt, since they end the chain
+   and cannot loop. Together these rules are the state machine's only loop-breaker. They bound cycles
+   that pass through a park, which is every cycle a wait state participates in; a cycle among agent
+   states alone is not guarded. Progress history, including claim counts, is cleared when a chain
+   reaches a terminal and when a fresh claim opens a new one. See ADR 0090.
 5. If no transition matches and the wait state's `complete_when` is not violated, the wait stays
    parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick. For a workflow
    whose Issue is not workflow-owned, unresolved review feedback that has exhausted the PR

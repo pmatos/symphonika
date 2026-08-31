@@ -19,6 +19,7 @@ import type { WorkflowFormat } from "./config-schemas.js";
 import {
   pathStringSchema,
   projectDispatchSchema,
+  projectProgressGuardSchema,
   projectWorkspaceSchema,
   rejectDispatchOnlyKeysOnRoutineHost,
   workflowReferenceSchema
@@ -340,6 +341,7 @@ const dispatchProjectSchema = z
     tracker: trackerSchema,
     issue_filters: issueFiltersSchema,
     priority: prioritySchema,
+    progress_guard: projectProgressGuardSchema.optional(),
     workspace: projectWorkspaceSchema,
     agent: agentSchema,
     workflow: workflowReferenceSchema

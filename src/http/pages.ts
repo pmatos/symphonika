@@ -20,7 +20,10 @@ import type {
   WriteIssueLabelsFn
 } from "./app.js";
 import type { AsyncMutex } from "../lifecycle/async-mutex.js";
-import { parseNoProgressReason } from "../lifecycle/progress-fingerprint.js";
+import {
+  parseEdgeBudgetExhaustedReason,
+  parseNoProgressReason
+} from "../lifecycle/progress-fingerprint.js";
 import type { PullRequestState } from "../pull-request-state.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
@@ -274,11 +277,18 @@ export type PullRequestFollowupAttention = {
 // A park the progress guard is holding in place. Reported separately from the
 // review-dispatch cap because it is not a pull-request fact: an artifact-only
 // wait parks this way too, on a workspace that stopped changing.
-export type WorkflowProgressAttention = {
-  attention: "no_progress";
-  fromStateId: string;
-  toStateId: string;
-};
+export type WorkflowProgressAttention =
+  | {
+      attention: "no_progress";
+      fromStateId: string;
+      toStateId: string;
+    }
+  | {
+      attention: "edge_budget_exhausted";
+      fromStateId: string;
+      maxClaims: number;
+      toStateId: string;
+    };
 
 const TERMINAL_FIRING_STATES: ReadonlySet<RoutineFiringState> = new Set([
   "succeeded",
@@ -6661,7 +6671,15 @@ export function buildWorkflowProgressAttention(
     return null;
   }
   const edge = parseNoProgressReason(detail.stateTransitionReason);
-  return edge === null ? null : { attention: "no_progress", ...edge };
+  if (edge !== null) {
+    return { attention: "no_progress", ...edge };
+  }
+  const exhausted = parseEdgeBudgetExhaustedReason(
+    detail.stateTransitionReason
+  );
+  return exhausted === null
+    ? null
+    : { attention: "edge_budget_exhausted", ...exhausted };
 }
 
 function renderWorkflowProgressAttention(
@@ -6669,6 +6687,9 @@ function renderWorkflowProgressAttention(
 ): string {
   if (attention === null) {
     return "";
+  }
+  if (attention.attention === "edge_budget_exhausted") {
+    return `<section class="banner banner--attention"><p class="banner-title">Manual attention required</p><p class="banner-reason">The workflow is parked because <code>${escapeHtml(attention.fromStateId)}</code> &rarr; <code>${escapeHtml(attention.toStateId)}</code> reached its configured edge budget after ${attention.maxClaims} accepted advances: the workflow kept changing without reaching a terminal state.</p></section>`;
   }
   return `<section class="banner banner--attention"><p class="banner-title">Manual attention required</p><p class="banner-reason">The workflow is parked because taking <code>${escapeHtml(attention.fromStateId)}</code> &rarr; <code>${escapeHtml(attention.toStateId)}</code> again would repeat work it already did: nothing it can observe has changed since that transition last ran.</p></section>`;
 }

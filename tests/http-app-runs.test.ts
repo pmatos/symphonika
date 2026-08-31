@@ -8,7 +8,10 @@ import {
   emptyIssuePollStatus,
   type IssueSnapshot
 } from "../src/issue-polling.js";
-import { buildNoProgressReason } from "../src/lifecycle/progress-fingerprint.js";
+import {
+  buildEdgeBudgetExhaustedReason,
+  buildNoProgressReason
+} from "../src/lifecycle/progress-fingerprint.js";
 import { routineEvidencePaths } from "../src/routines/evidence.js";
 import type { RunState } from "../src/run-store.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
@@ -480,6 +483,61 @@ describe("HTTP app — runs API and pages", () => {
       expect(page).toContain("<code>wait_for_pr</code>");
       expect(page).toContain("<code>autofix</code>");
       expect(page).toContain("nothing it can observe has changed");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("surfaces the exhausted edge budget separately from no progress", async () => {
+    const test = await setup();
+    try {
+      const issue = sampleIssue({
+        number: 619,
+        title: "Changing workflow cycle"
+      });
+      test.runStore.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("parent-run", "succeeded");
+      test.runStore.createWaitingRun({
+        currentStateId: "wait_for_pr",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "alpha"
+      });
+      test.runStore.recordWaitingActivity(
+        "waiting-run",
+        buildEdgeBudgetExhaustedReason(
+          { fromStateId: "wait_for_pr", toStateId: "autofix" },
+          10
+        )
+      );
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const detail = (await (
+        await app.request("/api/runs/waiting-run")
+      ).json()) as { workflowProgress: unknown };
+
+      expect(detail.workflowProgress).toEqual({
+        attention: "edge_budget_exhausted",
+        fromStateId: "wait_for_pr",
+        maxClaims: 10,
+        toStateId: "autofix"
+      });
+
+      const page = await (await app.request("/runs/waiting-run")).text();
+      expect(page).toContain("Manual attention required");
+      expect(page).toContain("10 accepted advances");
+      expect(page).toContain("kept changing without reaching a terminal state");
     } finally {
       test.cleanup();
     }

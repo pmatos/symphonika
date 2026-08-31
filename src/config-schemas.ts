@@ -68,6 +68,14 @@ export const projectDispatchSchema = z
   })
   .strict();
 
+export const projectProgressGuardSchema = z
+  .object({
+    // Absolute accepted-claim budget for one directed park edge. Zero keeps
+    // the fingerprint guard but disables this changing-cycle bound.
+    max_claims_per_edge: z.number().int().nonnegative()
+  })
+  .strict();
+
 // A Routine Host has no use for dispatch-only fields — ADR 0062 says they are
 // "unused and rejected", so a stale or copy-pasted dispatch block must be a
 // declaration-time error rather than silently ignored. Shared so `reload` and
@@ -76,6 +84,7 @@ const DISPATCH_ONLY_KEYS = [
   "dispatch",
   "issue_filters",
   "priority",
+  "progress_guard",
   "workflow"
 ] as const;
 

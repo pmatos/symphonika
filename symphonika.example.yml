@@ -120,6 +120,11 @@ projects:
     #   output_token_budget: 400000
     #   max_run_minutes: 720
     #   mtime_include: ["target"]
+    # Park-mediated workflow cycles may take one directed edge ten times per
+    # chain by default. Lower or raise that absolute budget per Project; 0
+    # disables the count while keeping identical-observation fingerprinting.
+    # progress_guard:
+    #   max_claims_per_edge: 10
     tracker:
       kind: github
       owner: pmatos

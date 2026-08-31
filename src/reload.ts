@@ -10,6 +10,7 @@ import type { WorkflowFormat } from "./config-schemas.js";
 import {
   pathStringSchema,
   projectDispatchSchema,
+  projectProgressGuardSchema,
   projectWorkspaceSchema,
   rejectDispatchOnlyKeysOnRoutineHost,
   workflowReferenceSchema
@@ -334,6 +335,7 @@ const routineHostProjectSchema = z
 const runtimeDispatchDetailSchema = z
   .object({
     name: z.string().trim().min(1),
+    progress_guard: projectProgressGuardSchema.optional(),
     watchdog: projectWatchdogConfigSchema.optional(),
     workspace: projectWorkspaceSchema,
     workflow: workflowReferenceSchema
@@ -1154,6 +1156,7 @@ async function loadDispatchProject(input: {
     )?.workflow;
     input.dispatchProjects.push({
       ...pollingProject.data,
+      ...projectProgressGuardOverride(detail.data.progress_guard),
       routines: [],
       ...projectWatchdogOverride(detail.data.watchdog),
       workflow:
@@ -1180,6 +1183,7 @@ async function loadDispatchProject(input: {
   }
   input.dispatchProjects.push({
     ...pollingProject.data,
+    ...projectProgressGuardOverride(detail.data.progress_guard),
     ...projectWatchdogOverride(detail.data.watchdog),
     workflow,
     workspace: detail.data.workspace
@@ -1337,6 +1341,17 @@ function projectWatchdogOverride(
         ? {}
         : { outputTokenBudget: raw.output_token_budget })
     }
+  };
+}
+
+function projectProgressGuardOverride(
+  raw: z.infer<typeof projectProgressGuardSchema> | undefined
+): { progressGuard: { maxClaimsPerEdge: number } } | Record<string, never> {
+  if (raw === undefined) {
+    return {};
+  }
+  return {
+    progressGuard: { maxClaimsPerEdge: raw.max_claims_per_edge }
   };
 }
 

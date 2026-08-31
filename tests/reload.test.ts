@@ -1880,6 +1880,34 @@ describe("RuntimeConfigReloader routine workspace retention", () => {
   });
 });
 
+describe("RuntimeConfigReloader progress guard config", () => {
+  it("loads a Project edge-claim budget, including an explicit opt-out", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    progress_guard:", "      max_claims_per_edge: 4"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.projectsByName().get("symphonika")?.progressGuard).toEqual({
+      maxClaimsPerEdge: 4
+    });
+
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    progress_guard:", "      max_claims_per_edge: 0"]
+    });
+    await reloader.reload();
+
+    expect(reloader.projectsByName().get("symphonika")?.progressGuard).toEqual({
+      maxClaimsPerEdge: 0
+    });
+  });
+});
+
 describe("RuntimeConfigReloader watchdog config", () => {
   it("resolves a Project grace override while inheriting daemon settings", async () => {
     const root = await makeTempRoot();

@@ -145,6 +145,13 @@ explicitly. Every provider runs as a transient scope inside `symphonika-provider
 per-scope cap in `process-scope.ts` bounds one provider. No code change was needed, only a comment
 that stops the next reader reaching the same conclusion.
 
+**Superseded in part by ADR 0089 (`provider-memory-is-the-kernels-problem`)**: #603 removes the
+per-scope `MemoryHigh=`/`MemoryMax=` entirely — provider scopes now set no memory properties at
+all, and the `src/service.ts` comment cited above is gone with them — and drops `MemoryHigh=` from
+the slice as well, because a soft limit on a slice every concurrent provider shares throttled all
+of them at once with `oom_kill 0`. The aggregate reading above survives: the slice's
+`MemoryMax=32G` still bounds the total, and is now the only memory ceiling in the path.
+
 ## Consequences
 
 - A host under sustained memory pressure stops claiming new work instead of adding to the stall.

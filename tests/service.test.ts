@@ -205,10 +205,18 @@ describe("renderProvidersSliceUnit", () => {
     expect(renderProvidersSliceUnit()).toBe(onDisk);
   });
 
-  it("keeps the previously shared budget for spawned providers", () => {
-    expect(renderProvidersSliceUnit()).toContain("MemoryHigh=24G");
+  it("caps spawned providers with a hard ceiling and a task limit", () => {
     expect(renderProvidersSliceUnit()).toContain("MemoryMax=32G");
     expect(renderProvidersSliceUnit()).toContain("TasksMax=4096");
+  });
+
+  // Regression: MemoryHigh= on a slice shared by every concurrent provider
+  // throttles reclaim and socket allocation for all of them together while
+  // killing none, which stalled whole routine fan-outs for their full
+  // deadline with oom_kill=0. MemoryMax= kills; MemoryHigh= only stalls
+  // (docs/adr/0089).
+  it("declares no soft memory limit on the shared providers slice", () => {
+    expect(renderProvidersSliceUnit()).not.toMatch(/^MemoryHigh=/m);
   });
 });
 

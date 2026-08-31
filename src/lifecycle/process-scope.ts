@@ -83,8 +83,6 @@ export type ProcessScopeOptions = {
     timeoutMs: number
   ) => Promise<boolean>;
   isAvailable?: () => Promise<boolean>;
-  memoryHigh?: string;
-  memoryMax?: string;
   probeTimeoutMs?: number;
   runStop?: (unitName: string) => Promise<void>;
   slice?: string;
@@ -102,16 +100,12 @@ export type ProcessScope = {
 };
 
 const DEFAULT_PROVIDERS_SLICE = "symphonika-providers.slice";
-const DEFAULT_MEMORY_HIGH = "24G";
-const DEFAULT_MEMORY_MAX = "32G";
 const DEFAULT_STOP_TIMEOUT_MS = 10_000;
 
 export function createProcessScope(
   options: ProcessScopeOptions = {}
 ): ProcessScope {
   const slice = options.slice ?? DEFAULT_PROVIDERS_SLICE;
-  const memoryHigh = options.memoryHigh ?? DEFAULT_MEMORY_HIGH;
-  const memoryMax = options.memoryMax ?? DEFAULT_MEMORY_MAX;
   const stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
   const runStop =
     options.runStop ?? ((unitName) => defaultRunStop(unitName, stopTimeoutMs));
@@ -139,6 +133,25 @@ export function createProcessScope(
         return command;
       }
 
+      // Deliberately no MemoryHigh=/MemoryMax= here. Per-scope caps set to
+      // the providers slice's own budget isolated nothing — they only
+      // restated the ceiling already in force — and dividing that budget by
+      // max_in_flight would kill legitimately heavy work (one ESBMC
+      // verification has been measured at ~21 GB). `memory.high` is also a
+      // throttle rather than a limit: once the shared slice crossed it, every
+      // task in the subtree was reclaim- and socket-throttled together while
+      // `oom_kill` stayed 0, and a freshly spawned provider (almost pure new
+      // allocation) could not finish its first HTTPS request, hanging for the
+      // whole run deadline instead of failing. Host memory pressure is the
+      // kernel's job; the slice keeps a hard MemoryMax= as a backstop. See
+      // docs/adr/0089.
+      //
+      // OOMPolicy=kill sets memory.oom.group=1 on the scope, so a kernel OOM
+      // kill takes the provider's entire process tree (its build tools with
+      // it) rather than one descendant, and the run fails visibly instead of
+      // hanging on a half-dead pipeline. `-p OOMScoreAdjust=` is not an
+      // option here: scope units carry no exec context and systemd-run
+      // rejects it outright with "Unknown assignment" (systemd 261).
       return {
         args: [
           "--user",
@@ -147,9 +160,7 @@ export function createProcessScope(
           `--unit=${scopeUnitName(run)}`,
           "--collect",
           "-p",
-          `MemoryHigh=${memoryHigh}`,
-          "-p",
-          `MemoryMax=${memoryMax}`,
+          "OOMPolicy=kill",
           "--",
           command.executable,
           ...command.args

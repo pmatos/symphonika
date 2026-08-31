@@ -87,9 +87,7 @@ describe("createProcessScope.wrapForProviderScope", () => {
         "--unit=symphonika-run-abc123-attempt-1.scope",
         "--collect",
         "-p",
-        "MemoryHigh=24G",
-        "-p",
-        "MemoryMax=32G",
+        "OOMPolicy=kill",
         "--",
         "codex",
         "--flag",
@@ -98,19 +96,51 @@ describe("createProcessScope.wrapForProviderScope", () => {
     });
   });
 
-  it("honors custom slice and memory cap options", async () => {
+  // Regression: per-scope MemoryHigh=/MemoryMax= used to be set to the
+  // providers slice's own budget, so every scope was authorised to consume
+  // the entire slice and the limits isolated nothing. Worse, the soft limit
+  // throttled reclaim and socket allocation across the whole shared slice
+  // without ever killing the process at fault. Host memory is the kernel's
+  // job now; the slice keeps a hard MemoryMax= as its only ceiling
+  // (docs/adr/0089).
+  it("sets no per-scope memory limits", async () => {
+    const scope = createProcessScope({
+      isAvailable: () => Promise.resolve(true)
+    });
+
+    const wrapped = await scope.wrapForProviderScope(RUN, COMMAND);
+
+    expect(wrapped.args.some((arg) => arg.startsWith("MemoryHigh="))).toBe(
+      false
+    );
+    expect(wrapped.args.some((arg) => arg.startsWith("MemoryMax="))).toBe(
+      false
+    );
+  });
+
+  // OOMPolicy=kill sets memory.oom.group=1, so a kernel OOM kill takes the
+  // provider's whole tree (build tools included) instead of one descendant,
+  // failing the run visibly rather than leaving it hung on a half-dead
+  // pipeline.
+  it("kills the whole scope cgroup on a kernel OOM kill", async () => {
+    const scope = createProcessScope({
+      isAvailable: () => Promise.resolve(true)
+    });
+
+    const wrapped = await scope.wrapForProviderScope(RUN, COMMAND);
+
+    expect(wrapped.args).toContain("OOMPolicy=kill");
+  });
+
+  it("honors a custom slice option", async () => {
     const scope = createProcessScope({
       isAvailable: () => Promise.resolve(true),
-      memoryHigh: "8G",
-      memoryMax: "12G",
       slice: "custom.slice"
     });
 
     const wrapped = await scope.wrapForProviderScope(RUN, COMMAND);
 
     expect(wrapped.args).toContain("--slice=custom.slice");
-    expect(wrapped.args).toContain("MemoryHigh=8G");
-    expect(wrapped.args).toContain("MemoryMax=12G");
   });
 });
 

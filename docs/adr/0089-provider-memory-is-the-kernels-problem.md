@@ -68,7 +68,8 @@ isolate anything when eight of them are admitted, which is the same contradictio
 24G expressed — a fair share cannot be both.
 
 Admission control is the right place to resolve that contradiction, and it is not a cgroup
-property. #599 (gate dispatch on host memory and IO pressure) decides whether the host can afford
+property. #599 (gate dispatch on host memory and IO pressure), landed as ADR 0088
+(`host-pressure-dispatch-gate-and-disk-backed-scratch`), decides whether the host can afford
 another provider *before* one is spawned; this decision only stops the cgroup configuration from
 manufacturing stalls in the meantime.
 

@@ -135,9 +135,17 @@ _Avoid_: orchestrator workflow
 
 **PR Follow-up**:
 The orchestrator-owned polling loop for pull requests discovered from Symphonika-created Issue
-Branches; it re-dispatches review feedback as workflow-owned, label-immune continuation work and
-merges PRs only when policy says they are clear.
+Branches. It observes every tracked PR, but acts only on Issues no raw FSM workflow is parked on:
+for those it re-dispatches review feedback as workflow-owned, label-immune continuation work and
+merges PRs only when policy says they are clear. A workflow-owned Issue decides both from its own
+parked position instead (see docs/adr/0090-fsm-position-is-the-only-start-state.md).
 _Avoid_: arbitrary PR detection
+
+**Progress Guard**:
+The rule that a parked Run may not re-take a transition it already took under an identical
+observation — the projected signals, the artefact probe, and the tracked head SHA. It is the state
+machine's only loop-breaker; a guarded park raises manual attention naming the edge it refused.
+_Avoid_: review dispatch cap (that is the markdown-workflow mechanism it replaces for FSM work)
 
 **Pull Request State**:
 Symphonika's normalized interpretation of a GitHub PR's merged, mergeable, checks, unresolved-thread, and review-decision state; it is the single source of meaning consumed by both Workflow Predicate projection and PR Follow-up verdicts.
@@ -413,6 +421,8 @@ _Avoid_: chat session
 - A **Coding Agent** owns the **PR Workflow**
 - A **PR Follow-up** watches only PRs associated with completed Symphonika **Runs**
 - A **PR Follow-up** remains eligible while its Issue is open even when workflow labels drift
+- A **PR Follow-up** defers to the **Workflow** when a raw FSM is parked on the **Issue**
+- A **Progress Guard** bounds every cycle a **Workflow** can express
 - **Pull Request State** is derived from tracker observations and feeds **Workflow Predicate** projection and **PR Follow-up** verdicts
 - Each dispatched **Issue** has exactly one active **Workspace** per run
 - Each **Workspace** uses one **Issue Branch**

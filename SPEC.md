@@ -1909,13 +1909,25 @@ On each daemon tick, Symphonika discovers open PRs for succeeded runs whose Issu
 tracked. For each tracked open PR:
 
 1. Fetch PR review state, unresolved review threads, status-check rollup, head SHA, and mergeability.
-2. If unresolved review threads or requested changes exist, start a follow-up Run in the same
+2. If a raw FSM workflow is parked at a state of its own for this Issue, record the observation and
+   take no action: the workflow owns both the review feedback and the merge, and decides what
+   happens next from its own parked position on its own re-evaluation tick. Steps 3 to 6 apply only
+   to Issues no workflow is parked on. See ADR 0090.
+3. If unresolved review threads or requested changes exist, start a follow-up Run in the same
    Workspace and Issue Branch. The prompt includes the review thread context and tells the agent not
    to open a second PR.
-3. Do not repeat the same review follow-up for the same head SHA and review-feedback fingerprint.
-4. Stop automatic review follow-up after `pull_requests.review_followup.max_dispatches_per_pr`.
-5. If the PR is open, non-draft, mergeable, has no unresolved review feedback, satisfies the review
+4. Do not repeat the same review follow-up for the same head SHA and review-feedback fingerprint.
+5. Stop automatic review follow-up after `pull_requests.review_followup.max_dispatches_per_pr`.
+6. If the PR is open, non-draft, mergeable, has no unresolved review feedback, satisfies the review
    policy, and has passing status checks when required, merge it using the configured merge method.
+
+A review follow-up Run never picks its own start state. For a raw FSM this loop does not dispatch at
+all, so the only entry point is the transition the parked state itself names — a wait state that
+routes reviewer feedback (`has_unresolved_reviews: true`) into a repair state, with the observed
+thread context carried into that state's prompt. A wait state naming no such transition parks and
+raises manual attention rather than being replayed from `workflow.initial`. Markdown
+compatibility-graph workflows have no state machine and no position, so this loop remains their
+follow-up route and their single entry point is the right one.
 
 A successful PR Follow-up observation requires a non-empty `headRefOid` from the same GraphQL
 response that supplies mergeability, checks, and review state. GitHub declares this field as
@@ -1927,9 +1939,12 @@ because pairing a newer REST head with GraphQL readiness evaluated for another c
 the commit-identity guarantee while adding another polling call.
 
 Review follow-up Runs ignore `labels_all` and `labels_none` from the moment their in-flight slot is
-reserved, including workspace preparation and provider validation. Issue closure and operator
-cancellation still cancel them. Fresh dispatches and ordinary label-controlled Continuations keep
-their existing label eligibility checks.
+reserved, including workspace preparation and provider validation. Every raw FSM state advance has
+the same immunity from the same moment, decided at the claim rather than after the attempt's
+workflow reload — a raw FSM legitimately removes its own eligibility label as it works, so a
+reconcile landing between slot reservation and provider attachment must not cancel it. Issue closure
+and operator cancellation still cancel them. Fresh dispatches and ordinary label-controlled
+Continuations keep their existing label eligibility checks.
 
 Every successful tracked-PR observation durably records whether the PR is open, still has unresolved
 review feedback, and has exhausted the configured review-dispatch cap. A transient observation
@@ -1970,19 +1985,31 @@ Lifecycle:
    (`pr_open`, `pr_merged`, `mergeable`, `checks`, `review_decision`,
    `has_unresolved_reviews`, `unresolved_review_threads`) and emits a static
    `provider_success: true`, then evaluates the wait state's transitions in file order.
-3. The first matching transition wins. If the destination is an agent state, Symphonika schedules
-   a `state_advance` that runs the agent through `runFreshLifecycle`. If the destination is another
-   wait state, Symphonika creates a new waiting Run row and schedules a `wait_park` re-evaluation.
-   If the destination is terminal, the waiting Run records `terminal_state_id` and transitions to
-   `succeeded`.
-4. If no transition matches and the wait state's `complete_when` is not violated, the wait stays
-   parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick. If unresolved
-   review feedback has exhausted the PR Follow-up dispatch cap, the Run remains parked and its
-   detail surfaces identify the tracked PR and require manual attention.
-5. Issue close cancels a waiting Run with `cancel_reason = "closed_issue"`. Operator cancel marks
+3. The first matching transition wins, subject to the progress guard below. If the destination is
+   an agent state, Symphonika schedules a `state_advance` that runs the agent through
+   `runFreshLifecycle`, carrying the observed review thread context into that state's prompt when
+   unresolved threads exist. If the destination is another wait state, Symphonika creates a new
+   waiting Run row and schedules a `wait_park` re-evaluation. If the destination is terminal, the
+   waiting Run records `terminal_state_id` and transitions to `succeeded`.
+4. Progress guard. Symphonika fingerprints what the re-evaluation observed — the projected signal
+   map, the artefact probe results for the paths the state's own predicates name, and the tracked
+   head SHA — and records it against `(project, issue, from state, to state)` when an advance is
+   taken. An advance that would repeat an edge under an identical fingerprint has learned nothing
+   since that edge last ran, so it cannot make progress: the Run stays parked and its detail
+   surfaces report the edge it refused as requiring manual attention. Terminal destinations are
+   exempt, since they end the chain and cannot loop. This is the state machine's only loop-breaker
+   and bounds every cycle a workflow author can write, not only the review-feedback one. Progress
+   history is cleared when a chain reaches a terminal and when a fresh claim opens a new one. See
+   ADR 0090.
+5. If no transition matches and the wait state's `complete_when` is not violated, the wait stays
+   parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick. For a workflow
+   whose Issue is not workflow-owned, unresolved review feedback that has exhausted the PR
+   Follow-up dispatch cap also leaves the Run parked, with its detail surfaces identifying the
+   tracked PR and requiring manual attention.
+6. Issue close cancels a waiting Run with `cancel_reason = "closed_issue"`. Operator cancel marks
    the cancel reason; the next re-evaluation tick observes the cancel-requested flag and
    transitions the Run to `cancelled`.
-6. Label or dependency drift does not cancel a waiting Run. Mid-walk runs are immune to
+7. Label or dependency drift does not cancel a waiting Run. Mid-walk runs are immune to
    `labels_all`, `labels_none`, and Dependency Gate re-checks; the FSM owns transitions while the
    walk is in flight (ADR 0046 and ADR 0082, carried over to wait states by ADR 0047).
 

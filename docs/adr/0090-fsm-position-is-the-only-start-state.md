@@ -1,0 +1,64 @@
+# The FSM position is the only thing that names a start state
+
+Nothing outside a raw FSM chooses where its work resumes. A provider launches only at the state the
+state machine advanced to. This supersedes the paragraph in ADR 0044 beginning "The follow-up run's
+Continuation parent is 'record-keeping only'" through its "starts at the workflow's `initial` state"
+sentence, and widens ADR 0048's merge-only deference into the general rule.
+
+ADR 0044 gave PR review follow-up its own dispatcher, reasoning that the run associated with a
+tracked pull request is by construction parked at a `wait`/`merge_pr` state, and that a parked
+position is never a valid start state for a fresh dispatch. The premise is true. The conclusion —
+start at `expandedWorkflow.initial` instead — does not follow from it. A parked position is not a
+state you can launch a provider at, but it is very close to the right answer: it is the state whose
+own transitions say what the workflow wants done about the pull request in front of it. Starting at
+`initial` instead replayed the whole pipeline — plan, implement, review, simplify — against a pull
+request that was already complete, and left the Issue with two live FSM positions: the untouched
+parked row, and the fresh chain racing it. One occurrence cost a single five-hour run; the review
+dispatch counter reached four on merged PRs across several projects.
+
+So the parked position decides, and the deference that ADR 0048 gave to `merge_pr` states now
+covers the whole follow-up loop. `isIssueOwnedByWorkflow` asks whether a raw-FSM workflow is parked
+at a state of its own; when it is, `runPullRequestFollowup` observes and records but acts on
+neither the merge nor the review feedback. This makes the double position unrepresentable rather
+than merely guarded against — there is no second dispatcher left to race. `dispatchReviewFollowup`
+refuses raw_fsm outright, including when no run is parked: a raw FSM that is not parked has
+terminated or blocked, and replaying it from the top is no more correct there. It remains the
+follow-up route for markdown compatibility-graph workflows, which have no state machine, no
+position, and for which the single entry point is the right and only answer.
+
+Where review feedback lands is therefore a workflow-authoring question, answered in the workflow
+file. No new contract syntax was needed: `has_unresolved_reviews` has been a live `pr_signal`
+predicate since ADR 0048's predicate vocabulary, projected by `projectPullRequestSignals` on every
+park re-evaluation, and simply unused because ADR 0044 had assigned this case elsewhere. A wait
+state that does not name the case is one nothing handles: the run parks and raises manual
+attention. That is a real behaviour change for workflow files that never authored the transition,
+and it is the intended one — a visible park beats an invisible replay.
+
+Moving review rounds onto the park-to-advance path put them inside the state machine's cycles, and
+the state machine had no cycle guard at all. Nothing bounded `autofix → wait_for_pr → autofix`; it
+had simply been unreachable, because no workflow authored a transition that could enter it, and the
+one case that could reach it went through the global loop's per-PR dispatch cap and feedback
+fingerprint. Porting that cap inward would have kept "review" as a special concept inside the FSM
+while leaving every other cycle an author can write unguarded.
+
+The guard is therefore workflow-agnostic and phrased in terms of observation rather than counting.
+Each park-to-advance records a fingerprint of everything the re-evaluation observed — the projected
+signal map, the artifact probe results for the paths the state's own predicates name, and the
+tracked head SHA — keyed by `(project, issue, from state, to state)`. An advance that would repeat
+an edge under an identical fingerprint has learned nothing since that edge last ran, so it cannot
+make progress; the run stays parked and reports a `no_progress` manual-attention warning naming the
+edge it refused. The head SHA is part of the observation and not derived from it:
+`unresolved_review_threads` is a count, so a push that changed the code while leaving check status
+and thread count untouched would otherwise hash identically to the tick before it.
+
+Two exemptions keep the guard from parking work that is genuinely progressing. Terminal targets are
+never guarded — they end the chain and cannot loop. Agent-outcome advances are out of scope
+entirely: the agent ran, so something plausibly changed, its signals are agent signals rather than
+pull-request ones, and every cycle passes through a park anyway, so guarding the park side alone is
+sufficient. Progress history is cleared when a chain reaches a terminal and when a fresh claim opens
+a new one, so a re-dispatched Issue is never parked on an edge its own chain has not taken.
+
+`maxReviewDispatchesPerPr` and the `cap_reached` attention it raises remain live for markdown
+workflows, which still dispatch through the global loop. For a workflow-owned Issue the cap cannot
+be reached on a pull request that loop never dispatches for, and the progress guard raises the
+attention instead.

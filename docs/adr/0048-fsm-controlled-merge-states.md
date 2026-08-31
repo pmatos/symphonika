@@ -52,3 +52,7 @@ the same predicate the wait state uses; expressing "the merge cannot proceed" us
 `unresolved_review_threads` predicates. This keeps the predicate vocabulary small and avoids a
 divergence between the orchestrator-wide PR follow-up loop and the FSM-controlled merge path,
 echoing ADR 0047's reasoning for sharing `projectPullRequestSignals`.
+
+**Widened by ADR 0090.** The deference this ADR gives the global loop was scoped to `merge_pr`
+states. It now covers any raw-FSM workflow parked at a state of its own, and covers the review
+feedback as well as the merge: `isIssueOwnedByWorkflow` replaces `isIssueParkedInMergePrState`.

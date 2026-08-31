@@ -4444,6 +4444,77 @@ export class RunStore {
       });
   }
 
+  // The observation fingerprint the last advance from `fromStateId` to
+  // `toStateId` was taken on, or undefined when that edge has never been
+  // taken for this issue. Keyed by issue rather than run id because each park
+  // creates a fresh waiting row: a cycle through a park would otherwise never
+  // see its own history.
+  readProgressFingerprint(input: {
+    fromStateId: string;
+    issueNumber: number;
+    projectName: string;
+    toStateId: string;
+  }): string | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select fingerprint",
+          "from workflow_progress",
+          "where project_name = ? and issue_number = ?",
+          "and from_state_id = ? and to_state_id = ?"
+        ].join(" ")
+      )
+      .get(
+        input.projectName,
+        input.issueNumber,
+        input.fromStateId,
+        input.toStateId
+      ) as { fingerprint: string } | undefined;
+    return row?.fingerprint;
+  }
+
+  recordProgressFingerprint(input: {
+    fingerprint: string;
+    fromStateId: string;
+    issueNumber: number;
+    projectName: string;
+    toStateId: string;
+  }): void {
+    this.database
+      .prepare(
+        [
+          "insert into workflow_progress",
+          "(project_name, issue_number, from_state_id, to_state_id, fingerprint, recorded_at)",
+          "values (@projectName, @issueNumber, @fromStateId, @toStateId, @fingerprint, @recordedAt)",
+          "on conflict(project_name, issue_number, from_state_id, to_state_id)",
+          "do update set fingerprint = excluded.fingerprint,",
+          "recorded_at = excluded.recorded_at"
+        ].join(" ")
+      )
+      .run({
+        fingerprint: input.fingerprint,
+        fromStateId: input.fromStateId,
+        issueNumber: input.issueNumber,
+        projectName: input.projectName,
+        recordedAt: timestamp(),
+        toStateId: input.toStateId
+      });
+  }
+
+  // Called at run-chain boundaries (fresh dispatch, terminal) so a
+  // re-dispatched Issue starts with no history and is not parked by an edge
+  // a previous chain already walked.
+  clearProgressFingerprints(input: {
+    issueNumber: number;
+    projectName: string;
+  }): void {
+    this.database
+      .prepare(
+        "delete from workflow_progress where project_name = ? and issue_number = ?"
+      )
+      .run(input.projectName, input.issueNumber);
+  }
+
   // Used by the global PR follow-up loop to decide whether a tracked PR's
   // merge belongs to the FSM (when a workflow has parked the run in a
   // `merge_pr` state) or to the global auto-merge path. Returns the most
@@ -5037,6 +5108,21 @@ export class RunStore {
         created_at text not null,
         updated_at text not null,
         primary key (project_name, pr_number)
+      );
+
+      -- One row per (issue, park state, transition target) recording the
+      -- observation fingerprint the last advance across that edge was taken
+      -- on. A park re-evaluation that would repeat an edge under an identical
+      -- fingerprint has learned nothing since it last ran, so it stays parked
+      -- instead of looping. This is the state machine's only loop-breaker.
+      create table if not exists workflow_progress (
+        project_name text not null,
+        issue_number integer not null,
+        from_state_id text not null,
+        to_state_id text not null,
+        fingerprint text not null,
+        recorded_at text not null,
+        primary key (project_name, issue_number, from_state_id, to_state_id)
       );
 
       create table if not exists pull_request_merge_attempts (

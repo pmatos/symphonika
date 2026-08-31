@@ -204,7 +204,8 @@ describe("daemon watchdog", () => {
     const root = await makeTempRoot();
     await writeProject(root, {
       evidenceIgnore: ["vendor/"],
-      graceMinutes: 10
+      graceMinutes: 10,
+      pollingIntervalMs: 60_000
     });
     const prepared = preparedWorkspaceFixture(root);
     await mkdir(path.join(prepared.workspacePath, "vendor"), {
@@ -227,9 +228,23 @@ describe("daemon watchdog", () => {
       await waitForRunState(daemon.url, "running");
       await replaceProjectWithRoutineHost(root);
 
-      const run = await waitForRunState(daemon.url, "stale", {
-        timeoutMs: 1_000
+      // Drive the two Watchdog samples explicitly. A minimum delay controls
+      // its clock; poll-now, rather than scheduler responsiveness, runs it.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const baselineResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
       });
+      expect(baselineResponse.status).toBe(200);
+      expect(
+        await getRun(daemon.url, "run-watchdog-removed-project")
+      ).toMatchObject({ state: "running" });
+
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      const staleResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(staleResponse.status).toBe(200);
+      const run = await getRun(daemon.url, "run-watchdog-removed-project");
       expect(run).toMatchObject({
         id: "run-watchdog-removed-project",
         state: "stale",
@@ -617,6 +632,7 @@ async function writeProject(
     evidenceIgnore?: string[];
     graceMinutes?: number;
     outputTokenBudget?: number;
+    pollingIntervalMs?: number;
   } = {}
 ): Promise<void> {
   await writeFile(
@@ -625,7 +641,7 @@ async function writeProject(
       "state:",
       "  root: ./.symphonika",
       "polling:",
-      "  interval_ms: 20",
+      `  interval_ms: ${options.pollingIntervalMs ?? 20}`,
       "watchdog:",
       "  enabled: true",
       `  grace_minutes: ${options.graceMinutes ?? 0.001}`,
@@ -717,7 +733,7 @@ async function replaceProjectWithRoutineHost(root: string): Promise<void> {
       "state:",
       "  root: ./.symphonika",
       "polling:",
-      "  interval_ms: 20",
+      "  interval_ms: 60000",
       "watchdog:",
       "  enabled: true",
       "  grace_minutes: 0.001",

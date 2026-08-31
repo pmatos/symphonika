@@ -2,6 +2,7 @@ import type { Logger } from "pino";
 
 import {
   findPolledIssueSnapshot,
+  sameIssueRepository,
   tryGetIssue,
   type GitHubIssuesApi,
   type IssuePollStatus
@@ -49,6 +50,30 @@ export async function reconcileActiveRuns(
       // Routine Firing on a project that is also a Dispatch Project has its
       // synthetic issue number looked up on GitHub, resolves to "not
       // found", and is incorrectly cancelled with CLOSED_ISSUE.
+      continue;
+    }
+
+    // Refuse to reconcile across a repository boundary. A retargeted tracker
+    // makes the poll lookup below miss (it keys on the tracker's repository),
+    // which sends handleMissingFromPoll's getIssue to the *new* repository:
+    // a same-numbered Issue that is closed or absent there then cancels this
+    // Run with CLOSED_ISSUE on evidence from an Issue it never touched.
+    // Deferring costs nothing — the Project's tracker is either restored or
+    // the Run reaches its own terminal state. An undetermined origin (legacy
+    // row, non-GitHub URL) proves no mismatch and is reconciled as before.
+    // See docs/adr/0089.
+    const origin = input.runStore.getRunIssueRepository(entry.runId);
+    if (origin !== undefined && !sameIssueRepository(origin, project.tracker)) {
+      input.logger.warn(
+        {
+          issueNumber: entry.issueNumber,
+          origin: `${origin.owner}/${origin.repo}`,
+          project: entry.projectName,
+          runId: entry.runId,
+          tracker: `${project.tracker.owner}/${project.tracker.repo}`
+        },
+        "symphonika reconcile skipped: project tracker no longer points at the run's repository"
+      );
       continue;
     }
 

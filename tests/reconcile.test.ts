@@ -134,6 +134,97 @@ describe("reconcileActiveRuns", () => {
     });
   });
 
+  it("defers instead of cancelling when the tracker no longer points at the run's repository", async () => {
+    await withRunStore(async (store) => {
+      // The run's issue lived in acme/alpha; the project has since been
+      // retargeted to acme/beta. Without the origin gate the poll lookup
+      // misses, getIssue asks acme/beta about #7, and a closed same-numbered
+      // issue there cancels this run on evidence it never touched.
+      store.createRun({
+        id: "run-a",
+        issue: snapshot({ url: "https://github.com/acme/alpha/issues/7" }),
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const registry = new ActiveRunRegistry();
+      registry.register({
+        cancel,
+        issueNumber: 7,
+        projectName: project.name,
+        runId: "run-a"
+      });
+
+      const retargeted: RunControllerProjectConfig = {
+        ...project,
+        tracker: { ...project.tracker!, owner: "acme", repo: "beta" }
+      };
+      const githubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue(null),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+
+      await reconcileActiveRuns({
+        activeRuns: registry,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi,
+        logger,
+        pollStatus: emptyIssuePollStatus(),
+        projects: new Map([[retargeted.name, retargeted]]),
+        runStore: store
+      });
+
+      expect(cancel).not.toHaveBeenCalled();
+      expect(githubIssuesApi.getIssue).not.toHaveBeenCalled();
+      expect(store.listRuns()[0]?.cancelReason).toBeNull();
+    });
+  });
+
+  it("reconciles a run whose origin matches the tracker under different casing", async () => {
+    await withRunStore(async (store) => {
+      store.createRun({
+        id: "run-a",
+        issue: snapshot({ url: "https://github.com/ACME/Alpha/issues/7" }),
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const registry = new ActiveRunRegistry();
+      registry.register({
+        cancel,
+        issueNumber: 7,
+        projectName: project.name,
+        runId: "run-a"
+      });
+
+      const retargeted: RunControllerProjectConfig = {
+        ...project,
+        tracker: { ...project.tracker!, owner: "acme", repo: "alpha" }
+      };
+      const githubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue(null),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+
+      await reconcileActiveRuns({
+        activeRuns: registry,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi,
+        logger,
+        pollStatus: emptyIssuePollStatus(),
+        projects: new Map([[retargeted.name, retargeted]]),
+        runStore: store
+      });
+
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(registry.get("run-a")?.cancelReason).toBe(
+        CANCEL_REASONS.CLOSED_ISSUE
+      );
+    });
+  });
+
   it("cancels with eligibility_loss when poll snapshot adds excluded label", async () => {
     await withRunStore(async (store) => {
       store.createRun({

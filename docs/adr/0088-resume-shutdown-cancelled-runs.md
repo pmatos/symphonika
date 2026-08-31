@@ -177,8 +177,9 @@ and it still discards the walk.
   `writeIssueLabels` and the snapshot-backed dashboard actions, not to the daemon passes. The
   `findPolledIssueSnapshot` key and the origin/tracker refusal above extend the same principle to
   this pass only; doing it for `reconcileActiveRuns` and `detectStaleClaims` needs durable
-  repository columns on `runs` and is tracked separately (#602), along with partitioning the
-  newest-Run relation itself by repository.
+  repository columns on `runs` and is tracked separately, along with partitioning the newest-Run
+  relation itself by repository. **Superseded by ADR 0089**, which adds those columns, partitions
+  the relation, and closes both sibling gates.
 
 ## Numbering
 

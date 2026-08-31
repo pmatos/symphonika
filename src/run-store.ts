@@ -5716,7 +5716,7 @@ function nextRoutineFiringTransitionSequence(
 // non-GitHub trackers, or a snapshot written before `url` was populated — so
 // callers treat "cannot tell" as "no mismatch proven" rather than as a
 // mismatch.
-export function parseIssueRepositoryUrl(
+function parseIssueRepositoryUrl(
   url: unknown
 ): { owner: string; repo: string } | undefined {
   if (typeof url !== "string") {

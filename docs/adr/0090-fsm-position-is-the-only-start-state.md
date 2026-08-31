@@ -43,13 +43,29 @@ while leaving every other cycle an author can write unguarded.
 
 The guard is therefore workflow-agnostic and phrased in terms of observation rather than counting.
 Each park-to-advance records a fingerprint of everything the re-evaluation observed — the projected
-signal map, the artifact probe results for the paths the state's own predicates name, and the
-tracked head SHA — keyed by `(project, issue, from state, to state)`. An advance that would repeat
-an edge under an identical fingerprint has learned nothing since that edge last ran, so it cannot
-make progress; the run stays parked and reports a `no_progress` manual-attention warning naming the
-edge it refused. The head SHA is part of the observation and not derived from it:
-`unresolved_review_threads` is a count, so a push that changed the code while leaving check status
-and thread count untouched would otherwise hash identically to the tick before it.
+signal map, the artefact probe results for the paths the state's own predicates name, the tracked
+head SHA, and the pull request's review-feedback fingerprint — keyed by
+`(project, issue, from state, to state)`. An advance that would repeat an edge under an identical
+fingerprint has learned nothing since that edge last ran, so it cannot make progress; the run stays
+parked and reports a `no_progress` manual-attention warning naming the edge it refused.
+
+The last two inputs are in the fingerprint because the projected signals cannot express either on
+their own, and both false-park a workflow that was in fact progressing. `unresolved_review_threads`
+is a count, so a push that changed the code while leaving check status and thread count untouched
+would hash identically to the tick before it; and a reviewer who resolves one thread while opening
+another moves no projected signal at all, so a changed conversation at an unchanged count would read
+as no change. Reusing the review-feedback fingerprint `PullRequestState` already computes — thread
+ids, comment bodies, review decision — answers the second, and is the same value the global loop
+uses to decide a markdown workflow's review round is new.
+
+What the guard deliberately does not do is bound a cycle whose observation genuinely changes each
+round. An agent that pushes something every time it runs, without ever resolving the feedback, moves
+the head SHA and so never trips the guard. `maxReviewDispatchesPerPr` was an absolute count and did
+bound that case; nothing replaces it for a workflow-owned Issue, which leaves the per-run watchdog
+caps (ADR 0089) as the only ceiling on such a loop. Adding an absolute per-edge budget alongside the
+fingerprint is the obvious complement and is deliberately deferred, not overlooked: it is a second
+mechanism with its own failure mode (killing a long but genuinely converging repair loop), and the
+fingerprint covers the case actually observed in issue #616.
 
 Two exemptions keep the guard from parking work that is genuinely progressing. Terminal targets are
 never guarded — they end the chain and cannot loop. Agent-outcome advances are out of scope

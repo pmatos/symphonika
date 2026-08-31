@@ -8,7 +8,7 @@ import {
   emptyIssuePollStatus,
   type IssueSnapshot
 } from "../src/issue-polling.js";
-import { formatNoProgressReason } from "../src/lifecycle/progress-fingerprint.js";
+import { buildNoProgressReason } from "../src/lifecycle/progress-fingerprint.js";
 import { routineEvidencePaths } from "../src/routines/evidence.js";
 import type { RunState } from "../src/run-store.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
@@ -459,7 +459,10 @@ describe("HTTP app — runs API and pages", () => {
 
       test.runStore.recordWaitingActivity(
         "waiting-run",
-        formatNoProgressReason("wait_for_pr", "autofix")
+        buildNoProgressReason({
+          fromStateId: "wait_for_pr",
+          toStateId: "autofix"
+        })
       );
 
       const detail = (await (

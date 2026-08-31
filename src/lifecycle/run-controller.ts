@@ -45,7 +45,7 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
-import type { CancelReason, RunStore } from "../run-store.js";
+import type { CancelReason, ProgressEdge, RunStore } from "../run-store.js";
 import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
   PreparedIssueWorkspace,
@@ -83,7 +83,8 @@ import {
 } from "./active-runs.js";
 import { probeStateArtifacts, statePredicateKeys } from "./artifact-probe.js";
 import {
-  formatNoProgressReason,
+  buildNoProgressReason,
+  parseNoProgressReason,
   progressFingerprint
 } from "./progress-fingerprint.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
@@ -249,7 +250,7 @@ export type RunControllerOptions = {
   // caps are read from the project config inside the picker. See ADR 0053.
   globalConcurrencyLoader?: () => Promise<{ maxInFlight: number | undefined }>;
   // Host pressure-stall admission gate (ADR 0088). Omitted means the
-  // controller never defers on host state -- the one-shot CLI's posture,
+  // controller never defers on host state — the one-shot CLI's posture,
   // matching how it already ignores max_in_flight.
   hostPressureGate?: HostPressureGate;
   lifecyclePolicy?: LifecyclePolicy;
@@ -389,6 +390,16 @@ type StateAdvancePayload = {
 // wait decided from the Workspace alone (ADR 0087), where there is no tracked
 // pull request to observe. Distinct from `undefined`, which the observation
 // returns to mean "stay parked, nothing to decide this tick".
+// Whether a run on this workflow keeps its Issue-label eligibility checks.
+// A raw FSM is FSM-governed: the state machine, not the label set, decides
+// whether the agent keeps running, and an agent state legitimately removes
+// `agent-ready` as it works. Markdown compatibility graphs stay label-driven.
+// One definition, because both the claim (executeStateAdvance) and the attempt
+// (runAttemptLifecycle's fallback) have to answer it identically. See ADR 0046.
+function respectsIssueLabelsFor(expandedWorkflow: ExpandedWorkflow): boolean {
+  return expandedWorkflow.source.kind !== "raw_fsm";
+}
+
 type WaitObservation = {
   pullRequestState?: PullRequestState;
   signals: WorkflowPredicateMap;
@@ -1066,7 +1077,7 @@ export class RunController {
   }
 
   // Tells the global PR follow-up loop whether a raw-FSM workflow already owns
-  // this Issue -- that is, whether it is parked at a state of its own and will
+  // this Issue — that is, whether it is parked at a state of its own and will
   // decide what happens next on its own tick. When true, the global loop must
   // act on neither the merge nor the review feedback.
   //
@@ -1122,7 +1133,7 @@ export class RunController {
   //
   // Extracted from reEvaluateWaitingRun so the decision that follows it is
   // reachable without a tracked pull request. A wait state naming only artifact
-  // predicates is decided from the Workspace alone (ADR 0087) -- the poll has
+  // predicates is decided from the Workspace alone (ADR 0087) — the poll has
   // everything it needs on disk. A state that also names PR predicates, and
   // every merge_pr state, still waits for its PR: an absent PR signal reads as
   // unmet under strict equality, so evaluating early would drop such a state
@@ -1390,6 +1401,14 @@ export class RunController {
     }
 
     if (decision.kind === "stay_waiting") {
+      // The guard's own park returns before this branch, so reaching it with a
+      // no-progress reason still on the row means the guard has stopped
+      // firing: the observation moved on and the state simply has nothing to
+      // match now. Clear it, or the manual-attention banner would outlive the
+      // condition that raised it.
+      if (parseNoProgressReason(row.stateTransitionReason) !== null) {
+        this.runStore.recordWaitingActivity(runId, decision.reason);
+      }
       this.logger?.debug(
         { reason: decision.reason, runId },
         "symphonika wait re-eval: still waiting"
@@ -1427,27 +1446,33 @@ export class RunController {
       }
       // The loop-breaker. A park can only make progress on what it observed,
       // so re-taking the same edge on an identical observation would put the
-      // workflow back where it already was -- the `autofix -> wait_for_pr ->
+      // workflow back where it already was — the `autofix -> wait_for_pr ->
       // autofix` cycle that a review-feedback transition opens up, and every
       // other cycle an author can write. Stay parked instead, and say so.
       // Terminal targets are exempt: they end the chain, so they cannot loop.
       // See issue #616.
-      const fingerprint = progressFingerprint({
-        artifactExists: waitArtifactExists,
-        headSha: pullRequestState?.headSha,
-        signals,
-        state: waitState
-      });
-      const lastFingerprint = this.runStore.readProgressFingerprint({
+      const edge: ProgressEdge = {
         fromStateId: waitState.id,
         issueNumber: row.issueNumber,
         projectName: row.project,
         toStateId: decision.to
-      });
-      if (lastFingerprint === fingerprint) {
+      };
+      const claimed = this.runStore.claimProgressEdge(
+        edge,
+        progressFingerprint({
+          artifactExists: waitArtifactExists,
+          pullRequestState,
+          signals,
+          state: waitState
+        })
+      );
+      if (!claimed) {
         this.runStore.recordWaitingActivity(
           runId,
-          formatNoProgressReason(waitState.id, decision.to)
+          buildNoProgressReason({
+            fromStateId: waitState.id,
+            toStateId: decision.to
+          })
         );
         this.logger?.warn(
           {
@@ -1461,13 +1486,6 @@ export class RunController {
         );
         return;
       }
-      this.runStore.recordProgressFingerprint({
-        fingerprint,
-        fromStateId: waitState.id,
-        issueNumber: row.issueNumber,
-        projectName: row.project,
-        toStateId: decision.to
-      });
 
       this.runStore.recordWorkflowStateAdvance(runId, {
         nextStateId: decision.to,
@@ -1862,15 +1880,16 @@ export class RunController {
         parentRunId: payload.parentRunId,
         // Decide label immunity at the claim, not after the workflow reload
         // inside runAttemptLifecycle. Its fallback computes the same answer,
-        // but only once the attempt is already under way -- so reserveSlot
+        // but only once the attempt is already under way — so reserveSlot
         // registers a raw-FSM advance as label-controlled, and a reconcile
         // landing in the window before attachProvider cancels it as
         // ELIGIBILITY_LOSS. A raw FSM legitimately removes `agent-ready` as
         // it works, so that window is reachable on the expected path. The old
         // review dispatch set this flag explicitly for the same reason; the
         // advance path is where review rounds arrive now. See ADR 0046.
-        respectsIssueLabels:
-          loadedWorkflow.expandedWorkflow.source.kind !== "raw_fsm",
+        respectsIssueLabels: respectsIssueLabelsFor(
+          loadedWorkflow.expandedWorkflow
+        ),
         project: {
           ...project,
           workflow: {
@@ -2346,7 +2365,7 @@ export class RunController {
 
     // A raw FSM decides for itself where work resumes: it has a position, and
     // that position is the only thing allowed to name a start state. This
-    // dispatch has no position to offer -- it would have to pick one, and the
+    // dispatch has no position to offer — it would have to pick one, and the
     // only one it could pick is `expandedWorkflow.initial`, which replays the
     // pipeline against a finished PR (issue #616). A markdown
     // compatibility-graph workflow has no state machine and no position, so
@@ -2999,7 +3018,7 @@ export class RunController {
       // CLOSED_ISSUE cancellation still applies. See ADR 0046.
       respectsIssueLabels =
         input.respectsIssueLabels ??
-        loadedWorkflow.expandedWorkflow.source.kind !== "raw_fsm";
+        respectsIssueLabelsFor(loadedWorkflow.expandedWorkflow);
       // For raw FSM workflows, the agent action's `prompt` field points at the
       // template file to send to the provider for this state. Resolve it here
       // so startAttempt renders the right prompt (rather than the YAML body of
@@ -4518,7 +4537,7 @@ function isParkedAction(kind: string | undefined): boolean {
 // True when every predicate a wait state names can be answered without
 // observing a pull request: at least one artifact predicate, and nothing beyond
 // artifact predicates and `provider_success`, which wait re-evaluation always
-// supplies. Deliberately strict -- `branch_ahead_of_base` and the PR signals are
+// supplies. Deliberately strict — `branch_ahead_of_base` and the PR signals are
 // not projected on this path, and treating an unprojected signal as merely
 // "unmet" would let a catch-all transition fire on the first poll.
 function isArtifactOnlyWaitState(state: ExpandedWorkflowState): boolean {

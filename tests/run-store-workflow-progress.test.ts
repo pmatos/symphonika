@@ -35,8 +35,22 @@ describe("RunStore workflow progress fingerprints", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.recordProgressFingerprint({ ...edge, fingerprint: "abc" });
+      store.claimProgressEdge(edge, "abc");
       expect(store.readProgressFingerprint(edge)).toBe("abc");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("refuses a second claim on the same edge and fingerprint", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      expect(store.claimProgressEdge(edge, "abc")).toBe(true);
+      expect(store.claimProgressEdge(edge, "abc")).toBe(false);
+      // A changed observation is a new claim, and re-arms the guard.
+      expect(store.claimProgressEdge(edge, "def")).toBe(true);
+      expect(store.claimProgressEdge(edge, "def")).toBe(false);
     } finally {
       store.close();
     }
@@ -46,7 +60,7 @@ describe("RunStore workflow progress fingerprints", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.recordProgressFingerprint({ ...edge, fingerprint: "abc" });
+      store.claimProgressEdge(edge, "abc");
       expect(
         store.readProgressFingerprint({ ...edge, toStateId: "merge" })
       ).toBeUndefined();
@@ -65,8 +79,8 @@ describe("RunStore workflow progress fingerprints", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.recordProgressFingerprint({ ...edge, fingerprint: "abc" });
-      store.recordProgressFingerprint({ ...edge, fingerprint: "def" });
+      store.claimProgressEdge(edge, "abc");
+      store.claimProgressEdge(edge, "def");
       expect(store.readProgressFingerprint(edge)).toBe("def");
     } finally {
       store.close();
@@ -77,12 +91,8 @@ describe("RunStore workflow progress fingerprints", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.recordProgressFingerprint({ ...edge, fingerprint: "abc" });
-      store.recordProgressFingerprint({
-        ...edge,
-        fingerprint: "def",
-        toStateId: "merge"
-      });
+      store.claimProgressEdge(edge, "abc");
+      store.claimProgressEdge({ ...edge, toStateId: "merge" }, "def");
       expect(store.readProgressFingerprint(edge)).toBe("abc");
       expect(
         store.readProgressFingerprint({ ...edge, toStateId: "merge" })
@@ -96,17 +106,9 @@ describe("RunStore workflow progress fingerprints", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.recordProgressFingerprint({ ...edge, fingerprint: "abc" });
-      store.recordProgressFingerprint({
-        ...edge,
-        fingerprint: "def",
-        toStateId: "merge"
-      });
-      store.recordProgressFingerprint({
-        ...edge,
-        fingerprint: "ghi",
-        issueNumber: 43
-      });
+      store.claimProgressEdge(edge, "abc");
+      store.claimProgressEdge({ ...edge, toStateId: "merge" }, "def");
+      store.claimProgressEdge({ ...edge, issueNumber: 43 }, "ghi");
 
       store.clearProgressFingerprints({
         issueNumber: 42,

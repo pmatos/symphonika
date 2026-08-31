@@ -378,10 +378,26 @@ transitions:
   - to: repair
     when:
       checks: failure
+  - to: repair
+    when:
+      has_unresolved_reviews: true
 ```
 
-With no final catch-all, a wait state stays parked when checks are pending, review threads remain,
-or mergeability is unknown.
+With no final catch-all, a wait state stays parked when checks are pending or mergeability is
+unknown.
+
+Name the unresolved-review case explicitly, as above. Nothing outside the state machine will pick it
+up: the orchestrator-wide PR follow-up loop defers entirely to a raw FSM parked at a state of its
+own (ADR 0090), so a wait state that gates `merge` on `unresolved_review_threads: 0` and routes
+`repair` only on `checks: failure` parks forever on the commonest shape there is — green checks with
+one open thread. Order it after `merge`, so a clean and fully resolved PR still merges.
+
+A transition from a repair state back to the wait it came from makes a cycle. That is expected and
+supported: the progress guard stops it from spinning by refusing to re-take an edge on an
+observation identical to the one it was last taken on, parking the run and raising manual attention
+instead. The guard compares what it can see — the projected signals, the artefact probes for paths
+this state's predicates name, the head SHA, and the review conversation — so a repair that changes
+nothing observable is caught, while one that pushes a fix is not.
 
 ## 7. Prompt variables
 

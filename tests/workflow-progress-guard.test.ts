@@ -335,10 +335,7 @@ describe("workflow progress guard", () => {
       const second = store.getRun("waiting-2");
       expect(second?.state).toBe("waiting");
       expect(second?.currentStateId).toBe("holding");
-      expect(second?.stateTransitionReason).toContain(
-        "workflow made no progress"
-      );
-      expect(second?.stateTransitionReason).toContain("holding -> repair");
+      expect(second?.stateTransitionReason).toBe("no_progress:holding:repair");
     } finally {
       store.close();
     }
@@ -606,6 +603,76 @@ describe("workflow progress guard", () => {
       expect(providerInputs[0]!.prompt).not.toContain(
         "Pull request review follow-up"
       );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("clears the no-progress reason once the guard stops firing", async () => {
+    const root = await makeTempRoot();
+    await writeCyclingProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.trackPullRequest({
+        branchName: "sym/symphonika/616-progress-guard-fixture",
+        headSha: "deadbeef",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      // Third observation matches no transition at all: checks pending, so
+      // neither `done`, `repair` nor the failure route fires.
+      const getPullRequestFollowupState = vi
+        .fn()
+        .mockResolvedValueOnce(prState())
+        .mockResolvedValueOnce(prState())
+        .mockResolvedValue(
+          prState({
+            statusCheckRollupState: "PENDING",
+            unresolvedReviewThreads: []
+          })
+        );
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState,
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        root,
+        runStore: store
+      });
+
+      seedPark(store, issue, "waiting-1");
+      await controller.reEvaluateWaitingRun("waiting-1");
+
+      seedPark(store, issue, "waiting-2");
+      await controller.reEvaluateWaitingRun("waiting-2");
+      expect(store.getRun("waiting-2")?.stateTransitionReason).toContain(
+        "no_progress:"
+      );
+
+      // The same parked row, re-evaluated against a moved-on observation. The
+      // guard is no longer holding it, so the banner must not outlive it.
+      await controller.reEvaluateWaitingRun("waiting-2");
+      const after = store.getRun("waiting-2");
+      expect(after?.state).toBe("waiting");
+      expect(after?.stateTransitionReason).not.toContain("no_progress:");
     } finally {
       store.close();
     }

@@ -305,7 +305,7 @@ type ProjectIssueSnapshotKind = "candidate" | "filtered";
 export type ProjectIssueSnapshotRow = {
   blockedBy: RawGitHubIssueDependencyRef[];
   // A fetched-blocker count over ISSUE_DEPENDENCIES_MAX_BLOCKERS_PER_ISSUE
-  // (src/issue-polling.ts) unfetched -- must gate exactly like an open
+  // (src/issue-polling.ts) unfetched — must gate exactly like an open
   // blocker (fail closed on ambiguity), not just influence
   // evaluateProjectEligibility's reasons. Persisted as its own column so
   // the label-write route's snapshot-backed gate sees it too, not just the
@@ -315,7 +315,7 @@ export type ProjectIssueSnapshotRow = {
   kind: ProjectIssueSnapshotKind;
   labels: string[];
   // Best-effort "## Parent" heading parse (parseParentIssueNumber,
-  // src/issue-polling.ts) -- display-only graph clustering, never a
+  // src/issue-polling.ts) — display-only graph clustering, never a
   // gating signal. Absent when the body had no parseable heading.
   parentIssueNumber?: number;
   polledAt: string;
@@ -413,6 +413,15 @@ export type ReplaceProjectPullRequestSnapshotsInput = {
 // merge outcome and, separately, the re-derived post-attempt state) rather
 // than a two-phase "attempting" / "done" pair — see ADR 0078 for why a
 // single post-attempt insert was chosen over that alternative.
+// One directed transition out of a park, for one Issue. The progress guard's
+// unit of history: what it remembers is "this edge, on this observation".
+export type ProgressEdge = {
+  fromStateId: string;
+  issueNumber: number;
+  projectName: string;
+  toStateId: string;
+};
+
 export type RecordPullRequestMergeAttemptInput = {
   error: string | null;
   freshTrackingState: PullRequestTrackingStateSnapshot | null;
@@ -1037,7 +1046,7 @@ export class RunStore {
 
   // workspacePath carries the parent's Workspace onto the waiting row. Without
   // it the row's workspace_path is NULL, and an `artifact_exists` predicate in
-  // a wait/merge_pr state can never be evaluated (ADR 0087) -- reEvaluateWaitingRun
+  // a wait/merge_pr state can never be evaluated (ADR 0087) — reEvaluateWaitingRun
   // has no other route to the Workspace, since a wait->wait advance sets
   // parentRunId to the *waiting* run, so walking parents just finds another NULL.
   createWaitingRun(input: {
@@ -4451,17 +4460,64 @@ export class RunStore {
       });
   }
 
-  // The observation fingerprint the last advance from `fromStateId` to
-  // `toStateId` was taken on, or undefined when that edge has never been
-  // taken for this issue. Keyed by issue rather than run id because each park
-  // creates a fresh waiting row: a cycle through a park would otherwise never
-  // see its own history.
-  readProgressFingerprint(input: {
-    fromStateId: string;
-    issueNumber: number;
-    projectName: string;
-    toStateId: string;
-  }): string | undefined {
+  // Claims one park-to-advance transition against the observation it would be
+  // taken on. Returns false when this exact edge was already taken on an
+  // identical observation, which is the progress guard's whole question: the
+  // caller has learned nothing since, so re-taking it cannot make progress.
+  // A true claim records the new fingerprint.
+  //
+  // Read, compare and write live here as one statement rather than three calls
+  // on the caller's side, so the decision is made where the data is and cannot
+  // interleave with another writer's claim on the same edge.
+  //
+  // Keyed by issue rather than run id because each park creates a fresh
+  // waiting row: a cycle through a park would otherwise never see its own
+  // history.
+  claimProgressEdge(edge: ProgressEdge, fingerprint: string): boolean {
+    return this.database.transaction((): boolean => {
+      const row = this.database
+        .prepare(
+          [
+            "select fingerprint",
+            "from workflow_progress",
+            "where project_name = ? and issue_number = ?",
+            "and from_state_id = ? and to_state_id = ?"
+          ].join(" ")
+        )
+        .get(
+          edge.projectName,
+          edge.issueNumber,
+          edge.fromStateId,
+          edge.toStateId
+        ) as { fingerprint: string } | undefined;
+      if (row?.fingerprint === fingerprint) {
+        return false;
+      }
+      this.database
+        .prepare(
+          [
+            "insert into workflow_progress",
+            "(project_name, issue_number, from_state_id, to_state_id, fingerprint, recorded_at)",
+            "values (@projectName, @issueNumber, @fromStateId, @toStateId, @fingerprint, @recordedAt)",
+            "on conflict(project_name, issue_number, from_state_id, to_state_id)",
+            "do update set fingerprint = excluded.fingerprint,",
+            "recorded_at = excluded.recorded_at"
+          ].join(" ")
+        )
+        .run({
+          fingerprint,
+          fromStateId: edge.fromStateId,
+          issueNumber: edge.issueNumber,
+          projectName: edge.projectName,
+          recordedAt: timestamp(),
+          toStateId: edge.toStateId
+        });
+      return true;
+    })();
+  }
+
+  // Test and diagnostic accessor for what claimProgressEdge recorded.
+  readProgressFingerprint(edge: ProgressEdge): string | undefined {
     const row = this.database
       .prepare(
         [
@@ -4472,40 +4528,12 @@ export class RunStore {
         ].join(" ")
       )
       .get(
-        input.projectName,
-        input.issueNumber,
-        input.fromStateId,
-        input.toStateId
+        edge.projectName,
+        edge.issueNumber,
+        edge.fromStateId,
+        edge.toStateId
       ) as { fingerprint: string } | undefined;
     return row?.fingerprint;
-  }
-
-  recordProgressFingerprint(input: {
-    fingerprint: string;
-    fromStateId: string;
-    issueNumber: number;
-    projectName: string;
-    toStateId: string;
-  }): void {
-    this.database
-      .prepare(
-        [
-          "insert into workflow_progress",
-          "(project_name, issue_number, from_state_id, to_state_id, fingerprint, recorded_at)",
-          "values (@projectName, @issueNumber, @fromStateId, @toStateId, @fingerprint, @recordedAt)",
-          "on conflict(project_name, issue_number, from_state_id, to_state_id)",
-          "do update set fingerprint = excluded.fingerprint,",
-          "recorded_at = excluded.recorded_at"
-        ].join(" ")
-      )
-      .run({
-        fingerprint: input.fingerprint,
-        fromStateId: input.fromStateId,
-        issueNumber: input.issueNumber,
-        projectName: input.projectName,
-        recordedAt: timestamp(),
-        toStateId: input.toStateId
-      });
   }
 
   // Called at run-chain boundaries (fresh dispatch, terminal) so a
@@ -4808,8 +4836,8 @@ export class RunStore {
         const updatedAt = timestamp();
         update.run(entry.reason, updatedAt, entry.runId);
         // A re-swept row (previousState already 'stale') isn't changing
-        // state -- only its terminal_reason may bump between pending and
-        // confirmed -- so recording another "stale" transition here would
+        // state — only its terminal_reason may bump between pending and
+        // confirmed — so recording another "stale" transition here would
         // duplicate an entry every restart for as long as cleanup stays
         // unconfirmed, unboundedly, in a table rendered verbatim on the
         // dashboard.

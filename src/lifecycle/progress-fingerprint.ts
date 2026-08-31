@@ -1,4 +1,5 @@
 import { contentHash } from "../content-hash.js";
+import type { PullRequestState } from "../pull-request-state.js";
 import type {
   ExpandedWorkflowState,
   WorkflowPredicateMap
@@ -6,63 +7,64 @@ import type {
 import { collectArtifactPaths } from "./artifact-probe.js";
 import type { ArtifactExistsResolver } from "./state-machine-dispatch.js";
 
-// The `state_transition_reason` written when the progress guard holds a park
-// in place, and its inverse. Both live here so the guard that writes the
-// reason and the detail surfaces that render it as a manual-attention warning
-// cannot drift apart on the format.
-const NO_PROGRESS_PREFIX = "workflow made no progress: ";
-const NO_PROGRESS_SUFFIX = " under an unchanged observation";
+// The `state_transition_reason` written when the progress guard holds a park in
+// place. A machine token rendered into prose separately, the same split
+// terminal-reason.ts makes for `cap_reached:<kind>`, so a surface can re-word
+// the sentence without breaking the parse. State ids are path-safe identifiers
+// (fsm-expansion.ts), so ":" cannot occur inside one and the token is
+// unambiguous.
+const NO_PROGRESS_PREFIX = "no_progress:";
 
-export function formatNoProgressReason(
-  fromStateId: string,
-  toStateId: string
-): string {
-  return `${NO_PROGRESS_PREFIX}${fromStateId} -> ${toStateId}${NO_PROGRESS_SUFFIX}`;
+export type NoProgressEdge = {
+  fromStateId: string;
+  toStateId: string;
+};
+
+export function buildNoProgressReason(edge: NoProgressEdge): string {
+  return `${NO_PROGRESS_PREFIX}${edge.fromStateId}:${edge.toStateId}`;
 }
 
 export function parseNoProgressReason(
-  reason: string | null | undefined
-): { fromStateId: string; toStateId: string } | null {
+  reason: string | null
+): NoProgressEdge | null {
+  if (reason === null || !reason.startsWith(NO_PROGRESS_PREFIX)) {
+    return null;
+  }
+  const [fromStateId, toStateId, ...rest] = reason
+    .slice(NO_PROGRESS_PREFIX.length)
+    .split(":");
   if (
-    reason === null ||
-    reason === undefined ||
-    !reason.startsWith(NO_PROGRESS_PREFIX) ||
-    !reason.endsWith(NO_PROGRESS_SUFFIX)
+    rest.length > 0 ||
+    fromStateId === undefined ||
+    toStateId === undefined ||
+    fromStateId === "" ||
+    toStateId === ""
   ) {
     return null;
   }
-  const edge = reason.slice(
-    NO_PROGRESS_PREFIX.length,
-    reason.length - NO_PROGRESS_SUFFIX.length
-  );
-  const separator = edge.indexOf(" -> ");
-  if (separator < 0) {
-    return null;
-  }
-  return {
-    fromStateId: edge.slice(0, separator),
-    toStateId: edge.slice(separator + " -> ".length)
-  };
+  return { fromStateId, toStateId };
 }
 
 // Everything a park re-evaluation learned this tick, hashed into one value.
 // Two ticks with the same fingerprint observed the same world, so re-taking a
 // transition between them cannot make progress.
 //
-// The head SHA is part of the observation and not merely derived from it:
-// `unresolved_review_threads` is a count, so a fresh push that changed the
-// code while leaving check status and thread count untouched would otherwise
-// hash identically to the observation before it, and the guard would park a
-// run that genuinely had new work to do.
+// `pullRequestState` contributes two things the projected signals cannot say on
+// their own. Its head SHA distinguishes a push that changed the code while
+// leaving check status and thread count untouched. Its review feedback
+// fingerprint — thread ids, comment bodies, review decision — distinguishes a
+// changed conversation at an unchanged count: a reviewer resolving one thread
+// and opening another moves nothing in the projected map, and without it the
+// guard would park a workflow that had genuinely new feedback to act on.
 export function progressFingerprint(input: {
   artifactExists: ArtifactExistsResolver | undefined;
-  headSha: string | undefined;
+  pullRequestState: PullRequestState | undefined;
   signals: WorkflowPredicateMap;
   state: ExpandedWorkflowState;
 }): string {
-  const signals = Object.entries(input.signals)
-    .map(([key, value]): [string, unknown] => [key, value])
-    .sort(([left], [right]) => left.localeCompare(right));
+  const signals = Object.entries(input.signals).sort(([left], [right]) =>
+    left.localeCompare(right)
+  );
 
   const artifactExists = input.artifactExists;
   const artifacts = [...collectArtifactPaths(input.state)]
@@ -75,7 +77,9 @@ export function progressFingerprint(input: {
   return contentHash(
     JSON.stringify({
       artifacts,
-      head: input.headSha ?? null,
+      head: input.pullRequestState?.headSha ?? null,
+      reviewFeedback:
+        input.pullRequestState?.reviewFollowup.feedbackFingerprint ?? null,
       signals
     })
   );

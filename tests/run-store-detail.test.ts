@@ -55,6 +55,7 @@ describe("RunStore detail queries", () => {
       );
       const promptPath = path.join(evidenceDir, "prompt.md");
       const rawLogPath = path.join(evidenceDir, "provider.raw.jsonl");
+      const stderrLogPath = path.join(evidenceDir, "provider.stderr.log");
       const workflowGraphPath = path.join(evidenceDir, "workflow-graph.json");
       const issue = sampleIssue({ number: 99, title: "Artifact run" });
       const workflowGraph = {
@@ -80,6 +81,7 @@ describe("RunStore detail queries", () => {
         ),
         writeFile(promptPath, "Rendered prompt\n", "utf8"),
         writeFile(rawLogPath, '{"raw":"event"}\n', "utf8"),
+        writeFile(stderrLogPath, "provider warning\n", "utf8"),
         writeFile(
           workflowGraphPath,
           `${JSON.stringify(workflowGraph)}\n`,
@@ -122,7 +124,8 @@ describe("RunStore detail queries", () => {
         { kind: "prompt_metadata", present: true },
         { kind: "workflow_graph", present: true },
         { kind: "provider_raw", present: true },
-        { kind: "provider_normalized", present: true }
+        { kind: "provider_normalized", present: true },
+        { kind: "provider_stderr", present: true }
       ]);
       for (const artifact of artifacts) {
         expect(typeof artifact.sizeBytes).toBe("number");
@@ -320,7 +323,8 @@ describe("RunStore detail queries", () => {
         "prompt_metadata",
         "workflow_graph",
         "provider_raw",
-        "provider_normalized"
+        "provider_normalized",
+        "provider_stderr"
       ]);
       expect(detail?.attempts[1]?.artifacts).toEqual(
         detail?.attempts[0]?.artifacts.map((artifact) => ({
@@ -361,6 +365,13 @@ describe("RunStore detail queries", () => {
       const attempt2Raw = path.join(
         evidenceDir,
         "provider.raw.attempt-2.jsonl"
+      );
+      // Sibling of each attempt's raw log, sharing its attempt suffix — the
+      // naming listAttemptArtifacts derives provider_stderr from.
+      const attempt1Stderr = path.join(evidenceDir, "provider.stderr.log");
+      const attempt2Stderr = path.join(
+        evidenceDir,
+        "provider.stderr.attempt-2.log"
       );
       const attempt1Normalized = path.join(
         evidenceDir,
@@ -415,7 +426,9 @@ describe("RunStore detail queries", () => {
         writeFile(attempt1Raw, '{"raw":"a1"}\n', "utf8"),
         writeFile(attempt2Raw, '{"raw":"a2"}\n', "utf8"),
         writeFile(attempt1Normalized, '{"normalized":"a1"}\n', "utf8"),
-        writeFile(attempt2Normalized, '{"normalized":"a2"}\n', "utf8")
+        writeFile(attempt2Normalized, '{"normalized":"a2"}\n', "utf8"),
+        writeFile(attempt1Stderr, "attempt 1 stderr\n", "utf8"),
+        writeFile(attempt2Stderr, "attempt 2 stderr\n", "utf8")
       ]);
 
       const issue = sampleIssue();
@@ -476,7 +489,8 @@ describe("RunStore detail queries", () => {
         "prompt_metadata",
         "workflow_graph",
         "provider_raw",
-        "provider_normalized"
+        "provider_normalized",
+        "provider_stderr"
       ]);
       expect(descriptors1.every((descriptor) => descriptor.present)).toBe(true);
       expect(

@@ -29,6 +29,7 @@ import {
   shutdownProviderProcess,
   spawnProviderProcess
 } from "./provider-process.js";
+import { attachProviderStderrLog } from "./provider-stderr.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -169,7 +170,7 @@ export function createCodexProvider(
       const child = spawnProviderProcess(command, input.workspacePath);
       activeRun.child = child;
       const spawnedRun: SpawnedCodexRun = activeRun as SpawnedCodexRun;
-      child.stderr.resume();
+      attachProviderStderrLog(child, input.stderrLogPath);
       const queue = createJsonlProcessQueue(child);
 
       try {

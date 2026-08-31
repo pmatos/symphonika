@@ -6475,7 +6475,8 @@ async function buildFiringArtifactDescriptors(
     ["prompt", evidence.promptPath],
     ["prompt_metadata", evidence.promptMetadataPath],
     ["provider_raw", evidence.rawLogPath],
-    ["provider_normalized", evidence.normalizedLogPath]
+    ["provider_normalized", evidence.normalizedLogPath],
+    ["provider_stderr", evidence.stderrLogPath]
   ];
   return Promise.all(
     entries.map(async ([kind, filePath]) => {
@@ -6918,6 +6919,8 @@ function formatArtifactKind(kind: RunArtifactDescriptor["kind"]): string {
       return "Provider event log";
     case "provider_normalized":
       return "Normalized event log";
+    case "provider_stderr":
+      return "Provider stderr log";
   }
 }
 

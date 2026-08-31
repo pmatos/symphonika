@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -848,6 +848,77 @@ describe("RoutineFiringDispatcher", () => {
     } finally {
       clearTimeout(fallback);
       releaseProvider();
+      runStore.close();
+    }
+  });
+
+  it("hands the provider a stderr evidence path and quotes its tail in the terminal reason", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    let handedStderrLogPath: string | undefined;
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        handedStderrLogPath = input.stderrLogPath;
+        // Stands in for the real adapter's tee: the dispatcher only supplies
+        // the path, the provider is what puts bytes at it.
+        await writeFile(
+          input.stderrLogPath!,
+          "codex: upstream connect error\n",
+          "utf8"
+        );
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const project = dueRoutineProjectFixture(root, "codex");
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-stderr",
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(handedStderrLogPath).toBe(
+        path.join(
+          stateRoot,
+          "logs",
+          "routines",
+          "fire-stderr",
+          "provider.stderr.log"
+        )
+      );
+      expect(runStore.getRoutineFiring("fire-stderr")).toMatchObject({
+        state: "failed",
+        terminalReason: "process_exit_1 (stderr: codex: upstream connect error)"
+      });
+    } finally {
       runStore.close();
     }
   });

@@ -53,6 +53,9 @@ export type ProviderRunInput = {
   // boundary to add routine-only argv/environment guards without changing
   // the operator-authored base command used by issue Runs.
   routine?: ProviderCommandTemplateValues;
+  // Evidence path for the provider's stderr tee. Absent for callers with no
+  // evidence directory (the doctor/probe path), which drain stderr instead.
+  stderrLogPath?: string;
   workspacePath: string;
 };
 

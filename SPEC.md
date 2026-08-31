@@ -857,7 +857,7 @@ Recommended layout:
       <run-id>/
         provider.raw.jsonl
         provider.normalized.jsonl
-        stderr.log
+        provider.stderr.log
         prompt.md
         prompt-metadata.json
         issue-snapshot.json
@@ -893,6 +893,12 @@ and workflow graphs remain inspectable through attempt-scoped artifact descripto
 `WORKFLOW.md` workflows record their one-state compatibility graph; explicit raw FSM YAML workflows
 record their parsed expanded graph. Multi-state raw FSM walks advance through the state machine via
 a `state_advance` dispatch path that is distinct from label-driven continuations; see ADR 0046.
+
+Provider stderr is teed to `provider.stderr.log` (`provider.stderr.attempt-<N>.log` on retries)
+alongside the raw event log, capped so a chatty provider cannot fill the state root. The file is
+created on the provider's first stderr byte, so its absence means the provider stayed silent. When
+a Run or Firing ends without a clean provider exit, the tail of that log is appended to the
+terminal reason, which otherwise carries nothing but `process_exit_<code>` or `firing_timeout`.
 
 ## 8. Scheduling
 

@@ -385,7 +385,7 @@ Run evidence lives outside agent workspaces:
       <run-id>/
         provider.raw.jsonl
         provider.normalized.jsonl
-        stderr.log
+        provider.stderr.log
         prompt.md
         prompt-metadata.json
         issue-snapshot.json

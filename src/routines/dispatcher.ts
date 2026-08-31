@@ -23,6 +23,7 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
+import { withProviderStderrTail } from "../providers/provider-stderr.js";
 import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
@@ -1086,6 +1087,7 @@ async function runRoutineFiring(input: {
   let preparationAttempt: Promise<PreparedRoutineWorkspace> | undefined;
   let providerAttempt: Promise<void> | undefined;
   let rawLogPath: string | undefined;
+  let stderrLogPath: string | undefined;
   let normalizedIndexPath: string | undefined;
   let normalizedLogPath: string | undefined;
   let normalizedLogOffset = 0;
@@ -1130,6 +1132,7 @@ async function runRoutineFiring(input: {
       })
     );
     rawLogPath = evidence.rawLogPath;
+    stderrLogPath = evidence.stderrLogPath;
     normalizedIndexPath = evidence.normalizedIndexPath;
     normalizedLogPath = evidence.normalizedLogPath;
     input.runStore.updateRoutineFiringWorkspace({
@@ -1219,6 +1222,7 @@ async function runRoutineFiring(input: {
           id: input.firingId
         },
         routine: routineOverrides,
+        stderrLogPath: evidence.stderrLogPath,
         workspacePath: prepared.workspacePath
       })) {
         const normalizedLogCursor = await appendRoutineEvent({
@@ -1250,6 +1254,7 @@ async function runRoutineFiring(input: {
             classifyRoutineOutcome(events, {
               baseBranch: input.project.workspace.git.base_branch,
               kind: input.routine.kind,
+              stderrLogPath: evidence.stderrLogPath,
               workspacePath: prepared.workspacePath
             })
           );
@@ -1474,8 +1479,18 @@ async function runRoutineFiring(input: {
       : finalCancelled
         ? "cancelled"
         : reason;
+    // A firing killed at its deadline reports `firing_timeout` and nothing
+    // else; whatever the provider wrote on stderr before dying is the only
+    // account of why it went quiet, so it rides along on the reason here as
+    // well as staying in the evidence directory.
+    const explainedFinalReason = finalCancelled
+      ? finalReason
+      : await withProviderStderrTail(finalReason, stderrLogPath);
     const resolvedRedactSecrets = input.redactSecrets();
-    const redactedFinalReason = redactAll(finalReason, resolvedRedactSecrets);
+    const redactedFinalReason = redactAll(
+      explainedFinalReason,
+      resolvedRedactSecrets
+    );
     input.runStore.completeRoutineFiring({
       commitsAhead,
       id: input.firingId,
@@ -1930,6 +1945,7 @@ async function prepareRoutineEvidence(input: {
   prompt: string;
   promptPath: string;
   rawLogPath: string;
+  stderrLogPath: string;
 }> {
   const routine = input.routine;
   const rendered = renderRoutinePrompt({
@@ -1966,7 +1982,8 @@ async function prepareRoutineEvidence(input: {
     normalizedLogPath,
     promptMetadataPath: metadataPath,
     promptPath,
-    rawLogPath
+    rawLogPath,
+    stderrLogPath
   } = evidencePaths;
   await Promise.all([
     writeFile(promptPath, rendered.prompt, "utf8"),
@@ -2017,7 +2034,8 @@ async function prepareRoutineEvidence(input: {
     normalizedLogPath,
     prompt: rendered.prompt,
     promptPath,
-    rawLogPath
+    rawLogPath,
+    stderrLogPath
   };
 }
 
@@ -2060,6 +2078,7 @@ async function classifyRoutineOutcome(
   workspace: {
     baseBranch: string;
     kind: RoutineStatus["kind"];
+    stderrLogPath?: string;
     workspacePath: string;
   }
 ): Promise<RoutineTerminalOutcome> {
@@ -2071,6 +2090,9 @@ async function classifyRoutineOutcome(
     const classified = await classifyFailure({
       cancelRequested: false,
       events,
+      ...(workspace.stderrLogPath === undefined
+        ? {}
+        : { stderrLogPath: workspace.stderrLogPath }),
       successWorkspace: {
         baseBranch: workspace.baseBranch,
         workspacePath: workspace.workspacePath
@@ -2106,7 +2128,13 @@ async function classifyRoutineOutcome(
   }
   const exit = events.find((event) => event.type === "process_exit");
   if (exit === undefined) {
-    return { kind: "failed", reason: "no_process_exit_event" };
+    return {
+      kind: "failed",
+      reason: await withProviderStderrTail(
+        "no_process_exit_event",
+        workspace.stderrLogPath
+      )
+    };
   }
   if (exit.cancelled === true) {
     return { kind: "cancelled", reason: "provider_cancelled" };
@@ -2117,10 +2145,12 @@ async function classifyRoutineOutcome(
   }
   return {
     kind: "failed",
-    reason:
+    reason: await withProviderStderrTail(
       exitCode === undefined
         ? `process_exit_signal_${stringField(exit, "signal") ?? "unknown"}`
-        : `process_exit_${exitCode}`
+        : `process_exit_${exitCode}`,
+      workspace.stderrLogPath
+    )
   };
 }
 

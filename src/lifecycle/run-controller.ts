@@ -30,6 +30,7 @@ import {
   normalizeProjectWeight,
   priorityForLabels
 } from "../issue-priority.js";
+import { providerStderrLogPath } from "../providers/provider-stderr.js";
 import { interpretPullRequest } from "../pull-request-state.js";
 import { evaluateRunContinuationEligibility } from "./issue-eligibility.js";
 import { projectPullRequestSignals } from "./pr-signal-projection.js";
@@ -3017,6 +3018,9 @@ export class RunController {
           ...(started === undefined
             ? {}
             : {
+                stderrLogPath: providerStderrLogPath(
+                  started.evidence.rawLogPath
+                ),
                 successWorkspace: {
                   baseBranch: input.project.workspace.git.base_branch,
                   headInspectionFailed,
@@ -3505,6 +3509,7 @@ export class RunController {
         attempt: input.attemptNumber,
         id: input.runId
       },
+      stderrLogPath: providerStderrLogPath(input.evidence.rawLogPath),
       workspacePath: input.evidence.workspacePath
     })) {
       sequence += 1;

@@ -1692,6 +1692,11 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             "normalized log",
             formatPath(evidence.normalizedLogPath)
           );
+          writeFiringField(
+            program,
+            "stderr log",
+            formatPath(evidence.stderrLogPath)
+          );
           if (displayDetail.terminalReason !== null) {
             writeFiringField(program, "terminal", displayDetail.terminalReason);
           }

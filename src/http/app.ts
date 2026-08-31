@@ -321,7 +321,8 @@ const RUN_ARTIFACT_CONTENT_TYPES: Record<RunArtifactKind, string> = {
   prompt_metadata: "application/json; charset=utf-8",
   workflow_graph: "application/json; charset=utf-8",
   provider_raw: "application/x-ndjson",
-  provider_normalized: "application/x-ndjson"
+  provider_normalized: "application/x-ndjson",
+  provider_stderr: "text/plain; charset=utf-8"
 };
 
 const RUN_ARTIFACT_KINDS: ReadonlySet<string> = new Set(
@@ -870,7 +871,7 @@ function parseRunArtifactKind(value: string): RunArtifactKind | undefined {
   return RUN_ARTIFACT_KINDS.has(value) ? (value as RunArtifactKind) : undefined;
 }
 
-// Only these four RunArtifactKind values have a Firing evidence-path
+// Only these five RunArtifactKind values have a Firing evidence-path
 // analogue — issue_snapshot and workflow_graph are Run-only concepts (a
 // Firing has no issue and no workflow graph) and fall through to 404.
 function resolveRoutineEvidenceFilePath(
@@ -886,6 +887,8 @@ function resolveRoutineEvidenceFilePath(
       return paths.rawLogPath;
     case "provider_normalized":
       return paths.normalizedLogPath;
+    case "provider_stderr":
+      return paths.stderrLogPath;
     default:
       return undefined;
   }

@@ -24,6 +24,7 @@ import {
   shutdownProviderProcess,
   spawnProviderProcess
 } from "./provider-process.js";
+import { attachProviderStderrLog } from "./provider-stderr.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -123,7 +124,7 @@ export function createClaudeProvider(
           : { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" }
       );
       activeRun.child = child;
-      child.stderr.resume();
+      attachProviderStderrLog(child, input.stderrLogPath);
       const queue = createJsonlProcessQueue(child);
 
       try {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -132,6 +132,55 @@ describe("classifyFailure", () => {
 
     expect(result.kind).toBe("failed");
     expect(result.classification).toBe("transient");
+  });
+
+  it("attaches the provider's stderr tail to an unclean exit reason", async () => {
+    const root = await makeTempRoot();
+    const stderrLogPath = path.join(root, "provider.stderr.log");
+    await writeFile(
+      stderrLogPath,
+      "Error: ENOSPC: no space left on device\n",
+      "utf8"
+    );
+
+    const result = await classifyFailure({
+      cancelRequested: false,
+      events: [{ type: "process_exit", exitCode: null, signal: "SIGKILL" }],
+      stderrLogPath
+    });
+
+    expect(result.kind).toBe("failed");
+    expect(result.reason).toBe(
+      "process_exit_signal_SIGKILL (stderr: Error: ENOSPC: no space left on device)"
+    );
+  });
+
+  it("attaches the stderr tail when the provider never reported an exit", async () => {
+    const root = await makeTempRoot();
+    const stderrLogPath = path.join(root, "provider.stderr.log");
+    await writeFile(stderrLogPath, "panic: unreachable\n", "utf8");
+
+    const result = await classifyFailure({
+      cancelRequested: false,
+      events: [],
+      stderrLogPath
+    });
+
+    expect(result.reason).toBe(
+      "no_process_exit_event (stderr: panic: unreachable)"
+    );
+  });
+
+  it("leaves unclean-exit reasons verbatim when the provider wrote no stderr", async () => {
+    const root = await makeTempRoot();
+
+    const result = await classifyFailure({
+      cancelRequested: false,
+      events: [{ type: "process_exit", exitCode: 137 }],
+      stderrLogPath: path.join(root, "provider.stderr.log")
+    });
+
+    expect(result.reason).toBe("process_exit_137");
   });
 
   it("classifies WorkspacePreparationError as deterministic", async () => {

@@ -20,6 +20,7 @@ import {
   shutdownProviderProcess,
   spawnProviderProcess
 } from "./provider-process.js";
+import { attachProviderStderrLog } from "./provider-stderr.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -147,7 +148,7 @@ export function createOmpProvider(
 
       const child = spawnProviderProcess(command, input.workspacePath);
       activeRun.child = child;
-      child.stderr.resume();
+      attachProviderStderrLog(child, input.stderrLogPath);
       const queue = createProcessQueue(child, {
         isPromptDispatched: () => activeRun.promptDispatched
       });

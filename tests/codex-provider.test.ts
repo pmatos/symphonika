@@ -683,6 +683,76 @@ describe("Codex JSON-RPC provider", () => {
     ]);
   });
 
+  // Issue #593: codex flags a transient stream drop it recovers from itself
+  // with `willRetry: true`. Mapping that to `turn_failed` shut the app-server
+  // down mid-turn and lost the whole attempt, six times in production.
+  it("keeps the app-server running when an error notification sets willRetry", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const processScope = noopProcessScope();
+    const provider = createCodexProvider({ processScope });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} --scenario=retryable-error app-server`,
+          name: "codex"
+        },
+        workspacePath
+      })
+    );
+
+    expect(events.map((event) => event.normalized).filter(Boolean)).toEqual([
+      {
+        cwd: workspacePath,
+        sessionId: "thread-9",
+        threadId: "thread-9",
+        type: "session_started"
+      },
+      {
+        message: "Reconnecting... 2/5",
+        signal: "stream_retry",
+        threadId: "thread-9",
+        turnId: "turn-9",
+        type: "progress"
+      },
+      {
+        message: "recovered",
+        threadId: "thread-9",
+        turnId: "turn-9",
+        type: "message"
+      },
+      {
+        result: "recovered",
+        status: "completed",
+        threadId: "thread-9",
+        turnId: "turn-9",
+        type: "turn_completed"
+      },
+      {
+        cancelled: false,
+        exitCode: 0,
+        signal: null,
+        type: "process_exit"
+      }
+    ]);
+    // The provider must not have interrupted the turn: a `turn/interrupt`
+    // request in the transcript is the fingerprint of the shutdown this fix
+    // removes.
+    const requests = readJsonl(await readFile(transcriptPath, "utf8"));
+    expect(requests.map((request) => objectField(request, "method"))).toEqual([
+      "initialize",
+      "initialized",
+      "thread/start",
+      "turn/start"
+    ]);
+  });
+
   it("interrupts and stops the app-server process on cancellation", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1411,6 +1481,12 @@ async function writeFakeCodexAppServer(
       "    if (scenario === 'error') {",
       "      send({ method: 'error', params: { threadId: 'thread-9', turnId: 'turn-9', error: { message: 'model exploded politely', codexErrorInfo: null, additionalDetails: null }, willRetry: false } });",
       "      continue;",
+      "    }",
+      "    if (scenario === 'retryable-error') {",
+      "      send({ method: 'error', params: { threadId: 'thread-9', turnId: 'turn-9', error: { message: 'Reconnecting... 2/5', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } }, additionalDetails: 'request timed out' }, willRetry: true } });",
+      "      send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'item-1', delta: 'recovered' } });",
+      "      send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
+      "      process.exit(0);",
       "    }",
       "    if (scenario === 'wait' || scenario === 'term-exit') {",
       "      continue;",

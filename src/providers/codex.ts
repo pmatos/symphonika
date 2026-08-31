@@ -43,7 +43,7 @@ const PROVIDER_LABEL: ProviderLabel = "Codex";
 // default), so markers are rate-limited well below that (ADR 0087).
 const PROGRESS_MARKER_MIN_INTERVAL_MS = 5_000;
 
-type CodexProgressSignal = "command_output" | "workspace_diff";
+type CodexProgressSignal = "command_output" | "stream_retry" | "workspace_diff";
 
 type ActiveCodexRun = {
   cancelled: boolean;
@@ -580,11 +580,35 @@ function mapCodexJsonRpcMessage(
 
   if (method === "error") {
     const error = objectField(params, "error");
+    const message = stringField(error, "message") ?? "Codex provider error";
+    const threadId = stringField(params, "threadId") ?? activeRun.threadId;
+    const turnId = stringField(params, "turnId") ?? activeRun.turnId;
+
+    // Codex reports a transient stream drop as an `error` notification it will
+    // recover from itself, flagged `willRetry: true` ("Reconnecting... 2/5").
+    // Treating it as terminal killed the process at the exact moment codex was
+    // telling us it was still alive, inside its own
+    // stream_idle_timeout_ms x stream_max_retries budget (ADR 0088). Only a
+    // retry codex will not make itself ends the turn.
+    if (booleanField(params, "willRetry") === true) {
+      const signal: CodexProgressSignal = "stream_retry";
+      return {
+        normalized: {
+          message,
+          signal,
+          threadId,
+          turnId,
+          type: "progress"
+        },
+        raw
+      };
+    }
+
     return {
       normalized: {
-        message: stringField(error, "message") ?? "Codex provider error",
-        threadId: stringField(params, "threadId") ?? activeRun.threadId,
-        turnId: stringField(params, "turnId") ?? activeRun.turnId,
+        message,
+        threadId,
+        turnId,
         type: "turn_failed"
       },
       raw
@@ -1206,6 +1230,15 @@ function field(value: unknown, key: string): unknown {
 function stringField(value: unknown, key: string): string | undefined {
   const valueAtKey = field(value, key);
   if (typeof valueAtKey === "string") {
+    return valueAtKey;
+  }
+
+  return undefined;
+}
+
+function booleanField(value: unknown, key: string): boolean | undefined {
+  const valueAtKey = field(value, key);
+  if (typeof valueAtKey === "boolean") {
     return valueAtKey;
   }
 

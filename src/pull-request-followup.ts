@@ -363,7 +363,7 @@ async function processTrackedPullRequests(input: {
       trackingState === "open" &&
       (await input.runController.isIssueOwnedByWorkflow({
         issueNumber: tracked.issueNumber,
-        projectName: tracked.projectName
+        project
       }));
     input.runStore.recordPullRequestObservation({
       headSha,

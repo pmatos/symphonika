@@ -1093,17 +1093,19 @@ export class RunController {
   // Scoped to raw_fsm because only a raw FSM has a position to be parked at.
   // A markdown compatibility-graph workflow has no state machine, so the
   // global loop remains its only follow-up path.
+  //
+  // Takes the caller's already-resolved project rather than re-reading it: the
+  // follow-up loop holds it, and the daemon's loader rebuilds a Map of every
+  // project on each call. The workflow-kind test comes before the waiting-row
+  // lookup for the same reason — it is one in-memory field read that rejects
+  // every markdown project outright, while the lookup is an unindexed scan of
+  // a table that grows with every Run ever recorded.
   async isIssueOwnedByWorkflow(input: {
     issueNumber: number;
-    projectName: string;
+    project: RunControllerProjectConfig;
   }): Promise<boolean> {
-    const waiting = this.runStore.findWaitingRunByIssue(input);
-    if (waiting === undefined || waiting.currentStateId === null) {
-      return false;
-    }
-    const projects = await this.projectsLoader();
-    const project = projects.get(input.projectName);
-    if (project === undefined || !isDispatchProject(project)) {
+    const { project } = input;
+    if (project.disabled === true || !isDispatchProject(project)) {
       return false;
     }
     let loaded;
@@ -1112,10 +1114,17 @@ export class RunController {
     } catch {
       return false;
     }
-    if (loaded.errors.length > 0) {
+    if (
+      loaded.errors.length > 0 ||
+      loaded.expandedWorkflow.source.kind !== "raw_fsm"
+    ) {
       return false;
     }
-    if (loaded.expandedWorkflow.source.kind !== "raw_fsm") {
+    const waiting = this.runStore.findWaitingRunByIssue({
+      issueNumber: input.issueNumber,
+      projectName: project.name
+    });
+    if (waiting === undefined || waiting.currentStateId === null) {
       return false;
     }
     // A `current_state_id` naming a state the workflow no longer has means the

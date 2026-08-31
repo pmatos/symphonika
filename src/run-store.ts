@@ -5501,6 +5501,15 @@ export class RunStore {
       on run_state_transitions(run_id, sequence);
     `);
 
+    // `runs` had no index at all. Every per-Issue lookup against it — the
+    // waiting-row probe the PR follow-up loop now makes for each tracked PR on
+    // each pass, and its several siblings — was a filtered scan of a table
+    // that grows with every Run ever recorded and is never swept.
+    this.database.exec(`
+      create index if not exists runs_project_issue_idx
+      on runs(project_name, issue_number);
+    `);
+
     // Runs after the ensureColumn additions above so databases created before
     // watchdog_samples gained normalized_log_path/last_message_at have those
     // columns before the history backfill reads them.

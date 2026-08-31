@@ -428,6 +428,88 @@ describe("attachProviderStderrLog flush barrier", () => {
   });
 });
 
+describe("attachProviderStderrLog buffering bounds", () => {
+  it("does not buffer without bound for a self-overlapping secret", async () => {
+    // Secret "aaa" against a stream of "a" merges into one span that always
+    // starts at zero, so honouring the straddle forever would retain the whole
+    // stream in memory, rescan it on every chunk, and write nothing until EOF.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+    const child: ChildProcessWithoutNullStreams = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        "for (let i = 0; i < 40; i += 1) { process.stderr.write('a'.repeat(256)); await new Promise((r) => setTimeout(r, 5)); } await new Promise((r) => setTimeout(r, 5_000));"
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    child.stdout.resume();
+    const capture = attachProviderStderrLog(child, logPath, {
+      redactSecrets: ["aaa"]
+    });
+
+    try {
+      // Masked output reaches disk while the provider is still running, rather
+      // than accumulating in memory until an EOF that may never come.
+      await expect
+        .poll(
+          () =>
+            readFile(logPath, "utf8").then(
+              (text) => text.length,
+              () => 0
+            ),
+          { timeout: 4_000 }
+        )
+        .toBeGreaterThan(0);
+      const contents = await readFile(logPath, "utf8");
+      expect(contents).not.toContain("aaa");
+      expect(contents.split("[REDACTED]").join("")).toBe("");
+    } finally {
+      child.kill("SIGKILL");
+      await capture.waitForFlush();
+    }
+  });
+
+  it("creates the file when the whole first chunk is withheld as a secret prefix", async () => {
+    // "hun" could still become "hunter2", so nothing is emitted yet — but the
+    // provider did speak, and an absent file is documented to mean silence.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+    const child: ChildProcessWithoutNullStreams = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        "process.stderr.write('hun'); await new Promise((r) => setTimeout(r, 5_000));"
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    child.stdout.resume();
+    const capture = attachProviderStderrLog(child, logPath, {
+      redactSecrets: ["hunter2"]
+    });
+
+    try {
+      await expect
+        .poll(
+          () =>
+            stat(logPath).then(
+              () => true,
+              () => false
+            ),
+          {
+            timeout: 4_000
+          }
+        )
+        .toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+      await capture.waitForFlush();
+    }
+  });
+});
+
 describe("attachProviderStderrLog cap boundary", () => {
   it("truncates at a character boundary, not mid-sequence", async () => {
     // The cap lands inside "é"; cutting there would write an incomplete UTF-8

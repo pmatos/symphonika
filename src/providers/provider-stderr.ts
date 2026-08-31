@@ -90,6 +90,13 @@ export function attachProviderStderrLog(
   const redactor = createStreamingRedactor(secrets);
 
   child.stderr.on("data", (chunk: Buffer) => {
+    if (chunk.length > 0) {
+      // Open on the first RAW byte, not the first byte that survives
+      // redaction: a provider whose opening output is entirely withheld as a
+      // possible secret prefix (`hun` against `hunter2`) and then hangs must
+      // not look identical to one that never said anything.
+      sink.open();
+    }
     sink.write(redactor.push(chunk));
   });
 
@@ -168,6 +175,7 @@ function createStreamingRedactor(secrets: readonly string[]): {
 // boundary is retained unredacted because a future chunk could still change
 // what it means.
 function emitBoundary(text: string, secrets: readonly string[]): number {
+  const longest = Math.max(...secrets.map((secret) => secret.length));
   const boundary = holdbackBoundary(
     text,
     text.length - pendingSecretPrefixLength(text, secrets)
@@ -178,9 +186,18 @@ function emitBoundary(text: string, secrets: readonly string[]): number {
   const straddling = secretSpans(text, secrets).find(
     (span) => span.start < boundary && boundary < span.end
   );
-  return straddling === undefined
-    ? boundary
-    : holdbackBoundary(text, straddling.start);
+  if (straddling === undefined) {
+    return boundary;
+  }
+  const retained = holdbackBoundary(text, straddling.start);
+  // A self-overlapping secret against a stream that repeats its pattern
+  // (secret `aaa`, provider emitting `a` forever) merges into one span that
+  // always starts at zero, so honouring the straddle would retain everything
+  // and grow the buffer without bound while rescanning it on every chunk.
+  // Past this point, fall back to the prefix-only boundary: every complete
+  // match inside what is emitted is still masked, and at most `longest - 1`
+  // characters stay buffered.
+  return text.length - retained > longest * 2 ? boundary : retained;
 }
 
 // How much of the tail must be withheld because it could still turn out to be
@@ -237,6 +254,7 @@ function createProviderStderrSink(
 ): {
   end: () => void;
   finished: Promise<void>;
+  open: () => void;
   write: (chunk: Buffer) => void;
 } {
   let stream: WriteStream | undefined;
@@ -255,6 +273,19 @@ function createProviderStderrSink(
     }
     settled = true;
     settle();
+  };
+
+  const openStream = (): WriteStream => {
+    if (stream === undefined) {
+      stream = createWriteStream(filePath, { flags: "a" });
+      // Evidence capture is best-effort: an unwritable state directory must
+      // not take the run down with it, and must not strand `finished`.
+      stream.on("error", () => {
+        failed = true;
+        done();
+      });
+    }
+    return stream;
   };
 
   return {
@@ -277,25 +308,22 @@ function createProviderStderrSink(
       });
     },
     finished,
+    open: () => {
+      if (!failed && !ended) {
+        openStream();
+      }
+    },
     write: (chunk: Buffer) => {
       if (failed || capped || ended || chunk.length === 0) {
         return;
       }
-      if (stream === undefined) {
-        stream = createWriteStream(filePath, { flags: "a" });
-        // Evidence capture is best-effort: an unwritable state directory must
-        // not take the run down with it, and must not strand `finished`.
-        stream.on("error", () => {
-          failed = true;
-          done();
-        });
-      }
+      const target = openStream();
       // The cap counts post-redaction bytes — it is a disk guard, and
       // `[REDACTED]` is longer than most secrets it replaces.
       const remaining = maxBytes - written;
       if (chunk.length <= remaining) {
         written += chunk.length;
-        stream.write(chunk);
+        target.write(chunk);
         return;
       }
       capped = true;
@@ -305,9 +333,9 @@ function createProviderStderrSink(
       const keep = utf8EndOffset(chunk, remaining);
       if (keep > 0) {
         written += keep;
-        stream.write(chunk.subarray(0, keep));
+        target.write(chunk.subarray(0, keep));
       }
-      stream.write(
+      target.write(
         `\n[symphonika] provider stderr truncated at ${maxBytes} bytes\n`
       );
     }

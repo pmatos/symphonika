@@ -13,7 +13,7 @@ import type { ArtifactExistsResolver } from "./state-machine-dispatch.js";
 
 // Probes the Run Workspace once for every path the state's artifact predicates
 // name, so decideNextStep can stay synchronous and every predicate in the state
-// -- complete_when and each transition -- answers from the same observation.
+// — complete_when and each transition — answers from the same observation.
 // Undefined means "nothing to probe or nowhere to probe it": a state with no
 // artifact predicate never consults the resolver, and a state that has one but
 // no prepared Workspace must block rather than advance, which is what
@@ -53,7 +53,7 @@ export async function probeStateArtifacts(input: {
 
 // Every predicate key the state references, across complete_when and each
 // transition. A caller with only some signal sources available uses this to ask
-// whether the state is decidable at all from what it has -- reEvaluateWaitingRun
+// whether the state is decidable at all from what it has — reEvaluateWaitingRun
 // polls an artifact-only wait before a pull request exists, but must leave a
 // state that also names PR predicates parked, since an absent PR signal is
 // "unmet" and would otherwise drop the state onto a catch-all transition.
@@ -70,7 +70,12 @@ export function statePredicateKeys(state: ExpandedWorkflowState): Set<string> {
   return keys;
 }
 
-function collectArtifactPaths(state: ExpandedWorkflowState): Set<string> {
+// Exported so the progress fingerprint can observe exactly the paths this
+// state's predicates name — a second, independently derived path list would
+// let the fingerprint miss an artifact the decision actually turned on.
+export function collectArtifactPaths(
+  state: ExpandedWorkflowState
+): Set<string> {
   const paths = new Set<string>();
   addArtifactPaths(state.completeWhen, paths);
   for (const transition of state.transitions) {

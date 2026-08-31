@@ -8,6 +8,7 @@ import {
   emptyIssuePollStatus,
   type IssueSnapshot
 } from "../src/issue-polling.js";
+import { buildNoProgressReason } from "../src/lifecycle/progress-fingerprint.js";
 import { routineEvidencePaths } from "../src/routines/evidence.js";
 import type { RunState } from "../src/run-store.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
@@ -417,6 +418,68 @@ describe("HTTP app — runs API and pages", () => {
       expect(clearedDetail.pullRequestFollowup).toBeNull();
       const clearedPage = await (await app.request("/runs/waiting-run")).text();
       expect(clearedPage).not.toContain("Manual attention required");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("surfaces manual attention when the progress guard parks a workflow", async () => {
+    const test = await setup();
+    try {
+      const issue = sampleIssue({
+        number: 616,
+        title: "Progress guard park"
+      });
+      test.runStore.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("parent-run", "succeeded");
+      test.runStore.createWaitingRun({
+        currentStateId: "wait_for_pr",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "alpha"
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const beforeGuard = (await (
+        await app.request("/api/runs/waiting-run")
+      ).json()) as { workflowProgress: unknown };
+      expect(beforeGuard.workflowProgress).toBeNull();
+
+      test.runStore.recordWaitingActivity(
+        "waiting-run",
+        buildNoProgressReason({
+          fromStateId: "wait_for_pr",
+          toStateId: "autofix"
+        })
+      );
+
+      const detail = (await (
+        await app.request("/api/runs/waiting-run")
+      ).json()) as { workflowProgress: unknown };
+      expect(detail.workflowProgress).toEqual({
+        attention: "no_progress",
+        fromStateId: "wait_for_pr",
+        toStateId: "autofix"
+      });
+
+      const page = await (await app.request("/runs/waiting-run")).text();
+      expect(page).toContain('class="banner banner--attention"');
+      expect(page).toContain("Manual attention required");
+      expect(page).toContain("<code>wait_for_pr</code>");
+      expect(page).toContain("<code>autofix</code>");
+      expect(page).toContain("nothing it can observe has changed");
     } finally {
       test.cleanup();
     }

@@ -20,6 +20,7 @@ import type {
   WriteIssueLabelsFn
 } from "./app.js";
 import type { AsyncMutex } from "../lifecycle/async-mutex.js";
+import { parseNoProgressReason } from "../lifecycle/progress-fingerprint.js";
 import type { PullRequestState } from "../pull-request-state.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
@@ -154,13 +155,13 @@ export type RegisterPagesOptions = {
   // HttpAppOptions.getProjectRepoAliases (src/http/app.ts) — the resolver
   // itself needs runtimeConfig.projectsByName(), which only daemon.ts has.
   getProjectRepoAliases?: (projectName: string) => string[];
-  // The project's configured issue_filters.labels_all -- handleIssueLabelWrite's
+  // The project's configured issue_filters.labels_all — handleIssueLabelWrite's
   // dependency gate only blocks adding a label in this set. See
   // HttpAppOptions.getProjectRequiredLabels (src/http/app.ts).
   getProjectRequiredLabels?: (projectName: string) => string[];
   // The dependency graph view (/issues/graph) needs a Project's GitHub
   // owner/repo to build node ids and resolve "## Parent" clustering.
-  // Undefined for a Routine Host or an unknown Project name -- that
+  // Undefined for a Routine Host or an unknown Project name — that
   // project's issues are skipped from the graph rather than erroring. See
   // HttpAppOptions.getProjectRepo (src/http/app.ts).
   getProjectRepo?: (
@@ -270,6 +271,15 @@ export type PullRequestFollowupAttention = {
   prUrl: string;
 };
 
+// A park the progress guard is holding in place. Reported separately from the
+// review-dispatch cap because it is not a pull-request fact: an artifact-only
+// wait parks this way too, on a workspace that stopped changing.
+export type WorkflowProgressAttention = {
+  attention: "no_progress";
+  fromStateId: string;
+  toStateId: string;
+};
+
 const TERMINAL_FIRING_STATES: ReadonlySet<RoutineFiringState> = new Set([
   "succeeded",
   "failed",
@@ -311,7 +321,7 @@ export function registerPages(options: RegisterPagesOptions): void {
   const now = options.now ?? Date.now;
   const getWatchdogConfig =
     options.getWatchdogConfig ?? (() => DEFAULT_WATCHDOG_CONFIG);
-  // Same gate as src/http/app.ts's own mutating routes -- an editor's
+  // Same gate as src/http/app.ts's own mutating routes — an editor's
   // preview step does no write, but it does meaningful server-side work
   // (validation) against caller-supplied content, so it gets the same
   // same-origin/CSRF check as the confirm step that actually writes. See
@@ -375,7 +385,7 @@ export function registerPages(options: RegisterPagesOptions): void {
   // island (src/client/issues-bulk.tsx), bundled by esbuild
   // (scripts/build-client.mjs) into dist/client/issues-bulk.js. Resolved
   // relative to this compiled module's own location, two directories up to
-  // the repo root then into dist/client -- that's the same relative path
+  // the repo root then into dist/client — that's the same relative path
   // whether this file is running as src/http/pages.ts (tsx, dev) or
   // dist/http/pages.js (tsc, prod), since dist/ is always a sibling of
   // src/ at the repo root. Not embedded as a source constant (unlike
@@ -402,7 +412,7 @@ export function registerPages(options: RegisterPagesOptions): void {
   });
 
   // The dependency graph view's React island (src/client/issues-deps-graph.tsx),
-  // bundled the same way as issues-bulk.js above -- see that route's comment
+  // bundled the same way as issues-bulk.js above — see that route's comment
   // for why the path is resolved relative to this compiled module.
   const depsGraphBundlePath = fileURLToPath(
     new URL("../../dist/client/issues-deps-graph.js", import.meta.url)
@@ -514,7 +524,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     // The banner's own reference point falls back to when the tick loop
     // started scheduling (mirroring isTickRecentEnoughForSystemdWatchdog's
     // identical fallback) so a hung first tick isn't indistinguishable from
-    // "nothing has been scheduled yet" -- /api/status's own lastTickAt stays
+    // "nothing has been scheduled yet" — /api/status's own lastTickAt stays
     // truthfully null pre-first-tick; only this banner's age uses the
     // fallback.
     const bannerReferenceAt =
@@ -676,6 +686,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       `<h1 class="page-title">Run <code>${escapeHtml(detail.id)}</code></h1>`,
       renderOutcomeBanner(detail, failureEvent, exitEvent),
       renderPullRequestFollowupAttention(pullRequestFollowup),
+      renderWorkflowProgressAttention(buildWorkflowProgressAttention(detail)),
       renderRunSummary(detail, capContext),
       renderWatchdogSection(watchdog, outputTokenGrowth5m, detailNowMs),
       renderWorkflowGraphSummary(detail.id, workflowGraph),
@@ -761,7 +772,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       runStore: options.runStore,
       targetProjects
     });
-    // Only resolvable when exactly one Project is selected -- with the
+    // Only resolvable when exactly one Project is selected — with the
     // "all projects" view (projectFilter undefined) there's no way to know
     // which Project's repo a bare issue number belongs to.
     const issueParam = parsePositiveIntQueryParam(context.req.query("issue"));
@@ -869,7 +880,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       // Hard block, no override (see docs/adr, issue dependency gating):
       // the only way past this is to actually resolve the dependency on
       // GitHub. This is best-effort UX against a snapshot that can be up
-      // to ~30s stale (ADR 0073) -- the authoritative gate is
+      // to ~30s stale (ADR 0073) — the authoritative gate is
       // evaluateProjectEligibility, re-evaluated every poll regardless of
       // what this route allowed. offerPollNow lets an operator who just
       // closed the blocker refresh immediately rather than wait it out.
@@ -1341,7 +1352,7 @@ export function registerPages(options: RegisterPagesOptions): void {
 
     // The SHA the merge is pinned to is whatever the operator's page
     // actually showed (submitted from the GET page's hidden field), not a
-    // fresh re-read of the snapshot -- a poll landing between page-load
+    // fresh re-read of the snapshot — a poll landing between page-load
     // and the click would otherwise let this validate a commit the
     // operator never saw. Missing/blank is only permissive when the GET
     // page itself had no headSha to pin (renderPullRequestMergeSection
@@ -2117,7 +2128,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     );
     // resolveNamedRoutineGroup was already queried with includeInactive:
     // true below, so resolved.group already carries every inactive
-    // sibling target -- unlike the fallthrough case, there's nothing left
+    // sibling target — unlike the fallthrough case, there's nothing left
     // for includeInactiveRoutineTargets to add.
     let resolvedWithInactive = requestedIncludeInactive;
     if (!requestedIncludeInactive && resolved.kind === "not_found") {
@@ -2400,10 +2411,10 @@ export function registerPages(options: RegisterPagesOptions): void {
   );
 
   // #307's disable/enable action: a targeted structured edit (setRoutineDisabled)
-  // rather than the raw-text editor -- the operator picks a state, not text
+  // rather than the raw-text editor — the operator picks a state, not text
   // to type. Renders through the SAME diff-before-write confirmation page
   // and the SAME /edit/confirm route the raw-text editor uses (#307 AC:
-  // "Every save goes through #306's pipeline -- no editor writes files
+  // "Every save goes through #306's pipeline — no editor writes files
   // directly"), just pre-filled with programmatically computed content
   // instead of a submitted textarea.
   async function renderRoutineDisabledTogglePreview(
@@ -3617,7 +3628,7 @@ const PROJECT_ISSUE_ROW_BUCKET: Record<
 type ProjectIssueRow = {
   detail: string;
   // /issues/:project/:number (loadIssueDetail) resolves only against the
-  // persisted snapshot table, never against Run history -- a row can exist
+  // persisted snapshot table, never against Run history — a row can exist
   // here from a Run alone (#303's union join) with no snapshot behind it.
   // This says whether that detail page actually exists for this row, so the
   // renderer knows whether "#N" may safely become a link.
@@ -3757,7 +3768,7 @@ function renderProjectIssuesTable(
   const body = rows
     .map((row) => {
       // Only snapshot-backed rows have a working detail page (see
-      // ProjectIssueRow.hasSnapshot) -- a Run-only row would 404.
+      // ProjectIssueRow.hasSnapshot) — a Run-only row would 404.
       const numberCell = row.hasSnapshot
         ? `<a href="${escapeHtml(`/issues/${encodedProjectName}/${row.issueNumber}`)}">#${row.issueNumber}</a>`
         : `#${row.issueNumber}`;
@@ -3940,7 +3951,7 @@ function collectLiveRunEntries(input: {
 // (runPullRequestFollowup, src/pull-request-followup.ts) is NOT represented
 // here. Its Run already terminated (so it's absent from every source above)
 // but sym:claimed stays attached while follow-up decides whether to
-// dispatch a review round -- meaning both handleClearStaleClaim and the PR
+// dispatch a review round — meaning both handleClearStaleClaim and the PR
 // merge guard can act during that window. The natural fix (have
 // runPullRequestFollowup hold dispatchMutex around its decide-then-dispatch
 // step) deadlocks: dispatchReviewFollowup -> runFreshLifecycle ->
@@ -4136,7 +4147,7 @@ function issueVerdictFamily(
   // both missing its required label and blocked by an open dependency
   // reads "filtered: missing ...; blocked: dependency ..."), so a
   // whole-string prefix check would miss a blocked/claimed segment that
-  // isn't first. Scan segments in order instead -- first non-neutral wins,
+  // isn't first. Scan segments in order instead — first non-neutral wins,
   // which preserves today's "claimed by run" precedence since operational
   // label reasons are always pushed before dependency reasons (see
   // evaluateProjectEligibility, src/issue-polling.ts).
@@ -4173,7 +4184,7 @@ function renderIssueSearchFilters(
 }
 
 // #467's bulk multi-select label editing: the data window.__ISSUES__ hands
-// the React island (src/client/issues-bulk.tsx) -- just enough to build
+// the React island (src/client/issues-bulk.tsx) — just enough to build
 // selection state and a label autocomplete without a second network
 // request. Mirrors the currently-rendered rows exactly, not the full
 // IssueSearchRow (verdict/age/preRestart are display-only, not something
@@ -4188,7 +4199,7 @@ type BulkSelectIssueData = {
 
 // The /issues list row's "Deps" column: a bare count + link into the
 // dependency graph view (Phase 2, GET /issues/graph), independent of the
-// Verdict pill -- which already surfaces the same unresolved-dependency
+// Verdict pill — which already surfaces the same unresolved-dependency
 // fact in eligibility-reason form (see evaluateProjectEligibility). This
 // column exists for the itemized detail the terse verdict string doesn't
 // carry, not to duplicate the eligibility signal.
@@ -4201,7 +4212,7 @@ function renderIssueSearchRowDeps(row: IssueSearchRow): string {
   ).length;
   const graphLink = `/issues/graph?project=${encodeURIComponent(row.projectName)}&issue=${row.issueNumber}`;
   // A truncated fetch means openCount is a lower bound, not the true
-  // count -- the "+" signals more blockers exist than could be checked,
+  // count — the "+" signals more blockers exist than could be checked,
   // so this never reads as "0 open" (eligible) for an issue the gate
   // (issueDependencyGateBlocks) is actually treating as blocked.
   const label = row.blockedByTruncated
@@ -4278,16 +4289,16 @@ type DependencyGraphEmbedIssue = {
   title: string;
 };
 
-// Only projects whose owner/repo actually resolves contribute nodes -- a
+// Only projects whose owner/repo actually resolves contribute nodes — a
 // Routine Host or an unknown Project name is skipped rather than erroring,
 // consistent with this route's other optional-injected accessors.
 //
 // Two Project names can alias the same GitHub owner/repo (a supported
-// config -- see getProjectRepoAliases's own doc comment above), and each
+// config — see getProjectRepoAliases's own doc comment above), and each
 // alias polls and persists its own snapshot row for the same physical
 // GitHub issue. Since a graph node represents one physical issue, not one
 // Project's view of it, `seenIssueKeys` keeps only the first row seen per
-// owner/repo#issueNumber -- callers pass targetProjects pre-sorted, so
+// owner/repo#issueNumber — callers pass targetProjects pre-sorted, so
 // "first seen" is deterministically the alphabetically-first Project name,
 // not an accident of Map/object iteration order.
 function buildDependencyGraphIssues(input: {
@@ -4334,7 +4345,7 @@ function buildDependencyGraphIssues(input: {
 
 // ADR-0056's graceful-degradation guardrail: always rendered, and only
 // hidden by the client script (IssuesDepsGraphView) once cytoscape has
-// mounted without throwing -- see that component's own comment. Only lists
+// mounted without throwing — see that component's own comment. Only lists
 // issues with at least one blocker, mirroring renderIssueDependenciesSection
 // on the issue detail page rather than repeating every dependency-free
 // issue here too.
@@ -4356,8 +4367,8 @@ function renderIssueDependencyGraphFallback(
           return `<li>${labelPill(blocker.state, family)} ${escapeHtml(ref)} — ${escapeHtml(blocker.title)}</li>`;
         })
         .join("");
-      // A truncated fetch means the fetched blockers above -- even if every
-      // one shown is closed -- aren't the whole story; called out
+      // A truncated fetch means the fetched blockers above — even if every
+      // one shown is closed — aren't the whole story; called out
       // separately so it can't be mistaken for one more (closed) blocker.
       const truncatedNote = issue.blockedByTruncated
         ? `<li class="pill pill--blocked">⚠ more dependency links than could be checked</li>`
@@ -4394,7 +4405,7 @@ function renderIssueDependencyGraphPage(input: {
 }
 
 // Without an explicit height, .deps-graph-canvas is an empty block with no
-// content until cytoscape populates it -- it computes to zero height, so
+// content until cytoscape populates it — it computes to zero height, so
 // IssuesDepsGraphView's cytoscape instance would mount into an invisible
 // container right before hideFallback() removes the only visible content.
 // Mirrors WORKFLOW_GRAPH_STYLES's #wf-cy sizing for the pre-existing
@@ -4421,7 +4432,7 @@ function isOrchestratorLabel(label: string): boolean {
 }
 
 // The label-write dependency gate's own read of "resolved" (state ===
-// CLOSED, regardless of stateReason) -- kept in lockstep with
+// CLOSED, regardless of stateReason) — kept in lockstep with
 // evaluateProjectEligibility's identical rule (src/issue-polling.ts) since
 // this route is a best-effort UX gate against the same snapshot data, not
 // a second source of truth. See docs/adr/0081-issue-dependency-gating-and-graph-view.md.
@@ -4433,7 +4444,7 @@ function unresolvedIssueDependencies(
 
 // A truncated fetch (more blockedBy links than
 // ISSUE_DEPENDENCIES_MAX_BLOCKERS_PER_ISSUE, src/issue-polling.ts) gates
-// exactly like an open blocker -- fail closed on the unfetched overflow
+// exactly like an open blocker — fail closed on the unfetched overflow
 // rather than gating only on the state of the blockers that happened to
 // fit, which would silently allow dispatch when the true state is
 // unknown.
@@ -4464,14 +4475,14 @@ type BulkIssueLabelResult =
   | { error: string; issueNumber: number; ok: false; projectName: string };
 
 // Array.isArray's lib.es5.d.ts signature narrows to `any[]`, not
-// `unknown[]` -- these normalize a parsed JSON body's fields to properly
+// `unknown[]` — these normalize a parsed JSON body's fields to properly
 // typed arrays. A malformed element (wrong type, missing field) makes the
 // whole field invalid rather than being silently dropped: the documented
 // contract for a malformed request body is 400 with no writes attempted,
 // and filtering out just the bad element let the route mutate the
-// surviving, seemingly-valid entries -- a partial write the caller never
+// surviving, seemingly-valid entries — a partial write the caller never
 // asked for and has no way to detect from the response. An omitted field
-// (`undefined`) is not malformed -- it just means "none provided" -- and
+// (`undefined`) is not malformed — it just means "none provided" — and
 // stays valid-and-empty so the existing "at least one required" checks
 // handle it.
 type ArrayValidationResult<T> =
@@ -4575,7 +4586,7 @@ async function runBulkIssueLabelWrites(input: {
   const results = new Array<BulkIssueLabelResult>(operations.length);
   let nextIndex = 0;
   // Cached per project (not per operation) since a bulk selection commonly
-  // spans many issues in the same project -- avoids re-scanning
+  // spans many issues in the same project — avoids re-scanning
   // listProjectIssueSnapshots once per operation.
   const snapshotsByProject = new Map<string, ProjectIssueSnapshotRow[]>();
 
@@ -4601,7 +4612,7 @@ async function runBulkIssueLabelWrites(input: {
       }
       // Mirrors handleIssueLabelWrite's hard block on the single-issue
       // form: adding a configured required label to a dependency-blocked
-      // issue is refused here too -- the bulk toolbar is a second
+      // issue is refused here too — the bulk toolbar is a second
       // label-write path and must not bypass the same gate (see
       // docs/adr/0081-issue-dependency-gating-and-graph-view.md). Both add
       // and remove are skipped for this operation when blocked, since a
@@ -4620,7 +4631,7 @@ async function runBulkIssueLabelWrites(input: {
         );
         // A missing snapshot (not yet polled, or a stale/incorrect issue
         // number posted straight to the API) is unknown dependency state,
-        // not clear dependency state -- fail closed the same way a
+        // not clear dependency state — fail closed the same way a
         // truncated fetch does (ADR 0081), rather than letting the add
         // through unchecked because there's nothing to gate against.
         if (snapshot === undefined || issueDependencyGateBlocks(snapshot)) {
@@ -4637,7 +4648,7 @@ async function runBulkIssueLabelWrites(input: {
         }
       }
       // The full requested removeLabels goes to every issue, not narrowed
-      // against the persisted poll snapshot -- the snapshot can lag live
+      // against the persisted poll snapshot — the snapshot can lag live
       // GitHub state indefinitely (ADR 0073), so filtering against it can
       // silently drop a legitimate removal (e.g. add-then-immediate-remove
       // of the same label) and report false success. Removing a label an
@@ -4645,7 +4656,7 @@ async function runBulkIssueLabelWrites(input: {
       // (tryRemoveLabelsFromIssue, src/issue-polling.ts, swallows the
       // resulting 404), which is safe against live state regardless of
       // snapshot staleness. Every operation runs regardless of earlier
-      // outcomes -- best-effort, so one issue's GitHub-side failure
+      // outcomes — best-effort, so one issue's GitHub-side failure
       // doesn't block the rest of the batch.
       const outcome = await writeIssueLabels({
         add: addLabels,
@@ -4897,7 +4908,7 @@ function renderIssueDetailPage(input: {
   })}<p class="note"><a href="/issues">← Back to search</a></p>`;
 }
 
-// Full itemized breakdown of a Deps-column count -- kind of every
+// Full itemized breakdown of a Deps-column count — kind of every
 // blockedBy entry (open and closed), unlike evaluateProjectEligibility's
 // reasons, which only names the open (unresolved) ones. Absent entirely
 // for an issue with no blockedBy links, rather than an empty section.
@@ -5202,7 +5213,7 @@ function renderPullRequestSearchPage(input: {
 }
 
 type PullRequestDetail = {
-  // The issue this PR was originally discovered from -- used to find
+  // The issue this PR was originally discovered from — used to find
   // whether ANY Run is currently live for that issue, not just the one
   // that originally discovered the PR. See livePullRequestOwnerRunId.
   // Resolved from (in order): the tracked_pull_requests row regardless of
@@ -5369,7 +5380,7 @@ function renderPullRequestMergeSection(input: {
   }
   const action = `/prs/${encodeURIComponent(input.projectName)}/${input.prNumber}/merge`;
   // Pins the SHA to what this page actually shows, not whatever the DB
-  // holds when the merge POST lands -- a poll landing in between would
+  // holds when the merge POST lands — a poll landing in between would
   // otherwise let the safety check validate a commit the operator never
   // saw. See handlePullRequestMerge, which reads this submitted value
   // rather than re-querying the snapshot.
@@ -5658,7 +5669,7 @@ function includeInactiveRoutineTargets(
 }
 
 // Shared by #307's editor routes for the two ways resolveNamedRoutineGroup
-// can fail to produce a single group to edit -- ambiguous renders the same
+// can fail to produce a single group to edit — ambiguous renders the same
 // disambiguation page /routines/:name itself uses (pick a target Project),
 // rather than the misleading "not found" a bare 404 would show for a
 // routine that does exist, just not uniquely by name alone.
@@ -5750,7 +5761,7 @@ function errorMessage(error: unknown): string {
 }
 
 // Hono's parseBody() types a form-encoded field as string | File |
-// (string | File)[] | BodyDataValueDotAll -- these two narrow that down to
+// (string | File)[] | BodyDataValueDotAll — these two narrow that down to
 // the plain string a hidden/textarea field always is here, refusing a
 // missing or wrong-shaped field rather than silently coercing it.
 function readOptionalFormField(
@@ -5847,7 +5858,7 @@ function routineQuerySuffix(
 // route renders. blastRadiusHtml is caller-rendered rather than a fixed
 // shape here, since what a save affects differs per artifact (#307's issue
 // text: Routine Targets + next fire times; a Project's next dispatch;
-// the whole daemon) -- forcing one shared shape onto three different
+// the whole daemon) — forcing one shared shape onto three different
 // disclosures would be the wrong abstraction.
 function renderEditorForm(input: {
   action: string;
@@ -5864,7 +5875,7 @@ function renderEditorForm(input: {
 }
 
 // The raw-text-with-hidden-hash form body shared by renderEditorForm's fresh
-// edit and renderEditorPreview's invalid-resubmit branch -- kept as one
+// edit and renderEditorPreview's invalid-resubmit branch — kept as one
 // function so the two forms can't silently drift apart (missing hidden
 // field, changed textarea attrs) as they're extended.
 function renderContentTextareaForm(input: {
@@ -5889,7 +5900,7 @@ function renderContentTextareaForm(input: {
 
 // #307 AC: "Routine declaration → which Routine Targets, and their next
 // fire times." Targets share the same declaration (ADR 0069's fan-out), so
-// every one of them is affected by a save to this file -- listed
+// every one of them is affected by a save to this file — listed
 // individually because "every target" without the list is exactly the
 // vague disclosure the AC asks editors not to give.
 function renderRoutineEditBlastRadius(targets: RoutineStatus[]): string {
@@ -5903,7 +5914,7 @@ function renderRoutineEditBlastRadius(targets: RoutineStatus[]): string {
 }
 
 // #307 AC: "Workflow contract -> which Project's next dispatch. In-flight
-// Runs are immune (ADR 0045 persists the expanded graph per Run) -- say so
+// Runs are immune (ADR 0045 persists the expanded graph per Run) — say so
 // in the UI, because operators will reasonably assume otherwise." Stated
 // explicitly rather than left implicit precisely because it's the
 // surprising direction (an operator watching a Run in progress would
@@ -5913,7 +5924,7 @@ function renderWorkflowEditBlastRadius(projectName: string): string {
 }
 
 // #307 AC: "Service config -> the whole daemon: projects, caps, provider
-// argv." Stated once, unconditionally -- unlike the routine/workflow
+// argv." Stated once, unconditionally — unlike the routine/workflow
 // disclosures, a symphonika.yml save can touch anything, so there's no
 // narrower "affected set" to enumerate.
 function renderServiceConfigBlastRadius(): string {
@@ -5923,7 +5934,7 @@ function renderServiceConfigBlastRadius(): string {
 // #307 AC: "Editing providers.*.command requires an explicit confirmation
 // step distinct from an ordinary save." providers.codex/claude/omp are the
 // only three provider names the schema allows (src/reload.ts's
-// serviceConfigSchema) -- compared directly rather than diffing an
+// serviceConfigSchema) — compared directly rather than diffing an
 // arbitrary map. A parse failure on either side returns undefined for that
 // side's command, which reads as "unchanged" here; that's fine because a
 // YAML syntax error is already caught and blocks the save entirely before
@@ -6049,7 +6060,7 @@ function renderReloadFailedNotice(input: {
   return `<h1 class="page-title">Saved, but not active</h1><div class="alert" role="alert"><strong>${escapeHtml(input.filePath)} was written to disk, but reload failed</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><p class="note">The previous, last-known-good configuration is still what's running. Fix the issue above and save again.</p><p class="note"><a href="${escapeHtml(input.editAction)}">← Back to editor</a></p>`;
 }
 
-// A small line-based LCS diff -- not a general utility, just enough to
+// A small line-based LCS diff — not a general utility, just enough to
 // render the "diff before every write" requirement (#307) for the three
 // editors' confirmation screens. Keep the exact table bounded because an
 // editor can submit arbitrarily large content (#442); a coarse, linear-space
@@ -6191,7 +6202,7 @@ function isCurrentRoutineTarget(target: RoutineStatus): boolean {
 
 // A target removed from its declaration can remain as a durable
 // removed_from_config row beside current siblings (ADR 0069), so it must
-// not represent the declaration's lifecycle state -- unlike
+// not represent the declaration's lifecycle state — unlike
 // resolveRoutineDeclaration, which picks a target to carry the
 // declaration's *content* and so orders by validity instead.
 function currentRoutineTargets(group: RoutineGroup): RoutineStatus[] {
@@ -6253,7 +6264,7 @@ function renderRoutineLifecycleControls(
 
 // #469: fire-now posts straight at /api/routines/:id/fire (ADR 0075),
 // mirroring /api/runs/:id/cancel's form/JSON duality rather than
-// disable/enable's diff-preview route -- firing isn't a declaration edit,
+// disable/enable's diff-preview route — firing isn't a declaration edit,
 // so there's no diff to confirm. One button per target, since
 // fireRoutineNow requires an unambiguous (routineName, projectName) pair
 // once a Routine fans out to more than one Project (ADR 0069).
@@ -6299,7 +6310,7 @@ const FIRE_REFUSAL_REASON_TEXT: Readonly<Record<string, string>> = {
 };
 
 // #469 AC: refused (with reason), ambiguous, and not_found/unavailable
-// must render as legible page state, not a raw JSON error -- the fire
+// must render as legible page state, not a raw JSON error — the fire
 // route redirects here with the outcome flattened into query params
 // (POST has no response body of its own to render). Whitelisted against
 // known literals rather than reflected verbatim, since these are
@@ -6643,6 +6654,25 @@ export function buildPullRequestFollowupAttention(input: {
   };
 }
 
+export function buildWorkflowProgressAttention(
+  detail: Pick<RunStatus, "state" | "stateTransitionReason">
+): WorkflowProgressAttention | null {
+  if (detail.state !== "waiting") {
+    return null;
+  }
+  const edge = parseNoProgressReason(detail.stateTransitionReason);
+  return edge === null ? null : { attention: "no_progress", ...edge };
+}
+
+function renderWorkflowProgressAttention(
+  attention: WorkflowProgressAttention | null
+): string {
+  if (attention === null) {
+    return "";
+  }
+  return `<section class="banner banner--attention"><p class="banner-title">Manual attention required</p><p class="banner-reason">The workflow is parked because taking <code>${escapeHtml(attention.fromStateId)}</code> &rarr; <code>${escapeHtml(attention.toStateId)}</code> again would repeat work it already did: nothing it can observe has changed since that transition last ran.</p></section>`;
+}
+
 function renderDaemonStaleBanner(
   tickAgeMs: number | null,
   pollingIntervalMs: number
@@ -6757,7 +6787,7 @@ function renderCancelForm(
 }
 
 // #307's routine-lifecycle controls: cancellation already generalized
-// server-side (ADR 0060 -- /api/runs/:id/cancel id-sniffs a Run vs. a
+// server-side (ADR 0060 — /api/runs/:id/cancel id-sniffs a Run vs. a
 // Routine Firing and cancelViaUi/cancelRunInStore already handle both), so
 // this is the same form as renderCancelForm posting to the same endpoint,
 // not a new cancel mechanism.
@@ -7433,7 +7463,7 @@ function escapeHtml(value: string): string {
 }
 
 // JSON.stringify does not escape "<", ">", "&", or the JS line-terminator
-// characters U+2028/U+2029 -- embedding its output verbatim inside an
+// characters U+2028/U+2029 — embedding its output verbatim inside an
 // inline <script> lets attacker-controlled data (e.g. an issue title) close
 // the tag early with a literal "</script>" and inject a sibling script.
 // \u-escaping those characters keeps the JSON value identical after

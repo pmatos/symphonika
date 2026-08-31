@@ -349,22 +349,44 @@ async function processTrackedPullRequests(input: {
     // required headRefOid. A custom GitHubIssuesApi can still surface an
     // empty headSha, so retain the last known-good value as a defensive
     // fallback. tracked.lastSeenHeadSha can itself still be "" (e.g. no head
-    // SHA has ever been observed for this row) -- the merge guard further
+    // SHA has ever been observed for this row) — the merge guard further
     // down refuses to merge without a pin.
     const headSha =
       state.headSha === "" ? tracked.lastSeenHeadSha : state.headSha;
     const trackingState = trackedStateFor(state);
+    // A raw-FSM workflow parked on this Issue decides what happens to its own
+    // pull request — both the merge (ADR 0048) and the review feedback. This
+    // loop observes and records; it does not act. Acting anyway is what gave
+    // one Issue two live FSM positions, the second replaying the pipeline from
+    // `initial` against a finished PR. See issue #616.
+    const workflowOwned =
+      trackingState === "open" &&
+      (await input.runController.isIssueOwnedByWorkflow({
+        issueNumber: tracked.issueNumber,
+        project
+      }));
     input.runStore.recordPullRequestObservation({
       headSha,
       id: tracked.id,
       prUrl: state.url,
+      // The global dispatch cap cannot be reached on a PR this loop never
+      // dispatches for. A workflow-owned park that stops making progress
+      // raises its own attention instead (progress guard, issue #616).
       reviewFollowupCapReached:
+        !workflowOwned &&
         trackingState === "open" &&
         pullRequestNeedsReviewFollowup(state) &&
         tracked.reviewDispatchCount >= input.policy.maxReviewDispatchesPerPr,
       state: trackingState
     });
     if (trackingState !== "open") {
+      continue;
+    }
+    if (workflowOwned) {
+      input.logger?.debug(
+        { prNumber: tracked.prNumber, issueNumber: tracked.issueNumber },
+        "symphonika PR follow-up deferred: workflow owns this issue"
+      );
       continue;
     }
 
@@ -384,22 +406,6 @@ async function processTrackedPullRequests(input: {
     }
 
     if (!pullRequestReadyToMerge(state, input.policy)) {
-      continue;
-    }
-    // Defer to the workflow when a merge_pr state is parked on this issue —
-    // otherwise the first-discovery tick would merge with the global method
-    // before reEvaluateWaitingRun has a chance to apply the workflow's
-    // method override and record merge_pr evidence. See ADR 0048.
-    if (
-      await input.runController.isIssueParkedInMergePrState({
-        issueNumber: tracked.issueNumber,
-        projectName: tracked.projectName
-      })
-    ) {
-      input.logger?.info(
-        { prNumber: tracked.prNumber, issueNumber: tracked.issueNumber },
-        "symphonika PR follow-up merge deferred: workflow merge_pr state will handle"
-      );
       continue;
     }
     // Another GitHub subsystem can engage this project's credential
@@ -585,7 +591,10 @@ function trackedStateFor(
   return state.trackingState;
 }
 
-function reviewContextFromState(
+// Also used by wait re-evaluation, which observes the same PullRequestState
+// when a park routes review feedback into a repair state and needs the same
+// thread bodies in that state's prompt. See issue #616.
+export function reviewContextFromState(
   state: PullRequestState,
   headSha: string
 ): ReviewFollowupContext {

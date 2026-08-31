@@ -50,6 +50,7 @@ import {
 } from "../watchdog-status.js";
 import {
   buildPullRequestFollowupAttention,
+  buildWorkflowProgressAttention,
   registerPages,
   type ScheduledCallback
 } from "./pages.js";
@@ -598,6 +599,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         pullRequestFollowup,
         run,
         transitions,
+        workflowProgress: buildWorkflowProgressAttention(detail),
         watchdog: buildWatchdogStatus({
           config:
             options.getWatchdogConfig?.(run.project) ?? DEFAULT_WATCHDOG_CONFIG,

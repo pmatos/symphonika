@@ -111,6 +111,13 @@ export type WatchdogConfig = {
   // churn count as progress and makes every walk proportionally more
   // expensive.
   mtimeInclude: string[];
+  // Wall-clock minutes a single Run may live, measured from its claim, before
+  // the Watchdog stops it as timed out (ADR 0089). Zero disables the cap. This
+  // is the only bound that does not depend on what the Run is doing: a Run
+  // trickling real output forever satisfies both the liveness rule and the
+  // convergence budget while holding a concurrency slot and its share of the
+  // provider memory budget.
+  maxRunMinutes: number;
   // Cumulative output tokens a single Run may spend before the Watchdog stops
   // it as non-converging (ADR 0086). Zero disables the convergence guard and
   // leaves only the ADR 0054 liveness rule.
@@ -120,6 +127,7 @@ export type WatchdogConfig = {
 
 type ProjectWatchdogConfig = {
   graceMinutes?: number;
+  maxRunMinutes?: number;
   mtimeInclude?: string[];
   outputTokenBudget?: number;
 };
@@ -139,6 +147,10 @@ export type WatchdogServiceConfig = {
 export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   enabled: true,
   graceMinutes: 30,
+  // Six hours: an order of magnitude above any healthy Run and well under the
+  // thirteen-hour Runs of issue #605, so the cap only ever fires on a Run that
+  // has already stopped being worth its slot.
+  maxRunMinutes: 360,
   mtimeIgnore: [],
   mtimeInclude: [],
   outputTokenBudget: 150_000,
@@ -182,13 +194,20 @@ const watchdogConfigSchema = z
       .number()
       .int()
       .nonnegative()
-      .default(DEFAULT_WATCHDOG_CONFIG.outputTokenBudget)
+      .default(DEFAULT_WATCHDOG_CONFIG.outputTokenBudget),
+    // Wall-clock cap on one Run's lifetime; 0 disables it (ADR 0089).
+    max_run_minutes: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(DEFAULT_WATCHDOG_CONFIG.maxRunMinutes)
   })
   .passthrough();
 
 const projectWatchdogConfigSchema = z
   .object({
     grace_minutes: z.number().int().positive().optional(),
+    max_run_minutes: z.number().int().nonnegative().optional(),
     mtime_include: z.array(z.string().trim().min(1)).optional(),
     output_token_budget: z.number().int().nonnegative().optional()
   })
@@ -1213,6 +1232,8 @@ function normalizeWatchdogConfig(
   return {
     enabled: raw?.enabled ?? DEFAULT_WATCHDOG_CONFIG.enabled,
     graceMinutes: raw?.grace_minutes ?? DEFAULT_WATCHDOG_CONFIG.graceMinutes,
+    maxRunMinutes:
+      raw?.max_run_minutes ?? DEFAULT_WATCHDOG_CONFIG.maxRunMinutes,
     mtimeIgnore: raw?.mtime_ignore ?? DEFAULT_WATCHDOG_CONFIG.mtimeIgnore,
     mtimeInclude: raw?.mtime_include ?? DEFAULT_WATCHDOG_CONFIG.mtimeInclude,
     outputTokenBudget:
@@ -1234,6 +1255,9 @@ function projectWatchdogOverride(
       ...(raw.grace_minutes === undefined
         ? {}
         : { graceMinutes: raw.grace_minutes }),
+      ...(raw.max_run_minutes === undefined
+        ? {}
+        : { maxRunMinutes: raw.max_run_minutes }),
       ...(raw.mtime_include === undefined
         ? {}
         : { mtimeInclude: raw.mtime_include }),
@@ -1259,6 +1283,9 @@ export function resolveWatchdogConfig(
     ...(projectOverride.graceMinutes === undefined
       ? {}
       : { graceMinutes: projectOverride.graceMinutes }),
+    ...(projectOverride.maxRunMinutes === undefined
+      ? {}
+      : { maxRunMinutes: projectOverride.maxRunMinutes }),
     ...(projectOverride.mtimeInclude === undefined
       ? {}
       : { mtimeInclude: projectOverride.mtimeInclude }),

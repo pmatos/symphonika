@@ -451,11 +451,13 @@ host is a declaration-time validation error. See ADR 0062. `symphonika init-proj
 routine-host` scaffolds a host without issue-filter, priority, or label-creation prompts.
 
 A Project may override `watchdog.grace_minutes` (a positive integer),
-`watchdog.output_token_budget` (a non-negative integer), and `watchdog.mtime_include` (a list of
-workspace-relative directories); each is optional and merges independently over daemon scope. A
+`watchdog.output_token_budget` (a non-negative integer), `watchdog.max_run_minutes` (a non-negative
+integer), and `watchdog.mtime_include` (a list of workspace-relative directories); each is optional
+and merges independently over daemon scope. A
 Project-level `mtime_include` replaces the daemon-scope list rather than adding to it. It inherits
 `watchdog.enabled`, `watchdog.sample_interval_seconds`, and `watchdog.mtime_ignore` from daemon
-scope, so a Project can lengthen its grace window, raise its convergence budget, or opt a build
+scope, so a Project can lengthen its grace window, raise its convergence budget, lengthen or waive
+its wall-clock cap, or opt a build
 tree back into the workspace walk, but cannot opt into a daemon-disabled Watchdog.
 Project overrides are part of the defensive Service Config reload snapshot: any invalid value or
 unknown key rejects the candidate snapshot for all Projects and leaves the last known-good snapshot
@@ -940,8 +942,8 @@ pending. Validation and status commands must not dispatch work.
 
 The daemon also runs the Watchdog during reconciliation according to
 `watchdog.sample_interval_seconds`. The default Watchdog policy is enabled with a 30 minute
-no-progress grace window, a 150000 output-token convergence budget, and 60 second sampling
-interval.
+no-progress grace window, a 150000 output-token convergence budget, a 360 minute wall-clock Run cap,
+and 60 second sampling interval.
 
 ### 8.3 Multi-Project Dispatch
 
@@ -1368,7 +1370,8 @@ On Watchdog no-progress termination:
 - preserve workspace and logs
 
 On Watchdog convergence-budget termination, the same steps apply with
-`terminal_reason = "no_convergence"`.
+`terminal_reason = "no_convergence"`, and on Watchdog wall-clock termination with
+`terminal_reason = "run_timeout"`.
 
 On stale startup state:
 
@@ -1818,6 +1821,23 @@ opposite failure mode from `no_progress` — a Run doing plenty of observable wo
 finishing, which satisfies the liveness rule on every tick. The budget is checked before the idle
 clock, honours the same per-Project override scope as `grace_minutes`, and like `no_progress` is
 deterministic rather than a transient retry reason. See ADR 0086.
+
+Ahead of both, the Watchdog enforces a **wall-clock cap**: once a sampled Run's age — `now` minus
+its `runs.created_at`, the instant it claimed its Issue — reaches `watchdog.max_run_minutes`
+(default 360; `0` disables it), the Run transitions to `stale` with
+`terminal_reason = "run_timeout"` and its provider is cancelled the same way. This is the only
+bound that does not depend on what the Run is doing: a Run trickling real output indefinitely
+advances a liveness signal on every tick and can stay far below the convergence budget, so neither
+of the other two rules can ever fire, while it holds a `global.max_in_flight` slot and its share of
+the provider memory budget for as long as it lives (issue #605). Unlike the attempt-scoped
+Progress Signal the cap is Run-scoped: it spans workspace preparation and every retry attempt of
+that Run, and a transient retry does not reset it. It does not span a Run *chain* — a continuation,
+an FSM state advance, and a shutdown resume each write their own `runs` row and so each start a
+fresh cap. A Run whose `created_at` cannot be parsed is treated as having an unknown age and is
+never terminated by the cap. The cap is checked before the convergence budget and the idle clock,
+so a Run that has overrun several bounds at once reports the outermost one; it honours the same
+per-Project override scope as `grace_minutes`, and like the other two verdicts is deterministic
+rather than a transient retry reason. See ADR 0089.
 
 ### 12.5 PR Follow-up
 
@@ -2353,7 +2373,8 @@ parameter disambiguates a target and `force=true` applies the narrow disabled-Ro
 ambiguity, and availability refusals return a specific error without advancing the Routine clock.
 
 `GET /api/runs/:id` exposes the latest sample as a camel-cased top-level `watchdog` object, including
-the effective `graceMs` and server-computed `graceRemainingMs`. `GET /api/status` adds a `watchdog`
+the effective `graceMs` and server-computed `graceRemainingMs`, plus the effective `maxRunMs` and
+server-computed `runRemainingMs` (omitted when the wall-clock cap is disabled). `GET /api/status` adds a `watchdog`
 object to each active Run with `idleSince` and `graceRemainingMs` when idle. When the effective
 Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }` for that object.
 

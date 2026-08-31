@@ -159,7 +159,13 @@ export type RunControllerProjectConfig = {
   // still-configured routine is never mistaken for one removed from
   // routines:, mirroring trackerlessGitRoutines above. See ADR 0067.
   templateRejectedRoutines?: TargetedRoutineDeclaration[] | undefined;
-  watchdog?: { graceMinutes?: number; outputTokenBudget?: number } | undefined;
+  watchdog?:
+    | {
+        graceMinutes?: number;
+        maxRunMinutes?: number;
+        outputTokenBudget?: number;
+      }
+    | undefined;
 };
 
 // A Dispatch Project's runtime config: the issue-dispatch fields are required.

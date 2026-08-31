@@ -77,6 +77,21 @@ function progressSignalBlock(output: string): string {
   return output.slice(start, end < 0 ? undefined : end).trimEnd();
 }
 
+// `createRun` stamps `created_at` from the wall clock, and the Watchdog's
+// wall-clock countdown (ADR 0089) is measured from it — so a fixture that
+// snapshots an exact countdown has to pin the claim instant instead of letting
+// it float to whenever the suite happens to run. Only Date is faked, so timers
+// and the event loop are untouched.
+function withClaimTime(instant: string, create: () => void): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(instant));
+  try {
+    create();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 describe("CLI run commands", () => {
   it("status prints state-root and counts grouped by lifecycle", async () => {
     const stateRoot = await makeTempRoot();
@@ -1076,12 +1091,14 @@ describe("CLI run commands", () => {
   it("show-run renders a not-yet-idle Progress Signal from persisted samples", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
-    store.createRun({
-      id: "progress-active",
-      issue: sampleIssue({ number: 202, title: "Watchdog surface" }),
-      projectName: "alpha",
-      providerCommand: "x",
-      providerName: "codex"
+    withClaimTime("2026-05-22T11:50:00.000Z", () => {
+      store.createRun({
+        id: "progress-active",
+        issue: sampleIssue({ number: 202, title: "Watchdog surface" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
     });
     store.updateRunState("progress-active", "running");
     for (const sample of [
@@ -1126,7 +1143,8 @@ describe("CLI run commands", () => {
           workspace mtime: 1m 30s ago
           turn_ids observed: 2
           output tokens / 5m: +75
-          output tokens: 175 / 150000 budget"
+          output tokens: 175 / 150000 budget
+          run timeout in: 5h 50m (cap 6h)"
       `);
     } finally {
       vi.useRealTimers();
@@ -1136,12 +1154,14 @@ describe("CLI run commands", () => {
   it("show-run renders an idle Progress Signal within its grace window", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
-    store.createRun({
-      id: "progress-idle",
-      issue: sampleIssue({ number: 202, title: "Watchdog surface" }),
-      projectName: "alpha",
-      providerCommand: "x",
-      providerName: "codex"
+    withClaimTime("2026-05-22T11:30:00.000Z", () => {
+      store.createRun({
+        id: "progress-idle",
+        issue: sampleIssue({ number: 202, title: "Watchdog surface" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
     });
     store.updateRunState("progress-idle", "running");
     for (const sample of [
@@ -1187,7 +1207,8 @@ describe("CLI run commands", () => {
           output tokens / 5m: +20
           output tokens: 70 / 150000 budget
           idle_since: 2026-05-22T11:45:00.000Z
-          grace remaining: 15m"
+          grace remaining: 15m
+          run timeout in: 5h 30m (cap 6h)"
       `);
     } finally {
       vi.useRealTimers();
@@ -1296,12 +1317,14 @@ describe("CLI run commands", () => {
   it("show-run preserves the final Progress Signal after watchdog termination", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
-    store.createRun({
-      id: "progress-terminated",
-      issue: sampleIssue({ number: 202, title: "Watchdog surface" }),
-      projectName: "alpha",
-      providerCommand: "x",
-      providerName: "codex"
+    withClaimTime("2026-05-22T11:20:00.000Z", () => {
+      store.createRun({
+        id: "progress-terminated",
+        issue: sampleIssue({ number: 202, title: "Watchdog surface" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
     });
     store.updateRunState("progress-terminated", "running");
     for (const sampledAt of [
@@ -1354,7 +1377,8 @@ describe("CLI run commands", () => {
           output tokens / 5m: 0
           output tokens: 36365 / 150000 budget
           idle_since: 2026-05-22T11:25:30.000Z
-          grace remaining: -2h 5m"
+          grace remaining: -2h 5m
+          run timeout in: 3h 19m (cap 6h)"
       `);
     } finally {
       vi.useRealTimers();
@@ -1364,15 +1388,17 @@ describe("CLI run commands", () => {
   it("show-run's Progress Signal does not drift when viewed long after watchdog termination", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
-    store.createRun({
-      id: "progress-terminated-stale-view",
-      issue: sampleIssue({
-        number: 213,
-        title: "Watchdog surface, viewed later"
-      }),
-      projectName: "alpha",
-      providerCommand: "x",
-      providerName: "codex"
+    withClaimTime("2026-05-22T11:20:00.000Z", () => {
+      store.createRun({
+        id: "progress-terminated-stale-view",
+        issue: sampleIssue({
+          number: 213,
+          title: "Watchdog surface, viewed later"
+        }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
     });
     store.updateRunState("progress-terminated-stale-view", "running");
     store.upsertWatchdogSample({
@@ -1425,7 +1451,8 @@ describe("CLI run commands", () => {
           output tokens / 5m: 0
           output tokens: 36365 / 150000 budget
           idle_since: 2026-05-22T11:25:30.000Z
-          grace remaining: -2h 5m"
+          grace remaining: -2h 5m
+          run timeout in: 3h 19m (cap 6h)"
       `);
     } finally {
       vi.useRealTimers();

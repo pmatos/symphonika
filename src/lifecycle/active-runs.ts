@@ -39,7 +39,8 @@ export const CANCEL_REASONS = {
   ELIGIBILITY_LOSS: "eligibility_loss",
   NO_CONVERGENCE: "no_convergence",
   NO_PROGRESS: "no_progress",
-  OPERATOR: "operator"
+  OPERATOR: "operator",
+  RUN_TIMEOUT: "run_timeout"
 } as const satisfies Record<string, CancelReason>;
 
 export const LIFECYCLE_POLICY: LifecyclePolicy = {

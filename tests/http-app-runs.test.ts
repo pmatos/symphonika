@@ -61,6 +61,21 @@ async function setup(): Promise<TestSetup> {
   };
 }
 
+// `createRun` stamps `created_at` from the wall clock, and the Watchdog's
+// wall-clock countdown (ADR 0089) is measured from it — so a fixture that
+// asserts an exact countdown has to pin the claim instant instead of letting
+// it float to whenever the suite happens to run. Only Date is faked, so
+// timers and the event loop are untouched.
+function withClaimTime(instant: string, create: () => void): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(instant));
+  try {
+    create();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 describe("HTTP app — runs API and pages", () => {
   it("shows each Run's current workflow state on /runs", async () => {
     const test = await setup();
@@ -443,12 +458,14 @@ describe("HTTP app — runs API and pages", () => {
   it("exposes the persisted watchdog sample on /api/runs/:id", async () => {
     const test = await setup();
     try {
-      test.runStore.createRun({
-        id: "watchdog-detail",
-        issue: sampleIssue({ number: 202 }),
-        projectName: "alpha",
-        providerCommand: "x",
-        providerName: "codex"
+      withClaimTime("2026-05-22T13:01:00.000Z", () => {
+        test.runStore.createRun({
+          id: "watchdog-detail",
+          issue: sampleIssue({ number: 202 }),
+          projectName: "alpha",
+          providerCommand: "x",
+          providerName: "codex"
+        });
       });
       test.runStore.updateRunState("watchdog-detail", "running");
       test.runStore.upsertWatchdogSample({
@@ -483,8 +500,11 @@ describe("HTTP app — runs API and pages", () => {
         idleSince: "2026-05-22T11:25:30.000Z",
         lastProgressAt: null,
         lastToolCallAt: "2026-05-22T11:25:00.000Z",
+        maxRunMs: 21_600_000,
         outputTokenBudget: 150_000,
         outputTokensTotal: 36_365,
+        // Claimed an hour before this view, against the default six-hour cap.
+        runRemainingMs: 18_000_000,
         sampledAt: "2026-05-22T14:01:00.000Z",
         turnIdSetSize: 1,
         workspaceMtimeMax: "2026-05-22T11:25:30.000Z"
@@ -523,6 +543,7 @@ describe("HTTP app — runs API and pages", () => {
         getWatchdogConfig: () => ({
           enabled: false,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0
         }),
         runStore: test.runStore,
@@ -1955,6 +1976,7 @@ describe("HTTP app — runs API and pages", () => {
         getWatchdogConfig: () => ({
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0
         }),
         now: () => Date.parse("2026-05-22T12:00:00.000Z"),
@@ -1980,6 +2002,7 @@ describe("HTTP app — runs API and pages", () => {
         getWatchdogConfig: () => ({
           enabled: false,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0
         }),
         now: () => Date.parse("2026-05-22T12:00:00.000Z"),
@@ -2026,6 +2049,7 @@ describe("HTTP app — runs API and pages", () => {
         getWatchdogConfig: () => ({
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0
         }),
         now: () => Date.parse("2026-05-22T12:00:00.000Z"),
@@ -2228,6 +2252,7 @@ describe("HTTP app — runs API and pages", () => {
       expect(preparingApiBody.watchdog).toEqual({
         enabled: true,
         graceMs: 1_800_000,
+        maxRunMs: 0,
         outputTokenBudget: 0
       });
 
@@ -2235,6 +2260,7 @@ describe("HTTP app — runs API and pages", () => {
         getWatchdogConfig: () => ({
           enabled: false,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0
         }),
         now: () => Date.parse("2026-05-22T12:00:00.000Z"),

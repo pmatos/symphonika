@@ -1581,6 +1581,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           const watchdog = buildWatchdogStatus({
             config: resolveWatchdogConfig(watchdogService, detail.project),
             nowMs,
+            runCreatedAt: detail.createdAt,
             runId: detail.id,
             runStore: store
           });
@@ -2854,6 +2855,11 @@ function formatProgressSignal(
   if (watchdog.graceRemainingMs !== undefined) {
     lines.push(
       `  grace remaining: ${formatWatchdogDuration(watchdog.graceRemainingMs)}`
+    );
+  }
+  if (watchdog.runRemainingMs !== undefined) {
+    lines.push(
+      `  run timeout in: ${formatWatchdogDuration(watchdog.runRemainingMs)} (cap ${formatWatchdogDuration(watchdog.maxRunMs)})`
     );
   }
   return `${lines.join("\n")}\n`;

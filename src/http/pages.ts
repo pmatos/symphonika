@@ -173,7 +173,10 @@ export type RegisterPagesOptions = {
   claimMutex?: AsyncMutex;
   getWatchdogConfig?: (
     projectName: string
-  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes" | "outputTokenBudget">;
+  ) => Pick<
+    WatchdogConfig,
+    "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
+  >;
   issuePollStatus?: IssuePollStatus;
   // #309 part 3's guarded-merge action. See HttpAppOptions.mergePullRequest
   // (src/http/app.ts).
@@ -665,6 +668,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     const watchdog = buildWatchdogStatus({
       config: getWatchdogConfig(detail.project),
       nowMs: detailNowMs,
+      runCreatedAt: detail.createdAt,
       runId: detail.id,
       runStore: options.runStore
     });
@@ -6490,7 +6494,10 @@ function collectActiveWatchdogIdleStatuses(
   runs: RunStatus[],
   getWatchdogConfig: (
     projectName: string
-  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes" | "outputTokenBudget">,
+  ) => Pick<
+    WatchdogConfig,
+    "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
+  >,
   nowMs: number
 ): Map<string, WatchdogIdleStatus> {
   const statuses = new Map<string, WatchdogIdleStatus>();
@@ -6721,6 +6728,10 @@ function renderWatchdogSection(
     watchdog.outputTokenBudget > 0
       ? `<dt>Output tokens</dt><dd>${watchdog.outputTokensTotal ?? 0} / ${watchdog.outputTokenBudget} budget</dd>`
       : "";
+  const runTimeoutRow =
+    watchdog.runRemainingMs !== undefined
+      ? `<dt>Run timeout in</dt><dd>${escapeHtml(formatWatchdogDuration(watchdog.runRemainingMs))} <span class="muted">(cap ${escapeHtml(formatWatchdogDuration(watchdog.maxRunMs))})</span></dd>`
+      : "";
   return `<section>${sectionHead("Watchdog")}<dl class="fields">
   <dt>Last tool_call</dt><dd>${escapeHtml(formatAge(watchdog.lastToolCallAt, nowMs))}</dd>
   <dt>Last progress marker</dt><dd>${escapeHtml(formatAge(watchdog.lastProgressAt, nowMs))}</dd>
@@ -6730,6 +6741,7 @@ function renderWatchdogSection(
   ${budgetRow}
   ${idleRow}
   ${graceRow}
+  ${runTimeoutRow}
 </dl></section>`;
 }
 

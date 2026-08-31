@@ -12,6 +12,7 @@ import {
   type WatchdogServiceConfig
 } from "../reload.js";
 import type {
+  CancelReason,
   RunStore,
   WatchdogCandidateRun,
   WatchdogSample,
@@ -78,6 +79,19 @@ type NormalizedLogRead = {
   events: NormalizedProviderEvent[];
   offset: number;
 };
+
+// Milliseconds a Run has been alive, or undefined when its claim timestamp is
+// unusable. An unparseable timestamp must read as "age unknown" rather than
+// "infinitely old": the wall-clock cap is the one rule that would otherwise
+// terminate a perfectly live Run on the strength of a bad row. Clamped at zero
+// so clock skew cannot produce a negative age.
+export function runElapsedMs(createdAt: string, now: Date): number | undefined {
+  const claimedAtMs = Date.parse(createdAt);
+  if (Number.isNaN(claimedAtMs)) {
+    return undefined;
+  }
+  return Math.max(0, now.getTime() - claimedAtMs);
+}
 
 export function watchdogProgressObserved(
   previous: WatchdogSample,
@@ -172,11 +186,16 @@ export async function reconcileWatchdog(
     // ADR 0086: the convergence budget is checked before the liveness clock and
     // independently of it. A Run that burns its whole output-token budget
     // without finishing is busy, not idle — the liveness rule is satisfied on
-    // every tick and would never fire.
+    // every tick and would never fire. ADR 0089's wall-clock cap sits ahead of
+    // both for the same reason, one step further: a Run trickling real work
+    // satisfies the liveness rule AND stays under the budget, so elapsed time
+    // is the only signal left that can bound it.
     const terminalReason = watchdogTerminalReason({
       budget: config.outputTokenBudget,
+      createdAt: run.createdAt,
       graceMs: config.graceMinutes * 60_000,
       idleSince,
+      maxRunMs: config.maxRunMinutes * 60_000,
       now,
       outputTokensTotal: persisted.outputTokensTotal,
       progress
@@ -197,9 +216,7 @@ export async function reconcileWatchdog(
     cancellations.push(
       input.activeRuns.requestCancel(
         run.runId,
-        terminalReason === "no_convergence"
-          ? CANCEL_REASONS.NO_CONVERGENCE
-          : CANCEL_REASONS.NO_PROGRESS
+        WATCHDOG_CANCEL_REASONS[terminalReason]
       )
     );
     terminated += 1;
@@ -217,7 +234,9 @@ export async function reconcileWatchdog(
     }
     input.logger?.warn(
       {
+        elapsedMs: runElapsedMs(run.createdAt, now),
         issueNumber: run.issueNumber,
+        maxRunMinutes: config.maxRunMinutes,
         outputTokenBudget: config.outputTokenBudget,
         outputTokensTotal: persisted.outputTokensTotal,
         project: run.projectName,
@@ -232,14 +251,32 @@ export async function reconcileWatchdog(
   return { sampled, terminated };
 }
 
+// Each Watchdog verdict cancels under its own name, so an operator reading the
+// cancellation can tell which of the three bounds the Run hit.
+const WATCHDOG_CANCEL_REASONS: Readonly<
+  Record<WatchdogTerminalReason, CancelReason>
+> = {
+  no_convergence: CANCEL_REASONS.NO_CONVERGENCE,
+  no_progress: CANCEL_REASONS.NO_PROGRESS,
+  run_timeout: CANCEL_REASONS.RUN_TIMEOUT
+};
+
 function watchdogTerminalReason(input: {
   budget: number;
+  createdAt: string;
   graceMs: number;
   idleSince: string | null;
+  maxRunMs: number;
   now: Date;
   outputTokensTotal: number;
   progress: boolean;
 }): WatchdogTerminalReason | undefined {
+  if (input.maxRunMs > 0) {
+    const elapsedMs = runElapsedMs(input.createdAt, input.now);
+    if (elapsedMs !== undefined && elapsedMs >= input.maxRunMs) {
+      return "run_timeout";
+    }
+  }
   if (input.budget > 0 && input.outputTokensTotal >= input.budget) {
     return "no_convergence";
   }

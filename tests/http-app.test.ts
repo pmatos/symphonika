@@ -340,6 +340,7 @@ describe("HTTP app", () => {
         getWatchdogConfig: () => ({
           enabled: false,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0
         }),
         runStore,

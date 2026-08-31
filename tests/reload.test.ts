@@ -1797,6 +1797,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
     expect(resolveWatchdogConfig(snapshot!, "symphonika")).toEqual({
       enabled: true,
       graceMinutes: 180,
+      maxRunMinutes: 360,
       mtimeIgnore: ["*.log"],
       mtimeInclude: [],
       outputTokenBudget: 150_000,
@@ -1949,6 +1950,72 @@ describe("RuntimeConfigReloader watchdog config", () => {
     );
   });
 
+  it("resolves a Project wall-clock cap override, including an opt-out", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    watchdog:", "      max_run_minutes: 720"],
+      serviceLines: [
+        "watchdog:",
+        "  enabled: true",
+        "  grace_minutes: 30",
+        "  max_run_minutes: 180"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    const snapshot = await reloader.reload();
+
+    expect(snapshot?.watchdog.maxRunMinutes).toBe(180);
+    expect(resolveWatchdogConfig(snapshot!, "symphonika").maxRunMinutes).toBe(
+      720
+    );
+
+    // 0 is the documented opt-out, and a Project must be able to reach it even
+    // when the daemon default is non-zero — otherwise the only way to exempt
+    // one long-running Project would be to disable the cap for every Project.
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      projectLines: ["    watchdog:", "      max_run_minutes: 0"],
+      serviceLines: [
+        "watchdog:",
+        "  enabled: true",
+        "  grace_minutes: 30",
+        "  max_run_minutes: 180"
+      ]
+    });
+    const optedOut = await reloader.reload();
+
+    expect(resolveWatchdogConfig(optedOut!, "symphonika").maxRunMinutes).toBe(
+      0
+    );
+  });
+
+  it.each(["-1", '"180"', "1.5"])(
+    "rejects Project max_run_minutes: %s",
+    async (maxRunMinutes) => {
+      const root = await makeTempRoot();
+      await writeProjectConfig(root, "WORKFLOW.md", {
+        projectLines: [
+          "    watchdog:",
+          `      max_run_minutes: ${maxRunMinutes}`
+        ]
+      });
+      await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+      const reloader = new RuntimeConfigReloader({
+        configPath: path.join(root, "symphonika.yml")
+      });
+
+      await reloader.reload();
+
+      expect(reloader.getStatus().ok).toBe(false);
+      expect(reloader.getStatus().errors.join("\n")).toMatch(
+        /projects\.0\.watchdog\.max_run_minutes/
+      );
+    }
+  );
+
   it.each(["0", "-1", '"180"'])(
     "rejects Project grace_minutes: %s",
     async (graceMinutes) => {
@@ -2001,6 +2068,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
     expect(reloader.getSnapshot()?.watchdog).toEqual({
       enabled: true,
       graceMinutes: 30,
+      maxRunMinutes: 360,
       mtimeIgnore: [],
       mtimeInclude: [],
       outputTokenBudget: 150_000,
@@ -2035,6 +2103,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
     expect(reloader.getSnapshot()?.watchdog).toEqual({
       enabled: false,
       graceMinutes: 0.5,
+      maxRunMinutes: 360,
       mtimeIgnore: ["*.log", "dist/**"],
       mtimeInclude: [],
       outputTokenBudget: 150_000,

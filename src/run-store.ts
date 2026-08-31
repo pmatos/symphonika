@@ -61,14 +61,18 @@ export type CancelReason =
   | "eligibility_loss"
   | "no_convergence"
   | "no_progress"
-  | "operator";
+  | "operator"
+  | "run_timeout";
 
 // Terminal reasons the Watchdog owns. `no_progress` is the ADR 0054 liveness
 // verdict (nothing observable happened); `no_convergence` is the ADR 0086
-// budget verdict (plenty happened, none of it finishing the work).
+// budget verdict (plenty happened, none of it finishing the work);
+// `run_timeout` is the ADR 0089 wall-clock verdict (the Run outlived its cap,
+// whatever it was doing).
 export const WATCHDOG_TERMINAL_REASONS = [
   "no_convergence",
-  "no_progress"
+  "no_progress",
+  "run_timeout"
 ] as const;
 
 export type WatchdogTerminalReason = (typeof WATCHDOG_TERMINAL_REASONS)[number];
@@ -478,6 +482,11 @@ export type WatchdogSample = {
 };
 
 export type WatchdogCandidateRun = {
+  // Claim time, and therefore the origin of the Run's wall-clock age. Every
+  // fresh lifecycle — a first dispatch, a continuation, an FSM state advance,
+  // a shutdown resume — writes its own `runs` row, so this is the age of this
+  // agent invocation and not of the whole Issue (ADR 0089).
+  createdAt: string;
   evidenceIgnore: readonly string[];
   issueNumber: number;
   normalizedLogPath: string;
@@ -632,6 +641,7 @@ function mapProviderEventRow(row: ProviderEventRow): ProviderEventRecord {
 }
 
 type WatchdogCandidateRunRow = {
+  created_at: string;
   evidence_ignore_json: string;
   id: string;
   issue_number: number;
@@ -1274,7 +1284,7 @@ export class RunStore {
       .prepare(
         [
           "select id, project_name, issue_number, state, evidence_ignore_json,",
-          "workspace_path, normalized_log_path, watchdog_generation",
+          "workspace_path, normalized_log_path, watchdog_generation, created_at",
           "from runs",
           // ADR 0054: only `running` Runs have a live provider that can wedge.
           // queued/preparing_workspace have no provider yet (no liveness signal
@@ -1285,6 +1295,7 @@ export class RunStore {
       )
       .all() as WatchdogCandidateRunRow[];
     return rows.map((row) => ({
+      createdAt: row.created_at,
       evidenceIgnore: parseEvidenceIgnore(row.evidence_ignore_json),
       issueNumber: row.issue_number,
       normalizedLogPath: row.normalized_log_path ?? "",

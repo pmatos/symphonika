@@ -245,7 +245,10 @@ export type HttpAppOptions = {
   getStatusSnapshot?: () => StatusSnapshot;
   getWatchdogConfig?: (
     projectName: string
-  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes" | "outputTokenBudget">;
+  ) => Pick<
+    WatchdogConfig,
+    "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
+  >;
   issuePollStatus?: IssuePollStatus;
   monotonicNow?: () => number;
   // Wall clock used by human/API-facing timestamps and ages.
@@ -591,6 +594,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
             runState: run.state,
             runStore
           }),
+          runCreatedAt: run.createdAt,
           runId: run.id,
           runStore
         })

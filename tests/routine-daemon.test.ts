@@ -22,6 +22,7 @@ const tempRoots: string[] = [];
 
 type RoutineApiRow = {
   lastFiredAt: string | null;
+  lastSkipReason?: string | null;
   name: string;
   nextFireAt: string | null;
   projectName: string;
@@ -1134,6 +1135,76 @@ describe("daemon routine firing", () => {
       await daemon.stop();
     }
   });
+
+  it("samples host pressure before the startup dispatch, so a due Routine cannot fire onto a stalled host", async () => {
+    // The startup path calls launchWork() directly rather than through tick(),
+    // and Routine dispatch reads the gate's cached verdict synchronously —
+    // which admits until a sample exists. Restarting the daemon is the natural
+    // operator response to a stalled host, so an unsampled startup would fire
+    // every catch-up Routine at exactly the worst moment. See ADR 0088.
+    const root = await makeTempRoot();
+    await writeRecurringRoutineProject(root, true);
+    const seededStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    seededStore.syncRoutines(
+      [
+        {
+          catchUp: "fire_once_if_missed" as const,
+          kind: "report" as const,
+          name: "yearly-report",
+          projectName: "alpha",
+          prompt: "Report.",
+          provider: null,
+          schedule: { cron: "0 0 1 1 *", tz: "Etc/UTC" },
+          sourcePath: path.join(root, "yearly-report.md")
+        }
+      ],
+      { now: new Date("2020-06-01T00:00:00.000Z") }
+    );
+    seededStore.close();
+    const providerInputs: ProviderRunInput[] = [];
+    const provider = quietProvider();
+    vi.mocked(provider.runAttempt).mockImplementation(async function* (input) {
+      await Promise.resolve();
+      providerInputs.push(input);
+      yield {
+        normalized: { exitCode: 0, type: "process_exit" },
+        raw: { code: 0, kind: "exit" }
+      };
+    });
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      // Far above the default 10% memory ceiling.
+      readHostPressure: () =>
+        Promise.resolve({ fullAvg60: { memory: 90 }, unavailable: {} }),
+      prepareRoutineWorkspace: vi.fn().mockResolvedValue({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        cachePath: path.join(root, ".cache", "repo.git"),
+        reused: false,
+        workspacePath: path.join(root, "stalled-workspace")
+      })
+    });
+
+    try {
+      const skipped = await waitForRoutineSkip(daemon.url, "yearly-report");
+      expect(skipped.lastSkipReason).toBe("host_pressure");
+      expect(providerInputs).toEqual([]);
+      expect(skipped.lastFiredAt).toBeNull();
+    } finally {
+      await daemon.stop();
+    }
+  });
 });
 
 function quietProvider(): AgentProvider {
@@ -1282,6 +1353,24 @@ async function waitForProviderInputs(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`provider did not receive ${count} input(s)`);
+}
+
+async function waitForRoutineSkip(
+  baseUrl: string,
+  name: string
+): Promise<RoutineApiRow> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const body = (await fetch(`${baseUrl}/api/routines`).then((response) =>
+      response.json()
+    )) as { routines: RoutineApiRow[] };
+    const routine = body.routines.find((entry) => entry.name === name);
+    if (routine !== undefined && routine.lastSkipReason != null) {
+      return routine;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`routine ${name} recorded no skip`);
 }
 
 async function waitForRoutine(

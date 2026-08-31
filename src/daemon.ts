@@ -44,7 +44,10 @@ import { interpretPullRequest } from "./pull-request-state.js";
 import { ActiveRunRegistry, CANCEL_REASONS } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 import { resolveProjectMaxInFlight } from "./lifecycle/concurrency-capacity.js";
-import { createHostPressureGate } from "./lifecycle/host-pressure.js";
+import {
+  createHostPressureGate,
+  type HostPressureSample
+} from "./lifecycle/host-pressure.js";
 import { sweepProviderScratch } from "./lifecycle/provider-scratch.js";
 import { resolveToken } from "./lifecycle/token.js";
 import {
@@ -139,6 +142,10 @@ export type StartDaemonOptions = {
   notificationSink?: NotificationSink;
   port?: number;
   processScope?: ProcessScope;
+  // Overrides the PSI counter read behind the host-pressure gate (ADR 0088).
+  // Production leaves this unset and reads /proc/pressure; tests inject a
+  // reading so a stalled host is reproducible off a healthy machine.
+  readHostPressure?: () => Promise<HostPressureSample>;
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
@@ -478,7 +485,10 @@ export async function startDaemon(
   // reloader, so a config change takes effect without rebuilding the gate.
   // See ADR 0088.
   const hostPressureGate = createHostPressureGate({
-    policy: () => runtimeConfig.hostPressurePolicy()
+    policy: () => runtimeConfig.hostPressurePolicy(),
+    ...(options.readHostPressure === undefined
+      ? {}
+      : { readPressure: options.readHostPressure })
   });
   const enqueueScheduledWork = (work: () => Promise<void>): void => {
     scheduledWork = scheduledWork.then(work, work);
@@ -1714,6 +1724,16 @@ export async function startDaemon(
     stateRoot: state.stateRoot,
     version: VERSION
   });
+
+  // Seed the pressure gate before anything can dispatch. Both synchronous
+  // readers -- the Routine Firing path inside launchWork() and the manual
+  // /api/routines/.../fire endpoint -- take createHostPressureGate's cached
+  // verdict, which admits until a first sample exists. Without this the
+  // startup launchWork() below (and any manual fire in the window before the
+  // first tick, up to a whole polling interval later) would claim work
+  // unsampled -- on a host stalled badly enough that an operator has just
+  // restarted the daemon, which is exactly the #599 scenario. See ADR 0088.
+  await refreshHostPressure();
 
   const server = serve({
     fetch: app.fetch,

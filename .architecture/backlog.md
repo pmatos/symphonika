@@ -17,14 +17,14 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## codex-event-reducer
 
-- **Status**: in-flight
+- **Status**: landed
 - **Score**: 22/25 (leverage 5, locality 4, blast radius 2, heat 4)
 - **Files**: 4 (`codex.ts`, new `codex-events.ts`, new `codex-json.ts`, new `codex-events.test.ts`)
 - **Modules**: `src/providers/codex.ts` (`mapCodexJsonRpcMessage` + `thinkingEvent`/`progressMarkerEvent`/`jsonRpcErrorEvent`/`codexToolCallInput`/`isInputRequiredMethod` and field accessors), new `src/providers/codex-events.ts`, new `src/providers/codex-json.ts`
 - **Summary**: Extract `mapCodexJsonRpcMessage` into a `createCodexEventReducer(...).reduce(raw)` closure so mapping is testable without spawning a fake app-server subprocess.
 - **First seen**: 2026-08-31
 - **PR**: #617
-- **Reason**: Picked by the 2026-08-31 run (top surviving candidate at 22/25; tied with `claude-event-reducer`, won the recency tie-break). Implemented via design-it-twice winner C (stateful reducer closure); leaf JSON accessors split into `codex-json.ts`.
+- **Reason**: Picked by the 2026-08-31 run (top surviving candidate at 22/25; tied with `claude-event-reducer`, won the recency tie-break). Implemented via design-it-twice winner C (stateful reducer closure); leaf JSON accessors split into `codex-json.ts`. PR #617 merged 2026-08-31T20:23:58Z (reconciled from `in-flight` by the 2026-09-01 run).
 
 ### Run 2026-08-31 — complete
 
@@ -39,10 +39,11 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 - **Status**: proposed
 - **Score**: 22/25 (leverage 5, locality 4, blast radius 2, heat 4)
-- **Files**: ~2 estimated
-- **Modules**: `src/providers/claude.ts` (181-421+), new `src/providers/claude-events.ts`
-- **Summary**: Extract `mapClaudeStreamJsonMessage` into a pure `(raw, state) => {events, nextState}` reducer (returns an event array); sibling of `codex-event-reducer`.
+- **Files**: 4 (`claude.ts`, new `claude-events.ts`, new `claude-json.ts`, new `claude-events.test.ts`)
+- **Modules**: `src/providers/claude.ts` (`mapClaudeStreamJsonMessage` at 193-264 + `mapSystemMessage`/`mapAssistantMessage`/`mapResultMessage`/`mapStreamEvent`/`isInputRequiredType`/`isInputRequiredTool`/`isTerminalFailure` and the leaf field accessors at 690-737), new `src/providers/claude-events.ts`, new `src/providers/claude-json.ts`
+- **Summary**: Extract `mapClaudeStreamJsonMessage` into a `createClaudeEventReducer().reduce(raw)` closure returning `ProviderEvent[]`, owning the `session_id` carry-forward internally, so mapping is testable without spawning a fake `claude` subprocess; sibling of `codex-event-reducer`.
 - **First seen**: 2026-08-31
+- **Reason**: Picked by the 2026-09-01 run (top surviving candidate at 22/25; runner-up `issue-claim-label-writer` at 21/25, within 1 point). Sibling of the landed `codex-event-reducer` (#617); the `session_id` state is entirely mapping-internal (written only in `mapSystemMessage`, read only in the map functions), so the reducer needs no injected deps — cleaner than the codex closure.
 
 ## artifact-kind-catalog
 

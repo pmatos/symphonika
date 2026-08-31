@@ -585,7 +585,10 @@ function trackedStateFor(
   return state.trackingState;
 }
 
-function reviewContextFromState(
+// Also used by wait re-evaluation, which observes the same PullRequestState
+// when a park routes review feedback into a repair state and needs the same
+// thread bodies in that state's prompt. See issue #616.
+export function reviewContextFromState(
   state: PullRequestState,
   headSha: string
 ): ReviewFollowupContext {

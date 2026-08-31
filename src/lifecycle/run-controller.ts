@@ -22,6 +22,7 @@ import {
 import {
   DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY,
   pullRequestReadyToMerge,
+  reviewContextFromState,
   type PullRequestFollowupPolicy
 } from "../pull-request-followup.js";
 import {
@@ -370,6 +371,10 @@ type ContinuationPayload = {
 };
 
 type StateAdvancePayload = {
+  // Rendered by the park that scheduled this advance, from the observation it
+  // decided on. A repair state reached because reviewers left feedback needs
+  // the thread bodies in its prompt; nothing downstream re-fetches them.
+  extraInstructions?: string;
   issue: IssueSnapshot;
   parentRunId: string;
   projectName: string;
@@ -1477,10 +1482,24 @@ export class RunController {
         return;
       }
 
+      // Carry the review feedback into the state the park routed to. The
+      // observation is already in hand here, and the target state's prompt is
+      // the only place it can still reach the agent.
+      const reviewInstructions =
+        pullRequestState !== undefined &&
+        pullRequestState.reviewFollowup.unresolvedThreads.length > 0
+          ? renderReviewFollowupInstructions(
+              reviewContextFromState(pullRequestState, pullRequestState.headSha)
+            )
+          : undefined;
+
       this.schedule({
         delayMs: this.lifecyclePolicy.continuation.delayMs,
         fire: () =>
           this.executeStateAdvance({
+            ...(reviewInstructions === undefined
+              ? {}
+              : { extraInstructions: reviewInstructions }),
             issue: refreshed,
             parentRunId: runId,
             projectName: project.name,
@@ -1819,6 +1838,9 @@ export class RunController {
     try {
       await this.runFreshLifecycle({
         attemptNumber: 1,
+        ...(payload.extraInstructions === undefined
+          ? {}
+          : { extraInstructions: payload.extraInstructions }),
         isContinuation: true,
         issue: refreshed,
         parentRunId: payload.parentRunId,

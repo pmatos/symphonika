@@ -18,9 +18,10 @@ import {
   type RunControllerProjectConfig,
   type RunControllerProvidersConfig
 } from "../src/lifecycle/run-controller.js";
-import type { ProviderEvent } from "../src/provider.js";
+import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
 import { openRunStore } from "../src/run-store.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
+import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND = "codex app-server";
@@ -132,6 +133,9 @@ async function writeCyclingProject(root: string): Promise<void> {
       "        - to: repair",
       "          when:",
       "            has_unresolved_reviews: true",
+      "        - to: repair",
+      "          when:",
+      "            checks: failure",
       "    repair:",
       "      action:",
       "        kind: agent",
@@ -213,6 +217,7 @@ function projectFixture(): RunControllerProjectConfig {
 
 function buildController(input: {
   githubIssuesApi: GitHubIssuesApi;
+  providerInputs?: ProviderRunInput[];
   root: string;
   runStore: ReturnType<typeof openRunStore>;
   schedule?: (item: ScheduledWorkInput) => void;
@@ -224,7 +229,10 @@ function buildController(input: {
       codex: {
         cancel: vi.fn().mockResolvedValue(undefined),
         name: "codex",
-        runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        runAttempt: vi.fn(async function* (
+          providerInput: ProviderRunInput
+        ): AsyncGenerator<ProviderEvent> {
+          input.providerInputs?.push(providerInput);
           await Promise.resolve();
           yield {
             normalized: { exitCode: 0, type: "process_exit" },
@@ -465,6 +473,138 @@ describe("workflow progress guard", () => {
       seedPark(store, issue, "waiting-3");
       await controller.reEvaluateWaitingRun("waiting-3");
       expect(store.getRun("waiting-3")?.currentStateId).toBe("repair");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("carries the review feedback into the state the park routed to", async () => {
+    const root = await makeTempRoot();
+    await writeCyclingProject(root);
+    await createGitWorkspaceAhead(preparedWorkspaceFixture(root));
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.trackPullRequest({
+        branchName: "sym/symphonika/616-progress-guard-fixture",
+        headSha: "deadbeef",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const scheduled: ScheduledWorkInput[] = [];
+      const providerInputs: ProviderRunInput[] = [];
+      const controller = buildController({
+        githubIssuesApi,
+        providerInputs,
+        root,
+        runStore: store,
+        schedule: (item) => {
+          scheduled.push(item);
+        }
+      });
+
+      seedPark(store, issue, "waiting-1");
+      await controller.reEvaluateWaitingRun("waiting-1");
+
+      const advance = scheduled.find((item) => item.kind === "state_advance");
+      expect(advance).toBeDefined();
+      await advance?.fire();
+
+      expect(providerInputs).toHaveLength(1);
+      const prompt = providerInputs[0]!.prompt;
+      expect(prompt).toContain("Pull request review follow-up");
+      expect(prompt).toContain("please rename this");
+      expect(prompt).toContain("Do not open a second pull request.");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("attaches no review section when the park routed for a non-review reason", async () => {
+    const root = await makeTempRoot();
+    await writeCyclingProject(root);
+    await createGitWorkspaceAhead(preparedWorkspaceFixture(root));
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.trackPullRequest({
+        branchName: "sym/symphonika/616-progress-guard-fixture",
+        headSha: "deadbeef",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(
+          prState({
+            statusCheckRollupState: "FAILURE",
+            unresolvedReviewThreads: []
+          })
+        ),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const scheduled: ScheduledWorkInput[] = [];
+      const providerInputs: ProviderRunInput[] = [];
+      const controller = buildController({
+        githubIssuesApi,
+        providerInputs,
+        root,
+        runStore: store,
+        schedule: (item) => {
+          scheduled.push(item);
+        }
+      });
+
+      seedPark(store, issue, "waiting-1");
+      await controller.reEvaluateWaitingRun("waiting-1");
+
+      const advance = scheduled.find((item) => item.kind === "state_advance");
+      expect(advance).toBeDefined();
+      await advance?.fire();
+
+      expect(providerInputs).toHaveLength(1);
+      expect(providerInputs[0]!.prompt).not.toContain(
+        "Pull request review follow-up"
+      );
     } finally {
       store.close();
     }

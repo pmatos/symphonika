@@ -1857,8 +1857,17 @@ bound that does not depend on what the Run is doing: a Run trickling real output
 advances a liveness signal on every tick and can stay far below the convergence budget, so neither
 of the other two rules can ever fire, while it holds a `global.max_in_flight` slot and its share of
 the provider memory budget for as long as it lives (issue #605). Unlike the attempt-scoped
-Progress Signal the cap is Run-scoped: it spans workspace preparation and every retry attempt of
-that Run, and a transient retry does not reset it. It does not span a Run *chain* — a continuation,
+Progress Signal the cap is Run-scoped: its origin is the Run row's claim, so it accumulates across
+workspace preparation and every retry attempt of that Run, and a transient retry does not reset it.
+Enforcement, however, is bounded by the sampling scope above: the verdict is reached on a sampled
+Run, and sampling is `running`-only. A Run wedged *before* its provider starts — a hung clone in
+workspace preparation, `provider.validate`, or the `sym:running` label write — is therefore not
+reached by the cap, even though it holds a `global.max_in_flight` slot from the moment it is
+claimed. Terminating such a Run would not release that slot either: the slot is freed only when the
+lifecycle's `finally` unregisters it, which cannot run until the wedged call returns, and a
+reserved-but-unattached slot's cancel handler is a no-op. Closing that window needs a cancellable
+preparation deadline rather than a wider Watchdog state scope, and is tracked separately. It does
+not span a Run *chain* — a continuation,
 an FSM state advance, and a shutdown resume each write their own `runs` row and so each start a
 fresh cap. A Run whose `created_at` cannot be parsed is treated as having an unknown age and is
 never terminated by the cap. The cap is checked before the convergence budget and the idle clock,

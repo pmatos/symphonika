@@ -43,11 +43,29 @@ and reproduces pre-0089 behaviour exactly.
 
 The rest of the Progress Signal is attempt-scoped: attempt start clears the latest sample and
 advances the Watchdog generation, so a transient retry starts every baseline fresh (ADR 0054). The
-cap deliberately is not. It measures the Run row's whole life — workspace preparation, provider
-validation, and every retry attempt — because the resource it protects is held for exactly that
-long: `reserveSlot` runs once per Run at claim time, not once per attempt, and the provider memory
-follows the same shape. An attempt-scoped cap would be reset by the retry path and could not bound
-what issue #605 actually describes.
+cap deliberately is not. Its origin is the Run row's claim, so the age it measures accumulates
+across workspace preparation, provider validation, and every retry attempt — because the resource
+it protects is held for exactly that long: `reserveSlot` runs once per Run at claim time, not once
+per attempt, and the provider memory follows the same shape. An attempt-scoped cap would be reset
+by the retry path and could not bound what issue #605 actually describes.
+
+**Measured from claim, enforced while running.** The origin spans preparation; enforcement does
+not. The verdict is reached inside the Watchdog's sampling pass, and ADR 0054 restricts sampling to
+`state = 'running'`, so a Run wedged before its provider starts is never evaluated against the cap.
+That asymmetry is deliberate here rather than an oversight, and the reason is that widening the
+state scope would not fix it: `reserveSlot` registers a no-op cancel handler, the slot is released
+only by the lifecycle's `finally`, and `prepareIssueWorkspace` threads no `AbortSignal` into its
+git calls — so marking a wedged `preparing_workspace` Run `stale` would record a timeout while the
+slot, the subprocess, and the memory stay exactly as held. It would convert an unbounded slot hold
+into an unbounded slot hold plus a `stale` row.
+
+The pre-`running` window is a real gap, and it predates this ADR — nothing bounded a hung
+preparation before it either. Closing it needs a genuinely cancellable deadline (an
+`AbortController` armed at claim and threaded through `prepareIssueWorkspace`, whose git helpers
+already accept a signal), sourced from actual slot ownership rather than from a fixed state list —
+a hung retry claim, for instance, holds a slot while its row reads `failed`. That is its own slice
+with its own race surface, and it amends ADR 0054's "every Watchdog mutation is conditional on the
+`running` state" invariant, so it is tracked separately rather than folded in here.
 
 It does not span a Run *chain*. A continuation (ADR 0019), an FSM state advance, and a shutdown
 resume (ADR 0088) each write their own `runs` row through `claimAndPersistRun`, so each starts a
@@ -139,10 +157,12 @@ looks at it.
   independently of it, because a slow Run is never idle.
 - **ADR 0086 (convergence budget):** unchanged, and still the earlier and more proportional of the
   two absolute bounds. See the section above.
-- **ADR 0067 (routine deadlines):** Runs now have the wall-clock bound Routine Firings already had.
-  The mechanisms stay separate — a Routine Firing's deadline is declared per Routine and enforced
-  in the dispatcher's own race, while a Run's cap is Watchdog policy resolved per Project — but a
-  slot-holding unit of work is no longer unbounded on either path.
+- **ADR 0067 (routine deadlines):** Runs gain a wall-clock bound, but not the same mechanism, and
+  the difference matters. A Routine Firing's deadline is declared per Routine and enforced by an
+  `AbortController` the dispatcher races against every await, so it actually aborts workspace
+  preparation. A Run's cap is Watchdog policy resolved per Project and reached by sampling, so it
+  bounds a Run only once its provider is running. A Run that is *executing* is no longer unbounded;
+  one wedged in preparation still is, per the section above.
 - **ADR 0020 (retry transient only):** `run_timeout` is deterministic. The stopped Run is the
   terminal verdict, and a retry cannot hand the work a fresh cap.
 - **ADR 0019 (capped continuations):** a `run_timeout` Run is terminal, so it spawns no

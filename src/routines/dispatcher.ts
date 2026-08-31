@@ -28,6 +28,7 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
+import { withProviderStderrTail } from "../providers/provider-stderr.js";
 import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
@@ -37,6 +38,7 @@ import type { NotificationDeliveryTracker } from "../notifications/delivery-trac
 import { deliverRoutineFanoutNotification } from "../notifications/routine-fanout.js";
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
+import { redactAll } from "../redaction.js";
 import type { RoutineFanoutHoldReason, RunStore } from "../run-store.js";
 import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
@@ -986,10 +988,13 @@ async function deliverReadyRoutineFanouts(
   // delivery and the next. Re-resolving here would let a later fan-out's
   // redaction secret drift from the config `sink` above actually delivers
   // through for the rest of this tick.
-  const fanoutRedactSecrets = secretsForEmailConfig(
-    config,
-    input.env ?? process.env
-  );
+  const fanoutRedactSecrets = [
+    ...secretsForEmailConfig(config, input.env ?? process.env),
+    // A fan-out renders several projects' firings into one email, so every
+    // participating project's tracker token has to be scrubbed, not just the
+    // one whose firing is being rendered at the time.
+    ...projectTrackerTokens(input.projects, input.env ?? process.env)
+  ];
   // notify is uniform across every target of one fan-out (it lives on the
   // shared RoutineDeclaration, materialized identically per project — ADR
   // 0069), so any one target row's value is authoritative for the group.
@@ -1129,12 +1134,23 @@ async function runRoutineFiring(input: {
   stateRoot: string;
 }): Promise<RoutineFiringResult> {
   const events: NormalizedProviderEvent[] = [];
+  // One secret list for every writer in this firing. The notification config
+  // supplies the SMTP password; the tracker token is env-backed and resolved
+  // here rather than stored. Providers run full-permission and inherit this
+  // process's environment, so either can come back out of a provider's own
+  // output and must be scrubbed from the JSONL evidence, the stderr tee, and
+  // any terminal reason derived from them alike (SPEC.md §6).
+  const redactSecrets = (): string[] => [
+    ...input.redactSecrets(),
+    ...routineTrackerTokens(input.project, input.env)
+  ];
   const deadline = routineFiringDeadline(input.routine.timeoutMinutes);
   const scratchIdentity = { attempt: 1, id: input.firingId };
   let prepared: PreparedRoutineWorkspace | undefined;
   let preparationAttempt: Promise<PreparedRoutineWorkspace> | undefined;
   let providerAttempt: Promise<void> | undefined;
   let rawLogPath: string | undefined;
+  let stderrLogPath: string | undefined;
   let normalizedIndexPath: string | undefined;
   let normalizedLogPath: string | undefined;
   let normalizedLogOffset = 0;
@@ -1179,6 +1195,7 @@ async function runRoutineFiring(input: {
       })
     );
     rawLogPath = evidence.rawLogPath;
+    stderrLogPath = evidence.stderrLogPath;
     normalizedIndexPath = evidence.normalizedIndexPath;
     normalizedLogPath = evidence.normalizedLogPath;
     input.runStore.updateRoutineFiringWorkspace({
@@ -1272,6 +1289,11 @@ async function runRoutineFiring(input: {
         run: scratchIdentity,
         routine: routineOverrides,
         scratchPath,
+        stderrLogPath: evidence.stderrLogPath,
+        // The stderr tee lands in the same evidence directory as the raw and
+        // normalized logs and is served by the same artifact routes, so it
+        // scrubs the same secrets they do.
+        stderrRedactSecrets: redactSecrets(),
         workspacePath: prepared.workspacePath
       })) {
         const normalizedLogCursor = await appendRoutineEvent({
@@ -1281,7 +1303,7 @@ async function runRoutineFiring(input: {
           normalizedLogOffset,
           normalizedLogSequence,
           rawLogPath,
-          redactSecrets: input.redactSecrets
+          redactSecrets
         });
         normalizedLogOffset = normalizedLogCursor.offset;
         normalizedLogSequence = normalizedLogCursor.sequence;
@@ -1303,6 +1325,7 @@ async function runRoutineFiring(input: {
             classifyRoutineOutcome(events, {
               baseBranch: input.project.workspace.git.base_branch,
               kind: input.routine.kind,
+              stderrLogPath: evidence.stderrLogPath,
               workspacePath: prepared.workspacePath
             })
           );
@@ -1391,7 +1414,7 @@ async function runRoutineFiring(input: {
       input.routine.kind,
       githubSnapshotSince
     );
-    const resolvedRedactSecrets = input.redactSecrets();
+    const resolvedRedactSecrets = redactSecrets();
     const redactedTerminalReason =
       outcome.reason.length === 0
         ? null
@@ -1527,8 +1550,18 @@ async function runRoutineFiring(input: {
       : finalCancelled
         ? "cancelled"
         : reason;
-    const resolvedRedactSecrets = input.redactSecrets();
-    const redactedFinalReason = redactAll(finalReason, resolvedRedactSecrets);
+    // A firing killed at its deadline reports `firing_timeout` and nothing
+    // else; whatever the provider wrote on stderr before dying is the only
+    // account of why it went quiet, so it rides along on the reason here as
+    // well as staying in the evidence directory.
+    const explainedFinalReason = finalCancelled
+      ? finalReason
+      : await withProviderStderrTail(finalReason, stderrLogPath);
+    const resolvedRedactSecrets = redactSecrets();
+    const redactedFinalReason = redactAll(
+      explainedFinalReason,
+      resolvedRedactSecrets
+    );
     input.runStore.completeRoutineFiring({
       commitsAhead,
       id: input.firingId,
@@ -1665,7 +1698,13 @@ async function recordRoutineFiringNotification(
     return;
   }
   const sink = input.notification.createSink(config);
-  const redactSecrets = resolveRedactSecrets(input.notification, input.env);
+  // The tracker token belongs here for the same reason the SMTP password
+  // does: this text leaves the machine, so it is the last place a leaked
+  // credential can still be caught.
+  const redactSecrets = [
+    ...resolveRedactSecrets(input.notification, input.env),
+    ...routineTrackerTokens(input.project, input.env)
+  ];
   const outcome = await deliverRoutineFiringNotification({
     config,
     firing: {
@@ -1995,6 +2034,7 @@ async function prepareRoutineEvidence(input: {
   prompt: string;
   promptPath: string;
   rawLogPath: string;
+  stderrLogPath: string;
 }> {
   const routine = input.routine;
   const rendered = renderRoutinePrompt({
@@ -2031,7 +2071,8 @@ async function prepareRoutineEvidence(input: {
     normalizedLogPath,
     promptMetadataPath: metadataPath,
     promptPath,
-    rawLogPath
+    rawLogPath,
+    stderrLogPath
   } = evidencePaths;
   await Promise.all([
     writeFile(promptPath, rendered.prompt, "utf8"),
@@ -2082,7 +2123,8 @@ async function prepareRoutineEvidence(input: {
     normalizedLogPath,
     prompt: rendered.prompt,
     promptPath,
-    rawLogPath
+    rawLogPath,
+    stderrLogPath
   };
 }
 
@@ -2125,6 +2167,7 @@ async function classifyRoutineOutcome(
   workspace: {
     baseBranch: string;
     kind: RoutineStatus["kind"];
+    stderrLogPath?: string;
     workspacePath: string;
   }
 ): Promise<RoutineTerminalOutcome> {
@@ -2136,6 +2179,9 @@ async function classifyRoutineOutcome(
     const classified = await classifyFailure({
       cancelRequested: false,
       events,
+      ...(workspace.stderrLogPath === undefined
+        ? {}
+        : { stderrLogPath: workspace.stderrLogPath }),
       successWorkspace: {
         baseBranch: workspace.baseBranch,
         workspacePath: workspace.workspacePath
@@ -2171,7 +2217,13 @@ async function classifyRoutineOutcome(
   }
   const exit = events.find((event) => event.type === "process_exit");
   if (exit === undefined) {
-    return { kind: "failed", reason: "no_process_exit_event" };
+    return {
+      kind: "failed",
+      reason: await withProviderStderrTail(
+        "no_process_exit_event",
+        workspace.stderrLogPath
+      )
+    };
   }
   if (exit.cancelled === true) {
     return { kind: "cancelled", reason: "provider_cancelled" };
@@ -2182,10 +2234,12 @@ async function classifyRoutineOutcome(
   }
   return {
     kind: "failed",
-    reason:
+    reason: await withProviderStderrTail(
       exitCode === undefined
         ? `process_exit_signal_${stringField(exit, "signal") ?? "unknown"}`
-        : `process_exit_${exitCode}`
+        : `process_exit_${exitCode}`,
+      workspace.stderrLogPath
+    )
   };
 }
 
@@ -2445,17 +2499,6 @@ function serializeJsonl(value: unknown, redactSecrets: string[]): Buffer {
   return Buffer.from(`${JSON.stringify(redacted)}\n`, "utf8");
 }
 
-// A provider's own output can echo back environment values it inherited
-// (full-permission execution, see CLAUDE.md) — persisted evidence and any
-// terminal reason derived from it must never retain the raw SMTP password.
-function redactAll(message: string, redactSecrets: string[]): string {
-  return redactSecrets.reduce(
-    (acc, secret) =>
-      secret.length === 0 ? acc : acc.split(secret).join("[REDACTED]"),
-    message
-  );
-}
-
 function redactRoutineOutcomeClaim(
   claim: RoutineOutcomeClaim | null,
   redactSecrets: string[]
@@ -2487,6 +2530,34 @@ function redactValueDeep(value: unknown, redactSecrets: string[]): unknown {
     );
   }
   return value;
+}
+
+// The tracker token is env-backed and resolved per call rather than stored,
+// mirroring captureRoutineGithubSnapshot. Absent tracker or unset variable
+// yields nothing to redact.
+// Every distinct tracker token across the projects a fan-out can render.
+function projectTrackerTokens(
+  projects: ReadonlyMap<string, RunControllerProjectConfig>,
+  env: NodeJS.ProcessEnv
+): string[] {
+  return [
+    ...new Set(
+      [...projects.values()].flatMap((project) =>
+        routineTrackerTokens(project, env)
+      )
+    )
+  ];
+}
+
+function routineTrackerTokens(
+  project: RunControllerProjectConfig,
+  env: NodeJS.ProcessEnv
+): string[] {
+  if (project.tracker === undefined) {
+    return [];
+  }
+  const token = resolveEnvBackedValue(project.tracker.token, env);
+  return token === undefined ? [] : [token];
 }
 
 function resolveRedactSecrets(

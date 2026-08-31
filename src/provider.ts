@@ -57,6 +57,13 @@ export type ProviderRunInput = {
   // boundary to add routine-only argv/environment guards without changing
   // the operator-authored base command used by issue Runs.
   routine?: ProviderCommandTemplateValues;
+  // Evidence path for the provider's stderr tee. Absent for callers with no
+  // evidence directory (the doctor/probe path), which drain stderr instead.
+  stderrLogPath?: string;
+  // Resolved secret values the stderr tee must scrub before writing. Supplied
+  // by the routine dispatcher, which holds the only redaction data the
+  // orchestrator resolves today (SPEC.md §6).
+  stderrRedactSecrets?: readonly string[];
   workspacePath: string;
 };
 

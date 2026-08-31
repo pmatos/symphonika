@@ -30,6 +30,7 @@ import {
   normalizeProjectWeight,
   priorityForLabels
 } from "../issue-priority.js";
+import { providerStderrLogPath } from "../providers/provider-stderr.js";
 import { interpretPullRequest } from "../pull-request-state.js";
 import { evaluateRunContinuationEligibility } from "./issue-eligibility.js";
 import { projectPullRequestSignals } from "./pr-signal-projection.js";
@@ -2991,6 +2992,7 @@ export class RunController {
         provider: input.provider,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
+        repositoryToken: input.repository.token,
         runId: input.runId,
         runtime
       });
@@ -3082,6 +3084,9 @@ export class RunController {
           ...(started === undefined
             ? {}
             : {
+                stderrLogPath: providerStderrLogPath(
+                  started.evidence.rawLogPath
+                ),
                 successWorkspace: {
                   baseBranch: input.project.workspace.git.base_branch,
                   headInspectionFailed,
@@ -3553,6 +3558,7 @@ export class RunController {
     provider: AgentProvider;
     providerCommand: string;
     providerName: AgentProviderName;
+    repositoryToken: string;
     runId: string;
     runtime: RunRuntime;
   }): Promise<void> {
@@ -3580,6 +3586,14 @@ export class RunController {
         },
         run: scratchIdentity,
         scratchPath,
+        stderrLogPath: providerStderrLogPath(input.evidence.rawLogPath),
+        // Providers run full-permission and inherit this process's env
+        // (provider-process.ts spawns with `{ ...process.env }`), so an agent
+        // that echoes its GitHub token would otherwise persist it verbatim
+        // into an artifact the dashboard serves. SPEC.md §6. The wider gap —
+        // this token is not scrubbed from a Run's own raw/normalized evidence
+        // either, and the Run path resolves no other secrets — is issue #612.
+        stderrRedactSecrets: [input.repositoryToken],
         workspacePath: input.evidence.workspacePath
       })) {
         sequence += 1;

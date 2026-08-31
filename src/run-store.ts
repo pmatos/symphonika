@@ -15,6 +15,7 @@ import {
   encodeJsonArrayColumn
 } from "./run-store-json-columns.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
+import { providerStderrLogPath } from "./providers/provider-stderr.js";
 import type {
   RoutineOutcome,
   RoutineOutcomeAction,
@@ -185,7 +186,8 @@ export type RunArtifactKind =
   | "prompt_metadata"
   | "workflow_graph"
   | "provider_raw"
-  | "provider_normalized";
+  | "provider_normalized"
+  | "provider_stderr";
 
 export type RunArtifactDescriptor = {
   kind: RunArtifactKind;
@@ -5863,7 +5865,8 @@ const RUN_ARTIFACT_KINDS: readonly RunArtifactKind[] = [
   "prompt_metadata",
   "workflow_graph",
   "provider_raw",
-  "provider_normalized"
+  "provider_normalized",
+  "provider_stderr"
 ];
 
 const ATTEMPT_ARTIFACT_KINDS: readonly RunArtifactKind[] = [
@@ -5872,7 +5875,8 @@ const ATTEMPT_ARTIFACT_KINDS: readonly RunArtifactKind[] = [
   "prompt_metadata",
   "workflow_graph",
   "provider_raw",
-  "provider_normalized"
+  "provider_normalized",
+  "provider_stderr"
 ];
 
 const ATTEMPT_ARTIFACT_KIND_SET: ReadonlySet<RunArtifactKind> = new Set(
@@ -5896,6 +5900,8 @@ function artifactPath(
       return row.raw_log_path;
     case "provider_normalized":
       return row.normalized_log_path;
+    case "provider_stderr":
+      return stderrArtifactPath(row.raw_log_path);
   }
 }
 
@@ -5916,7 +5922,20 @@ function attemptArtifactPath(
       return row.raw_log_path;
     case "provider_normalized":
       return row.normalized_log_path;
+    case "provider_stderr":
+      return stderrArtifactPath(row.raw_log_path);
   }
+}
+
+// The stderr log is a sibling of the raw log rather than its own column: it
+// is written by the provider adapter under a name derived from the raw log's,
+// so deriving it here also gives runs recorded before #604 a correct (absent)
+// descriptor instead of needing a backfill.
+function stderrArtifactPath(rawLogPath: string | null): string | null {
+  if (rawLogPath === null || rawLogPath.length === 0) {
+    return null;
+  }
+  return providerStderrLogPath(rawLogPath);
 }
 
 function inferAttemptMetadataPath(

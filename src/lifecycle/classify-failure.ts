@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import type { NormalizedProviderEvent } from "../provider.js";
+import { withProviderStderrTail } from "../providers/provider-stderr.js";
 import type { FailureClassification } from "../run-store.js";
 import { WorkspacePreparationError } from "../workspace.js";
 
@@ -11,6 +12,10 @@ export type ClassifyFailureInput = {
   cancelRequested: boolean;
   error?: unknown;
   events: NormalizedProviderEvent[];
+  // Evidence path for the attempt's provider stderr tee. The unclean-exit
+  // reasons below carry no explanation of their own, so the provider's last
+  // words are appended to them when it wrote any.
+  stderrLogPath?: string;
   successWorkspace?: {
     baseBranch: string;
     headInspectionFailed?: boolean;
@@ -85,7 +90,10 @@ export async function classifyFailure(
     return {
       classification: "transient",
       kind: "failed",
-      reason: "no_process_exit_event"
+      reason: await withProviderStderrTail(
+        "no_process_exit_event",
+        input.stderrLogPath
+      )
     };
   }
 
@@ -104,10 +112,12 @@ export async function classifyFailure(
   return {
     classification: "transient",
     kind: "failed",
-    reason:
+    reason: await withProviderStderrTail(
       exitCode === undefined
         ? `process_exit_signal_${stringField(exit, "signal") ?? "unknown"}`
-        : `process_exit_${exitCode}`
+        : `process_exit_${exitCode}`,
+      input.stderrLogPath
+    )
   };
 }
 

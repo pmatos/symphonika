@@ -2,6 +2,8 @@ import { createReadStream } from "node:fs";
 import { open, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 
+import { providerStderrLogPath } from "../providers/provider-stderr.js";
+
 type RecentRoutineEvent = {
   normalized: Record<string, unknown>;
   sequence: number | null;
@@ -368,6 +370,7 @@ export type RoutineEvidencePaths = {
   promptMetadataPath: string;
   promptPath: string;
   rawLogPath: string;
+  stderrLogPath: string;
 };
 
 export function routineEvidencePaths(
@@ -381,13 +384,15 @@ export function routineEvidencePaths(
     safePathSegment(firingId)
   );
   const normalizedLogPath = path.join(directory, "provider.normalized.jsonl");
+  const rawLogPath = path.join(directory, "provider.raw.jsonl");
   return {
     directory,
     normalizedIndexPath: routineEventIndexPath(normalizedLogPath),
     normalizedLogPath,
     promptMetadataPath: path.join(directory, "prompt-metadata.json"),
     promptPath: path.join(directory, "prompt.md"),
-    rawLogPath: path.join(directory, "provider.raw.jsonl")
+    rawLogPath,
+    stderrLogPath: providerStderrLogPath(rawLogPath)
   };
 }
 

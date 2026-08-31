@@ -524,6 +524,45 @@ describe("Claude stream-json provider", () => {
     ]);
   });
 
+  it("captures provider stderr in the evidence directory instead of discarding it", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const stderrLogPath = path.join(root, "provider.stderr.log");
+    const fakeClaudePath = path.join(root, "fake-noisy-claude.mjs");
+    await writeFile(
+      fakeClaudePath,
+      [
+        "if (process.argv.includes('--help')) { process.stdout.write('stream-json'); process.exit(0); }",
+        "process.stderr.write('claude: credentials expired, re-run `claude login`\\n');",
+        "process.exit(3);"
+      ].join("\n"),
+      "utf8"
+    );
+    await chmod(fakeClaudePath, 0o755);
+    const provider = createClaudeProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`,
+          name: "claude"
+        },
+        stderrLogPath,
+        workspacePath
+      })
+    );
+
+    expect(events.at(-1)?.normalized).toMatchObject({
+      exitCode: 3,
+      type: "process_exit"
+    });
+    expect(await readFile(stderrLogPath, "utf8")).toBe(
+      "claude: credentials expired, re-run `claude login`\n"
+    );
+  });
+
   it("stops the stream-json process on cancellation", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

@@ -3815,6 +3815,7 @@ describe("HTTP app — firing detail page (#304 part 2/2)", () => {
         "utf8"
       );
       await writeFile(evidence.rawLogPath, "{}\n", "utf8");
+      await writeFile(evidence.stderrLogPath, "codex: retrying\n", "utf8");
 
       const app = createHttpApp({
         runStore: test.runStore,
@@ -3838,6 +3839,7 @@ describe("HTTP app — firing detail page (#304 part 2/2)", () => {
       expect(body).toContain("/logs/firings/fire-1/prompt_metadata");
       expect(body).toContain("/logs/firings/fire-1/provider_raw");
       expect(body).toContain("/logs/firings/fire-1/provider_normalized");
+      expect(body).toContain("/logs/firings/fire-1/provider_stderr");
     } finally {
       test.cleanup();
     }
@@ -3919,6 +3921,14 @@ describe("HTTP app — firing detail page (#304 part 2/2)", () => {
       expect(present.status).toBe(200);
       expect(present.headers.get("content-type")).toContain("text/markdown");
       expect(await present.text()).toContain("Do it.");
+
+      await writeFile(evidence.stderrLogPath, "codex: boom\n", "utf8");
+      const stderrLog = await app.request(
+        "/logs/firings/fire-1/provider_stderr"
+      );
+      expect(stderrLog.status).toBe(200);
+      expect(stderrLog.headers.get("content-type")).toContain("text/plain");
+      expect(await stderrLog.text()).toBe("codex: boom\n");
 
       const missing = await app.request("/logs/firings/fire-1/provider_raw");
       expect(missing.status).toBe(404);

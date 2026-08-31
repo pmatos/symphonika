@@ -23,6 +23,7 @@ not retry, and does not schedule continuations after a successful run.
    - `issue-snapshot.json`
    - `provider.raw.jsonl`
    - `provider.normalized.jsonl`
+   - `provider.stderr.log` (only when the provider wrote to stderr)
 5. Awaits the provider attempt to terminate, prints the run summary (run id,
    state, branch, workspace, log paths), and exits.
 

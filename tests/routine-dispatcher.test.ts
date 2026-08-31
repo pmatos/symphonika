@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -848,6 +848,77 @@ describe("RoutineFiringDispatcher", () => {
     } finally {
       clearTimeout(fallback);
       releaseProvider();
+      runStore.close();
+    }
+  });
+
+  it("hands the provider a stderr evidence path and quotes its tail in the terminal reason", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    let handedStderrLogPath: string | undefined;
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        handedStderrLogPath = input.stderrLogPath;
+        // Stands in for the real adapter's tee: the dispatcher only supplies
+        // the path, the provider is what puts bytes at it.
+        await writeFile(
+          input.stderrLogPath!,
+          "codex: upstream connect error\n",
+          "utf8"
+        );
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const project = dueRoutineProjectFixture(root, "codex");
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-stderr",
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(handedStderrLogPath).toBe(
+        path.join(
+          stateRoot,
+          "logs",
+          "routines",
+          "fire-stderr",
+          "provider.stderr.log"
+        )
+      );
+      expect(runStore.getRoutineFiring("fire-stderr")).toMatchObject({
+        state: "failed",
+        terminalReason: "process_exit_1 (stderr: codex: upstream connect error)"
+      });
+    } finally {
       runStore.close();
     }
   });
@@ -4581,22 +4652,30 @@ describe("RoutineFiringDispatcher", () => {
     const secret = "smtp-password-that-must-never-leak";
     const runStore = openRunStore({ stateRoot });
     const delivered: NotificationMessage[] = [];
+    let handedStderrRedactSecrets: readonly string[] | undefined;
     const provider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
       // A full-permission provider process can inherit the daemon's env and
       // echo it back — this simulates that leak path to prove evidence and
       // the terminal reason both come out redacted regardless of source.
-      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        handedStderrRedactSecrets = input.stderrRedactSecrets;
         await Promise.resolve();
         yield {
           normalized: {
-            message: `inherited env leaked password ${secret}`,
+            message: `inherited env leaked password ${secret} and token tracker-token-value`,
             type: "message"
           },
-          raw: { delta: `inherited env leaked password ${secret}` }
+          raw: {
+            delta: `inherited env leaked password ${secret} and token tracker-token-value`
+          }
         };
-        throw new Error(`provider crashed while holding ${secret}`);
+        throw new Error(
+          `provider crashed while holding ${secret} and tracker-token-value`
+        );
       }),
       validate: vi.fn().mockResolvedValue(undefined)
     } satisfies AgentProvider;
@@ -4607,7 +4686,10 @@ describe("RoutineFiringDispatcher", () => {
         agentProviders: { codex: provider },
         configDir: root,
         createFiringId: () => "fire-redact-evidence",
-        env: { SMTP_TEST_PASSWORD: secret },
+        env: {
+          GITHUB_TOKEN: "tracker-token-value",
+          SMTP_TEST_PASSWORD: secret
+        },
         globalConcurrency: { maxInFlight: undefined },
         notification: {
           createSink: () => ({
@@ -4674,7 +4756,7 @@ describe("RoutineFiringDispatcher", () => {
       const firing = runStore.getRoutineFiring("fire-redact-evidence");
       expect(firing?.state).toBe("failed");
       expect(firing?.terminalReason).toBe(
-        "provider crashed while holding [REDACTED]"
+        "provider crashed while holding [REDACTED] and [REDACTED]"
       );
       expect(firing?.terminalReason).not.toContain(secret);
 
@@ -4702,10 +4784,30 @@ describe("RoutineFiringDispatcher", () => {
       expect(rawLog).not.toContain(secret);
       expect(normalizedLog).toContain("[REDACTED]");
       expect(normalizedLog).not.toContain(secret);
+      // provider.stderr.log lands in this same directory and is served by the
+      // same artifact route, so the tee gets the same secret list the JSONL
+      // evidence writer uses. (What the tee then does with it — including
+      // secrets split across chunk boundaries — is covered by
+      // tests/provider-stderr.test.ts.)
+      expect(handedStderrRedactSecrets).toContain(secret);
+      // The project's tracker token rides along too: providers inherit this
+      // process's env, so an agent echoing it would otherwise write it into
+      // the same artifact (SPEC.md §6).
+      expect(handedStderrRedactSecrets).toContain("tracker-token-value");
+      // ... and it is scrubbed from the JSONL evidence and the terminal reason
+      // on the same terms as the SMTP password, not only from the tee.
+      expect(rawLog).not.toContain("tracker-token-value");
+      expect(normalizedLog).not.toContain("tracker-token-value");
+      expect(firing?.terminalReason).not.toContain("tracker-token-value");
 
       expect(delivered).toHaveLength(1);
       expect(delivered[0]?.text).not.toContain(secret);
       expect(delivered[0]?.html).not.toContain(secret);
+      // The email is the one channel that leaves the machine, so it is the
+      // last place a leaked credential can still be caught — the tracker token
+      // has to be scrubbed here too, not only from the on-disk evidence.
+      expect(delivered[0]?.text).not.toContain("tracker-token-value");
+      expect(delivered[0]?.html).not.toContain("tracker-token-value");
 
       const database = await readFile(path.join(stateRoot, "symphonika.db"));
       expect(database.includes(Buffer.from(secret))).toBe(false);

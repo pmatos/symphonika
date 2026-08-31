@@ -229,6 +229,10 @@ describe("daemon dispatch", () => {
         },
         workspacePath
       });
+      // Providers inherit this process's environment, so the project's own
+      // GitHub token must reach the stderr tee — otherwise an agent echoing it
+      // would persist it into an artifact the dashboard serves (SPEC.md §6).
+      expect(providerInputs[0]?.stderrRedactSecrets).toContain("secret-token");
 
       expect(run).toMatchObject({
         branchName:

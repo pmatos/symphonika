@@ -112,6 +112,11 @@ describe("daemon dispatch", () => {
             kind: "exit"
           }
         };
+        yield {
+          raw: {
+            kind: "provider_diagnostic"
+          }
+        };
       }),
       validate: vi.fn().mockResolvedValue(undefined)
     } satisfies AgentProvider;
@@ -301,6 +306,9 @@ describe("daemon dispatch", () => {
         {
           code: 0,
           kind: "exit"
+        },
+        {
+          kind: "provider_diagnostic"
         }
       ]);
       expect(
@@ -370,6 +378,13 @@ describe("daemon dispatch", () => {
           "message",
           "process_exit"
         ]);
+        expect(
+          database
+            .prepare(
+              "select last_event_sequence from provider_stream_events where run_id = ?"
+            )
+            .get("run-issue-8")
+        ).toMatchObject({ last_event_sequence: 4 });
       } finally {
         database.close();
       }

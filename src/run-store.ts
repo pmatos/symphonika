@@ -15,6 +15,7 @@ import {
   encodeJsonArrayColumn
 } from "./run-store-json-columns.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
+import { PROVIDER_STREAM_STALL_THRESHOLD_MS } from "./provider-stream-status.js";
 import { providerStderrLogPath } from "./providers/provider-stderr.js";
 import type {
   RoutineOutcome,
@@ -492,6 +493,23 @@ export type ProviderEventRecord = {
   type: string;
 };
 
+export type ProviderStreamStallRecord = {
+  attemptId: string;
+  durationMs: number;
+  gapStartedAt: string;
+  lastEventSequence: number | null;
+  resumedAt: string;
+  resumedWithSequence: number;
+  runId: string;
+};
+
+export type ProviderStreamEventRecord = {
+  attemptId: string;
+  createdAt: string;
+  runId: string;
+  sequence: number;
+};
+
 export type WatchdogSample = {
   idleSince: string | null;
   lastMessageAt: string | null;
@@ -575,6 +593,12 @@ export type ProviderEventMetadataInput = {
   attemptId: string;
   normalized: NormalizedProviderEvent;
   raw: unknown;
+  runId: string;
+  sequence: number;
+};
+
+export type ProviderStreamEventInput = {
+  attemptId: string;
   runId: string;
   sequence: number;
 };
@@ -663,6 +687,23 @@ type ProviderEventRow = {
   type: string;
 };
 
+type ProviderStreamStallRow = {
+  attempt_id: string;
+  duration_ms: number;
+  gap_started_at: string;
+  last_event_sequence: number | null;
+  resumed_at: string;
+  resumed_with_sequence: number;
+  run_id: string;
+};
+
+type ProviderStreamEventRow = {
+  attempt_id: string;
+  last_event_at: string;
+  last_event_sequence: number;
+  run_id: string;
+};
+
 function mapProviderEventRow(row: ProviderEventRow): ProviderEventRecord {
   return {
     attemptId: row.attempt_id,
@@ -672,6 +713,20 @@ function mapProviderEventRow(row: ProviderEventRow): ProviderEventRecord {
     runId: row.run_id,
     sequence: row.sequence,
     type: row.type
+  };
+}
+
+function mapProviderStreamStallRow(
+  row: ProviderStreamStallRow
+): ProviderStreamStallRecord {
+  return {
+    attemptId: row.attempt_id,
+    durationMs: row.duration_ms,
+    gapStartedAt: row.gap_started_at,
+    lastEventSequence: row.last_event_sequence,
+    resumedAt: row.resumed_at,
+    resumedWithSequence: row.resumed_with_sequence,
+    runId: row.run_id
   };
 }
 
@@ -3925,24 +3980,107 @@ export class RunStore {
   }
 
   recordProviderEvent(input: ProviderEventMetadataInput): void {
+    const createdAt = timestamp();
+    const apply = this.database.transaction(() => {
+      this.database
+        .prepare(
+          [
+            "insert into provider_events (",
+            "run_id, attempt_id, sequence, type, raw_json, normalized_json, created_at",
+            ") values (",
+            "@run_id, @attempt_id, @sequence, @type, @raw_json, @normalized_json, @created_at",
+            ")"
+          ].join(" ")
+        )
+        .run({
+          attempt_id: input.attemptId,
+          created_at: createdAt,
+          normalized_json: JSON.stringify(input.normalized),
+          raw_json: JSON.stringify(input.raw),
+          run_id: input.runId,
+          sequence: input.sequence,
+          type: input.normalized.type
+        });
+      this.insertProviderStreamEvent(input, createdAt);
+    });
+    apply();
+  }
+
+  recordProviderStreamEvent(input: ProviderStreamEventInput): void {
+    const apply = this.database.transaction(() => {
+      this.insertProviderStreamEvent(input, timestamp());
+    });
+    apply();
+  }
+
+  private insertProviderStreamEvent(
+    input: ProviderStreamEventInput,
+    createdAt: string
+  ): void {
+    const previous = this.database
+      .prepare(
+        [
+          "select run_id, attempt_id, last_event_sequence, last_event_at",
+          "from provider_stream_events where attempt_id = ?"
+        ].join(" ")
+      )
+      .get(input.attemptId) as ProviderStreamEventRow | undefined;
+
+    const gapStartedAt =
+      previous?.last_event_at ??
+      (
+        this.database
+          .prepare("select created_at from attempts where id = ?")
+          .get(input.attemptId) as { created_at: string } | undefined
+      )?.created_at;
+    const durationMs =
+      gapStartedAt === undefined
+        ? Number.NaN
+        : Date.parse(createdAt) - Date.parse(gapStartedAt);
+    if (
+      Number.isFinite(durationMs) &&
+      durationMs >= PROVIDER_STREAM_STALL_THRESHOLD_MS
+    ) {
+      this.database
+        .prepare(
+          [
+            "insert or ignore into provider_stream_stalls (",
+            "run_id, attempt_id, last_event_sequence, resumed_with_sequence,",
+            "gap_started_at, resumed_at, duration_ms",
+            ") values (",
+            "@run_id, @attempt_id, @last_event_sequence, @resumed_with_sequence,",
+            "@gap_started_at, @resumed_at, @duration_ms",
+            ")"
+          ].join(" ")
+        )
+        .run({
+          attempt_id: input.attemptId,
+          duration_ms: Math.floor(durationMs),
+          gap_started_at: gapStartedAt,
+          last_event_sequence: previous?.last_event_sequence ?? null,
+          resumed_at: createdAt,
+          resumed_with_sequence: input.sequence,
+          run_id: input.runId
+        });
+    }
+
     this.database
       .prepare(
         [
-          "insert into provider_events (",
-          "run_id, attempt_id, sequence, type, raw_json, normalized_json, created_at",
-          ") values (",
-          "@run_id, @attempt_id, @sequence, @type, @raw_json, @normalized_json, @created_at",
-          ")"
+          "insert into provider_stream_events (",
+          "run_id, attempt_id, last_event_sequence, last_event_at",
+          ") values (@run_id, @attempt_id, @last_event_sequence, @last_event_at)",
+          "on conflict(attempt_id) do update set",
+          "run_id = excluded.run_id,",
+          "last_event_sequence = excluded.last_event_sequence,",
+          "last_event_at = excluded.last_event_at"
         ].join(" ")
       )
       .run({
         attempt_id: input.attemptId,
-        created_at: timestamp(),
-        normalized_json: JSON.stringify(input.normalized),
-        raw_json: JSON.stringify(input.raw),
-        run_id: input.runId,
-        sequence: input.sequence,
-        type: input.normalized.type
+        last_event_at: createdAt,
+        last_event_sequence: input.sequence,
+        run_id: input.runId
       });
   }
 
@@ -4209,6 +4347,41 @@ export class RunStore {
       .all(params) as ProviderEventRow[];
 
     return rows.map((row) => mapProviderEventRow(row));
+  }
+
+  listProviderStreamStalls(runId: string): ProviderStreamStallRecord[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select run_id, attempt_id, last_event_sequence, resumed_with_sequence,",
+          "gap_started_at, resumed_at, duration_ms",
+          "from provider_stream_stalls where run_id = ?",
+          "order by resumed_at asc, id asc"
+        ].join(" ")
+      )
+      .all(runId) as ProviderStreamStallRow[];
+    return rows.map((row) => mapProviderStreamStallRow(row));
+  }
+
+  getLatestProviderStreamEvent(
+    attemptId: string
+  ): ProviderStreamEventRecord | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select run_id, attempt_id, last_event_sequence, last_event_at",
+          "from provider_stream_events where attempt_id = ?"
+        ].join(" ")
+      )
+      .get(attemptId) as ProviderStreamEventRow | undefined;
+    return row === undefined
+      ? undefined
+      : {
+          attemptId: row.attempt_id,
+          createdAt: row.last_event_at,
+          runId: row.run_id,
+          sequence: row.last_event_sequence
+        };
   }
 
   // Provider event `sequence` resets to 1 on every attempt, so an unscoped
@@ -5059,6 +5232,43 @@ export class RunStore {
         foreign key (run_id) references runs(id),
         foreign key (attempt_id) references attempts(id)
       );
+
+      create table if not exists provider_stream_events (
+        attempt_id text primary key,
+        run_id text not null,
+        last_event_sequence integer not null,
+        last_event_at text not null,
+        foreign key (run_id) references runs(id),
+        foreign key (attempt_id) references attempts(id)
+      );
+
+      create table if not exists provider_stream_stalls (
+        id integer primary key autoincrement,
+        run_id text not null,
+        attempt_id text not null,
+        last_event_sequence integer,
+        resumed_with_sequence integer not null,
+        gap_started_at text not null,
+        resumed_at text not null,
+        duration_ms integer not null,
+        unique(attempt_id, resumed_with_sequence),
+        foreign key (run_id) references runs(id),
+        foreign key (attempt_id) references attempts(id)
+      );
+
+      create index if not exists provider_stream_stalls_run_resumed_idx
+        on provider_stream_stalls(run_id, resumed_at);
+
+      insert or ignore into provider_stream_events (
+        run_id, attempt_id, last_event_sequence, last_event_at
+      )
+      select event.run_id, event.attempt_id, event.sequence, event.created_at
+      from provider_events event
+      inner join (
+        select attempt_id, max(id) as id
+        from provider_events
+        group by attempt_id
+      ) latest on latest.id = event.id;
 
       create table if not exists tracked_pull_requests (
         id integer primary key autoincrement,

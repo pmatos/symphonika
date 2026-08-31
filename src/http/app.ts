@@ -30,6 +30,7 @@ import {
 import { reconcileRoutineOutcome } from "../routines/outcome.js";
 import type { RoutineFiringState, RoutineState } from "../routines/types.js";
 import type { PullRequestState } from "../pull-request-state.js";
+import { buildProviderStreamStatus } from "../provider-stream-status.js";
 import type { ReloadOutcome } from "./save-pipeline.js";
 import type { StatusSnapshot } from "../status.js";
 import type { UpdateActionResult } from "../update/coordinator.js";
@@ -592,6 +593,11 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         return context.json({ error: "run not found" }, 404);
       }
       const events = runStore.listProviderEvents(detail.id, { limit: 100 });
+      const activeAttempt = detail.attempts[detail.attempts.length - 1];
+      const latestEvent =
+        activeAttempt === undefined
+          ? undefined
+          : runStore.getLatestProviderStreamEvent(activeAttempt.id);
       const { attempts, transitions, ...run } = detail;
       const pullRequestFollowup = buildPullRequestFollowupAttention({
         detail,
@@ -604,6 +610,13 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       return context.json({
         attempts,
         events,
+        providerStream: buildProviderStreamStatus({
+          attempt: activeAttempt,
+          latestEvent,
+          nowMs: now(),
+          recoveredStalls: runStore.listProviderStreamStalls(detail.id),
+          runState: run.state
+        }),
         pullRequestFollowup,
         run,
         transitions,

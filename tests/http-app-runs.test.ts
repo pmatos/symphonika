@@ -576,6 +576,286 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("exposes the current provider-event gap on /api/runs/:id", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        test.runStore.createRun({
+          id: "provider-stream-detail",
+          issue: sampleIssue({ number: 591 }),
+          projectName: "alpha",
+          providerCommand: "x",
+          providerName: "codex"
+        });
+        test.runStore.updateRunState("provider-stream-detail", "running");
+        test.runStore.createAttempt({
+          attemptNumber: 1,
+          branchName: "sym/provider-stream-detail",
+          branchRef: "refs/heads/sym/provider-stream-detail",
+          id: "provider-stream-detail-attempt-1",
+          issueSnapshotPath: "",
+          metadataPath: "",
+          normalizedLogPath: "",
+          promptPath: "",
+          providerCommand: "x",
+          providerName: "codex",
+          rawLogPath: "",
+          runId: "provider-stream-detail",
+          state: "running",
+          workflowGraphPath: "",
+          workspacePath: test.stateRoot
+        });
+        test.runStore.recordProviderEvent({
+          attemptId: "provider-stream-detail-attempt-1",
+          normalized: { type: "session_started" },
+          raw: {},
+          runId: "provider-stream-detail",
+          sequence: 1
+        });
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:06:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/runs/provider-stream-detail");
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(body.providerStream).toEqual({
+        lastEventAgeMs: 360_000,
+        lastEventAt: "2026-08-28T13:00:00.000Z",
+        recoveredStalls: [],
+        stalled: true,
+        stalledForMs: 360_000,
+        thresholdMs: 300_000
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("clears a recovered stream stall and preserves its duration as run evidence", async () => {
+    const stateRoot = await makeTempRoot();
+    let runStore = openRunStore({ stateRoot });
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        runStore.createRun({
+          id: "provider-stream-recovered",
+          issue: sampleIssue({ number: 591 }),
+          projectName: "alpha",
+          providerCommand: "x",
+          providerName: "codex"
+        });
+        runStore.updateRunState("provider-stream-recovered", "running");
+        runStore.createAttempt({
+          attemptNumber: 1,
+          branchName: "sym/provider-stream-recovered",
+          branchRef: "refs/heads/sym/provider-stream-recovered",
+          id: "provider-stream-recovered-attempt-1",
+          issueSnapshotPath: "",
+          metadataPath: "",
+          normalizedLogPath: "",
+          promptPath: "",
+          providerCommand: "x",
+          providerName: "codex",
+          rawLogPath: "",
+          runId: "provider-stream-recovered",
+          state: "running",
+          workflowGraphPath: "",
+          workspacePath: stateRoot
+        });
+        runStore.recordProviderEvent({
+          attemptId: "provider-stream-recovered-attempt-1",
+          normalized: { type: "message", message: "before retry" },
+          raw: {},
+          runId: "provider-stream-recovered",
+          sequence: 1
+        });
+      });
+      withClaimTime("2026-08-28T13:46:00.000Z", () => {
+        runStore.recordProviderEvent({
+          attemptId: "provider-stream-recovered-attempt-1",
+          normalized: { type: "tool_call", command: "pwd" },
+          raw: {},
+          runId: "provider-stream-recovered",
+          sequence: 2
+        });
+      });
+
+      runStore.close();
+      runStore = openRunStore({ stateRoot });
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:46:00.000Z"),
+        runStore,
+        stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/runs/provider-stream-recovered");
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(body.providerStream).toEqual({
+        lastEventAgeMs: 0,
+        lastEventAt: "2026-08-28T13:46:00.000Z",
+        recoveredStalls: [
+          {
+            attemptId: "provider-stream-recovered-attempt-1",
+            durationMs: 2_760_000,
+            gapStartedAt: "2026-08-28T13:00:00.000Z",
+            lastEventSequence: 1,
+            resumedAt: "2026-08-28T13:46:00.000Z",
+            resumedWithSequence: 2,
+            runId: "provider-stream-recovered"
+          }
+        ],
+        stalled: false,
+        stalledForMs: null,
+        thresholdMs: 300_000
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("preserves a recovered stall that ended with the attempt's first event", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        test.runStore.createRun({
+          id: "provider-stream-first-event",
+          issue: sampleIssue({ number: 591 }),
+          projectName: "alpha",
+          providerCommand: "x",
+          providerName: "codex"
+        });
+        test.runStore.updateRunState("provider-stream-first-event", "running");
+        test.runStore.createAttempt({
+          attemptNumber: 1,
+          branchName: "sym/provider-stream-first-event",
+          branchRef: "refs/heads/sym/provider-stream-first-event",
+          id: "provider-stream-first-event-attempt-1",
+          issueSnapshotPath: "",
+          metadataPath: "",
+          normalizedLogPath: "",
+          promptPath: "",
+          providerCommand: "x",
+          providerName: "codex",
+          rawLogPath: "",
+          runId: "provider-stream-first-event",
+          state: "running",
+          workflowGraphPath: "",
+          workspacePath: test.stateRoot
+        });
+      });
+      withClaimTime("2026-08-28T13:06:00.000Z", () => {
+        test.runStore.recordProviderEvent({
+          attemptId: "provider-stream-first-event-attempt-1",
+          normalized: { type: "session_started" },
+          raw: {},
+          runId: "provider-stream-first-event",
+          sequence: 1
+        });
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:06:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request(
+        "/api/runs/provider-stream-first-event"
+      );
+      const body = (await response.json()) as {
+        providerStream: { recoveredStalls: unknown[] };
+      };
+
+      expect(body.providerStream.recoveredStalls).toEqual([
+        {
+          attemptId: "provider-stream-first-event-attempt-1",
+          durationMs: 360_000,
+          gapStartedAt: "2026-08-28T13:00:00.000Z",
+          lastEventSequence: null,
+          resumedAt: "2026-08-28T13:06:00.000Z",
+          resumedWithSequence: 1,
+          runId: "provider-stream-first-event"
+        }
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("uses raw-only provider activity when reporting the latest stream event", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        test.runStore.createRun({
+          id: "provider-stream-raw-activity",
+          issue: sampleIssue({ number: 591 }),
+          projectName: "alpha",
+          providerCommand: "x",
+          providerName: "codex"
+        });
+        test.runStore.updateRunState("provider-stream-raw-activity", "running");
+        test.runStore.createAttempt({
+          attemptNumber: 1,
+          branchName: "sym/provider-stream-raw-activity",
+          branchRef: "refs/heads/sym/provider-stream-raw-activity",
+          id: "provider-stream-raw-activity-attempt-1",
+          issueSnapshotPath: "",
+          metadataPath: "",
+          normalizedLogPath: "",
+          promptPath: "",
+          providerCommand: "x",
+          providerName: "codex",
+          rawLogPath: "",
+          runId: "provider-stream-raw-activity",
+          state: "running",
+          workflowGraphPath: "",
+          workspacePath: test.stateRoot
+        });
+        test.runStore.recordProviderEvent({
+          attemptId: "provider-stream-raw-activity-attempt-1",
+          normalized: { type: "session_started" },
+          raw: {},
+          runId: "provider-stream-raw-activity",
+          sequence: 1
+        });
+      });
+      withClaimTime("2026-08-28T13:04:00.000Z", () => {
+        test.runStore.recordProviderStreamEvent({
+          attemptId: "provider-stream-raw-activity-attempt-1",
+          runId: "provider-stream-raw-activity",
+          sequence: 2
+        });
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:06:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request(
+        "/api/runs/provider-stream-raw-activity"
+      );
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(body.providerStream).toEqual({
+        lastEventAgeMs: 120_000,
+        lastEventAt: "2026-08-28T13:04:00.000Z",
+        recoveredStalls: [],
+        stalled: false,
+        stalledForMs: null,
+        thresholdMs: 300_000
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("exposes the persisted watchdog sample on /api/runs/:id", async () => {
     const test = await setup();
     try {
@@ -1121,6 +1401,62 @@ describe("HTTP app — runs API and pages", () => {
       expect(runPageBody).toContain("run-page-attempt-1");
       expect(runPageBody).toContain(detail?.attempts[0]?.createdAt);
       expect(runPageBody).toContain("/logs/runs/run-page/provider_raw");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("labels a running Codex stream after five minutes without provider events", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:50:12.000Z", () => {
+        test.runStore.createRun({
+          id: "run-stream-stalled",
+          issue: sampleIssue({ number: 591, title: "Visible stream stall" }),
+          projectName: "alpha",
+          providerCommand: "x",
+          providerName: "codex"
+        });
+        test.runStore.updateRunState("run-stream-stalled", "running");
+        test.runStore.createAttempt({
+          attemptNumber: 1,
+          branchName: "sym/run-stream-stalled",
+          branchRef: "refs/heads/sym/run-stream-stalled",
+          id: "run-stream-stalled-attempt-1",
+          issueSnapshotPath: "",
+          metadataPath: "",
+          normalizedLogPath: "",
+          promptPath: "",
+          providerCommand: "x",
+          providerName: "codex",
+          rawLogPath: "",
+          runId: "run-stream-stalled",
+          state: "running",
+          workflowGraphPath: "",
+          workspacePath: test.stateRoot
+        });
+        test.runStore.recordProviderEvent({
+          attemptId: "run-stream-stalled-attempt-1",
+          normalized: { type: "message", message: "still working" },
+          raw: {},
+          runId: "run-stream-stalled",
+          sequence: 1
+        });
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T14:36:12.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-stream-stalled");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("Stream stalled, provider retrying (46m)");
+      expect(body).toContain("Last provider event");
+      expect(body).toContain("46m ago");
     } finally {
       test.cleanup();
     }

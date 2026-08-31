@@ -836,6 +836,8 @@ SQLite stores durable orchestration state:
 - workspace paths
 - per-Run Workflow Contract `evidence.ignore` snapshots
 - normalized event metadata
+- per-Attempt latest raw provider-event receipt metadata and recovered Provider Stream Stall
+  intervals
 - Watchdog samples for no-progress and convergence-budget detection
 - workflow progress fingerprints and accepted claim counts for park-edge cycle detection
 - raw log file paths
@@ -2508,6 +2510,21 @@ Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }
 When no valid runtime snapshot (including a last-known-good snapshot) exists, both endpoints return
 `watchdog: null`; `null` means unavailable and is distinct from the explicitly disabled object.
 The server-rendered Run page shows the same unavailable state and calculates no Watchdog fields.
+
+`GET /api/runs/:id` also exposes a top-level `providerStream` object independently of Watchdog
+policy. It always includes `lastEventAt` / `lastEventAgeMs` (both `null` before the current Attempt's
+first raw event), the five-minute `thresholdMs`, `stalled`, `stalledForMs`, and every durable
+`recoveredStalls` interval for the Run. Provider receipt activity is Attempt-scoped and includes raw
+events the normalizer does not project into `provider_events`; a retry therefore cannot inherit the
+prior Attempt's last-event clock. A running Attempt with no events uses its own creation time only
+to decide `stalled`, while still reporting that no last event exists.
+
+The Run-detail page renders the same Provider stream evidence unconditionally: last raw provider
+event (or `none`), time since that event, the five-minute threshold, and recovered-stall count. A
+running gap at or beyond the threshold adds `Stream stalled, provider retrying (Nm)`. This is a
+non-terminal observation, not an idle-kill timer or a Watchdog Progress Signal. The next raw event
+clears it and durably records the gap's start, nullable prior sequence, resuming sequence and
+timestamp, and duration for distribution measurement. See ADR 0090.
 
 The server-rendered dashboard and `/runs` list surface the same idle/grace state as a small
 "watchdog idle since X (Y remaining)" badge next to the state pill, shown only for active

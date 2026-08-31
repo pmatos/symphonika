@@ -25,6 +25,10 @@ import {
   parseNoProgressReason
 } from "../lifecycle/progress-fingerprint.js";
 import type { PullRequestState } from "../pull-request-state.js";
+import {
+  buildProviderStreamStatus,
+  type ProviderStreamStatus
+} from "../provider-stream-status.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
 import {
@@ -638,6 +642,10 @@ export function registerPages(options: RegisterPagesOptions): void {
     const isFailure =
       FAILURE_STATES.has(detail.state) || BLOCKED_STATES.has(detail.state);
     const terminalAttempt = detail.attempts[detail.attempts.length - 1];
+    const latestAttemptEvent =
+      terminalAttempt === undefined
+        ? undefined
+        : options.runStore.getLatestProviderStreamEvent(terminalAttempt.id);
     const failureEvent = isFailure
       ? options.runStore.getLastFailureEvent(id, terminalAttempt?.id)
       : undefined;
@@ -690,6 +698,13 @@ export function registerPages(options: RegisterPagesOptions): void {
             runId: detail.id,
             runStore: options.runStore
           });
+    const providerStream = buildProviderStreamStatus({
+      attempt: terminalAttempt,
+      latestEvent: latestAttemptEvent,
+      nowMs: now(),
+      recoveredStalls: options.runStore.listProviderStreamStalls(detail.id),
+      runState: detail.state
+    });
     const outputTokenGrowth5m =
       watchdog?.enabled === true && watchdog.sampledAt !== undefined
         ? options.runStore.watchdogOutputTokenGrowth(
@@ -704,6 +719,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       renderPullRequestFollowupAttention(pullRequestFollowup),
       renderWorkflowProgressAttention(buildWorkflowProgressAttention(detail)),
       renderRunSummary(detail, capContext),
+      renderProviderStreamSection(providerStream),
       renderWatchdogSection(watchdog, outputTokenGrowth5m, detailNowMs),
       renderWorkflowGraphSummary(detail.id, workflowGraph),
       renderCancelForm(detail, csrfToken),
@@ -6809,6 +6825,26 @@ function renderWatchdogSection(
   ${idleRow}
   ${graceRow}
   ${runTimeoutRow}
+</dl></section>`;
+}
+
+function renderProviderStreamSection(status: ProviderStreamStatus): string {
+  const stalledBanner =
+    status.stalled && status.stalledForMs !== null
+      ? `<div class="banner banner--attention"><p class="banner-title">Stream stalled, provider retrying (${escapeHtml(formatWatchdogDuration(status.stalledForMs))})</p><p class="banner-reason">No provider event has arrived beyond the normal five-minute stream idle window. The provider may recover within its own retry budget; this is an observation, not a termination signal.</p></div>`
+      : "";
+  const lastEvent =
+    status.lastEventAt === null || status.lastEventAgeMs === null
+      ? `<span class="muted">none recorded</span>`
+      : `<code>${renderTimestamp(status.lastEventAt)}</code> <span class="muted">(${escapeHtml(formatWatchdogDuration(status.lastEventAgeMs))} ago)</span>`;
+  const recoveredStalls =
+    status.recoveredStalls.length === 0
+      ? "0"
+      : `${status.recoveredStalls.length} <span class="muted">(latest ${escapeHtml(formatWatchdogDuration(status.recoveredStalls[status.recoveredStalls.length - 1]?.durationMs ?? 0))})</span>`;
+  return `<section>${sectionHead("Provider stream")}${stalledBanner}<dl class="fields">
+  <dt>Last provider event</dt><dd>${lastEvent}</dd>
+  <dt>Stall threshold</dt><dd>${escapeHtml(formatWatchdogDuration(status.thresholdMs))}</dd>
+  <dt>Recovered stalls</dt><dd>${recoveredStalls}</dd>
 </dl></section>`;
 }
 

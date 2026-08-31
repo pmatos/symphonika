@@ -172,6 +172,13 @@ _Avoid_: normalized event log
 Provider-neutral run events used by the orchestrator, observability surfaces, and tests.
 _Avoid_: raw provider log
 
+**Provider Event Reducer**:
+The per-Run mapping that turns one Coding Agent's raw protocol messages (its Provider Event
+Log) into Normalized Event Log entries, owning any cross-message carry-forward state privately
+so it is testable without spawning the provider. One per provider adapter (`codex-events`,
+`claude-events`).
+_Avoid_: parser, event mapper
+
 **Thinking Marker**:
 A timestamped normalized event recording that provider reasoning started or completed. It may carry
 a provider-authored reasoning summary for observability, but never raw reasoning content, and counts

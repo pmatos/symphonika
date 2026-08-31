@@ -293,9 +293,10 @@ waiting, cancellation, or terminal labels.
 _Avoid_: daemon loop when referring to Run-local progression
 
 **Watchdog**:
-A daemon reconciliation component that samples active Runs for observable progress and marks wedged
-Runs `stale` with `terminal_reason = "no_progress"` after the configured grace window, or
-`terminal_reason = "no_convergence"` once a Run exceeds its Convergence Budget.
+A daemon reconciliation component that samples running issue Runs and Routine Firings for
+observable progress. It marks a wedged Run `stale` or a wedged Routine Firing `failed`, both with
+`terminal_reason = "no_progress"`; issue Runs are also stopped with `no_convergence` once they
+exceed their Convergence Budget.
 _Avoid_: retry, timeout when referring to no-progress termination
 
 **Lifecycle Event**:
@@ -309,27 +310,28 @@ run, schedule retry, re-evaluate a waiting row, cancel, or mark failed.
 _Avoid_: callback when referring to lifecycle policy
 
 **Watchdog**:
-The orchestrator subsystem that samples a Progress Signal for each `running` Run on the reconciliation
-tick and transitions the Run to `stale` with terminal reason `no_progress` when no progress signal
-advances within the configured grace window, or `no_convergence` when the Run exceeds its
-Convergence Budget.
+The orchestrator subsystem that samples a Progress Signal for each `running` issue Run and Routine
+Firing on the reconciliation tick. When no signal advances within the configured grace window, an
+issue Run becomes `stale / no_progress` and a Routine Firing becomes `failed / no_progress`; only
+issue Runs additionally use the Convergence Budget and wall-clock Run cap.
 _Avoid_: heartbeat checker, liveness probe
 
 **Progress Signal**:
-The tuple of observed Run-progress evidence the Watchdog samples — most recent tool-call timestamp,
-provider progress timestamp (including Thinking Markers), Workspace Digest, distinct turn-id count,
-output-token growth since the last sample, and most recent streamed assistant-message timestamp.
+The tuple of observed active-provider progress evidence the Watchdog samples — most recent
+tool-call timestamp, provider progress timestamp (including Thinking Markers), Workspace Digest,
+distinct turn-id count, output-token growth since the last sample, and most recent streamed
+assistant-message timestamp.
 Advance of any one signal counts as progress.
 _Avoid_: heartbeat when describing observable side-effects — rate-limit events are excluded from
 the Progress Signal outright, and the bare presence of usage events is not progress, though the
 Progress Signal still reads output-token growth from `usage_updated` events (signal 4)
 
 **Workspace Digest**:
-The hash over the sorted `relative-path:size` pairs of every non-excluded file in a Run's
-Workspace, and the Progress Signal's workspace evidence. A change means files appeared,
-disappeared, or changed size; a rebuild that restamps byte-identical output does not change it and
-is not progress. The maximum workspace mtime is still sampled and shown to operators but no longer
-decides the signal on its own (ADR 0086).
+The hash over the sorted `relative-path:size` pairs of every non-excluded file in an active Run or
+Routine Firing Workspace, and the Progress Signal's workspace evidence. A change means files
+appeared, disappeared, or changed size; a rebuild that restamps byte-identical output does not
+change it and is not progress. The maximum workspace mtime is still sampled but no longer decides
+the signal on its own (ADR 0086).
 _Avoid_: workspace mtime when describing what counts as workspace progress
 
 **Convergence Budget**:
@@ -468,7 +470,9 @@ _Avoid_: chat session
 - A daemon start, health transition, or Watchdog pass may produce one **Daemon Health Notification**
 - A **Notification Sink** delivers a rendered message without owning event-specific policy
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
-- A **Watchdog** samples a **Progress Signal** for each active **Run** during daemon reconciliation and may mark no-progress work `stale`, or stop a **Run** that exceeds its **Convergence Budget**, preserving **Workspace** contents in both cases
+- A **Watchdog** samples a **Progress Signal** for each running **Run** and **Routine Firing** during
+  daemon reconciliation; no-progress Runs become `stale`, no-progress Firings become `failed`, and
+  only Runs are additionally stopped by the **Convergence Budget** or wall-clock Run cap
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete

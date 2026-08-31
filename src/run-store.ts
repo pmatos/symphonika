@@ -508,6 +508,10 @@ export type WatchdogSample = {
   workspaceMtimeMax: number;
 };
 
+export type RoutineWatchdogSample = Omit<WatchdogSample, "runId"> & {
+  firingId: string;
+};
+
 export type WatchdogCandidateRun = {
   // Claim time, and therefore the origin of the Run's wall-clock age. Every
   // fresh lifecycle — a first dispatch, a continuation, an FSM state advance,
@@ -521,6 +525,15 @@ export type WatchdogCandidateRun = {
   runId: string;
   state: Extract<RunState, "running">;
   watchdogGeneration: number;
+  workspacePath: string;
+};
+
+export type WatchdogCandidateRoutineFiring = {
+  firingId: string;
+  normalizedLogPath: string;
+  projectName: string;
+  routineName: string;
+  state: Extract<RoutineFiringState, "running">;
   workspacePath: string;
 };
 
@@ -700,6 +713,19 @@ type WatchdogSampleRow = {
   turn_id_set_size: number;
   workspace_digest: string;
   workspace_mtime_max: number;
+};
+
+type RoutineWatchdogSampleRow = Omit<WatchdogSampleRow, "run_id"> & {
+  firing_id: string;
+};
+
+type WatchdogCandidateRoutineFiringRow = {
+  id: string;
+  normalized_log_path: string | null;
+  project_name: string;
+  routine_name: string;
+  state: WatchdogCandidateRoutineFiring["state"];
+  workspace_path: string | null;
 };
 
 type WatchdogTokenSampleRow = {
@@ -1367,6 +1393,27 @@ export class RunStore {
     }));
   }
 
+  listWatchdogCandidateRoutineFirings(): WatchdogCandidateRoutineFiring[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, routine_name, state, workspace_path, normalized_log_path",
+          "from routine_firings",
+          "where state = 'running' and cancel_requested = 0",
+          "order by created_at asc, id asc"
+        ].join(" ")
+      )
+      .all() as WatchdogCandidateRoutineFiringRow[];
+    return rows.map((row) => ({
+      firingId: row.id,
+      normalizedLogPath: row.normalized_log_path ?? "",
+      projectName: row.project_name,
+      routineName: row.routine_name,
+      state: row.state,
+      workspacePath: row.workspace_path ?? ""
+    }));
+  }
+
   getWatchdogSample(runId: string): WatchdogSample | undefined {
     const row = this.database
       .prepare(
@@ -1380,6 +1427,23 @@ export class RunStore {
       )
       .get(runId) as WatchdogSampleRow | undefined;
     return row === undefined ? undefined : mapWatchdogSampleRow(row);
+  }
+
+  getRoutineWatchdogSample(
+    firingId: string
+  ): RoutineWatchdogSample | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select firing_id, sampled_at, last_tool_call_at, last_message_at,",
+          "last_progress_at, workspace_mtime_max, workspace_digest,",
+          "turn_id_set_size, output_tokens_total, normalized_log_offset,",
+          "normalized_log_path, idle_since from routine_watchdog_samples",
+          "where firing_id = ?"
+        ].join(" ")
+      )
+      .get(firingId) as RoutineWatchdogSampleRow | undefined;
+    return row === undefined ? undefined : mapRoutineWatchdogSampleRow(row);
   }
 
   upsertWatchdogSample(
@@ -1455,6 +1519,73 @@ export class RunStore {
     })();
   }
 
+  upsertRoutineWatchdogSample(sample: RoutineWatchdogSample): boolean {
+    const values = {
+      firing_id: sample.firingId,
+      idle_since: sample.idleSince,
+      last_message_at: sample.lastMessageAt,
+      last_progress_at: sample.lastProgressAt,
+      last_tool_call_at: sample.lastToolCallAt,
+      normalized_log_offset: sample.normalizedLogOffset,
+      normalized_log_path: sample.normalizedLogPath,
+      output_tokens_total: sample.outputTokensTotal,
+      sampled_at: sample.sampledAt,
+      turn_id_set_size: sample.turnIdSetSize,
+      workspace_digest: sample.workspaceDigest,
+      workspace_mtime_max: sample.workspaceMtimeMax
+    };
+    const latest = this.database.prepare(
+      [
+        "insert into routine_watchdog_samples (",
+        "firing_id, sampled_at, last_tool_call_at, last_message_at,",
+        "last_progress_at, workspace_mtime_max, workspace_digest,",
+        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
+        "normalized_log_path, idle_since",
+        ") values (",
+        "@firing_id, @sampled_at, @last_tool_call_at, @last_message_at,",
+        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
+        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
+        "@normalized_log_path, @idle_since",
+        ")",
+        "on conflict(firing_id) do update set",
+        "sampled_at = excluded.sampled_at,",
+        "last_tool_call_at = excluded.last_tool_call_at,",
+        "last_message_at = excluded.last_message_at,",
+        "last_progress_at = excluded.last_progress_at,",
+        "workspace_mtime_max = excluded.workspace_mtime_max,",
+        "workspace_digest = excluded.workspace_digest,",
+        "turn_id_set_size = excluded.turn_id_set_size,",
+        "output_tokens_total = excluded.output_tokens_total,",
+        "normalized_log_offset = excluded.normalized_log_offset,",
+        "normalized_log_path = excluded.normalized_log_path,",
+        "idle_since = excluded.idle_since"
+      ].join(" ")
+    );
+    const history = this.database.prepare(
+      [
+        "insert or replace into routine_watchdog_sample_history (",
+        "firing_id, sampled_at, last_tool_call_at, last_message_at,",
+        "last_progress_at, workspace_mtime_max, workspace_digest,",
+        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
+        "normalized_log_path, idle_since",
+        ") values (",
+        "@firing_id, @sampled_at, @last_tool_call_at, @last_message_at,",
+        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
+        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
+        "@normalized_log_path, @idle_since",
+        ")"
+      ].join(" ")
+    );
+    return this.database.transaction(() => {
+      if (!this.isRoutineWatchdogCandidate(sample.firingId)) {
+        return false;
+      }
+      latest.run(values);
+      history.run(values);
+      return true;
+    })();
+  }
+
   watchdogOutputTokenGrowth(runId: string, windowStart: string): number {
     const baseline = this.database
       .prepare(
@@ -1520,6 +1651,37 @@ export class RunStore {
       return count.get(runId) as { count: number };
     });
     return apply()?.count;
+  }
+
+  rememberRoutineWatchdogTurnIds(
+    firingId: string,
+    turnIds: Iterable<string>
+  ): number | undefined {
+    const insert = this.database.prepare(
+      "insert or ignore into routine_watchdog_turn_ids (firing_id, turn_id) values (?, ?)"
+    );
+    const count = this.database.prepare(
+      "select count(*) as count from routine_watchdog_turn_ids where firing_id = ?"
+    );
+    return this.database.transaction(() => {
+      if (!this.isRoutineWatchdogCandidate(firingId)) {
+        return undefined;
+      }
+      for (const turnId of turnIds) {
+        insert.run(firingId, turnId);
+      }
+      return (count.get(firingId) as { count: number }).count;
+    })();
+  }
+
+  private isRoutineWatchdogCandidate(firingId: string): boolean {
+    return (
+      this.database
+        .prepare(
+          "select 1 from routine_firings where id = ? and state = 'running' and cancel_requested = 0"
+        )
+        .get(firingId) !== undefined
+    );
   }
 
   markRunNoProgressStale(
@@ -3478,6 +3640,24 @@ export class RunStore {
       .run(SHUTDOWN_PREEMPTIVE_REASON, reason, timestamp(), firingId);
   }
 
+  markRoutineFiringWatchdogNoProgress(
+    firingId: string,
+    updatedAt = timestamp()
+  ): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update routine_firings set",
+          "cancel_requested = 1,",
+          "cancel_reason = 'no_progress',",
+          "updated_at = ?",
+          "where id = ? and state = 'running' and cancel_requested = 0"
+        ].join(" ")
+      )
+      .run(updatedAt, firingId);
+    return result.changes > 0;
+  }
+
   updateRoutineFiringWorkspace(input: {
     branchName?: string;
     branchRef?: string;
@@ -5298,6 +5478,46 @@ export class RunStore {
         foreign key (firing_id) references routine_firings(id)
       );
 
+      create table if not exists routine_watchdog_samples (
+        firing_id text primary key,
+        sampled_at text not null,
+        last_tool_call_at text,
+        last_progress_at text,
+        workspace_mtime_max real not null,
+        workspace_digest text not null default '',
+        turn_id_set_size integer not null,
+        output_tokens_total integer not null,
+        normalized_log_offset integer not null,
+        idle_since text,
+        normalized_log_path text not null default '',
+        last_message_at text,
+        foreign key (firing_id) references routine_firings(id)
+      );
+
+      create table if not exists routine_watchdog_sample_history (
+        firing_id text not null,
+        sampled_at text not null,
+        last_tool_call_at text,
+        last_progress_at text,
+        workspace_mtime_max real not null,
+        workspace_digest text not null default '',
+        turn_id_set_size integer not null,
+        output_tokens_total integer not null,
+        normalized_log_offset integer not null,
+        idle_since text,
+        normalized_log_path text not null default '',
+        last_message_at text,
+        primary key (firing_id, sampled_at),
+        foreign key (firing_id) references routine_firings(id)
+      );
+
+      create table if not exists routine_watchdog_turn_ids (
+        firing_id text not null,
+        turn_id text not null,
+        primary key (firing_id, turn_id),
+        foreign key (firing_id) references routine_firings(id)
+      );
+
       create table if not exists routine_pull_requests (
         id integer primary key autoincrement,
         project_name text not null,
@@ -5984,6 +6204,25 @@ function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
     normalizedLogPath: row.normalized_log_path,
     outputTokensTotal: row.output_tokens_total,
     runId: row.run_id,
+    sampledAt: row.sampled_at,
+    turnIdSetSize: row.turn_id_set_size,
+    workspaceDigest: row.workspace_digest,
+    workspaceMtimeMax: row.workspace_mtime_max
+  };
+}
+
+function mapRoutineWatchdogSampleRow(
+  row: RoutineWatchdogSampleRow
+): RoutineWatchdogSample {
+  return {
+    firingId: row.firing_id,
+    idleSince: row.idle_since,
+    lastMessageAt: row.last_message_at,
+    lastProgressAt: row.last_progress_at,
+    lastToolCallAt: row.last_tool_call_at,
+    normalizedLogOffset: row.normalized_log_offset,
+    normalizedLogPath: row.normalized_log_path,
+    outputTokensTotal: row.output_tokens_total,
     sampledAt: row.sampled_at,
     turnIdSetSize: row.turn_id_set_size,
     workspaceDigest: row.workspace_digest,

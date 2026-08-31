@@ -287,6 +287,14 @@ terminates the provider process tree, waits for that work to settle, and records
 with `terminal_reason = "firing_timeout"`. This declared deadline is independent of Watchdog
 progress-liveness: useful progress does not extend it.
 
+While a Routine Firing is `running`, the Watchdog samples the same provider and Workspace Progress
+Signal used for issue Runs. If no signal advances for the target Project's effective
+`watchdog.grace_minutes`, the Watchdog requests provider cancellation and the firing settles as
+`state = failed` with `terminal_reason = "no_progress"`; the dispatcher's `finally` then releases
+its shared in-flight slot. This liveness guard is independent of the optional declared deadline.
+The convergence budget and `max_run_minutes` remain issue-Run policies and do not apply to Routine
+Firings.
+
 A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
 no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
 `last_skip_reason`, and `last_skip_at`, together with rolling 24-hour counts for each skip reason.
@@ -832,7 +840,8 @@ SQLite stores durable orchestration state:
 - workspace paths
 - per-Run Workflow Contract `evidence.ignore` snapshots
 - normalized event metadata
-- Watchdog samples for no-progress and convergence-budget detection
+- Watchdog samples for issue-Run no-progress and convergence-budget detection
+- per-firing Watchdog samples for Routine Firing no-progress detection
 - workflow progress fingerprints and accepted claim counts for park-edge cycle detection
 - raw log file paths
 - routines
@@ -977,8 +986,9 @@ pending. Validation and status commands must not dispatch work.
 
 The daemon also runs the Watchdog during reconciliation according to
 `watchdog.sample_interval_seconds`. The default Watchdog policy is enabled with a 30 minute
-no-progress grace window, a 150000 output-token convergence budget, a 360 minute wall-clock Run cap,
-and 60 second sampling interval.
+no-progress grace window for running issue Runs and Routine Firings, a 150000 output-token
+convergence budget for issue Runs, a 360 minute wall-clock issue-Run cap, and 60 second sampling
+interval.
 
 ### 8.3 Multi-Project Dispatch
 
@@ -1077,6 +1087,12 @@ row. One-shot Routines become `expired`; recurring Routines remain active and at
 `next_fire_at` before the provider executes, so successful and failed firings both leave the next
 clock event visible. Routine Firings use states `queued`, `preparing_workspace`, `running`,
 `succeeded`, `failed`, and `cancelled`.
+
+The Watchdog samples every `running` Routine Firing. A firing whose Progress Signal remains idle
+through the effective Project grace window is cancelled through its live provider adapter and
+settles as `failed` with `terminal_reason = "no_progress"`. Its lifecycle completion releases both
+the shared concurrency slot and the non-overlap gate, so a later recurring clock event can launch a
+replacement without a daemon restart.
 
 When `timeout_minutes` is effective, one absolute deadline bounds how long the dispatcher waits
 on workspace preparation, provider validation, provider streaming, and terminal outcome
@@ -1801,12 +1817,13 @@ own process tree (ADR 0064).
 
 ### 12.4 Watchdog
 
-The Watchdog detects active provider runs that have stopped doing observable work. It samples rows
-in `state = "running"` only — the one active state with a live Agent Provider that can wedge. Rows
-in `queued` and `preparing_workspace` have no provider executing yet, so they have no liveness
-signal to advance and must not accrue idle time; rows in `state = "waiting"` are reconciled by the
-wait-state path. A `running` Run that already carries `cancel_requested` is also skipped, so the
-Watchdog does not overwrite a more specific in-flight cancellation with `no_progress`.
+The Watchdog detects active issue Runs and Routine Firings whose providers have stopped doing
+observable work. It samples rows in `state = "running"` only — the one active state with a live
+Agent Provider that can wedge. Rows in `queued` and `preparing_workspace` have no provider
+executing yet, so they have no liveness signal to advance and must not accrue idle time; issue Runs
+in `state = "waiting"` are reconciled by the wait-state path. Running work that already carries
+`cancel_requested` is also skipped, so the Watchdog does not overwrite a more specific in-flight
+cancellation with `no_progress`.
 
 For each sampled Run, Symphonika records one durable latest `watchdog_samples` row keyed by
 `run_id` and an append-only `watchdog_sample_history` row keyed by `(run_id, sampled_at)`. Both
@@ -1826,6 +1843,16 @@ so an old attempt's tick that finishes asynchronous log or Workspace I/O after t
 discarded instead of recreating data or terminating the new attempt. A transient retry therefore
 exposes no current Progress Signal during workspace preparation and starts every attempt-local
 baseline and idle grace window fresh when sampling resumes.
+
+For each sampled Routine Firing, Symphonika records the equivalent latest
+`routine_watchdog_samples` row, append-only `routine_watchdog_sample_history`, and remembered
+`routine_watchdog_turn_ids`, all keyed by `firing_id` rather than `run_id`. Routine Firings have one
+provider attempt and no retry generation. Each sample and the no-progress cancellation latch are
+conditional on the firing still being `running` with no prior cancellation request, so a provider
+completion or operator cancellation racing asynchronous log or Workspace sampling wins cleanly.
+Routine prompts have no Workflow Contract, so their Workspace sampling uses the built-in exclusion
+set and the effective Project `watchdog.mtime_ignore` / `mtime_include` policy without an
+`evidence.ignore` layer.
 
 Sampling reads the Normalized Event Log only forward of the stored byte offset and walks the
 Workspace tree once. A transient retry writes a new per-attempt log path; its first sample reads
@@ -1880,6 +1907,14 @@ observation. Once `now - idle_since >= watchdog.grace_minutes`, it transitions t
 `stale` with `terminal_reason = "no_progress"` and requests provider cancellation. `no_progress`
 is a deterministic terminal verdict for that attempt, not a transient retry reason.
 
+The same idle rule applies to a sampled Routine Firing. At expiry the Watchdog atomically latches
+`cancel_requested` with `cancel_reason = "no_progress"` and requests provider cancellation. The
+Routine dispatcher preserves that reason over the cancellation-produced provider exit, completes
+the firing as `failed / no_progress`, performs its ordinary evidence and commits-ahead inspection,
+and releases the in-memory slot in `finally`. It does not add a Routine-Firing `stale` state:
+Routine Firings have no stale operational-label recovery workflow, and a provider that failed its
+liveness contract is a terminal failed firing.
+
 Independently of that liveness clock, the Watchdog enforces a **convergence budget**: when a
 sampled Run's cumulative `output_tokens_total` reaches `watchdog.output_token_budget` (default
 150000; `0` disables it), the Run transitions to `stale` with
@@ -1890,6 +1925,10 @@ opposite failure mode from `no_progress` — a Run doing plenty of observable wo
 finishing, which satisfies the liveness rule on every tick. The budget is checked before the idle
 clock, honours the same per-Project override scope as `grace_minutes`, and like `no_progress` is
 deterministic rather than a transient retry reason. See ADR 0086.
+
+The convergence budget is issue-Run-only. Routine Firings still sample output-token growth as one
+component of liveness, but their independent absolute bound is the optional declared
+`timeout_minutes` deadline rather than `watchdog.output_token_budget` or `max_run_minutes`.
 
 Ahead of both, the Watchdog enforces a **wall-clock cap**: once a sampled Run's age — `now` minus
 its `runs.created_at`, the instant it claimed its Issue — reaches `watchdog.max_run_minutes`

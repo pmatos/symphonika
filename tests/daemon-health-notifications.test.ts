@@ -139,6 +139,40 @@ describe("daemon health notifications", () => {
     });
   });
 
+  it("includes Routine Firings in a grouped Watchdog termination notification", async () => {
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const notifier = new DaemonHealthNotifier({
+      createSink: () => ({ deliver }),
+      resolveConfig: () => ({
+        from: "symphonika@example.com",
+        on: "always",
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls",
+        to: "operator@example.com"
+      })
+    });
+
+    notifier.notifyWatchdogTerminations([
+      { issueNumber: 42, projectName: "alpha", runId: "run-42" },
+      {
+        firingId: "fire-1",
+        kind: "routine_firing",
+        projectName: "alpha",
+        routineName: "daily-report"
+      }
+    ]);
+    await notifier.settled();
+
+    const message = deliver.mock.calls[0]?.[0] as NotificationMessage;
+    expect(message.subject).toBe(
+      "[Symphonika] Watchdog terminated 2 provider executions"
+    );
+    expect(message.text).toContain("alpha#42 [run-42]");
+    expect(message.text).toContain("alpha/daily-report [fire-1]");
+  });
+
   it("contains final delivery failure outside daemon control flow", async () => {
     const deliver = vi.fn().mockRejectedValue(new Error("relay unavailable"));
     const notifier = new DaemonHealthNotifier({

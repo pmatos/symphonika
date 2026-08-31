@@ -8,6 +8,19 @@ import { deliverNotificationBestEffort } from "./delivery.js";
 import { escapeHtml, htmlShell, symphonikaSubject } from "./message.js";
 import type { NotificationMessage, NotificationSink } from "./types.js";
 
+export type WatchdogTermination =
+  | {
+      issueNumber: number;
+      projectName: string;
+      runId: string;
+    }
+  | {
+      firingId: string;
+      kind: "routine_firing";
+      projectName: string;
+      routineName: string;
+    };
+
 export class DaemonHealthNotifier {
   private readonly inFlight = new Set<Promise<void>>();
   private readonly edgeState = new Map<string, boolean>();
@@ -96,22 +109,30 @@ export class DaemonHealthNotifier {
   }
 
   notifyWatchdogTerminations(
-    runs: ReadonlyArray<{
-      issueNumber: number;
-      projectName: string;
-      runId: string;
-    }>
+    terminations: readonly WatchdogTermination[]
   ): void {
-    if (runs.length === 0) {
+    if (terminations.length === 0) {
       return;
     }
+    const routineFirings = terminations.filter(isRoutineFiringTermination);
+    const issueRunCount = terminations.length - routineFirings.length;
+    const subject =
+      routineFirings.length === 0
+        ? `Watchdog terminated ${issueRunCount} issue ${
+            issueRunCount === 1 ? "Run" : "Runs"
+          }`
+        : issueRunCount === 0
+          ? `Watchdog terminated ${routineFirings.length} Routine ${
+              routineFirings.length === 1 ? "Firing" : "Firings"
+            }`
+          : `Watchdog terminated ${terminations.length} provider executions`;
     this.enqueue({
-      details: runs.map(
-        (run) => `${run.projectName}#${run.issueNumber} [${run.runId}]`
+      details: terminations.map((termination) =>
+        isRoutineFiringTermination(termination)
+          ? `${termination.projectName}/${termination.routineName} [${termination.firingId}]`
+          : `${termination.projectName}#${termination.issueNumber} [${termination.runId}]`
       ),
-      subject: `Watchdog terminated ${runs.length} issue ${
-        runs.length === 1 ? "Run" : "Runs"
-      }`
+      subject
     });
   }
 
@@ -154,6 +175,12 @@ export class DaemonHealthNotifier {
       throw new Error(outcome.error);
     }
   }
+}
+
+function isRoutineFiringTermination(
+  termination: WatchdogTermination
+): termination is Extract<WatchdogTermination, { kind: "routine_firing" }> {
+  return "kind" in termination && termination.kind === "routine_firing";
 }
 
 function renderDaemonHealthNotification(event: {

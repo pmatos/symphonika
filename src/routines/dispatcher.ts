@@ -167,6 +167,14 @@ type RoutineTerminalOutcome =
   | { kind: "failed"; reason: string }
   | { kind: "succeeded"; reason: string };
 
+function routineCancellationOutcome(
+  cancelReason: string | undefined
+): RoutineTerminalOutcome {
+  return cancelReason === "no_progress"
+    ? { kind: "failed", reason: "no_progress" }
+    : { kind: "cancelled", reason: "cancelled" };
+}
+
 // A single firing's before/after GitHub snapshots are captured minutes apart
 // at most, so bounding `state: "all"` issue pagination to this window (well
 // above any realistic firing duration) avoids paginating a repository's
@@ -1320,7 +1328,7 @@ async function runRoutineFiring(input: {
     const cancelEntry = input.activeRuns.get(input.firingId);
     let outcome: RoutineTerminalOutcome =
       cancelEntry?.cancelRequested === true
-        ? { kind: "cancelled" as const, reason: "cancelled" }
+        ? routineCancellationOutcome(cancelEntry.cancelReason)
         : await deadline.race(
             classifyRoutineOutcome(events, {
               baseBranch: input.project.workspace.git.base_branch,
@@ -1350,7 +1358,7 @@ async function runRoutineFiring(input: {
     // still protects any commits already created in the workspace.
     const cancelAfterGithubAfter = input.activeRuns.get(input.firingId);
     if (cancelAfterGithubAfter?.cancelRequested === true) {
-      outcome = { kind: "cancelled", reason: "cancelled" };
+      outcome = routineCancellationOutcome(cancelAfterGithubAfter.cancelReason);
     }
     // The firing's own execution phase is done. PR discovery is post-terminal
     // enrichment, so it must not let the execution deadline rewrite a
@@ -1388,7 +1396,9 @@ async function runRoutineFiring(input: {
     // still wins even though the provider itself already finished (ADR 0060).
     const cancelBeforeCommitInspection = input.activeRuns.get(input.firingId);
     if (cancelBeforeCommitInspection?.cancelRequested === true) {
-      outcome = { kind: "cancelled", reason: "cancelled" };
+      outcome = routineCancellationOutcome(
+        cancelBeforeCommitInspection.cancelReason
+      );
     }
     const commitsAhead =
       outcome.kind === "succeeded"
@@ -1406,7 +1416,7 @@ async function runRoutineFiring(input: {
     // for both lifecycle classification and its matching cancel reason.
     const completionCancelEntry = input.activeRuns.get(input.firingId);
     if (completionCancelEntry?.cancelRequested === true) {
-      outcome = { kind: "cancelled", reason: "cancelled" };
+      outcome = routineCancellationOutcome(completionCancelEntry.cancelReason);
     }
     const githubObservation = routineGithubObservation(
       githubBefore,
@@ -1469,14 +1479,21 @@ async function runRoutineFiring(input: {
       await providerAttempt?.catch(() => undefined);
     }
     const cancelEntry = input.activeRuns.get(input.firingId);
-    const cancelled = !timedOut && cancelEntry?.cancelRequested === true;
+    const watchdogNoProgress =
+      !timedOut &&
+      cancelEntry?.cancelRequested === true &&
+      cancelEntry.cancelReason === "no_progress";
+    const cancelled =
+      !timedOut && !watchdogNoProgress && cancelEntry?.cancelRequested === true;
     const reason = timedOut
       ? error.terminalReason
-      : cancelled
-        ? "cancelled"
-        : error instanceof RoutinePromptRenderError
-          ? error.terminalReason
-          : errorMessage(error);
+      : watchdogNoProgress
+        ? "no_progress"
+        : cancelled
+          ? "cancelled"
+          : error instanceof RoutinePromptRenderError
+            ? error.terminalReason
+            : errorMessage(error);
     // The deadline may already be expired here (we can be in this catch
     // block precisely because it expired). deadline.race would then reject
     // again immediately with the same timeout error, and — unlike the try
@@ -1540,16 +1557,26 @@ async function runRoutineFiring(input: {
     // during snapshot capture or commit inspection.
     const completionCancelEntry = input.activeRuns.get(input.firingId);
     const timeoutWon = timedOut || failureSnapshotTimedOut;
+    const finalWatchdogNoProgress =
+      !timeoutWon &&
+      [cancelEntry, cancelAfterFailureSnapshot, completionCancelEntry].some(
+        (entry) =>
+          entry?.cancelRequested === true &&
+          entry.cancelReason === "no_progress"
+      );
     const finalCancelled =
       !timeoutWon &&
+      !finalWatchdogNoProgress &&
       (cancelled ||
         cancelAfterFailureSnapshot?.cancelRequested === true ||
         completionCancelEntry?.cancelRequested === true);
     const finalReason = timeoutWon
       ? "firing_timeout"
-      : finalCancelled
-        ? "cancelled"
-        : reason;
+      : finalWatchdogNoProgress
+        ? "no_progress"
+        : finalCancelled
+          ? "cancelled"
+          : reason;
     // A firing killed at its deadline reports `firing_timeout` and nothing
     // else; whatever the provider wrote on stderr before dying is the only
     // account of why it went quiet, so it rides along on the reason here as

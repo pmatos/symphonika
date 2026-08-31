@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RawGitHubPullRequest } from "../src/issue-polling.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
+import { reconcileWatchdog } from "../src/lifecycle/watchdog.js";
 import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
@@ -6790,6 +6791,131 @@ describe("RoutineFiringDispatcher", () => {
       expect(beforeNextClock.fired).toEqual([]);
       expect(nextClock.fired).toEqual(["new-fire"]);
     } finally {
+      runStore.close();
+    }
+  });
+
+  it("terminates a wedged recurring firing and releases its overlap and capacity slots", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const onRoutineTerminated = vi.fn();
+    const routine = minuteRoutine(root);
+    const firingIds = ["wedged-fire", "replacement-fire"];
+    let releaseWedgedProvider: (() => void) | undefined;
+    const wedgedProvider = new Promise<void>((resolve) => {
+      releaseWedgedProvider = resolve;
+    });
+    let attempt = 0;
+    const provider = {
+      cancel: vi.fn(() => {
+        releaseWedgedProvider?.();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        if (attempt++ === 0) {
+          await wedgedProvider;
+        }
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+    const baseInput = {
+      ...recurringDispatchInput({
+        activeRuns,
+        provider,
+        root,
+        routine,
+        runStore
+      }),
+      createFiringId: () => firingIds.shift() ?? "unexpected-fire",
+      prepareRoutineWorkspace: () =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    };
+    const firstDispatch = dispatchDueRoutines(baseInput);
+
+    try {
+      await vi.waitFor(() => {
+        expect(runStore.getRoutineFiring("wedged-fire")?.state).toBe("running");
+      });
+      expect(activeRuns.countInFlight()).toBe(1);
+
+      const baseline = await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 1,
+          maxRunMinutes: 0,
+          mtimeIgnore: [],
+          mtimeInclude: [],
+          outputTokenBudget: 0,
+          sampleIntervalSeconds: 60
+        },
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore
+      });
+      const termination = await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 1,
+          maxRunMinutes: 0,
+          mtimeIgnore: [],
+          mtimeInclude: [],
+          outputTokenBudget: 0,
+          sampleIntervalSeconds: 60
+        },
+        now: () => new Date("2026-05-22T10:01:00.000Z"),
+        onRoutineTerminated,
+        runStore
+      });
+
+      expect(baseline).toEqual({ sampled: 1, terminated: 0 });
+      expect(termination).toEqual({ sampled: 1, terminated: 1 });
+      await firstDispatch;
+      expect(provider.cancel).toHaveBeenCalledWith("wedged-fire");
+      expect(onRoutineTerminated).toHaveBeenCalledWith({
+        firingId: "wedged-fire",
+        projectName: "alpha",
+        routineName: "minute-report"
+      });
+      expect(runStore.getRoutineFiring("wedged-fire")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(activeRuns.countInFlight()).toBe(0);
+
+      const replacement = await dispatchDueRoutines({
+        ...baseInput,
+        now: new Date("2026-05-22T10:01:00.000Z")
+      });
+      expect(replacement.fired).toEqual(["replacement-fire"]);
+      expect(provider.runAttempt).toHaveBeenCalledTimes(2);
+    } finally {
+      releaseWedgedProvider?.();
+      await firstDispatch.catch(() => undefined);
       runStore.close();
     }
   });

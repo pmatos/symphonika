@@ -321,5 +321,104 @@ natural next firing. `claude-event-reducer` ties it at 22/25 and is its sibling.
 
 ## Design
 
-Written in step 4 after this report was committed; see the amended
-`## Design` section below.
+Three interfaces were designed in parallel (design-it-twice), each by a separate
+sub-agent, then a fourth sub-agent that authored none of them adjudicated against
+depth → locality → seam placement → test surface → blast radius.
+
+### Design A — minimal-surface verbatim lift *(runner-up design)*
+
+New `src/lifecycle/outcome-projection.ts` exporting the five functions **unchanged**
+(same names, same signatures), `BLOCKED_TERMINAL_REASONS` private; `run-controller`
+imports the names it already calls. Zero call-site logic changes, one import line,
+five bodies + the Set moved verbatim.
+*Hides*: the blocked-reason set, the `kind → RunState` table, the fuse precedence,
+the predicate-map shapes. *Strength*: minimal, mechanical blast radius; exact
+`pr-signal-projection.ts` precedent. *Weakness*: a 5-function surface is wide and
+shallow; the fuse-before-map ordering stays an unenforced caller contract outside
+the interface; `WorkflowOutcomeResult.terminalLabel` (`run-controller.ts:356`) stays
+a *separate* inline `"success"|"failure"|"blocked"` union that TypeScript cannot tie
+to the module's copy — silent drift if a label is ever added.
+
+### Design B — single deep facade *(rejected)*
+
+One `projectOutcome(terminal, terminalLabel?) => { outcome, runState, isBlocked, signals }`.
+Adjudication (verified against the code) found the depth **illusory**: `signalsFromTerminal`
+is computed at `:3319` *inside* `applyWorkflowOutcome`, **before** `decideNextStep`
+at `:3324` produces the label (`signals → decideNextStep → label → fuse`), so a single
+call taking the label cannot also produce the signals. `narrowTerminalLabel` at
+`:3338`/`:3401` is upstream label *production* writing into a result struct, fused
+only later at `:3060`. `isBlockedOutcome` at `:3757`/`:3898` runs on a threaded
+`input.outcome` that for four sites (`:711`/`:968`/`:1877`/`:2984`) is hand-built and
+never passed through any facade. Depth is realized at 1 of 8 sites; elsewhere it forces
+eager/dead computation and would widen `ApplyLabelsInput`/`scheduleNext`. One adapter,
+hypothetical seam — loses on seam placement.
+
+### Design C — structured two-concern re-grouping *(WINNER)*
+
+New `src/lifecycle/outcome-projection.ts` grouping the cluster into two named phases
+behind one module seam:
+
+- **(a) FSM terminal-label fusion** — `narrowTerminalLabel`, `fuseWorkflowTerminal`,
+  plus a net-new convenience `fuseTerminalLabel(terminal, rawLabel)` = `fuse ∘ narrow`
+  for the single site (`:1952`) that holds both a base terminal and a raw label.
+- **(b) outcome projection** — `isBlockedOutcome`, `mapOutcomeToRunState`,
+  `signalsFromTerminal`.
+
+Exports a `TerminalLabel = "success" | "failure" | "blocked"` type so the three
+inline unions (`:356`, and the narrow return / fuse param) become one type-checked
+source of truth; `WorkflowOutcomeResult.terminalLabel` (`:356`) is retyped to it.
+`BLOCKED_TERMINAL_REASONS` stays private — it is the shared reason-string alphabet
+between `fuseWorkflowTerminal` (producer of `workflow_terminal_blocked`) and
+`isBlockedOutcome` (consumer), which is the reason both phases stay in **one** module.
+
+**Interface:**
+
+```ts
+import type { ClassifiedTerminal } from "./classify-failure.js";
+import type { RunState } from "../run-store.js";
+import type { WorkflowPredicateMap } from "../workflow/types.js";
+
+export type TerminalLabel = "success" | "failure" | "blocked";
+export function narrowTerminalLabel(value: string | undefined): TerminalLabel | undefined;
+export function fuseWorkflowTerminal(terminal: ClassifiedTerminal, label: TerminalLabel | undefined): ClassifiedTerminal;
+export function fuseTerminalLabel(terminal: ClassifiedTerminal, rawLabel: string | undefined): ClassifiedTerminal;
+export function isBlockedOutcome(outcome: ClassifiedTerminal): boolean;
+export function mapOutcomeToRunState(outcome: ClassifiedTerminal): RunState;
+export function signalsFromTerminal(outcome: ClassifiedTerminal): WorkflowPredicateMap;
+```
+
+### Verdict
+
+Ranking: **C 1st, A 2nd (runner-up design), B 3rd.** C beat the verbatim lift on
+**Criterion 2 (Locality)**: depth is a wash (same 5-function core; `fuseTerminalLabel`
+raises leverage at one site while adding one derivable export — they offset), so the
+decision falls to where change and bugs concentrate afterwards. Under A, adding a
+terminal label and forgetting `run-controller.ts:356` is a *silent* drift across two
+disconnected literal unions; under C it is a compile error, and the narrow→fuse
+ordering at `:1952` is encapsulated in one call. A's advantages — smaller blast radius
+and not introducing a one-site convenience seam — sit *below* Locality in the priority
+order, so they cannot overturn it. C is not over-engineered: `TerminalLabel` maps to
+three real unions, `fuseTerminalLabel` to the one real dual-input site, and the two
+phases to two genuinely distinct compute points (signals upstream at `:3319`; fuse+map
+downstream at `:3060`/`:3064`).
+
+**Risks the implementation must respect** (carried from adjudication):
+
+1. **Ordering is documentation-only.** `signalsFromTerminal` stays upstream of the
+   label; fuse precedes map. Do not "tidy" signals into a post-label projection —
+   that was B's fatal move.
+2. **ADR 0058 / #271.** Blocked stays *reason-based*: `kind` remains `"failed"` so
+   `deferRetryableTransientAdvance`, `willRetry`, `signalsFromTerminal`, `fsmContinuing`
+   are untouched; only `RunState` and the GitHub-label branch observe the distinction.
+   Do not mint a `ClassifiedTerminal.kind: "blocked"`.
+3. **`fuseWorkflowTerminal` precedence.** `cancelled` / `input_required` always win
+   over an FSM terminal label (operator/system intent).
+4. **ADR 0046.** `signalsFromTerminal` keeps `provider_success: true` for
+   `no_workspace_changes` (a deterministic no-commits step still advances the walk).
+5. **`TerminalLabel` must equal the exact union** `"success" | "failure" | "blocked"`.
+6. **No eager projection.** The pure functions stay callable pointwise at each site's
+   existing pipeline position; `isBlockedOutcome` at `:3757`/`:3898` must still accept
+   hand-built outcomes that never passed through fuse/map.
+
+The runner-up **design** carried into the PR body is Design A (verbatim lift). The
+runner-up **candidate** carried into the PR body is `codex-event-reducer` (22/25).

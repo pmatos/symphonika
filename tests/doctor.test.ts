@@ -1604,6 +1604,86 @@ describe("doctor", () => {
       ).toBe(true);
     });
 
+    it("warns when the installed service does not request daemon protection from OOM victim selection", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      const unitBin = path.join(homeDir, "bin");
+      await mkdir(unitDir, { recursive: true });
+      await writeStubExecutables(unitBin, ["gh"]);
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        currentServiceUnit(unitBin).replace(/^OOMScoreAdjust=-500\n/m, ""),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit(),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit(),
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("daemon protection from OOM victim selection") &&
+            warning.includes("service install")
+        )
+      ).toBe(true);
+    });
+
+    it("warns when a service drop-in neutralizes the daemon's OOM protection request", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      const unitBin = path.join(homeDir, "bin");
+      const dropInDir = path.join(unitDir, "symphonika.service.d");
+      await mkdir(dropInDir, { recursive: true });
+      await writeStubExecutables(unitBin, ["gh"]);
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        currentServiceUnit(unitBin),
+        "utf8"
+      );
+      await writeFile(
+        path.join(dropInDir, "20-oom-score.conf"),
+        "[Service]\nOOMScoreAdjust=0\n",
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit(),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit(),
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some((warning) =>
+          warning.includes("daemon protection from OOM victim selection")
+        )
+      ).toBe(true);
+    });
+
     it("warns when the installed unit predates environment-file secret injection", async () => {
       const root = await makeTempRoot();
       const homeDir = await makeTempRoot();

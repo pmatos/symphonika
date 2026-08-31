@@ -1,9 +1,17 @@
 import { once } from "node:events";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createProcessScope } from "../src/lifecycle/process-scope.js";
 import {
   shutdownProviderProcess,
   spawnProviderProcess
@@ -20,6 +28,111 @@ afterEach(async () => {
 });
 
 describe("provider process lifecycle", () => {
+  it.skipIf(process.platform !== "linux")(
+    "makes a systemd-wrapped provider tree preferable to its supervisor and guardian as OOM victims",
+    async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "symphonika-provider-process-test-")
+      );
+      tempRoots.push(root);
+      const fakeSystemdRunPath = path.join(root, "systemd-run");
+      const providerPath = path.join(root, "provider.mjs");
+      const providerPidPath = path.join(root, "provider.pid");
+      const providerScorePath = path.join(root, "provider.score");
+      const childPath = path.join(root, "provider-child.mjs");
+      const childScorePath = path.join(root, "provider-child.score");
+      await writeFile(
+        fakeSystemdRunPath,
+        [
+          "#!/bin/sh",
+          'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done',
+          '[ "$#" -gt 0 ] || exit 64',
+          "shift",
+          'exec "$@"',
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+      await chmod(fakeSystemdRunPath, 0o755);
+      await writeFile(
+        childPath,
+        [
+          "import { readFile, writeFile } from 'node:fs/promises';",
+          `await writeFile(${JSON.stringify(childScorePath)}, (await readFile("/proc/self/oom_score_adj", "utf8")).trim(), "utf8");`,
+          "setInterval(() => {}, 60_000);",
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+      await writeFile(
+        providerPath,
+        [
+          "import { spawn } from 'node:child_process';",
+          "import { readFile, writeFile } from 'node:fs/promises';",
+          `await writeFile(${JSON.stringify(providerPidPath)}, String(process.pid), "utf8");`,
+          `await writeFile(${JSON.stringify(providerScorePath)}, (await readFile("/proc/self/oom_score_adj", "utf8")).trim(), "utf8");`,
+          `spawn(process.execPath, [${JSON.stringify(childPath)}], { stdio: "ignore" });`,
+          "setInterval(() => {}, 60_000);",
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+
+      const scope = createProcessScope({
+        isAvailable: () => Promise.resolve(true)
+      });
+      const wrapped = await scope.wrapForProviderScope(
+        { attempt: 1, id: "oom-score" },
+        { args: [providerPath], executable: process.execPath }
+      );
+      const inheritedScore = (
+        await readFile("/proc/self/oom_score_adj", "utf8")
+      ).trim();
+      const expectedProviderScore = String(
+        Math.max(500, Number(inheritedScore))
+      );
+      const child = spawnProviderProcess(wrapped, root, {
+        PATH: `${root}${path.delimiter}${process.env.PATH ?? ""}`
+      });
+      const supervisorPid = child.pid;
+      expect(supervisorPid).toBeDefined();
+      const closed = once(child, "close");
+
+      try {
+        const providerPid = Number(await waitForFileContent(providerPidPath));
+        expect(await waitForFileContent(providerScorePath)).toBe(
+          expectedProviderScore
+        );
+        expect(await waitForFileContent(childScorePath)).toBe(
+          expectedProviderScore
+        );
+
+        const directChildren = (
+          await readFile(
+            `/proc/${supervisorPid!}/task/${supervisorPid!}/children`,
+            "utf8"
+          )
+        )
+          .trim()
+          .split(/\s+/)
+          .map(Number);
+        const guardianPid = directChildren.find((pid) => pid !== providerPid);
+        expect(guardianPid).toBeDefined();
+        expect(
+          (
+            await readFile(`/proc/${supervisorPid!}/oom_score_adj`, "utf8")
+          ).trim()
+        ).toBe(inheritedScore);
+        expect(
+          (await readFile(`/proc/${guardianPid!}/oom_score_adj`, "utf8")).trim()
+        ).toBe(inheritedScore);
+      } finally {
+        await shutdownProviderProcess(child);
+        await closed;
+      }
+    }
+  );
+
   it.skipIf(process.platform === "win32")(
     "does not launch the provider after shutdown preparation",
     async () => {

@@ -1620,6 +1620,12 @@ merge any operator-authored restrictions with `ScheduleWakeup`, `Monitor`, and `
 (outside the template, applied by the adapter directly), and set
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the child environment.
 
+On Linux, the provider child branch raises its own `oom_score_adj` to `500` before it execs the
+configured command. The value is inherited by the complete provider descendant tree, including the
+optional `systemd-run --user --scope` wrapper path, while the detached process-group supervisor and
+guardian retain the daemon's inherited score. A failed `/proc/self/oom_score_adj` write does not
+prevent the provider from starting. See ADR 0091.
+
 Future sandboxing, if added, should be outside the provider through host, container, VM, network, or
 credential isolation.
 
@@ -2153,6 +2159,13 @@ path; otherwise it uses a `./`-prefixed path relative to the Service Config.
 `service install --config <path>` resolves the selected Service Config to an absolute path and
 bakes it into the generated unit as `daemon --config <absolute-path>`. Omitting `--config` keeps the
 unit on the daemon's normal project-local/user-config discovery path.
+
+The generated service requests `OOMScoreAdjust=-500`, asking the kernel to make the small
+control-plane daemon a less eligible OOM victim than ordinary processes while Linux provider trees
+select `+500` before exec. `doctor` warns when an installed service has no negative
+`OOMScoreAdjust=` assignment. A user service manager without permission to lower its inherited
+score may retain that inherited value; the provider-side raise remains effective and unprivileged.
+See ADR 0091.
 
 The generated service always references an optional environment file named `env`, resolved at
 install time. With `--config`, the path is `<directory-containing-config>/env`; without it, the

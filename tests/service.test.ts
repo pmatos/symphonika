@@ -80,6 +80,12 @@ describe("renderServiceUnit", () => {
     expect(unit).not.toContain("Type=simple");
   });
 
+  it("requests that the daemon be less eligible than ordinary processes for an OOM kill", () => {
+    const unit = renderServiceUnit(baseUnitInput);
+
+    expect(unit).toMatch(/^OOMScoreAdjust=-500$/m);
+  });
+
   // Regression: createDaemonHeartbeat sends READY=1/WATCHDOG=1 by spawning
   // systemd-notify as a child process, not from the daemon's own Node PID.
   // Per `man systemd.service`, Type=notify/WatchdogSec= with no explicit

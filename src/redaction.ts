@@ -37,10 +37,13 @@ export function redactAll(
   return redacted + message.slice(cursor);
 }
 
-type SecretSpan = { end: number; start: number };
+export type SecretSpan = { end: number; start: number };
 
 // Non-overlapping, ascending spans covering every occurrence of every secret.
-function secretSpans(
+// Exported because a streaming redactor needs to know where matches sit in the
+// text, not just what the masked result looks like: once a match is replaced,
+// the original characters an overlapping match would have needed are gone.
+export function secretSpans(
   message: string,
   redactSecrets: readonly string[]
 ): SecretSpan[] {

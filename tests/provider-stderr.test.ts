@@ -252,6 +252,48 @@ describe("attachProviderStderrLog redaction", () => {
   });
 });
 
+describe("attachProviderStderrLog streaming overlap", () => {
+  it("scrubs a shifted overlap that completes only in a later chunk", async () => {
+    // Masking the first match as soon as it completes would replace the very
+    // characters the second match needs, so "ef" would reach disk.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+
+    await runWithStderr(
+      [
+        "process.stderr.write('abcd');",
+        "await new Promise((r) => setTimeout(r, 20));",
+        "process.stderr.write('ef');"
+      ].join("\n"),
+      logPath,
+      { redactSecrets: ["abcd", "bcdef"] }
+    );
+
+    const contents = await readFile(logPath, "utf8");
+    expect(contents).toBe("[REDACTED]");
+    expect(contents).not.toContain("ef");
+  });
+
+  it("matches whole-text redaction when a secret spans three chunks", async () => {
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+
+    await runWithStderr(
+      [
+        "process.stderr.write('start hun');",
+        "await new Promise((r) => setTimeout(r, 20));",
+        "process.stderr.write('te');",
+        "await new Promise((r) => setTimeout(r, 20));",
+        "process.stderr.write('r2 end');"
+      ].join("\n"),
+      logPath,
+      { redactSecrets: ["hunter2"] }
+    );
+
+    expect(await readFile(logPath, "utf8")).toBe("start [REDACTED] end");
+  });
+});
+
 describe("attachProviderStderrLog redaction durability", () => {
   it("puts a short diagnostic on disk before the stream ends", async () => {
     // The whole point of teeing the head of the stream is that an orchestrator
@@ -386,6 +428,23 @@ describe("attachProviderStderrLog flush barrier", () => {
   });
 });
 
+describe("attachProviderStderrLog cap boundary", () => {
+  it("truncates at a character boundary, not mid-sequence", async () => {
+    // The cap lands inside "é"; cutting there would write an incomplete UTF-8
+    // sequence immediately before the ASCII truncation marker.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+
+    await runWithStderr("process.stderr.write('aaaébbbb');", logPath, {
+      maxBytes: 4
+    });
+
+    const contents = await readFile(logPath, "utf8");
+    expect(contents.startsWith("aaa\n[symphonika]")).toBe(true);
+    expect(contents).not.toContain("\uFFFD");
+  });
+});
+
 describe("readProviderStderrTail", () => {
   it("returns the last bytes of the log", async () => {
     const root = await makeTempRoot();
@@ -439,6 +498,23 @@ describe("withProviderStderrTail", () => {
     expect(await withProviderStderrTail("firing_timeout", undefined)).toBe(
       "firing_timeout"
     );
+  });
+
+  it("strips terminal control sequences from the excerpt", async () => {
+    // terminal_reason is echoed verbatim into an operator's terminal by
+    // show-run/show-firing, so a provider must not be able to drive it.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+    await writeFile(
+      logPath,
+      "\u001B[31mfatal\u001B[0m: \u001B]0;pwned\u0007denied\u001B[2J\n",
+      "utf8"
+    );
+
+    const reason = await withProviderStderrTail("process_exit_1", logPath);
+    expect(reason).toBe("process_exit_1 (stderr: fatal: denied)");
+    expect(reason).not.toContain("\u001B");
+    expect(reason).not.toContain("\u0007");
   });
 
   it("bounds the excerpt so terminal_reason stays a readable one-liner", async () => {

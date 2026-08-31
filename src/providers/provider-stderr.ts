@@ -17,7 +17,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
-import { redactAll } from "../redaction.js";
+import { redactAll, secretSpans } from "../redaction.js";
 
 // A disk guard, not a diagnostic budget: real providers write kilobytes here.
 export const PROVIDER_STDERR_LOG_MAX_BYTES = 1_048_576;
@@ -141,24 +141,46 @@ function createStreamingRedactor(secrets: readonly string[]): {
   }
 
   const decoder = new StringDecoder("utf8");
-  let carry = "";
+  // Held UNREDACTED. Carrying the masked output instead would destroy the
+  // very characters an overlapping match needs: with secrets
+  // `["abcd", "bcdef"]` arriving as `abcd` then `ef`, masking `abcd` on the
+  // first chunk leaves `[REDACTED]` behind and `bcdef` can never match, so
+  // `ef` reaches disk.
+  let pending = "";
 
   return {
     flush: () => {
-      const remaining = redactAll(carry + decoder.end(), secrets);
-      carry = "";
+      const remaining = redactAll(pending + decoder.end(), secrets);
+      pending = "";
       return Buffer.from(remaining, "utf8");
     },
     push: (chunk) => {
-      const redacted = redactAll(carry + decoder.write(chunk), secrets);
-      const boundary = holdbackBoundary(
-        redacted,
-        redacted.length - pendingSecretPrefixLength(redacted, secrets)
-      );
-      carry = redacted.slice(boundary);
-      return Buffer.from(redacted.slice(0, boundary), "utf8");
+      pending += decoder.write(chunk);
+      const boundary = emitBoundary(pending, secrets);
+      const emitted = pending.slice(0, boundary);
+      pending = pending.slice(boundary);
+      return Buffer.from(redactAll(emitted, secrets), "utf8");
     }
   };
+}
+
+// How much of `text` can be masked and written now. Everything after the
+// boundary is retained unredacted because a future chunk could still change
+// what it means.
+function emitBoundary(text: string, secrets: readonly string[]): number {
+  const boundary = holdbackBoundary(
+    text,
+    text.length - pendingSecretPrefixLength(text, secrets)
+  );
+  // Spans are merged and disjoint, so at most one can straddle the boundary.
+  // Cutting through it would emit a masked fragment of a match whose full
+  // extent is not yet known, so retain from where that match starts.
+  const straddling = secretSpans(text, secrets).find(
+    (span) => span.start < boundary && boundary < span.end
+  );
+  return straddling === undefined
+    ? boundary
+    : holdbackBoundary(text, straddling.start);
 }
 
 // How much of the tail must be withheld because it could still turn out to be
@@ -277,9 +299,13 @@ function createProviderStderrSink(
         return;
       }
       capped = true;
-      if (remaining > 0) {
-        written += remaining;
-        stream.write(chunk.subarray(0, remaining));
+      // Trim to the last complete character: cutting mid-sequence would leave
+      // an incomplete UTF-8 byte run immediately before the ASCII marker, and
+      // the tail read would surface it as U+FFFD.
+      const keep = utf8EndOffset(chunk, remaining);
+      if (keep > 0) {
+        written += keep;
+        stream.write(chunk.subarray(0, keep));
       }
       stream.write(
         `\n[symphonika] provider stderr truncated at ${maxBytes} bytes\n`
@@ -322,6 +348,19 @@ export async function readProviderStderrTail(
   }
 }
 
+// Largest length <= `limit` that ends on a UTF-8 character boundary. A
+// character is at most four bytes, so this backs up three at the very most.
+function utf8EndOffset(buffer: Buffer, limit: number): number {
+  let end = Math.max(0, Math.min(limit, buffer.length));
+  for (let back = 0; back < 3 && end > 0; back += 1) {
+    if (((buffer[end] ?? 0) & 0xc0) !== 0x80) {
+      break;
+    }
+    end -= 1;
+  }
+  return end;
+}
+
 // Index of the first byte that can begin a UTF-8 character. Continuation bytes
 // match `0b10xxxxxx`, and a character is at most four bytes, so this skips
 // three at the very most.
@@ -345,7 +384,12 @@ function formatProviderStderrReason(
   if (tail === undefined) {
     return undefined;
   }
-  const collapsed = tail.replaceAll(/\s+/gu, " ").trim();
+  // terminal_reason is echoed verbatim into an operator's terminal by
+  // `show-run` and `show-firing`, and provider stderr is routinely coloured —
+  // or, for a repository-controlled tool, hostile. Drop ANSI/OSC sequences and
+  // the bare control characters they are built from before anything else, so
+  // no provider can move the operator's cursor or rewrite their scrollback.
+  const collapsed = stripControlSequences(tail).replaceAll(/\s+/gu, " ").trim();
   if (collapsed.length === 0) {
     return undefined;
   }
@@ -354,6 +398,24 @@ function formatProviderStderrReason(
       ? `${collapsed.slice(collapsed.length - PROVIDER_STDERR_REASON_CHARS)}`
       : collapsed;
   return `stderr: ${excerpt}`;
+}
+
+// Matching control characters is the entire purpose here; the lint rule
+// guards against them appearing in a pattern by accident.
+function stripControlSequences(text: string): string {
+  /* eslint-disable no-control-regex */
+  return (
+    text
+      // CSI (e.g. colour), OSC up to its BEL/ST terminator, and the shorter
+      // two-character escapes.
+      .replaceAll(/\u001B\[[0-?]*[ -/]*[@-~]/gu, "")
+      .replaceAll(/\u001B\][\s\S]*?(?:\u0007|\u001B\\)/gu, "")
+      .replaceAll(/\u001B[@-Z\\-_]/gu, "")
+      // Anything left that is still a C0/C1 control character, except the
+      // whitespace the collapse below folds into spaces.
+      .replaceAll(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu, "")
+  );
+  /* eslint-enable no-control-regex */
 }
 
 // Appends the provider's last words to a reason that would otherwise carry no

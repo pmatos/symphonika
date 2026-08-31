@@ -26,6 +26,22 @@
   three vow Runs held concurrency slots and provider memory for thirteen hours while never once
   looking idle. `show-run`, the Run-detail page, and `GET /api/runs/:id` render the time remaining
   against the cap. See ADR 0089 and issue #605.
+- Dispatch admission now consults the host, not just a run count. Before claiming new work the
+  daemon reads Linux's pressure-stall counters (`/proc/pressure/{memory,io}`) and defers while a
+  gated resource's `full avg60` is at or above its ceiling — the signal that actually distinguishes
+  a thrashing host from a busy one, which neither load average nor the Watchdog can. Configured
+  under `global.pressure`; memory is gated at 10% by default, I/O is opt-in (a healthy build host
+  sustains an I/O `full avg60` in the 50s), and the gate is inert where PSI is unavailable. A
+  deferred Routine Firing records the new `host_pressure` skip reason; `/api/status` reports the
+  current verdict and sample. See ADR 0088.
+- Spawned providers get a disk-backed `TMPDIR` at `<state.root>/scratch/<run-id>-attempt-<n>`,
+  removed when the attempt ends and swept at daemon startup. Previously an agent's build output
+  went to the daemon's inherited `/tmp` — a tmpfs on most systemd hosts — where it permanently
+  consumed RAM until an operator cleared it by hand. See ADR 0088.
+- `symphonika-daemon.slice` and `symphonika-providers.slice` now set `IOWeight` (500 and 50), so a
+  provider's build cannot starve the daemon's own writes under disk contention. `doctor` reports an
+  installed slice missing the directive as drift; re-run `symphonika service install --force` to
+  refresh it.
 - The `artifact_exists` predicate is implemented, so a Workflow state can gate its transition on the
   artefact the stage was asked to produce: `when: { artifact_exists: PLAN.md }`, or a sequence for
   "all of these exist". Paths resolve against the Run Workspace and need not be committed; absolute

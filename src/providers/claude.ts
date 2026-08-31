@@ -8,6 +8,7 @@ import {
   createProcessScope,
   type ProcessScope
 } from "../lifecycle/process-scope.js";
+import { providerScratchEnvironment } from "../lifecycle/provider-scratch.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -115,13 +116,12 @@ export function createClaudeProvider(
         };
         return;
       }
-      const child = spawnProviderProcess(
-        command,
-        input.workspacePath,
-        input.routine === undefined
+      const child = spawnProviderProcess(command, input.workspacePath, {
+        ...providerScratchEnvironment(input.scratchPath),
+        ...(input.routine === undefined
           ? {}
-          : { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" }
-      );
+          : { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" })
+      });
       activeRun.child = child;
       child.stderr.resume();
       const queue = createJsonlProcessQueue(child);

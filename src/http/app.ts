@@ -162,6 +162,7 @@ export type FireRoutineResult =
         | RoutineState
         | "concurrency_cap"
         | "daemon_shutdown"
+        | "host_pressure"
         | "overlap"
         | "self_update_draining";
     }
@@ -189,6 +190,20 @@ export type HttpAppOptions = {
       maxInFlight: number;
       projectName: string;
     }>;
+  };
+  // Host pressure-stall admission state (ADR 0088): the current verdict plus
+  // the sample behind it, so an operator can tell a deferred dispatch from an
+  // idle one without reading the journal.
+  getHostPressure?: () => {
+    admitted: boolean;
+    observed?: number;
+    reason?: string;
+    resource?: string;
+    sample?: {
+      fullAvg60: Record<string, number>;
+      unavailable: Record<string, string>;
+    };
+    threshold?: number;
   };
   getActiveRuns?: () => Array<{
     cancelReason: string | null;
@@ -412,6 +427,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         options.getConcurrency === undefined
           ? undefined
           : options.getConcurrency(),
+      hostPressure: options.getHostPressure?.(),
       stateRoot: options.stateRoot,
       tickAgeMs: lastTickAt === null ? null : now() - lastTickAt,
       uptimeMs: uptimeMs(startedAtMs, now)
@@ -507,7 +523,11 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         case "refused":
           return context.json(
             result,
-            result.reason === "concurrency_cap" ? 429 : 409
+            // Both are "come back later", not "this request is wrong".
+            result.reason === "concurrency_cap" ||
+              result.reason === "host_pressure"
+              ? 429
+              : 409
           );
       }
     }

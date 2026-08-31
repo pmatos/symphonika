@@ -50,6 +50,10 @@ import {
   MAX_ROUTINE_WORKSPACE_RETENTION_DAYS,
   type RoutineWorkspaceRetentionPolicy
 } from "./routines/workspace-retention.js";
+import {
+  DEFAULT_HOST_PRESSURE_POLICY,
+  type HostPressurePolicy
+} from "./lifecycle/host-pressure.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 
 export type RuntimeConfigSnapshot = {
@@ -58,6 +62,10 @@ export type RuntimeConfigSnapshot = {
   // Global concurrency cap snapshot. `maxInFlight: undefined` means
   // unbounded. See ADR 0053.
   globalConcurrency: { maxInFlight: number | undefined };
+  // Host pressure-stall admission policy (ADR 0088). Sits beside the count
+  // cap because both answer "may another run start now?" — one from the
+  // daemon's own bookkeeping, the other from the kernel's.
+  hostPressure: HostPressurePolicy;
   // Routine declarations that failed to load this reload and have no prior
   // valid snapshot to carry forward — a brand-new file, invalid from the
   // start. `name` is present only when the front matter's `name` field
@@ -172,6 +180,19 @@ const routineExecutionDefaultsSchema = z
     timeout_minutes: z.number().positive().optional()
   })
   .strict();
+
+// Host pressure-stall thresholds (ADR 0088). Percentages of the PSI
+// `full avg60` window, so 0 would defer every dispatch on a host that has
+// ever stalled — hence `positive()`, not `nonnegative()`. Omitting a
+// resource leaves it ungated.
+const hostPressureSchema = z
+  .object({
+    enabled: z.boolean().default(DEFAULT_HOST_PRESSURE_POLICY.enabled),
+    io_full_avg60_max: z.number().positive().max(100).nullable().optional(),
+    memory_full_avg60_max: z.number().positive().max(100).nullable().optional(),
+    sample_interval_seconds: z.number().positive().optional()
+  })
+  .passthrough();
 
 const watchdogConfigSchema = z
   .object({
@@ -388,9 +409,12 @@ const serviceConfigSchema = z
       .passthrough()
       .optional(),
     // Optional global concurrency cap. Omitted = unbounded. See ADR 0053.
+    // `pressure` gates the same admission decision on host stall, not count
+    // (ADR 0088); omitting it keeps the memory-only defaults.
     global: z
       .object({
-        max_in_flight: z.number().int().positive().optional()
+        max_in_flight: z.number().int().positive().optional(),
+        pressure: hostPressureSchema.optional()
       })
       .passthrough()
       .optional(),
@@ -483,6 +507,10 @@ export class RuntimeConfigReloader {
 
   globalConcurrency(): { maxInFlight: number | undefined } {
     return this.snapshot?.globalConcurrency ?? { maxInFlight: undefined };
+  }
+
+  hostPressurePolicy(): HostPressurePolicy {
+    return this.snapshot?.hostPressure ?? DEFAULT_HOST_PRESSURE_POLICY;
   }
 
   emailConfig(): EmailNotificationConfig | undefined {
@@ -930,6 +958,7 @@ async function loadRuntimeConfigSnapshot(input: {
       globalConcurrency: {
         maxInFlight: parsed.data.global?.max_in_flight
       },
+      hostPressure: normalizeHostPressurePolicy(parsed.data.global?.pressure),
       invalidRoutines,
       loadedAt: input.attemptedAt,
       polling,
@@ -1224,6 +1253,49 @@ function loadRoutineHostProject(input: {
     workspace: detail.data.workspace
   });
   return "ok";
+}
+
+// An omitted `pressure:` block keeps the defaults (memory gated, io opt-in);
+// an omitted key inside a present block keeps that key's default, so an
+// operator who only sets `io_full_avg60_max` does not silently lose the
+// memory gate. Setting a threshold to `null` is how a resource is explicitly
+// ungated — YAML's own "this key has no value" — since `undefined` is
+// indistinguishable from "not written".
+function normalizeHostPressurePolicy(
+  raw: z.infer<typeof hostPressureSchema> | undefined
+): HostPressurePolicy {
+  const defaults = DEFAULT_HOST_PRESSURE_POLICY;
+  if (raw === undefined) {
+    return defaults;
+  }
+  const sampleIntervalSeconds = raw.sample_interval_seconds;
+  return {
+    enabled: raw.enabled,
+    sampleIntervalMs:
+      sampleIntervalSeconds === undefined
+        ? defaults.sampleIntervalMs
+        : Math.round(sampleIntervalSeconds * 1000),
+    thresholds: {
+      io: resolvePressureThreshold(
+        raw.io_full_avg60_max,
+        defaults.thresholds.io
+      ),
+      memory: resolvePressureThreshold(
+        raw.memory_full_avg60_max,
+        defaults.thresholds.memory
+      )
+    }
+  };
+}
+
+function resolvePressureThreshold(
+  configured: number | null | undefined,
+  fallback: number | undefined
+): number | undefined {
+  if (configured === undefined) {
+    return fallback;
+  }
+  return configured ?? undefined;
 }
 
 function normalizeWatchdogConfig(

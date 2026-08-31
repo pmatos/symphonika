@@ -16,6 +16,7 @@ import {
   RuntimeConfigReloader,
   validateServiceConfigContent
 } from "../src/reload.js";
+import { DEFAULT_HOST_PRESSURE_POLICY } from "../src/lifecycle/host-pressure.js";
 
 const tempRoots: string[] = [];
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -929,6 +930,113 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     const status = reloader.getStatus();
     expect(status.ok).toBe(false);
     expect(status.errors.join("\n")).toMatch(/max_in_flight/);
+  });
+
+  it("keeps the memory-only host pressure defaults when global.pressure is omitted", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.hostPressurePolicy()).toEqual(DEFAULT_HOST_PRESSURE_POLICY);
+  });
+
+  it("parses global.pressure thresholds and sampling interval into the snapshot", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "global:",
+        "  pressure:",
+        "    memory_full_avg60_max: 15",
+        "    io_full_avg60_max: 80",
+        "    sample_interval_seconds: 30"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.hostPressurePolicy()).toEqual({
+      enabled: true,
+      sampleIntervalMs: 30_000,
+      thresholds: { io: 80, memory: 15 }
+    });
+  });
+
+  it("keeps the memory default when only io_full_avg60_max is configured", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["global:", "  pressure:", "    io_full_avg60_max: 80"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.hostPressurePolicy().thresholds).toEqual({
+      io: 80,
+      memory: DEFAULT_HOST_PRESSURE_POLICY.thresholds.memory
+    });
+  });
+
+  it("ungates a resource whose threshold is explicitly null", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "global:",
+        "  pressure:",
+        "    memory_full_avg60_max: null"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.hostPressurePolicy().thresholds.memory).toBeUndefined();
+  });
+
+  it("honors global.pressure.enabled: false", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["global:", "  pressure:", "    enabled: false"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.hostPressurePolicy().enabled).toBe(false);
+  });
+
+  it("rejects a pressure threshold outside the 0-100 percentage range", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["global:", "  pressure:", "    memory_full_avg60_max: 150"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    const status = reloader.getStatus();
+    expect(status.ok).toBe(false);
+    expect(status.errors.join("\n")).toMatch(/memory_full_avg60_max/);
   });
 
   it("loads configured project routines into the runtime snapshot", async () => {

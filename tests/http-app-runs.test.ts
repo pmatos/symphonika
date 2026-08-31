@@ -3260,7 +3260,7 @@ describe("HTTP app — routine detail page (#304)", () => {
       expect(body).toContain("fire_once_if_missed");
       expect(body).toContain("/tmp/audit.md");
       expect(body).toContain("alpha");
-      expect(body).toContain("overlap 0 · cap 0 · catch-up 0");
+      expect(body).toContain("overlap 0 · cap 0 · pressure 0 · catch-up 0");
       expect(body).toContain("fire-1");
       expect(body).toContain("single");
       expect(body).toContain('href="/routines/audit/edit"');

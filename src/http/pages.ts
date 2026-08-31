@@ -6296,6 +6296,7 @@ function renderRoutineFireControls(
 const FIRE_REFUSAL_REASON_TEXT: Readonly<Record<string, string>> = {
   concurrency_cap: "the concurrency cap for this Project is currently reached",
   daemon_shutdown: "the daemon is shutting down",
+  host_pressure: "the host is stalled on memory or I/O",
   disabled: "the routine is disabled",
   expired: "the routine's schedule has expired",
   inactive: "the target Project is inactive",
@@ -6352,7 +6353,7 @@ function renderRoutineTargetsTable(group: RoutineGroup): string {
         target.lastSkipReason === null
           ? '<span class="muted">none</span>'
           : `${escapeHtml(target.lastSkipReason)} <code>${renderTimestamp(target.lastSkipAt)}</code>`;
-      const counts = `overlap ${target.skipCounts24h.overlap} · cap ${target.skipCounts24h.concurrency_cap} · catch-up ${target.skipCounts24h.catch_up_window}`;
+      const counts = `overlap ${target.skipCounts24h.overlap} · cap ${target.skipCounts24h.concurrency_cap} · pressure ${target.skipCounts24h.host_pressure} · catch-up ${target.skipCounts24h.catch_up_window}`;
       return `<tr><td>${escapeHtml(target.projectName)}</td><td>${routineStatePill(target.state)}${reason}</td><td><code>${renderTimestamp(target.nextFireAt)}</code></td><td><code>${renderTimestamp(target.lastFiredAt)}</code></td><td class="c-detail">${skip}</td><td class="c-detail">${counts}</td></tr>`;
     })
     .join("");

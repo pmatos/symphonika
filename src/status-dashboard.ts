@@ -182,7 +182,7 @@ function formatRoutinePullRequestNumbers(numbers: number[]): string {
 function formatRoutineSkipCounts(
   counts: RoutineStatus["skipCounts24h"]
 ): string {
-  return `overlap=${counts.overlap},concurrency_cap=${counts.concurrency_cap},catch_up_window=${counts.catch_up_window}`;
+  return `overlap=${counts.overlap},concurrency_cap=${counts.concurrency_cap},host_pressure=${counts.host_pressure},catch_up_window=${counts.catch_up_window}`;
 }
 
 export function summarizeDashboardEvent(

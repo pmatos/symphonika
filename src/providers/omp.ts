@@ -8,6 +8,7 @@ import {
   createProcessScope,
   type ProcessScope
 } from "../lifecycle/process-scope.js";
+import { providerScratchEnvironment } from "../lifecycle/provider-scratch.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -145,7 +146,11 @@ export function createOmpProvider(
         return;
       }
 
-      const child = spawnProviderProcess(command, input.workspacePath);
+      const child = spawnProviderProcess(
+        command,
+        input.workspacePath,
+        providerScratchEnvironment(input.scratchPath)
+      );
       activeRun.child = child;
       child.stderr.resume();
       const queue = createProcessQueue(child, {

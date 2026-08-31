@@ -24,8 +24,29 @@ retention:
 
 # Optional global cap on the total number of concurrent provider runs across
 # all projects. Omit (or comment out) for unbounded. See ADR 0053.
+#
+# `pressure` gates the same admission decision on host state rather than a
+# count: before claiming another issue the daemon reads Linux's
+# pressure-stall counters (/proc/pressure/{memory,io}) and defers dispatch
+# while the host is stalled. Values are the `full avg60` percentage — the
+# share of the last minute during which EVERY non-idle task was blocked on
+# that resource. Unlike load average this never confuses "busy" with "stuck".
+#
+# Defaults, applied when the whole `pressure:` block is omitted: enabled,
+# memory gated at 10%, io ungated. A healthy host reads ~0% memory; the
+# thrashing episode in issue #599 measured 23.5%. io is opt-in because an
+# ordinary compile sustains an io `full avg60` in the 50s with no thrashing
+# at all, so no default is safe for every host — watch your own numbers with
+# `cat /proc/pressure/io` under load before setting one. Set a threshold to
+# `null` to ungate that resource explicitly. On hosts without PSI (non-Linux,
+# or a kernel without CONFIG_PSI) the gate is inert. See ADR 0088.
 # global:
 #   max_in_flight: 8
+#   pressure:
+#     enabled: true
+#     memory_full_avg60_max: 10
+#     io_full_avg60_max: 80
+#     sample_interval_seconds: 10
 
 # When true, the daemon periodically checks GitHub Releases for a newer
 # Symphonika version, stages and smoke-checks it in isolation, drains

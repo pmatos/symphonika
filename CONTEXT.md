@@ -218,7 +218,7 @@ _Avoid_: Watchdog timeout, no-progress grace
 
 **Routine Skip**:
 An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
-an overlapping non-terminal firing, or a concurrency cap. It updates the Routine's latest skip
+an overlapping non-terminal firing, a concurrency cap, or **Host Pressure**. It updates the Routine's latest skip
 evidence and rolling counters but creates no `routine_firings` row. A refused manual firing is not a
 Routine Skip because no clock event was attempted.
 _Avoid_: Routine Firing when no provider execution was launched
@@ -338,6 +338,19 @@ footprint intersects the periodically refreshed Workspace footprint of an in-fli
 Project. Unknown footprints remain dispatchable; strict serialization uses `max_in_flight: 1`.
 _Avoid_: dependency scheduler, merge-conflict resolver
 
+**Host Pressure**:
+The share of a window during which every non-idle task on the machine was stalled on memory or I/O,
+read from Linux's pressure-stall counters. An admission gate defers claiming new work while a gated
+resource is at or above its configured ceiling. Distinct from a concurrency cap: the cap bounds how
+many Runs may exist, Host Pressure asks whether the machine can still make progress.
+_Avoid_: load average, CPU saturation, throttling
+
+**Provider Scratch**:
+A per-attempt, disk-backed directory under the state root handed to a spawned provider as its
+temporary directory, removed when the attempt ends. Transient, never read back — unlike Run
+evidence, which is also under the state root but retained.
+_Avoid_: workspace, evidence, cache
+
 **Agent Provider**:
 A normalized adapter that lets the orchestrator run a specific coding-agent implementation; v1 supports Codex, Claude, and Oh My Pi.
 _Avoid_: agent when referring to the adapter boundary
@@ -434,6 +447,10 @@ _Avoid_: chat session
 - A **Project Cursor** belongs to exactly one **Dispatch Project**
 - A **Dispatch Overlap Guard** supplements concurrency caps and **Issue Reservation** without
   advancing a skipped **Dispatch Project**'s scheduler cursor
+- **Host Pressure** gates admission ahead of concurrency caps and affects **Run** and **Routine
+  Firing** alike; it never stops work already in flight
+- A **Provider Scratch** directory belongs to exactly one attempt of one **Run** or **Routine
+  Firing**, and outlives neither
 - **Full-Permission Agent Execution** is the default and assumed provider posture
 - **Provider PID Isolation** bounds what an **Agent Provider** can see and signal without changing
   **Full-Permission Agent Execution**

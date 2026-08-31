@@ -61,6 +61,13 @@ const SLICE_UNIT = [
   "# host you run on.",
   "MemoryHigh=4G",
   "MemoryMax=6G",
+  "",
+  "# I/O weight well above the providers slice's, so a provider tree",
+  "# saturating the disk cannot starve the daemon's own writes (run store,",
+  "# evidence logs) and stall the tick loop. Weights are relative shares",
+  "# under cgroup v2's io controller; on a host where that controller is not",
+  "# enabled for the backing device the directive is simply inert.",
+  "IOWeight=500",
   ""
 ].join("\n");
 
@@ -76,9 +83,20 @@ const PROVIDERS_SLICE_UNIT = [
   "# that tears down terminals or other unrelated cgroups — and, since",
   "# this slice is a sibling of symphonika-daemon.slice rather than its",
   "# parent, it can no longer throttle the daemon itself (docs/adr/0064).",
+  "# These are the AGGREGATE caps for every concurrent provider: each",
+  "# provider runs as a transient scope inside this slice, so the slice's",
+  "# own MemoryMax bounds their total no matter how many run at once. The",
+  "# per-scope caps in src/lifecycle/process-scope.ts bound ONE provider and",
+  "# deliberately do not compose into a promise of N times that much.",
   "MemoryHigh=24G",
   "MemoryMax=32G",
   "TasksMax=4096",
+  "",
+  "# Lower I/O weight than symphonika-daemon.slice (500): under contention",
+  "# the daemon wins, which is what keeps the dashboard and tick loop",
+  "# responsive while an agent's build hammers the disk. Best effort — see",
+  "# the note in the daemon slice about the cgroup v2 io controller.",
+  "IOWeight=50",
   ""
 ].join("\n");
 

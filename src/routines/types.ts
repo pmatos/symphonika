@@ -27,7 +27,12 @@ export type RoutineFiringTriggerSource = "manual" | "scheduled";
 export type RoutineCatchUpPolicy = "skip" | "fire_once_if_missed";
 
 export type RoutineSkipReason =
-  "overlap" | "concurrency_cap" | "catch_up_window";
+  | "overlap"
+  | "concurrency_cap"
+  | "catch_up_window"
+  // The host itself is stalled on memory or I/O, so the firing was held
+  // back regardless of how much count-headroom the caps left (ADR 0088).
+  | "host_pressure";
 
 export type RoutineSchedule = { at: string } | { cron: string; tz: string };
 

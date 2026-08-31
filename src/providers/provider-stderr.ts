@@ -305,14 +305,36 @@ export async function readProviderStderrTail(
       const length = Math.min(size, maxBytes);
       const buffer = Buffer.alloc(length);
       await handle.read(buffer, 0, length, size - length);
-      const text = buffer.toString("utf8").trim();
-      return text.length === 0 ? undefined : text;
+      // `size - length` is an arbitrary byte offset, so it can land inside a
+      // multi-byte character and decode its remaining bytes to U+FFFD at the
+      // head of the excerpt. Skip the orphaned continuation bytes (at most
+      // three) — the write path takes the same care not to split a character,
+      // and an excerpt that opens with a replacement char is exactly the
+      // evidence this file exists to keep readable.
+      const text = buffer.subarray(utf8StartOffset(buffer)).toString("utf8");
+      const trimmed = text.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
     } finally {
       await handle.close();
     }
   } catch {
     return undefined;
   }
+}
+
+// Index of the first byte that can begin a UTF-8 character. Continuation bytes
+// match `0b10xxxxxx`, and a character is at most four bytes, so this skips
+// three at the very most.
+function utf8StartOffset(buffer: Buffer): number {
+  let offset = 0;
+  while (
+    offset < buffer.length &&
+    offset < 3 &&
+    ((buffer[offset] ?? 0) & 0xc0) === 0x80
+  ) {
+    offset += 1;
+  }
+  return offset;
 }
 
 // Collapses the excerpt onto one line: terminal_reason is a single-line field

@@ -395,6 +395,18 @@ describe("readProviderStderrTail", () => {
     expect(await readProviderStderrTail(logPath, 16)).toBe("aaaa\nlast words");
   });
 
+  it("does not open the excerpt with a split multi-byte character", async () => {
+    // The read offset is arbitrary, so it can land mid-character; the write
+    // path is careful never to split one, and the read path must match.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+    await writeFile(logPath, "aaaé done", "utf8");
+
+    const tail = await readProviderStderrTail(logPath, 6);
+    expect(tail).toBe("done");
+    expect(tail).not.toContain("\uFFFD");
+  });
+
   it("returns undefined for a missing or empty log", async () => {
     const root = await makeTempRoot();
     const missing = path.join(root, "absent.log");

@@ -2887,6 +2887,7 @@ export class RunStore {
     const counts: Record<RoutineSkipReason, number> = {
       catch_up_window: 0,
       concurrency_cap: 0,
+      host_pressure: 0,
       overlap: 0
     };
     const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1_000).toISOString();
@@ -5940,6 +5941,7 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
     skipCounts24h: {
       catch_up_window: 0,
       concurrency_cap: 0,
+      host_pressure: 0,
       overlap: 0
     },
     sourcePath: row.source_path,

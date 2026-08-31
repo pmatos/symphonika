@@ -9,6 +9,11 @@ import {
   inspectWorkspaceCommitsAhead
 } from "../lifecycle/classify-failure.js";
 import { evaluateConcurrencyCapacity } from "../lifecycle/concurrency-capacity.js";
+import type { HostPressureVerdict } from "../lifecycle/host-pressure.js";
+import {
+  createProviderScratch,
+  removeProviderScratch
+} from "../lifecycle/provider-scratch.js";
 import {
   resolveEnvBackedValue,
   tryListIssues,
@@ -58,6 +63,7 @@ import {
 } from "./evidence.js";
 import type {
   RoutineSchedule,
+  RoutineSkipReason,
   RoutineState,
   RoutineStatus,
   TargetedRoutineDeclaration
@@ -79,6 +85,10 @@ export type DispatchDueRoutinesInput = {
   env?: NodeJS.ProcessEnv;
   globalConcurrency: { maxInFlight: number | undefined };
   githubIssuesApi?: GitHubIssuesApi;
+  // Host pressure-stall verdict, sampled once per daemon tick by the caller
+  // so every firing evaluated in that tick sees one consistent reading.
+  // Omitted means the host is not gated at all. See ADR 0088.
+  hostPressure?: HostPressureVerdict;
   inspectWorkspaceCommitsAhead?: typeof inspectWorkspaceCommitsAhead;
   logger?: Logger;
   notification?: RoutineNotificationDelivery;
@@ -142,7 +152,12 @@ export type FireRoutineNowResult =
   | {
       error: string;
       kind: "refused";
-      reason: RoutineState | "concurrency_cap" | "daemon_shutdown" | "overlap";
+      reason:
+        | RoutineState
+        | "concurrency_cap"
+        | "daemon_shutdown"
+        | "host_pressure"
+        | "overlap";
     }
   | { error: string; kind: "unavailable" };
 
@@ -248,6 +263,14 @@ export function fireRoutineNow(
     return {
       error: `provider command missing: ${providerName}`,
       kind: "unavailable"
+    };
+  }
+  const pressureReason = hostPressureSkipReason(input.hostPressure);
+  if (pressureReason !== null) {
+    return {
+      error: pressureReason,
+      kind: "refused",
+      reason: "host_pressure"
     };
   }
   const capReason = capSkipReason(
@@ -731,6 +754,31 @@ export async function dispatchDueRoutines(
         });
         continue;
       }
+      const pressureReason = hostPressureSkipReason(input.hostPressure);
+      if (pressureReason !== null) {
+        if (
+          recordDueRoutineSkip(input.runStore, {
+            evaluation,
+            fanoutId,
+            now,
+            projectName: project.name,
+            reason: "host_pressure",
+            routine
+          })
+        ) {
+          logRoutineSkip(input.logger, {
+            reason: "host_pressure",
+            routine: routine.name,
+            scheduledAt: routine.nextFireAt ?? now.toISOString()
+          });
+          skipped.push({
+            projectName: project.name,
+            reason: "host_pressure",
+            routineName: routine.name
+          });
+        }
+        continue;
+      }
       const capReason = capSkipReason(
         input.activeRuns,
         input.globalConcurrency,
@@ -1083,6 +1131,7 @@ async function runRoutineFiring(input: {
 }): Promise<RoutineFiringResult> {
   const events: NormalizedProviderEvent[] = [];
   const deadline = routineFiringDeadline(input.routine.timeoutMinutes);
+  const scratchIdentity = { attempt: 1, id: input.firingId };
   let prepared: PreparedRoutineWorkspace | undefined;
   let preparationAttempt: Promise<PreparedRoutineWorkspace> | undefined;
   let providerAttempt: Promise<void> | undefined;
@@ -1206,6 +1255,12 @@ async function runRoutineFiring(input: {
       );
     }
 
+    // Disk-backed TMPDIR for this firing, removed in the finally below, so a
+    // Routine's build output never lands on a RAM-backed /tmp. See ADR 0088.
+    const scratchPath = await createProviderScratch(
+      input.stateRoot,
+      scratchIdentity
+    );
     providerAttempt = (async () => {
       for await (const event of input.provider.runAttempt({
         branchName: prepared.branchName,
@@ -1217,11 +1272,9 @@ async function runRoutineFiring(input: {
           command: input.providerCommand,
           name: input.providerName
         },
-        run: {
-          attempt: 1,
-          id: input.firingId
-        },
+        run: scratchIdentity,
         routine: routineOverrides,
+        scratchPath,
         stderrLogPath: evidence.stderrLogPath,
         workspacePath: prepared.workspacePath
       })) {
@@ -1517,6 +1570,18 @@ async function runRoutineFiring(input: {
     });
   } finally {
     deadline.clear();
+    // Best effort, and a no-op when the firing never reached the provider.
+    // A timed-out firing has already had its provider cancelled above, so
+    // nothing meaningful is still writing here; anything left behind is
+    // reclaimed by the next startup sweep.
+    try {
+      await removeProviderScratch(input.stateRoot, scratchIdentity);
+    } catch (error) {
+      input.logger?.warn(
+        { err: error, firingId: input.firingId },
+        "routine firing scratch cleanup failed; continuing"
+      );
+    }
   }
   return { events, prepared };
 }
@@ -2264,6 +2329,15 @@ function isOpenPullRequestForBranch(
   );
 }
 
+function hostPressureSkipReason(
+  hostPressure: HostPressureVerdict | undefined
+): string | null {
+  if (hostPressure === undefined || hostPressure.admitted) {
+    return null;
+  }
+  return hostPressure.reason;
+}
+
 function capSkipReason(
   activeRuns: ActiveRunRegistry,
   globalConcurrency: { maxInFlight: number | undefined },
@@ -2332,7 +2406,7 @@ function recordDueRoutineSkip(
     fanoutId?: string;
     now: Date;
     projectName: string;
-    reason: "overlap" | "concurrency_cap" | "catch_up_window";
+    reason: RoutineSkipReason;
     routine: RoutineStatus;
   }
 ): boolean {
@@ -2351,7 +2425,7 @@ function recordDueRoutineSkip(
 function logRoutineSkip(
   logger: Logger | undefined,
   input: {
-    reason: "overlap" | "concurrency_cap" | "catch_up_window";
+    reason: RoutineSkipReason;
     routine: string;
     scheduledAt: string;
   }

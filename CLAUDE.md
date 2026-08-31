@@ -32,12 +32,18 @@ Before opening a PR, run each of these as a separate command (never `&&`-chained
 - `npm run lint`
 - `npm run typecheck`
 - `npm run format:check`
+- `npm run knip`
 - `npm test`
 - `npm run build`
 
 `format:check` (prettier) is easy to miss since it's not part of `lint` here — a diff can pass lint
 and typecheck while still failing it. If it flags a file the current change didn't touch, leave that
 file alone; only fix formatting in files the diff already modifies.
+
+`knip` is the other easy one to miss, and it fails in a way nothing else catches: its project scope
+is `src/**` only, so a symbol exported and used *only* by a test — or only by its own module — is
+reported as an unused export and fails CI. The usual fix is to drop the `export` keyword rather than
+to add a knip exception.
 
 PR titles must follow Conventional Commits (`type: subject`, e.g. `feat: ...`, `fix: ...`) with a
 lowercase subject — the "Lint PR title" workflow enforces this on open/edit/reopen/synchronize

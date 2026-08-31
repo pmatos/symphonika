@@ -705,14 +705,14 @@ async function checkInstalledUnitDrift(
   warnings.push(
     ...(await checkSliceDrift(
       path.join(unitDir, "symphonika-daemon.slice"),
-      ["MemoryHigh", "MemoryMax"],
+      ["MemoryHigh", "MemoryMax", "IOWeight"],
       reinstallHint
     ))
   );
   warnings.push(
     ...(await checkSliceDrift(
       path.join(unitDir, "symphonika-providers.slice"),
-      ["MemoryHigh", "MemoryMax", "TasksMax"],
+      ["MemoryHigh", "MemoryMax", "TasksMax", "IOWeight"],
       reinstallHint
     ))
   );

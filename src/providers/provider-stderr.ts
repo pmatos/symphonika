@@ -123,7 +123,7 @@ export async function readProviderStderrTail(
 
 // Collapses the excerpt onto one line: terminal_reason is a single-line field
 // everywhere it is displayed.
-export function formatProviderStderrReason(
+function formatProviderStderrReason(
   tail: string | undefined
 ): string | undefined {
   if (tail === undefined) {

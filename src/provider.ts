@@ -49,6 +49,10 @@ export type ProviderRunInput = {
     attempt: number;
     id: string;
   };
+  // Disk-backed directory this attempt's provider should use for temporary
+  // files (TMPDIR). Absent means the provider inherits the daemon's own
+  // TMPDIR, which on most hosts is a RAM-backed /tmp. See ADR 0088.
+  scratchPath?: string;
   // Present only for one-shot Routine Firings. Provider adapters use this
   // boundary to add routine-only argv/environment guards without changing
   // the operator-authored base command used by issue Runs.

@@ -119,9 +119,17 @@ export async function resumeShutdownCancelledRuns(
         projectName: row.projectName,
         repository
       });
-      if (!released) {
+      if (released === undefined) {
         continue;
       }
+      // The snapshot is shared with detectStaleClaims, which runs later in
+      // this same reconcile tick and decides from `issue.labels`. Declining
+      // the row below drops it from `collectLiveKeys`, so leaving a released
+      // `sym:claimed` in the snapshot would have that pass immediately mark
+      // the Issue `sym:stale` — reintroducing the very strand this module
+      // exists to remove. Mutating the snapshot in place is how
+      // detectStaleClaims already records its own label write.
+      forgetLabels(issue.labels, released);
       input.runStore.markShutdownResumeDeclined(row.runId);
       input.logger.info(
         {
@@ -140,8 +148,37 @@ export async function resumeShutdownCancelledRuns(
       continue;
     }
 
-    // Scheduled before the `sym:stale` removal below so no await separates
-    // the reservation check above from the schedule call.
+    // A boot that predated this pass may already have let stale detection
+    // mark the Issue. Clear that verdict BEFORE scheduling, and treat a
+    // failed write as a deferral: scheduling first would reserve the Issue
+    // (suppressing later ticks at the isIssueReserved gate above) and the
+    // resulting continuation would drop this row out of
+    // listResumableShutdownRuns, so nothing would ever retry the removal —
+    // and no terminal-label path clears `sym:stale`, leaving the Issue
+    // excluded by `labels_none` for good once the resumed walk finishes.
+    // Deferring instead keeps the row the newest for its Issue, so the next
+    // tick tries again.
+    if (issue.labels.includes(STALE_LABEL)) {
+      const cleared = await removeLabels({
+        ...input,
+        issueNumber: row.issueNumber,
+        labels: [STALE_LABEL],
+        projectName: row.projectName,
+        repository
+      });
+      if (!cleared) {
+        continue;
+      }
+      forgetLabels(issue.labels, [STALE_LABEL]);
+    }
+
+    // Re-asserted because the label write above is an await: the reservation
+    // check at the top of this iteration is no longer adjacent to the
+    // schedule call, and scheduleDelayed throws on a duplicate issue key.
+    if (input.activeRuns.isIssueReserved(row.projectName, row.issueNumber)) {
+      continue;
+    }
+
     input.runController.scheduleShutdownResume({
       issue,
       parentRunId: row.runId,
@@ -163,24 +200,15 @@ export async function resumeShutdownCancelledRuns(
       project: row.projectName,
       runId: row.runId
     });
-
-    // A boot that predated this pass may already have let stale detection
-    // mark the Issue. The claim is live again, so the verdict is now false
-    // and would otherwise keep the Issue out of polling after the walk ends.
-    if (issue.labels.includes(STALE_LABEL)) {
-      await removeLabels({
-        ...input,
-        issueNumber: row.issueNumber,
-        labels: [STALE_LABEL],
-        projectName: row.projectName,
-        repository
-      });
-    }
   }
 
   return outcomes;
 }
 
+// Returns the labels actually removed, or undefined when the write failed —
+// the caller distinguishes those, because a failure must leave the row
+// resumable for the next tick while a success must be reflected in the shared
+// poll snapshot.
 async function releaseIssue(
   input: ResumeShutdownCancelledRunsInput & {
     issueLabels: string[];
@@ -188,14 +216,25 @@ async function releaseIssue(
     projectName: string;
     repository: GitHubIssueRepositoryInput;
   }
-): Promise<boolean> {
+): Promise<string[] | undefined> {
   const labels = [CLAIM_LABEL, STALE_LABEL].filter((label) =>
     input.issueLabels.includes(label)
   );
   if (labels.length === 0) {
-    return true;
+    return [];
   }
-  return removeLabels({ ...input, labels });
+  return (await removeLabels({ ...input, labels })) ? labels : undefined;
+}
+
+// Drops labels this pass has just removed on GitHub from the poll snapshot
+// the rest of the reconcile tick still reads.
+function forgetLabels(labels: string[], removed: string[]): void {
+  for (const label of removed) {
+    const at = labels.indexOf(label);
+    if (at !== -1) {
+      labels.splice(at, 1);
+    }
+  }
 }
 
 async function removeLabels(

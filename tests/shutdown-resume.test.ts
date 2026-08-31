@@ -18,6 +18,7 @@ import {
   type ScheduleHandler
 } from "../src/lifecycle/run-controller.js";
 import { resumeShutdownCancelledRuns } from "../src/lifecycle/shutdown-resume.js";
+import { detectStaleClaims } from "../src/lifecycle/stale-claims.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
 
 const logger = pino({ enabled: false });
@@ -275,6 +276,99 @@ describe("resumeShutdownCancelledRuns", () => {
       );
       // Declined, so a later tick does not release the labels all over again.
       expect(store.listResumableShutdownRuns()).toEqual([]);
+    });
+  });
+
+  it("does not let stale detection re-strand an issue whose claim it just released", async () => {
+    await withRunStore(async (store) => {
+      seedShutdownCancelledRun(store);
+      const activeRuns = new ActiveRunRegistry();
+      const schedule = vi.fn();
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue,
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      // Both passes share one snapshot, exactly as the daemon's reconcile
+      // tick hands the same issuePollStatus to each of them in turn.
+      const pollStatus = pollStatusWithFiltered([snapshot()]);
+      const shared = {
+        activeRuns,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi,
+        logger,
+        pollStatus,
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      };
+
+      const outcomes = await resumeShutdownCancelledRuns({
+        ...shared,
+        runController: controller({
+          activeRuns,
+          githubIssuesApi,
+          runStore: store,
+          schedule
+        })
+      });
+      expect(outcomes.map((entry) => entry.kind)).toEqual(["claim_released"]);
+      expect(pollStatus.filteredIssues[0]?.issue.labels).not.toContain(
+        "sym:claimed"
+      );
+
+      const marks = await detectStaleClaims(shared);
+      expect(marks).toEqual([]);
+      expect(addLabelsToIssue).not.toHaveBeenCalled();
+    });
+  });
+
+  it("defers the resume when clearing an earlier sym:stale fails, and retries next pass", async () => {
+    await withRunStore(async (store) => {
+      const activeRuns = new ActiveRunRegistry();
+      const schedule = vi.fn();
+      const removeLabelsFromIssue = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("boom"))
+        .mockResolvedValueOnce(undefined);
+      const githubIssuesApi: GitHubIssuesApi = {
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue
+      };
+      const pollStatus = pollStatusWithFiltered([
+        snapshot({ labels: ["agent-ready", "sym:claimed", "sym:stale"] })
+      ]);
+      const call = () =>
+        resumeShutdownCancelledRuns({
+          activeRuns,
+          env: { GITHUB_TOKEN: "secret" },
+          githubIssuesApi,
+          logger,
+          pollStatus,
+          projects: new Map([[project.name, project]]),
+          runController: controller({
+            activeRuns,
+            githubIssuesApi,
+            runStore: store,
+            schedule
+          }),
+          runStore: store
+        });
+
+      seedShutdownCancelledRun(store, { currentStateId: "implement" });
+
+      // The label write fails, so nothing is scheduled and the row stays the
+      // newest run for its issue — the only thing that keeps it resumable.
+      expect(await call()).toEqual([]);
+      expect(schedule).not.toHaveBeenCalled();
+      expect(store.listResumableShutdownRuns()).toHaveLength(1);
+
+      // Next tick: the write succeeds and the resume goes ahead.
+      expect((await call()).map((entry) => entry.kind)).toEqual(["resumed"]);
+      expect(schedule).toHaveBeenCalledTimes(1);
+      expect(pollStatus.filteredIssues[0]?.issue.labels).not.toContain(
+        "sym:stale"
+      );
     });
   });
 

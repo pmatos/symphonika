@@ -1465,8 +1465,10 @@ Required normalized events:
 - `session_started`
 - `message`
 - `tool_call`
-- `progress` — a payload-free liveness marker with a `signal` naming its source; the provider
-  observed work whose content belongs only in the raw log (ADR 0087)
+- `progress` — a liveness marker with a `signal` naming its source; the provider observed work
+  whose content belongs only in the raw log (ADR 0087). Markers are payload-free except
+  `signal: "stream_retry"`, which carries the provider's short reconnect `message` — the only
+  human-readable explanation of the gap it reports (ADR 0088)
 - `thinking` — a timestamped reasoning-item boundary with `started` or `completed` status and an
   optional provider-authored summary; raw reasoning content is not normalized
 - `usage_updated`
@@ -1764,12 +1766,16 @@ A sampled Run is making progress when any one signal advances since the previous
 
 - `last_tool_call_at` increases (both Claude and Codex emit normalized `tool_call` events; the
   Codex provider maps its `commandExecution`, `fileChange`, and `webSearch` items)
-- `last_progress_at` increases — either a payload-free `progress` marker or a `thinking` boundary
-  arrived. The Codex provider emits progress markers for `item/commandExecution/outputDelta` and
+- `last_progress_at` increases — either a `progress` marker or a `thinking` boundary arrived. The
+  Codex provider emits progress markers for `item/commandExecution/outputDelta` and
   `turn/diff/updated`, rate-limited so a chatty build cannot flood the Normalized Event Log, and
-  thinking markers for reasoning `item/started` and `item/completed`. Together these signals cover
-  long tools and model reasoning even when no assistant message or token update arrives (ADR 0087,
-  issue #590).
+  thinking markers for reasoning `item/started` and `item/completed`. It also emits a
+  `stream_retry` marker for an `error` notification carrying `willRetry: true` — a transient
+  stream drop codex recovers from itself, which is a live Run, not a failed one. That marker is
+  not rate-limited: reconnects are bounded by codex's own retry budget, so the throttle would only
+  risk suppressing the one event that explains the gap (ADR 0088). Together these signals cover
+  long tools, model reasoning, and stream recovery even when no assistant message or token update
+  arrives (ADR 0087, ADR 0088, issues #590 and #593).
 - `workspace_digest` changes — a hash over the sorted `relative-path:size` pairs of every
   non-excluded file. A bare `workspace_mtime_max` advance is **not** progress: a build that
   reproduces byte-identical output restamps mtimes without carrying new information (ADR 0086).

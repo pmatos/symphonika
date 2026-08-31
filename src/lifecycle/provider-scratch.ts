@@ -17,7 +17,7 @@ import { mkdir, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 
 /** State-root-relative directory holding every attempt's scratch space. */
-export const PROVIDER_SCRATCH_DIRECTORY = "scratch";
+const PROVIDER_SCRATCH_DIRECTORY = "scratch";
 
 export type ProviderScratchIdentity = {
   attempt: number;

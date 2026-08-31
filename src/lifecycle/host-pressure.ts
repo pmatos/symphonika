@@ -14,13 +14,13 @@
 import { readFile } from "node:fs/promises";
 
 /** Directory holding the kernel's pressure-stall counters. */
-export const DEFAULT_PRESSURE_DIRECTORY = "/proc/pressure";
+const DEFAULT_PRESSURE_DIRECTORY = "/proc/pressure";
 
 /** Resources this gate can defer on. CPU is deliberately absent: a saturated
  * CPU still makes progress, which is what `max_in_flight` already bounds. */
 export type HostPressureResource = "memory" | "io";
 
-export const HOST_PRESSURE_RESOURCES: readonly HostPressureResource[] = [
+const HOST_PRESSURE_RESOURCES: readonly HostPressureResource[] = [
   "memory",
   "io"
 ];
@@ -52,7 +52,7 @@ export const DEFAULT_MEMORY_FULL_AVG60_MAX = 10;
  * Default sampling interval. One /proc read per interval is cheap enough to
  * run on every daemon tick without being so stale that a spike is missed.
  */
-export const DEFAULT_PRESSURE_SAMPLE_INTERVAL_MS = 10_000;
+const DEFAULT_PRESSURE_SAMPLE_INTERVAL_MS = 10_000;
 
 // I/O is deliberately ungated by default. A workstation doing ordinary
 // compilation sustains an io `full avg60` in the 50s with no thrashing at

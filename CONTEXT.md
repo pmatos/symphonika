@@ -106,6 +106,14 @@ opposed to a `failed` Run, which is reserved for outcomes that indicate somethin
 (crash, malformed event, workspace-prep error, unexpected exit code). See ADR 0058.
 _Avoid_: failed run, error
 
+**Outcome Projection**:
+The pure mapping from a Run's classified terminal outcome into its downstream forms — the persisted
+Run state, the terminal GitHub label, and the Workflow Predicate signals that drive the next FSM
+step — together with folding a raw FSM terminal label into the effective outcome. The Blocked-vs-`failed`
+distinction is decided here, reason-based, without changing the outcome kind (ADR 0058); a
+`no_workspace_changes` outcome still projects `provider_success` so the walk advances (ADR 0046).
+_Avoid_: outcome handling, state mapping
+
 **Issue Reservation**:
 The orchestrator's exclusive claim on a Dispatch Project's Issue, whether currently in flight as an
 executing Run or scheduled for imminent dispatch as a delayed retry, Continuation, State Advance,

@@ -41,7 +41,7 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
-import type { CancelReason, RunState, RunStore } from "../run-store.js";
+import type { CancelReason, RunStore } from "../run-store.js";
 import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
   PreparedIssueWorkspace,
@@ -90,6 +90,15 @@ import {
   inspectWorkspaceHead,
   type ClassifiedTerminal
 } from "./classify-failure.js";
+import {
+  fuseTerminalLabel,
+  fuseWorkflowTerminal,
+  isBlockedOutcome,
+  mapOutcomeToRunState,
+  narrowTerminalLabel,
+  signalsFromTerminal,
+  type TerminalLabel
+} from "./outcome-projection.js";
 import { DispatchFileOverlapGuard } from "./file-overlap-guard.js";
 import type { HostPressureGate, HostPressureVerdict } from "./host-pressure.js";
 import {
@@ -369,7 +378,7 @@ type WorkflowOutcomeResult = {
   advancedToTerminal: boolean;
   blocked: boolean;
   parkAsWait?: boolean;
-  terminalLabel?: "success" | "failure" | "blocked";
+  terminalLabel?: TerminalLabel;
   waitingRunId?: string;
 };
 
@@ -1999,10 +2008,9 @@ export class RunController {
         terminalStateId: input.targetState.id,
         transitionReason
       });
-      const terminalLabel = narrowTerminalLabel(input.targetState.terminal);
-      const outcome = fuseWorkflowTerminal(
+      const outcome = fuseTerminalLabel(
         { kind: "success", reason: transitionReason },
-        terminalLabel
+        input.targetState.terminal
       );
       this.runStore.recordTerminalReason(
         input.runId,
@@ -4352,73 +4360,6 @@ function indentReviewBody(body: string): string {
     .join("\n");
 }
 
-// Reason-based, not a new ClassifiedTerminal.kind: `kind` stays "failed" for
-// these outcomes so retry/classification/scheduling logic (deferRetryableTransientAdvance,
-// willRetry, signalsFromTerminal, fsmContinuing) is untouched by this
-// distinction — only RunState and the GitHub label branch downstream care.
-// See ADR 0058 / issue #271.
-const BLOCKED_TERMINAL_REASONS = new Set([
-  "no_workspace_changes",
-  "workflow_terminal_blocked"
-]);
-
-function isBlockedOutcome(outcome: ClassifiedTerminal): boolean {
-  return (
-    outcome.kind === "failed" && BLOCKED_TERMINAL_REASONS.has(outcome.reason)
-  );
-}
-
-function mapOutcomeToRunState(outcome: ClassifiedTerminal): RunState {
-  if (isBlockedOutcome(outcome)) {
-    return "blocked";
-  }
-  switch (outcome.kind) {
-    case "success":
-      return "succeeded";
-    case "cancelled":
-      return "cancelled";
-    case "input_required":
-      return "failed";
-    case "failed":
-    default:
-      return "failed";
-  }
-}
-
-function narrowTerminalLabel(
-  value: string | undefined
-): "success" | "failure" | "blocked" | undefined {
-  if (value === "success" || value === "failure" || value === "blocked") {
-    return value;
-  }
-  return undefined;
-}
-
-// When a raw FSM walks to a `failure` or `blocked` terminal node, the workflow
-// author has declared the run is a deterministic failure regardless of the
-// provider's exit code. Synthesize that classification so downstream code
-// (state write, terminal_reason, sym:failed label, scheduleNext) all observe
-// the workflow's verdict. Cancellation and input_required always win — they
-// reflect operator/system intent that an FSM terminal label cannot override.
-// This intentionally pre-empts the transient-retry policy for workflow-driven
-// failures.
-function fuseWorkflowTerminal(
-  terminal: ClassifiedTerminal,
-  terminalLabel: "success" | "failure" | "blocked" | undefined
-): ClassifiedTerminal {
-  if (terminal.kind === "cancelled" || terminal.kind === "input_required") {
-    return terminal;
-  }
-  if (terminalLabel !== "failure" && terminalLabel !== "blocked") {
-    return terminal;
-  }
-  return {
-    classification: "deterministic",
-    kind: "failed",
-    reason: `workflow_terminal_${terminalLabel}`
-  };
-}
-
 function isLabelWritingGitHubIssuesApi(
   api: GitHubIssuesApi
 ): api is LabelWritingGitHubIssuesApi {
@@ -4461,34 +4402,6 @@ function normalizeRawIssue(
     title: raw.title ?? "",
     updated_at: raw.updated_at ?? "",
     url: raw.html_url ?? raw.url ?? ""
-  };
-}
-
-function signalsFromTerminal(
-  terminal: ClassifiedTerminal
-): WorkflowPredicateMap {
-  if (terminal.kind === "success") {
-    return {
-      branch_advanced_since_attempt_start:
-        terminal.branchAdvancedSinceAttemptStart ?? false,
-      branch_ahead_of_base: true,
-      provider_success: true
-    };
-  }
-  if (
-    terminal.kind === "failed" &&
-    terminal.reason === "no_workspace_changes"
-  ) {
-    return {
-      branch_advanced_since_attempt_start: false,
-      branch_ahead_of_base: false,
-      provider_success: true
-    };
-  }
-  return {
-    branch_advanced_since_attempt_start: false,
-    branch_ahead_of_base: false,
-    provider_success: false
   };
 }
 

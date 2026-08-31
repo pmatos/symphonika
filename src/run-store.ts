@@ -1540,6 +1540,14 @@ export class RunStore {
   // docs/adr/0088.
   listResumableShutdownRuns(): {
     currentStateId: string | null;
+    // The repository the Issue actually lived in when the Run was created,
+    // recovered from the persisted snapshot's `html_url`. `runs` stores no
+    // repository columns, and a Project's tracker can be retargeted while a
+    // resumable row waits, so the caller needs this to refuse acting on a
+    // same-numbered Issue in a different repository. Undefined when the
+    // stored URL is not a GitHub issue URL (legacy or non-GitHub rows) — the
+    // caller then has nothing to compare and proceeds as before.
+    issueRepository: { owner: string; repo: string } | undefined;
     issueNumber: number;
     projectName: string;
     runId: string;
@@ -1547,7 +1555,8 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select r.id, r.project_name, r.issue_number, r.current_state_id",
+          "select r.id, r.project_name, r.issue_number, r.current_state_id,",
+          "r.issue_snapshot_json",
           "from runs r",
           "where r.cancel_reason = ?",
           "and r.state = 'cancelled'",
@@ -1567,10 +1576,12 @@ export class RunStore {
       project_name: string;
       issue_number: number;
       current_state_id: string | null;
+      issue_snapshot_json: string;
     }[];
     return rows.map((row) => ({
       currentStateId: row.current_state_id,
       issueNumber: row.issue_number,
+      issueRepository: parseIssueRepository(row.issue_snapshot_json),
       projectName: row.project_name,
       runId: row.id
     }));
@@ -5606,6 +5617,36 @@ function nextRoutineFiringTransitionSequence(
     .get(firingId) as { next_sequence?: number } | undefined;
 
   return row?.next_sequence ?? 1;
+}
+
+// Recovers `{owner, repo}` from a persisted IssueSnapshot's `url`, which is
+// the Issue's GitHub `html_url`. Returns undefined for anything that is not a
+// GitHub issue URL — test fixtures, non-GitHub trackers, or a row written
+// before `url` was populated — so callers treat "cannot tell" as "no
+// mismatch proven" rather than as a mismatch.
+function parseIssueRepository(
+  issueSnapshotJson: string
+): { owner: string; repo: string } | undefined {
+  let url: unknown;
+  try {
+    url = (JSON.parse(issueSnapshotJson) as { url?: unknown }).url;
+  } catch {
+    return undefined;
+  }
+  if (typeof url !== "string") {
+    return undefined;
+  }
+  const match =
+    /^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/issues\/\d+/.exec(
+      url
+    );
+  if (match === null) {
+    return undefined;
+  }
+  const [, owner, repo] = match;
+  return owner === undefined || repo === undefined
+    ? undefined
+    : { owner, repo };
 }
 
 function timestamp(): string {

@@ -77,6 +77,37 @@ would throw the walk's position away for a transient one. An Issue that stays ab
 snapshot is closed, and a closed Issue is already outside stale detection's scope, so waiting
 forever costs nothing but a loop over a handful of rows.
 
+### Two guards this pass needs and its siblings do not
+
+`resumeShutdownCancelledRuns` differs from `detectStaleClaims` and `reconcileActiveRuns` in one
+way that matters: it re-derives its work from a **durable query over possibly-old rows** on every
+tick, rather than from live in-memory state. Two hazards follow from that, and both are handled
+here rather than left to the generic machinery.
+
+**Repository identity.** `runs` stores no owner/repo columns, and every lifecycle pass in tree
+resolves the tracker from the name-keyed config. That is safe enough for a pass reading live state,
+but a resumable row can be days old, so a Project retargeted to a different repository in the
+meantime would have this pass rewrite labels on — and resume a Workspace against — a
+same-numbered Issue in the replacement repository. Rather than add repository columns and a
+backfill, the check reuses what is already persisted: the stored `IssueSnapshot`'s `url` is the
+Issue's `html_url`, so `listResumableShutdownRuns` parses `{owner, repo}` out of it and the pass
+refuses to write labels or schedule when that disagrees (case-insensitively) with the Project's
+current tracker. A URL that cannot be parsed — a legacy row, or a non-GitHub tracker — proves no
+mismatch and is allowed through, so the check never makes an existing row less recoverable than it
+was. Extending the same identity gate to the sibling passes is deliberately out of scope here.
+
+**The fire-to-claim window.** `ScheduledWorkRegistry` deletes its entry *before* invoking the
+callback, and `executeStateAdvance` then awaits config, provider and workflow loads plus a GitHub
+refresh before `claimAndPersistRun` reserves the slot and writes the continuation row. Throughout
+that prologue `activeRuns.isIssueReserved` is false and the cancelled parent is still the newest
+Run, so a reconcile tick landing inside it would schedule a second resume and could run the same
+Workflow state twice on the same Issue Branch. No other scheduled kind is exposed to this, because
+each is produced by a one-shot callback rather than a repeating query. `RunController` therefore
+tracks scheduled-but-unsettled resumes by parent Run id and the pass consults
+`hasPendingShutdownResume` alongside `isIssueReserved`. Membership is dropped when the callback
+settles — including when the advance is dropped for an unrelated reason — so a resume that never
+reached its claim leaves the row resumable for the next tick.
+
 ### Stale-claim detection reads the same list
 
 `collectLiveKeys` in `detectStaleClaims` adds the `listResumableShutdownRuns()` keys alongside

@@ -78,14 +78,20 @@ function pollStatusWithFiltered(issues: IssueSnapshot[]): IssuePollStatus {
 
 function seedShutdownCancelledRun(
   store: RunStore,
-  input: { currentStateId?: string; issueNumber?: number; runId?: string } = {}
+  input: {
+    currentStateId?: string;
+    issueNumber?: number;
+    runId?: string;
+    url?: string;
+  } = {}
 ): string {
   const runId = input.runId ?? "run-killed";
   store.createRun({
     id: runId,
-    issue: snapshot(
-      input.issueNumber === undefined ? {} : { number: input.issueNumber }
-    ),
+    issue: snapshot({
+      ...(input.issueNumber === undefined ? {} : { number: input.issueNumber }),
+      ...(input.url === undefined ? {} : { url: input.url })
+    }),
     projectName: project.name,
     providerCommand: "codex exec",
     providerName: "codex"
@@ -515,6 +521,134 @@ describe("resumeShutdownCancelledRuns", () => {
       expect(outcomes).toEqual([]);
       expect(schedule).not.toHaveBeenCalled();
       expect(store.listResumableShutdownRuns()).toHaveLength(1);
+    });
+  });
+
+  it("refuses to act when the project tracker no longer points at the run's repository", async () => {
+    await withRunStore(async (store, root) => {
+      seedShutdownCancelledRun(store, {
+        currentStateId: "implement",
+        url: "https://github.com/pmatos/some-other-repo/issues/7"
+      });
+      const activeRuns = new ActiveRunRegistry();
+      const schedule = vi.fn();
+      const removeLabelsFromIssue = vi.fn().mockResolvedValue(undefined);
+      const githubIssuesApi: GitHubIssuesApi = {
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue
+      };
+
+      const outcomes = await resumeShutdownCancelledRuns({
+        activeRuns,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi,
+        logger,
+        pollStatus: pollStatusWithFiltered([
+          snapshot({ labels: ["agent-ready", "sym:claimed", "sym:stale"] })
+        ]),
+        projects: new Map([[project.name, project]]),
+        runController: controller({
+          activeRuns,
+          githubIssuesApi,
+          root,
+          runStore: store,
+          schedule
+        }),
+        runStore: store
+      });
+
+      expect(outcomes).toEqual([]);
+      expect(schedule).not.toHaveBeenCalled();
+      expect(removeLabelsFromIssue).not.toHaveBeenCalled();
+      expect(store.listResumableShutdownRuns()).toHaveLength(1);
+    });
+  });
+
+  it("treats an owner/repo casing difference as the same repository", async () => {
+    await withRunStore(async (store, root) => {
+      seedShutdownCancelledRun(store, {
+        currentStateId: "implement",
+        url: "https://github.com/PMatos/Symphonika/issues/7"
+      });
+      const activeRuns = new ActiveRunRegistry();
+      const schedule = vi.fn();
+      const githubIssuesApi: GitHubIssuesApi = {
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+
+      const outcomes = await resumeShutdownCancelledRuns({
+        activeRuns,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi,
+        logger,
+        pollStatus: pollStatusWithFiltered([snapshot()]),
+        projects: new Map([[project.name, project]]),
+        runController: controller({
+          activeRuns,
+          githubIssuesApi,
+          root,
+          runStore: store,
+          schedule
+        }),
+        runStore: store
+      });
+
+      expect(outcomes.map((entry) => entry.kind)).toEqual(["resumed"]);
+      expect(schedule).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("does not schedule a second resume while the first has fired but not claimed", async () => {
+    await withRunStore(async (store, root) => {
+      const runId = seedShutdownCancelledRun(store, {
+        currentStateId: "implement"
+      });
+      const activeRuns = new ActiveRunRegistry();
+      // A stub scheduler: the work is never registered with the
+      // ScheduledWorkRegistry and the callback is held, which is exactly the
+      // fire-to-claim window isIssueReserved cannot observe.
+      const fires: Array<() => Promise<void>> = [];
+      const schedule = vi.fn((item: { fire: () => Promise<void> }) => {
+        fires.push(item.fire);
+      });
+      const githubIssuesApi: GitHubIssuesApi = {
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const runController = controller({
+        activeRuns,
+        githubIssuesApi,
+        root,
+        runStore: store,
+        schedule
+      });
+      const call = () =>
+        resumeShutdownCancelledRuns({
+          activeRuns,
+          env: { GITHUB_TOKEN: "secret" },
+          githubIssuesApi,
+          logger,
+          pollStatus: pollStatusWithFiltered([snapshot()]),
+          projects: new Map([[project.name, project]]),
+          runController,
+          runStore: store
+        });
+
+      expect((await call()).map((entry) => entry.kind)).toEqual(["resumed"]);
+      expect(runController.hasPendingShutdownResume(runId)).toBe(true);
+
+      // Second tick lands inside the window: the row is still the newest run
+      // and nothing is reserved, so only the pending guard can hold it.
+      expect(await call()).toEqual([]);
+      expect(schedule).toHaveBeenCalledTimes(1);
+
+      // Once the callback settles without claiming, the row is resumable
+      // again so a later tick retries it.
+      await fires[0]?.();
+      expect(runController.hasPendingShutdownResume(runId)).toBe(false);
+      expect((await call()).map((entry) => entry.kind)).toEqual(["resumed"]);
+      expect(schedule).toHaveBeenCalledTimes(2);
     });
   });
 

@@ -404,6 +404,9 @@ export class RunController {
   private readonly pullRequestPolicyLoader: () => Promise<PullRequestFollowupPolicy>;
   private readonly runStore: RunStore;
   private readonly schedule: ScheduleHandler;
+  // Parent Run ids of shutdown resumes scheduled but not yet settled. See
+  // hasPendingShutdownResume.
+  private readonly shutdownResumesPending = new Set<string>();
   private readonly stateRoot: string;
 
   constructor(options: RunControllerOptions) {
@@ -1411,14 +1414,37 @@ export class RunController {
   // the Scheduled Work registry, which makes the Issue visibly live to
   // stale-claim detection from this moment on. See docs/adr/0088.
   scheduleShutdownResume(payload: StateAdvancePayload): void {
+    this.shutdownResumesPending.add(payload.parentRunId);
     this.schedule({
       delayMs: this.lifecyclePolicy.continuation.delayMs,
-      fire: () => this.executeStateAdvance(payload),
+      fire: async () => {
+        try {
+          await this.executeStateAdvance(payload);
+        } finally {
+          this.shutdownResumesPending.delete(payload.parentRunId);
+        }
+      },
       issueNumber: payload.issue.number,
       kind: "state_advance",
       projectName: payload.projectName,
       runId: payload.parentRunId
     });
+  }
+
+  // Closes the fire-to-claim window that `activeRuns.isIssueReserved` cannot
+  // see. ScheduledWorkRegistry drops its entry *before* invoking the
+  // callback, and executeStateAdvance then awaits config, provider and
+  // workflow loads plus a GitHub refresh before claimAndPersistRun reserves
+  // the slot and writes the continuation row. Throughout that prologue the
+  // Issue looks unreserved and the cancelled parent is still the newest Run
+  // for it, so resumeShutdownCancelledRuns — which re-derives its work from a
+  // durable query on every reconcile tick, unlike every other scheduled kind
+  // — would schedule a second resume and could end up running the same
+  // Workflow state twice on the same Issue Branch. Membership is dropped when
+  // the callback settles, including on a dropped advance, so a Run that never
+  // reached its claim stays resumable for the next tick.
+  hasPendingShutdownResume(parentRunId: string): boolean {
+    return this.shutdownResumesPending.has(parentRunId);
   }
 
   async executeStateAdvance(payload: StateAdvancePayload): Promise<void> {

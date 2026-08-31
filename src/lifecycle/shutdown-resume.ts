@@ -85,11 +85,40 @@ export async function resumeShutdownCancelledRuns(
       continue;
     }
 
-    // Covers both live Runs and scheduled work, so a resume scheduled on an
-    // earlier tick is never scheduled twice (ScheduledWorkRegistry throws on
-    // a duplicate issue key) and a fresh dispatch that already picked the
-    // Issue up is left alone.
-    if (input.activeRuns.isIssueReserved(row.projectName, row.issueNumber)) {
+    // Refuse to act across a repository boundary. A Project's tracker can be
+    // retargeted while a resumable row waits — and this pass, unlike its
+    // live-state siblings, acts on rows that may be days old — so the same
+    // Issue number in the replacement repository would otherwise have its
+    // labels rewritten and this Run's Workspace resumed against it. An
+    // undetermined origin (legacy row, non-GitHub URL) proves no mismatch and
+    // is allowed through.
+    if (
+      row.issueRepository !== undefined &&
+      !sameRepository(row.issueRepository, project.tracker)
+    ) {
+      input.logger.warn(
+        {
+          issueNumber: row.issueNumber,
+          origin: `${row.issueRepository.owner}/${row.issueRepository.repo}`,
+          project: row.projectName,
+          runId: row.runId,
+          tracker: `${project.tracker.owner}/${project.tracker.repo}`
+        },
+        "symphonika shutdown resume skipped: project tracker no longer points at the run's repository"
+      );
+      continue;
+    }
+
+    // isIssueReserved covers live Runs and scheduled work; the pending set
+    // additionally covers a resume whose timer has fired but whose claim has
+    // not landed yet, a window isIssueReserved cannot see (see
+    // hasPendingShutdownResume). Together they stop this pass scheduling a
+    // second resume for a Run it already handed off, and leave an Issue a
+    // fresh dispatch already picked up alone.
+    if (
+      input.activeRuns.isIssueReserved(row.projectName, row.issueNumber) ||
+      input.runController.hasPendingShutdownResume(row.runId)
+    ) {
       continue;
     }
 
@@ -175,7 +204,10 @@ export async function resumeShutdownCancelledRuns(
     // Re-asserted because the label write above is an await: the reservation
     // check at the top of this iteration is no longer adjacent to the
     // schedule call, and scheduleDelayed throws on a duplicate issue key.
-    if (input.activeRuns.isIssueReserved(row.projectName, row.issueNumber)) {
+    if (
+      input.activeRuns.isIssueReserved(row.projectName, row.issueNumber) ||
+      input.runController.hasPendingShutdownResume(row.runId)
+    ) {
       continue;
     }
 
@@ -224,6 +256,18 @@ async function releaseIssue(
     return [];
   }
   return (await removeLabels({ ...input, labels })) ? labels : undefined;
+}
+
+// GitHub owners and repository names are case-insensitive, so a tracker
+// written with different casing than the stored URL is the same repository.
+function sameRepository(
+  origin: { owner: string; repo: string },
+  tracker: { owner: string; repo: string }
+): boolean {
+  return (
+    origin.owner.toLowerCase() === tracker.owner.toLowerCase() &&
+    origin.repo.toLowerCase() === tracker.repo.toLowerCase()
+  );
 }
 
 // Drops labels this pass has just removed on GitHub from the poll snapshot

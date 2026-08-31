@@ -1385,6 +1385,60 @@ describe("listResumableShutdownRuns", () => {
     }
   });
 
+  it("recovers the run's original repository from the persisted snapshot url", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      store.createRun({
+        id: "run-1",
+        issue: {
+          body: "",
+          created_at: "2025-01-01T00:00:00Z",
+          id: 1000,
+          labels: ["agent-ready"],
+          number: 7,
+          priority: 1,
+          state: "open",
+          title: "fixture",
+          updated_at: "2025-01-01T00:00:00Z",
+          url: "https://github.com/pmatos/symphonika/issues/7"
+        },
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.setRunCurrentState("run-1", "implement");
+      store.markCancelRequested("run-1", "daemon_shutdown");
+      store.updateRunState("run-1", "cancelled");
+
+      expect(store.listResumableShutdownRuns()[0]?.issueRepository).toEqual({
+        owner: "pmatos",
+        repo: "symphonika"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reports no repository when the snapshot url is not a github issue url", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      // seedRun's fixture url is `https://example/1` — nothing to parse, so
+      // the caller has no mismatch to act on.
+      const id = seedRun(store);
+      store.setRunCurrentState(id, "implement");
+      store.markCancelRequested(id, "daemon_shutdown");
+      store.updateRunState(id, "cancelled");
+
+      expect(
+        store.listResumableShutdownRuns()[0]?.issueRepository
+      ).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
   it("drops a declined run and survives a store reopen", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

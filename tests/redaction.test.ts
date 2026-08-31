@@ -24,6 +24,23 @@ describe("redactAll", () => {
     );
   });
 
+  it("scrubs both credentials when the second starts inside the first", () => {
+    // Jumping a cursor past the first match skips a secret that begins inside
+    // it: "abcdef" would come out "[REDACTED]ef", exposing the second
+    // credential's suffix.
+    expect(redactAll("abcdef", ["abcd", "bcdef"])).toBe("[REDACTED]");
+    expect(redactAll("abcdef", ["bcdef", "abcd"])).toBe("[REDACTED]");
+    expect(redactAll("_abcdef_", ["abcd", "bcdef"])).toBe("_[REDACTED]_");
+  });
+
+  it("merges a chain where each match only overlaps its neighbour", () => {
+    expect(redactAll("abcde", ["abc", "bcd", "cde"])).toBe("[REDACTED]");
+  });
+
+  it("keeps abutting matches as separate markers", () => {
+    expect(redactAll("abcd", ["ab", "cd"])).toBe("[REDACTED][REDACTED]");
+  });
+
   it("takes the earliest match, preferring the longest at the same offset", () => {
     expect(redactAll("abcd", ["bc", "abc"])).toBe("[REDACTED]d");
     expect(redactAll("zabcd", ["cd", "ab"])).toBe("z[REDACTED][REDACTED]");

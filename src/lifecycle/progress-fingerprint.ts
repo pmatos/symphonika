@@ -6,6 +6,11 @@ import type {
 import { collectArtifactPaths } from "./artifact-probe.js";
 import type { ArtifactExistsResolver } from "./state-machine-dispatch.js";
 
+// Marks a `state_transition_reason` written because the progress guard held a
+// park in place. One definition, shared by the guard that writes it and the
+// detail surfaces that render it as a manual-attention warning.
+export const noProgressReasonPrefix = "workflow made no progress: ";
+
 // Everything a park re-evaluation learned this tick, hashed into one value.
 // Two ticks with the same fingerprint observed the same world, so re-taking a
 // transition between them cannot make progress.

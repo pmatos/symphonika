@@ -31,7 +31,10 @@ import {
   priorityForLabels
 } from "../issue-priority.js";
 import { providerStderrLogPath } from "../providers/provider-stderr.js";
-import { interpretPullRequest } from "../pull-request-state.js";
+import {
+  interpretPullRequest,
+  type PullRequestState
+} from "../pull-request-state.js";
 import { evaluateRunContinuationEligibility } from "./issue-eligibility.js";
 import { projectPullRequestSignals } from "./pr-signal-projection.js";
 import type {
@@ -78,6 +81,10 @@ import {
   type LifecyclePolicy
 } from "./active-runs.js";
 import { probeStateArtifacts, statePredicateKeys } from "./artifact-probe.js";
+import {
+  noProgressReasonPrefix,
+  progressFingerprint
+} from "./progress-fingerprint.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import {
@@ -371,6 +378,15 @@ type StateAdvancePayload = {
   // stays accounted for across every retry. See hasPendingShutdownResume.
   shutdownResume?: boolean;
   toStateId: string;
+};
+
+// What one park re-evaluation observed. `pullRequestState` is absent for a
+// wait decided from the Workspace alone (ADR 0087), where there is no tracked
+// pull request to observe. Distinct from `undefined`, which the observation
+// returns to mean "stay parked, nothing to decide this tick".
+type WaitObservation = {
+  pullRequestState?: PullRequestState;
+  signals: WorkflowPredicateMap;
 };
 
 type WorkflowOutcomeResult = {
@@ -1097,7 +1113,7 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
     waitState: ExpandedWorkflowState;
-  }): Promise<WorkflowPredicateMap | undefined> {
+  }): Promise<WaitObservation | undefined> {
     const { isMergePr, repository, runId, waitState } = input;
 
     // Use the all-states lookup: a wait state targeting `pr_merged: true` must
@@ -1114,7 +1130,7 @@ export class RunController {
           { runId, issueNumber: input.issueNumber },
           "symphonika wait re-eval: deciding artifact-only wait with no tracked PR"
         );
-        return { provider_success: true };
+        return { signals: { provider_success: true } };
       }
       if (isMergePr) {
         this.runStore.recordWaitingActivity(
@@ -1243,7 +1259,7 @@ export class RunController {
       }
     }
 
-    return signals;
+    return { pullRequestState, signals };
   }
 
   async reEvaluateWaitingRun(runId: string): Promise<void> {
@@ -1315,7 +1331,7 @@ export class RunController {
 
     const isMergePr = waitState.action?.kind === "merge_pr";
 
-    const signals = await this.observeWaitPullRequestSignals({
+    const observation = await this.observeWaitPullRequestSignals({
       isMergePr,
       issueNumber: row.issueNumber,
       projectName: row.project,
@@ -1323,9 +1339,10 @@ export class RunController {
       runId,
       waitState
     });
-    if (signals === undefined) {
+    if (observation === undefined) {
       return;
     }
+    const { pullRequestState, signals } = observation;
 
     const waitArtifactExists = await probeStateArtifacts({
       state: waitState,
@@ -1387,6 +1404,50 @@ export class RunController {
         this.runStore.updateRunState(runId, "succeeded");
         return;
       }
+      // The loop-breaker. A park can only make progress on what it observed,
+      // so re-taking the same edge on an identical observation would put the
+      // workflow back where it already was -- the `autofix -> wait_for_pr ->
+      // autofix` cycle that a review-feedback transition opens up, and every
+      // other cycle an author can write. Stay parked instead, and say so.
+      // Terminal targets are exempt: they end the chain, so they cannot loop.
+      // See issue #616.
+      const fingerprint = progressFingerprint({
+        artifactExists: waitArtifactExists,
+        headSha: pullRequestState?.headSha,
+        signals,
+        state: waitState
+      });
+      const lastFingerprint = this.runStore.readProgressFingerprint({
+        fromStateId: waitState.id,
+        issueNumber: row.issueNumber,
+        projectName: row.project,
+        toStateId: decision.to
+      });
+      if (lastFingerprint === fingerprint) {
+        this.runStore.recordWaitingActivity(
+          runId,
+          `${noProgressReasonPrefix}${waitState.id} -> ${decision.to} under an unchanged observation`
+        );
+        this.logger?.warn(
+          {
+            fromStateId: waitState.id,
+            issueNumber: row.issueNumber,
+            project: row.project,
+            runId,
+            toStateId: decision.to
+          },
+          "symphonika wait re-eval parked: workflow made no progress"
+        );
+        return;
+      }
+      this.runStore.recordProgressFingerprint({
+        fingerprint,
+        fromStateId: waitState.id,
+        issueNumber: row.issueNumber,
+        projectName: row.project,
+        toStateId: decision.to
+      });
+
       this.runStore.recordWorkflowStateAdvance(runId, {
         nextStateId: decision.to,
         transitionReason: decision.reason

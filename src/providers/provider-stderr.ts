@@ -152,11 +152,30 @@ function createStreamingRedactor(secrets: readonly string[]): {
     },
     push: (chunk) => {
       const redacted = redactAll(carry + decoder.write(chunk), secrets);
-      const keep = Math.min(holdback, redacted.length);
-      carry = redacted.slice(redacted.length - keep);
-      return Buffer.from(redacted.slice(0, redacted.length - keep), "utf8");
+      const boundary = holdbackBoundary(
+        redacted,
+        redacted.length - Math.min(holdback, redacted.length)
+      );
+      carry = redacted.slice(boundary);
+      return Buffer.from(redacted.slice(0, boundary), "utf8");
     }
   };
+}
+
+// Each side of the holdback split is encoded by its own `Buffer.from`, so a
+// boundary falling between an astral character's UTF-16 surrogates would turn
+// both halves into U+FFFD — `xxxxx😀yyyyy` persisted as `xxxxx??yyyyy`. Move
+// the split one unit left so the pair stays together in the carry.
+function holdbackBoundary(text: string, boundary: number): number {
+  if (boundary <= 0 || boundary >= text.length) {
+    return boundary;
+  }
+  const isLowSurrogate =
+    text.charCodeAt(boundary) >= 0xdc00 && text.charCodeAt(boundary) <= 0xdfff;
+  const followsHighSurrogate =
+    text.charCodeAt(boundary - 1) >= 0xd800 &&
+    text.charCodeAt(boundary - 1) <= 0xdbff;
+  return isLowSurrogate && followsHighSurrogate ? boundary - 1 : boundary;
 }
 
 // Owns the write stream, the byte cap, and the completion promise. The file is

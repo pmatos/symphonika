@@ -1279,8 +1279,14 @@ async function runRoutineFiring(input: {
         stderrLogPath: evidence.stderrLogPath,
         // The stderr tee lands in the same evidence directory as the raw and
         // normalized logs and is served by the same artifact routes, so it
-        // honours the same redaction invariant they do (SPEC.md §6).
-        stderrRedactSecrets: input.redactSecrets(),
+        // honours the same redaction invariant they do (SPEC.md §6). The
+        // tracker token is added on top of the JSONL writers' own list:
+        // providers inherit this process's env, so an agent that echoes the
+        // token would otherwise persist it verbatim.
+        stderrRedactSecrets: [
+          ...input.redactSecrets(),
+          ...routineTrackerTokens(input.project, input.env)
+        ],
         workspacePath: prepared.workspacePath
       })) {
         const normalizedLogCursor = await appendRoutineEvent({
@@ -2511,6 +2517,20 @@ function redactValueDeep(value: unknown, redactSecrets: string[]): unknown {
     );
   }
   return value;
+}
+
+// The tracker token is env-backed and resolved per call rather than stored,
+// mirroring captureRoutineGithubSnapshot. Absent tracker or unset variable
+// yields nothing to redact.
+function routineTrackerTokens(
+  project: RunControllerProjectConfig,
+  env: NodeJS.ProcessEnv
+): string[] {
+  if (project.tracker === undefined) {
+    return [];
+  }
+  const token = resolveEnvBackedValue(project.tracker.token, env);
+  return token === undefined ? [] : [token];
 }
 
 function resolveRedactSecrets(

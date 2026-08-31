@@ -4682,7 +4682,10 @@ describe("RoutineFiringDispatcher", () => {
         agentProviders: { codex: provider },
         configDir: root,
         createFiringId: () => "fire-redact-evidence",
-        env: { SMTP_TEST_PASSWORD: secret },
+        env: {
+          GITHUB_TOKEN: "tracker-token-value",
+          SMTP_TEST_PASSWORD: secret
+        },
         globalConcurrency: { maxInFlight: undefined },
         notification: {
           createSink: () => ({
@@ -4783,6 +4786,10 @@ describe("RoutineFiringDispatcher", () => {
       // secrets split across chunk boundaries — is covered by
       // tests/provider-stderr.test.ts.)
       expect(handedStderrRedactSecrets).toContain(secret);
+      // The project's tracker token rides along too: providers inherit this
+      // process's env, so an agent echoing it would otherwise write it into
+      // the same artifact (SPEC.md §6).
+      expect(handedStderrRedactSecrets).toContain("tracker-token-value");
 
       expect(delivered).toHaveLength(1);
       expect(delivered[0]?.text).not.toContain(secret);

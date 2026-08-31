@@ -192,6 +192,43 @@ describe("attachProviderStderrLog redaction", () => {
     expect(await readFile(logPath, "utf8")).toBe("[REDACTED]");
   });
 
+  it("keeps an astral character intact when it lands on the holdback boundary", async () => {
+    // The holdback split is encoded by its own Buffer.from on each side, so a
+    // boundary between an emoji's UTF-16 surrogates would persist two U+FFFD.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+
+    await runWithStderr(
+      "process.stderr.write('xxxxx\\u{1F600}yyyyy');",
+      logPath,
+      { redactSecrets: ["hunter2"] }
+    );
+
+    const contents = await readFile(logPath, "utf8");
+    expect(contents).toBe("xxxxx\u{1F600}yyyyy");
+    expect(contents).not.toContain("\uFFFD");
+  });
+
+  it("keeps an astral character intact when it straddles two writes", async () => {
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+
+    await runWithStderr(
+      [
+        "const b = Buffer.from('aaaaaaaaaa\\u{1F600}bbbbbbbbbb', 'utf8');",
+        "process.stderr.write(b.subarray(0, 12));",
+        "await new Promise((r) => setTimeout(r, 20));",
+        "process.stderr.write(b.subarray(12));"
+      ].join("\n"),
+      logPath,
+      { redactSecrets: ["hunter2"] }
+    );
+
+    const contents = await readFile(logPath, "utf8");
+    expect(contents).toBe("aaaaaaaaaa\u{1F600}bbbbbbbbbb");
+    expect(contents).not.toContain("\uFFFD");
+  });
+
   it("keeps multi-byte characters intact across a chunk boundary", async () => {
     // A byte-sliced carry would decode to U+FFFD; the redactor carries decoded
     // characters instead.

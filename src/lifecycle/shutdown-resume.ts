@@ -79,6 +79,7 @@ export async function resumeShutdownCancelledRuns(
     const issue = findPolledIssueSnapshot(
       input.pollStatus,
       row.projectName,
+      project.tracker,
       row.issueNumber
     );
     if (issue === undefined || issue.state !== "open") {

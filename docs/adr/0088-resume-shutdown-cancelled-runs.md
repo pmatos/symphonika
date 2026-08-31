@@ -108,6 +108,25 @@ tracks scheduled-but-unsettled resumes by parent Run id and the pass consults
 settles — including when the advance is dropped for an unrelated reason — so a resume that never
 reached its claim leaves the row resumable for the next tick.
 
+The count has to be a refcount rather than a set, and the contention retry has to re-arm through
+the same wrapper. `executeStateAdvance`'s cap/reservation catch reschedules itself, and that catch
+necessarily runs *before* the outgoing callback's `finally`, so a set would have the outgoing
+release erase the incoming retry's claim and reopen the window on the retry's own prologue — every
+`continuation.delayMs` for as long as the Issue waits for a slot. A cap breach is the expected
+condition on the multi-Issue restart burst this ADR relies on caps to meter, so that path has to be
+covered, not just the first attempt.
+
+**Reading the poll snapshot by repository.** `findPolledIssueSnapshot` keys on
+`(project, repository, issue)`, not on the name alone. Duplicate Project declarations sharing a
+name are not rejected at load — `projectsByName` resolves them to the last match — while the poll
+loop walks the config array and records an entry per declaration, so the filtered band can hold two
+same-numbered Issues under one name. A name-only lookup would hand this pass the shadowed
+repository's *labels* while its writes went to the surviving declaration's tracker: `releaseIssue`
+would compute an empty label set, decline the row anyway, and the real Issue would be left
+`sym:claimed` with the row gone from `collectLiveKeys` — the #594 strand again. A miss now returns
+undefined, which the pass already treats as "wait for a later tick", so the failure mode is to
+defer rather than to act on the wrong data.
+
 ### Stale-claim detection reads the same list
 
 `collectLiveKeys` in `detectStaleClaims` adds the `listResumableShutdownRuns()` keys alongside
@@ -154,6 +173,12 @@ and it still discards the walk.
 - **ADR 0064 (orphan sweep for leaked provider scopes):** complementary and disjoint. That sweep
   handles rows a *crash* left non-terminal; this one handles rows a *graceful shutdown* made
   terminal.
+- **ADR 0077 (Issue triage and label writes):** its repository-identity gate is scoped to
+  `writeIssueLabels` and the snapshot-backed dashboard actions, not to the daemon passes. The
+  `findPolledIssueSnapshot` key and the origin/tracker refusal above extend the same principle to
+  this pass only; doing it for `reconcileActiveRuns` and `detectStaleClaims` needs durable
+  repository columns on `runs` and is tracked separately (#602), along with partitioning the
+  newest-Run relation itself by repository.
 
 ## Numbering
 

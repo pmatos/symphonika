@@ -341,6 +341,10 @@ type StateAdvancePayload = {
   issue: IssueSnapshot;
   parentRunId: string;
   projectName: string;
+  // Set only by scheduleShutdownResume. It makes executeStateAdvance's
+  // contention reschedule re-arm through that same wrapper, so the resume
+  // stays accounted for across every retry. See hasPendingShutdownResume.
+  shutdownResume?: boolean;
   toStateId: string;
 };
 
@@ -404,9 +408,12 @@ export class RunController {
   private readonly pullRequestPolicyLoader: () => Promise<PullRequestFollowupPolicy>;
   private readonly runStore: RunStore;
   private readonly schedule: ScheduleHandler;
-  // Parent Run ids of shutdown resumes scheduled but not yet settled. See
+  // Parent Run id -> number of scheduled-but-unsettled shutdown resume
+  // callbacks for it. A count rather than a set because a contention retry
+  // re-arms before the callback it replaces has unwound, and a set would let
+  // the outgoing callback's release erase the incoming one's claim. See
   // hasPendingShutdownResume.
-  private readonly shutdownResumesPending = new Set<string>();
+  private readonly shutdownResumesPending = new Map<string, number>();
   private readonly stateRoot: string;
 
   constructor(options: RunControllerOptions) {
@@ -1414,21 +1421,44 @@ export class RunController {
   // the Scheduled Work registry, which makes the Issue visibly live to
   // stale-claim detection from this moment on. See docs/adr/0088.
   scheduleShutdownResume(payload: StateAdvancePayload): void {
-    this.shutdownResumesPending.add(payload.parentRunId);
+    const resumePayload: StateAdvancePayload = {
+      ...payload,
+      shutdownResume: true
+    };
+    this.retainShutdownResume(resumePayload.parentRunId);
     this.schedule({
       delayMs: this.lifecyclePolicy.continuation.delayMs,
       fire: async () => {
         try {
-          await this.executeStateAdvance(payload);
+          await this.executeStateAdvance(resumePayload);
         } finally {
-          this.shutdownResumesPending.delete(payload.parentRunId);
+          // A contention retry has already retained the id again by the time
+          // this runs, so the count stays above zero and the Issue stays
+          // guarded across the handover.
+          this.releaseShutdownResume(resumePayload.parentRunId);
         }
       },
-      issueNumber: payload.issue.number,
+      issueNumber: resumePayload.issue.number,
       kind: "state_advance",
-      projectName: payload.projectName,
-      runId: payload.parentRunId
+      projectName: resumePayload.projectName,
+      runId: resumePayload.parentRunId
     });
+  }
+
+  private retainShutdownResume(parentRunId: string): void {
+    this.shutdownResumesPending.set(
+      parentRunId,
+      (this.shutdownResumesPending.get(parentRunId) ?? 0) + 1
+    );
+  }
+
+  private releaseShutdownResume(parentRunId: string): void {
+    const next = (this.shutdownResumesPending.get(parentRunId) ?? 0) - 1;
+    if (next > 0) {
+      this.shutdownResumesPending.set(parentRunId, next);
+      return;
+    }
+    this.shutdownResumesPending.delete(parentRunId);
   }
 
   // Closes the fire-to-claim window that `activeRuns.isIssueReserved` cannot
@@ -1444,7 +1474,7 @@ export class RunController {
   // the callback settles, including on a dropped advance, so a Run that never
   // reached its claim stays resumable for the next tick.
   hasPendingShutdownResume(parentRunId: string): boolean {
-    return this.shutdownResumesPending.has(parentRunId);
+    return (this.shutdownResumesPending.get(parentRunId) ?? 0) > 0;
   }
 
   async executeStateAdvance(payload: StateAdvancePayload): Promise<void> {
@@ -1717,6 +1747,16 @@ export class RunController {
           },
           "symphonika state_advance rescheduled: contention at claim"
         );
+        // A shutdown resume re-arms through scheduleShutdownResume so the
+        // pending count survives the retry. A cap breach in particular throws
+        // before any reservation is taken, and the bare reschedule below
+        // leaves the retry's own fire-to-claim window unguarded — which is
+        // reachable on the expected path, since ADR 0088 relies on
+        // concurrency caps to meter a multi-Issue restart burst.
+        if (payload.shutdownResume === true) {
+          this.scheduleShutdownResume(payload);
+          return;
+        }
         this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
           fire: () => this.executeStateAdvance(payload),

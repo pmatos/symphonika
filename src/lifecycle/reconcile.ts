@@ -55,6 +55,7 @@ export async function reconcileActiveRuns(
     const snapshot = findPolledIssueSnapshot(
       input.pollStatus,
       entry.projectName,
+      project.tracker,
       entry.issueNumber
     );
     if (snapshot === undefined) {

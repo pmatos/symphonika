@@ -652,6 +652,115 @@ describe("resumeShutdownCancelledRuns", () => {
     });
   });
 
+  it("selects the poll row for the project's own repository when a duplicate name shadows it", async () => {
+    await withRunStore(async (store, root) => {
+      seedShutdownCancelledRun(store, {
+        url: "https://github.com/pmatos/symphonika/issues/7"
+      });
+      const activeRuns = new ActiveRunRegistry();
+      const schedule = vi.fn();
+      const removeLabelsFromIssue = vi.fn().mockResolvedValue(undefined);
+      const githubIssuesApi: GitHubIssuesApi = {
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue
+      };
+      // Duplicate project declarations are not rejected at load: the poll loop
+      // walks the config array so both are polled under one name, while
+      // projectsByName keeps the last. The shadowing entry is listed first and
+      // carries no claim, so a name-only lookup would read its labels and
+      // release nothing.
+      const pollStatus = emptyIssuePollStatus();
+      pollStatus.filteredIssues = [
+        {
+          issue: snapshot({ labels: ["agent-ready"] }),
+          project: project.name,
+          reasons: ["fixture"],
+          repository: { owner: "pmatos", repo: "some-other-repo" }
+        },
+        {
+          issue: snapshot(),
+          project: project.name,
+          reasons: ["has operational label sym:claimed"],
+          repository: { owner: "pmatos", repo: "symphonika" }
+        }
+      ];
+
+      const outcomes = await resumeShutdownCancelledRuns({
+        activeRuns,
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi,
+        logger,
+        pollStatus,
+        projects: new Map([[project.name, project]]),
+        runController: controller({
+          activeRuns,
+          githubIssuesApi,
+          root,
+          runStore: store,
+          schedule
+        }),
+        runStore: store
+      });
+
+      expect(outcomes.map((entry) => entry.kind)).toEqual(["claim_released"]);
+      expect(removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: 7,
+          labels: ["sym:claimed"],
+          repo: "symphonika"
+        })
+      );
+      // The right snapshot was mutated, so stale detection sees no claim.
+      expect(pollStatus.filteredIssues[1]?.issue.labels).not.toContain(
+        "sym:claimed"
+      );
+    });
+  });
+
+  it("keeps a resume pending across a contention retry handover", async () => {
+    await withRunStore(async (store, root) => {
+      const activeRuns = new ActiveRunRegistry();
+      const fires: Array<() => Promise<void>> = [];
+      const schedule = vi.fn((item: { fire: () => Promise<void> }) => {
+        fires.push(item.fire);
+      });
+      const githubIssuesApi: GitHubIssuesApi = {
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const runController = controller({
+        activeRuns,
+        githubIssuesApi,
+        root,
+        runStore: store,
+        schedule
+      });
+      const payload = {
+        issue: snapshot(),
+        parentRunId: "run-killed",
+        projectName: project.name,
+        toStateId: "implement"
+      };
+
+      runController.scheduleShutdownResume(payload);
+      expect(runController.hasPendingShutdownResume("run-killed")).toBe(true);
+
+      // What executeStateAdvance's cap/reservation contention branch now
+      // does: re-arm through the same wrapper before the callback it replaces
+      // has unwound.
+      runController.scheduleShutdownResume(payload);
+
+      // The outgoing callback settling must not erase the incoming retry's
+      // claim — a plain Set would have cleared it here, reopening the
+      // retry's own fire-to-claim window.
+      await fires[0]?.();
+      expect(runController.hasPendingShutdownResume("run-killed")).toBe(true);
+
+      await fires[1]?.();
+      expect(runController.hasPendingShutdownResume("run-killed")).toBe(false);
+    });
+  });
+
   it("skips when the project tracker token env var is unset", async () => {
     await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, { currentStateId: "implement" });

@@ -139,4 +139,74 @@ and in the backlog rather than in the branch name.
 
 ## Design
 
-_Written in step 4, after this report was first committed._
+Three interfaces were designed in parallel by independent sub-agents, then a fourth
+sub-agent that authored none of them adjudicated against depth → locality → seam placement
+→ test surface → blast radius, in that priority order.
+
+### Design A — minimal stateful closure (WINNER, interface)
+
+```ts
+export type ClaudeEventReducer = { reduce: (raw: unknown) => ProviderEvent[] };
+export function createClaudeEventReducer(): ClaudeEventReducer;
+export function isTerminalFailure(type: string | undefined): boolean;
+```
+
+One reducer per Run; feed message items in stream order. The `session_id` carry-forward is
+a private `let` in the closure — no caller can name or mutate it — so `ActiveClaudeRun`
+loses its `sessionId` field entirely. **No injected deps**: unlike the codex sibling, the
+Claude mapping has no clock (no rate-limited markers/timestamps) and its session identity is
+mapping-owned, not provider-owned, so neither `now` nor a `session()` snapshot is needed.
+`reduce` returns `ProviderEvent[]` because assistant messages fan out to multiple Normalized
+Events. Hides: the 7-way `type` dispatch, the content-block fan-out, the session carry-forward,
+and the loosely-typed leaf accessors.
+
+### Design B — pure explicit-state reducer (RUNNER-UP design)
+
+```ts
+export type ClaudeReducerState = { readonly sessionId?: string };
+export const initialClaudeReducerState: ClaudeReducerState;
+export function reduceClaudeMessage(
+  raw: unknown, state: ClaudeReducerState
+): { events: ProviderEvent[]; state: ClaudeReducerState };
+```
+
+Referentially transparent; the caller threads `state` across the loop. Wins the *test surface*
+criterion narrowly (a test can seed `{ sessionId }` directly instead of replaying a system/init
+message) and would be 3 files. **Why it loses**: it promotes a mapping-internal invariant into a
+public type *and* a standing caller obligation — forgetting `reducerState = reduction.state`
+silently drops the carry-forward and still type-checks. That is a simultaneous depth (criterion 1)
+and locality (criterion 2) regression that its lone priority-4 test-surface convenience cannot
+outrank.
+
+### Design C — per-type handler registry (self-refuted)
+
+`createClaudeMessageMapper(handlers?)` with an exported `defaultClaudeHandlers` table and a
+`ClaudeMapContext` `setSessionId` port. Its own author concluded it is over-engineered: the
+second adapter does not exist (three providers each have distinct wire protocols and their own
+mapping modules; no per-run handler customization), so the handler-table is a *hypothetical seam*,
+and externalizing session state into a `ctx` setter turns a hidden invariant into a contract any
+handler can violate — making the module **shallower**. Recommended collapsing to A.
+
+### Adjudication
+
+| Criterion | Winner | Why |
+|---|---|---|
+| Depth | A | `reduce` teaches one factory + one method; B exposes 3 names + a threading protocol, C a handler table + `setSessionId` port. |
+| Locality | A | Carry-forward lives and dies in one closure; B relocates the bug surface into the caller loop, C lets any handler mutate session. |
+| Seam placement | A interface, B/C file layout | A's interface exposes no state nothing external varies. But A's proposed `claude-json.ts` split is the opposite hypothetical seam: post-extraction `claude.ts` uses **zero** leaf accessors, so `claude-json.ts` would have exactly one consumer. The codex split is real only because `codex-json.ts` has two (`codex.ts` + `codex-events.ts`). |
+| Test surface | B (narrowly) | B can seed state directly; but A is fully exercisable through `reduce` (the landed `codex-events.test.ts` proves it), and A's tests cannot fabricate impossible states. Priority-4, weak. |
+| Blast radius | corrected A = 3 files | A-as-described was 4 files; dropping `claude-json.ts` makes it 3, erasing B's edge. |
+
+**Winner: Design A's interface, corrected with B/C's accessor placement** — keep the leaf
+accessors private inside `claude-events.ts`; do **not** create `claude-json.ts`. Verified: all
+~40 accessor call sites (claude.ts:197-466) sit inside the five mapping functions that move;
+the retained functions (`createClaudeProvider`, `providerEventsFromQueueItem`, `withOutputSchema`,
+`writeClaudeInput`, `validate*`) operate on argv arrays and the child process and call no
+accessor. So a `claude-json.ts` would be a one-consumer hypothetical seam; A's "consistency with
+codex" argument fails because the two-consumer precondition that justified `codex-json.ts` does
+not hold for Claude.
+
+**Resulting file layout (3 files):** new `src/providers/claude-events.ts` (reducer + moved
+helpers + private accessors + exported `isTerminalFailure`), edited `src/providers/claude.ts`
+(import the reducer, drop `ActiveClaudeRun.sessionId`, collapse `providerEventsFromQueueItem`),
+new `tests/claude-events.test.ts`.

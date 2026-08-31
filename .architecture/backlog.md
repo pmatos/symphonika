@@ -39,8 +39,8 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 - **Status**: proposed
 - **Score**: 22/25 (leverage 5, locality 4, blast radius 2, heat 4)
-- **Files**: 4 (`claude.ts`, new `claude-events.ts`, new `claude-json.ts`, new `claude-events.test.ts`)
-- **Modules**: `src/providers/claude.ts` (`mapClaudeStreamJsonMessage` at 193-264 + `mapSystemMessage`/`mapAssistantMessage`/`mapResultMessage`/`mapStreamEvent`/`isInputRequiredType`/`isInputRequiredTool`/`isTerminalFailure` and the leaf field accessors at 690-737), new `src/providers/claude-events.ts`, new `src/providers/claude-json.ts`
+- **Files**: 3 (`claude.ts`, new `claude-events.ts`, new `claude-events.test.ts`) — design-it-twice dropped the `claude-json.ts` split (below)
+- **Modules**: `src/providers/claude.ts` (`mapClaudeStreamJsonMessage` at 193-264 + `mapSystemMessage`/`mapAssistantMessage`/`mapResultMessage`/`mapStreamEvent`/`isInputRequiredType`/`isInputRequiredTool`/`isTerminalFailure` and the leaf field accessors at 690-737), new `src/providers/claude-events.ts` (accessors kept private inside it — unlike `codex-json.ts`, no second consumer justifies a split)
 - **Summary**: Extract `mapClaudeStreamJsonMessage` into a `createClaudeEventReducer().reduce(raw)` closure returning `ProviderEvent[]`, owning the `session_id` carry-forward internally, so mapping is testable without spawning a fake `claude` subprocess; sibling of `codex-event-reducer`.
 - **First seen**: 2026-08-31
 - **Reason**: Picked by the 2026-09-01 run (top surviving candidate at 22/25; runner-up `issue-claim-label-writer` at 21/25, within 1 point). Sibling of the landed `codex-event-reducer` (#617); the `session_id` state is entirely mapping-internal (written only in `mapSystemMessage`, read only in the map functions), so the reducer needs no injected deps — cleaner than the codex closure.

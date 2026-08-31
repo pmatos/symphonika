@@ -97,6 +97,11 @@ export type WatchdogTerminalReason = (typeof WATCHDOG_TERMINAL_REASONS)[number];
 // every row that was live when shutdown began. See SPEC 12.3.
 const SHUTDOWN_PREEMPTIVE_REASON: CancelReason = "daemon_shutdown";
 
+// The Watchdog's Routine Firing verdict, used as both the durable cancel
+// reason it latches and the terminal_reason the fenced completion writes, so
+// the two can never disagree about what killed the firing. See ADR 0091.
+const WATCHDOG_NO_PROGRESS_REASON: CancelReason = "no_progress";
+
 // Shared by listRuns/listRoutineFirings so both accept either a single state
 // or a state set (e.g. the dashboard's active-now band, which spans several
 // non-terminal states) without each call site hand-rolling an IN clause. An
@@ -3511,30 +3516,48 @@ export class RunStore {
     workspacePath?: string;
   }): void {
     const now = timestamp();
-    this.database
-      .prepare(
-        [
-          "update routine_firings set",
-          "state = @state,",
-          "terminal_reason = @terminal_reason,",
-          "outcome_status = @outcome_status,",
-          "outcome_action = @outcome_action,",
-          "outcome_url = @outcome_url,",
-          "outcome_title = @outcome_title,",
-          "outcome_summary = @outcome_summary,",
-          "outcome_verified = @outcome_verified,",
-          "outcome_source = @outcome_source,",
-          "commits_ahead = case",
-          "when @commits_ahead is not null then @commits_ahead",
-          "when @outcome_action = 'commit' and @outcome_verified = 1 then 1",
-          "else commits_ahead end,",
-          "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
-          "workspace_path = coalesce(@workspace_path, workspace_path),",
-          "updated_at = @updated_at",
-          "where id = @id"
-        ].join(" ")
-      )
-      .run({
+    const update = this.database.prepare(
+      [
+        "update routine_firings set",
+        "state = @state,",
+        "terminal_reason = @terminal_reason,",
+        "outcome_status = @outcome_status,",
+        "outcome_action = @outcome_action,",
+        "outcome_url = @outcome_url,",
+        "outcome_title = @outcome_title,",
+        "outcome_summary = @outcome_summary,",
+        "outcome_verified = @outcome_verified,",
+        "outcome_source = @outcome_source,",
+        "commits_ahead = case",
+        "when @commits_ahead is not null then @commits_ahead",
+        "when @outcome_action = 'commit' and @outcome_verified = 1 then 1",
+        "else commits_ahead end,",
+        "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
+        "workspace_path = coalesce(@workspace_path, workspace_path),",
+        "updated_at = @updated_at",
+        "where id = @id"
+      ].join(" ")
+    );
+    // The Watchdog latches its no-progress verdict durably and then cancels
+    // in memory, so a provider that finishes between those two steps reaches
+    // here seeing no cancellation at all and would persist `succeeded` over a
+    // firing the Watchdog has already announced as terminated. Re-read the
+    // latch inside the write transaction — the one place the two passes
+    // serialize — and let it win. Only the lifecycle verdict is overridden:
+    // the outcome and commits-ahead evidence gathered by this call is real
+    // and retention still needs it (ADR 0068, ADR 0091).
+    const latched = this.database.prepare(
+      [
+        "select 1 from routine_firings",
+        "where id = ? and cancel_requested = 1 and cancel_reason = ?"
+      ].join(" ")
+    );
+    const state = this.database.transaction(() => {
+      const overridden =
+        input.state !== "failed" &&
+        latched.get(input.id, WATCHDOG_NO_PROGRESS_REASON) !== undefined;
+      const state = overridden ? ("failed" as const) : input.state;
+      update.run({
         cancel_reason: input.cancelReason ?? null,
         commits_ahead:
           input.commitsAhead === undefined ? null : Number(input.commitsAhead),
@@ -3548,12 +3571,16 @@ export class RunStore {
         outcome_url: input.outcome?.url ?? null,
         outcome_verified:
           input.outcome === undefined ? null : Number(input.outcome.verified),
-        state: input.state,
-        terminal_reason: input.terminalReason ?? null,
+        state,
+        terminal_reason: overridden
+          ? WATCHDOG_NO_PROGRESS_REASON
+          : (input.terminalReason ?? null),
         updated_at: now,
         workspace_path: input.workspacePath ?? null
       });
-    this.recordRoutineFiringTransition(input.id, input.state, now);
+      return state;
+    })();
+    this.recordRoutineFiringTransition(input.id, state, now);
   }
 
   getRoutineFiring(id: string): RoutineFiringStatus | undefined {
@@ -3606,12 +3633,16 @@ export class RunStore {
         [
           "update routine_firings set",
           "cancel_requested = 1,",
-          "cancel_reason = 'no_progress',",
-          "updated_at = ?",
-          "where id = ? and state = 'running' and cancel_requested = 0"
+          "cancel_reason = @reason,",
+          "updated_at = @updated_at",
+          "where id = @id and state = 'running' and cancel_requested = 0"
         ].join(" ")
       )
-      .run(updatedAt, firingId);
+      .run({
+        id: firingId,
+        reason: WATCHDOG_NO_PROGRESS_REASON,
+        updated_at: updatedAt
+      });
     return result.changes > 0;
   }
 

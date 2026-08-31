@@ -75,6 +75,71 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("keeps the Watchdog no-progress verdict when a firing completes after the latch", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringState("fire-latched", "running");
+      expect(store.markRoutineFiringWatchdogNoProgress("fire-latched")).toBe(
+        true
+      );
+
+      // The provider finished in the window between the durable latch and the
+      // Watchdog's in-memory cancel, so the dispatcher sees no cancellation
+      // and asks for `succeeded`.
+      store.completeRoutineFiring({
+        commitsAhead: true,
+        id: "fire-latched",
+        outcome: {
+          action: "commit",
+          source: "git",
+          status: "success",
+          summary: "Observed commits ahead of the configured base branch.",
+          title: "Commit retained in the Routine Firing workspace",
+          url: null,
+          verified: true
+        },
+        state: "succeeded",
+        terminalReason: null
+      });
+
+      expect(store.getRoutineFiring("fire-latched")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        // Retention evidence from the completing firing survives the override.
+        commitsAhead: true,
+        outcome: { action: "commit", verified: true },
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(
+        store
+          .listRoutineFiringTransitions("fire-latched")
+          .map((transition) => transition.state)
+      ).toContain("failed");
+    } finally {
+      store.close();
+    }
+  });
+
   it("claims a manual firing without consuming the pending scheduled clock event", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

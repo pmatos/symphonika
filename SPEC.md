@@ -1915,6 +1915,18 @@ and releases the in-memory slot in `finally`. It does not add a Routine-Firing `
 Routine Firings have no stale operational-label recovery workflow, and a provider that failed its
 liveness contract is a terminal failed firing.
 
+Because the latch drops the firing from every later Watchdog pass, that settlement is bounded.
+Cancelling a Routine Firing starts a settlement window covering everything the running phase still
+awaits that provider cancellation cannot reach — the before/after GitHub snapshot reads,
+pull-request discovery, and the Git commits-ahead probe. Work still pending when the window closes
+is abandoned, so the firing always reaches a terminal row and always releases its overlap and
+capacity slots; a cancel that arrives while the firing is healthy sees that work finish normally
+and loses no evidence. Completion is fenced on the latch as well: a provider that finishes between
+the durable latch and the in-memory cancellation still records `failed / no_progress` rather than
+`succeeded`, so the Watchdog termination notification and the durable row cannot disagree. The
+outcome and commits-ahead evidence that completion gathered is retained either way, because
+Workspace retention depends on it.
+
 Independently of that liveness clock, the Watchdog enforces a **convergence budget**: when a
 sampled Run's cumulative `output_tokens_total` reaches `watchdog.output_token_budget` (default
 150000; `0` disables it), the Run transitions to `stale` with

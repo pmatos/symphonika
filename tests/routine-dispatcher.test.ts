@@ -5,7 +5,10 @@ import { Writable } from "node:stream";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { RawGitHubPullRequest } from "../src/issue-polling.js";
+import type {
+  RawGitHubIssue,
+  RawGitHubPullRequest
+} from "../src/issue-polling.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import { reconcileWatchdog } from "../src/lifecycle/watchdog.js";
 import type {
@@ -6909,6 +6912,106 @@ describe("RoutineFiringDispatcher", () => {
     } finally {
       releaseWedgedProvider?.();
       await firstDispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("settles a firing whose Watchdog cancel lands while a GitHub snapshot hangs", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const routine = minuteRoutine(root);
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    // The before-snapshot read is awaited after the row is already `running`
+    // but before runAttempt starts, so provider.cancel() cannot settle it.
+    const listIssues = vi.fn(() => new Promise<RawGitHubIssue[]>(() => {}));
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+    const dispatch = dispatchDueRoutines({
+      ...recurringDispatchInput({
+        activeRuns,
+        provider,
+        root,
+        routine,
+        runStore
+      }),
+      cancellationSettleMs: 25,
+      createFiringId: () => "wedged-snapshot-fire",
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        listIssues,
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([])
+      },
+      prepareRoutineWorkspace: () =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(listIssues).toHaveBeenCalled();
+      });
+      expect(runStore.getRoutineFiring("wedged-snapshot-fire")?.state).toBe(
+        "running"
+      );
+      expect(activeRuns.countInFlight()).toBe(1);
+
+      const watchdogConfig = {
+        enabled: true,
+        graceMinutes: 1,
+        maxRunMinutes: 0,
+        mtimeIgnore: [],
+        mtimeInclude: [],
+        outputTokenBudget: 0,
+        sampleIntervalSeconds: 60
+      };
+      await reconcileWatchdog({
+        activeRuns,
+        config: watchdogConfig,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore
+      });
+      expect(
+        await reconcileWatchdog({
+          activeRuns,
+          config: watchdogConfig,
+          now: () => new Date("2026-05-22T10:01:00.000Z"),
+          runStore
+        })
+      ).toEqual({ sampled: 1, terminated: 1 });
+
+      await dispatch;
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(runStore.getRoutineFiring("wedged-snapshot-fire")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(activeRuns.countInFlight()).toBe(0);
+    } finally {
+      await dispatch.catch(() => undefined);
       runStore.close();
     }
   });

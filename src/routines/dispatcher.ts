@@ -88,6 +88,10 @@ import {
 export type DispatchDueRoutinesInput = {
   activeRuns: ActiveRunRegistry;
   agentProviders: AgentProviderRegistry;
+  // How long a cancelled Routine Firing may keep waiting on work it already
+  // started before that work is abandoned. Defaults to
+  // ROUTINE_CANCELLATION_SETTLE_MS.
+  cancellationSettleMs?: number;
   configDir: string;
   createFanoutId?: () => string;
   createFiringId?: () => string;
@@ -378,6 +382,9 @@ export function fireRoutineNow(
     githubIssuesApi: input.githubIssuesApi,
     inspectWorkspaceCommitsAhead:
       input.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
+    ...(input.cancellationSettleMs === undefined
+      ? {}
+      : { cancellationSettleMs: input.cancellationSettleMs }),
     logger: input.logger,
     now: new Date(),
     prepareRoutineWorkspace:
@@ -431,6 +438,27 @@ class RoutineFiringTimeoutError extends Error {
     this.name = "RoutineFiringTimeoutError";
   }
 }
+
+class RoutineFiringCancelledError extends Error {
+  constructor() {
+    super("routine firing was cancelled and its pending work was abandoned");
+    this.name = "RoutineFiringCancelledError";
+  }
+}
+
+// How long a cancelled firing may keep waiting on work it already started.
+// `provider.cancel()` only settles the provider stream, and it is a no-op both
+// before `runAttempt` starts and after it finishes. Everything else the
+// running phase awaits — GitHub snapshot reads, PR discovery, the Git
+// commits-ahead probe — is a network call or a subprocess with no bound of
+// its own when the Routine declares no `timeout_minutes`. Because the
+// Watchdog's durable no-progress latch drops the firing from every later pass
+// (ADR 0091), an await that never settles would strand the row non-terminal
+// and hold its overlap and capacity slot until a daemon restart. So a cancel
+// starts this clock: pending work gets whatever is left of it and is then
+// abandoned, which bounds the time to a terminal row without truncating the
+// evidence an ordinary operator cancel still collects in a second or two.
+const ROUTINE_CANCELLATION_SETTLE_MS = 60_000;
 
 export function synchronizeRoutineTargets(
   input: SynchronizeRoutineTargetsInput
@@ -931,6 +959,9 @@ export async function dispatchDueRoutines(
         githubIssuesApi: input.githubIssuesApi,
         inspectWorkspaceCommitsAhead:
           input.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
+        ...(input.cancellationSettleMs === undefined
+          ? {}
+          : { cancellationSettleMs: input.cancellationSettleMs }),
         logger: input.logger,
         now,
         prepareRoutineWorkspace,
@@ -1147,6 +1178,7 @@ async function deliverReadyRoutineFanouts(
 
 async function runRoutineFiring(input: {
   activeRuns: ActiveRunRegistry;
+  cancellationSettleMs?: number;
   configDir: string;
   env: NodeJS.ProcessEnv;
   firingId: string;
@@ -1178,6 +1210,7 @@ async function runRoutineFiring(input: {
     ...routineTrackerTokens(input.project, input.env)
   ];
   const deadline = routineFiringDeadline(input.routine.timeoutMinutes);
+  const cancellation = routineFiringCancellation(input.cancellationSettleMs);
   const scratchIdentity = { attempt: 1, id: input.firingId };
   let prepared: PreparedRoutineWorkspace | undefined;
   let preparationAttempt: Promise<PreparedRoutineWorkspace> | undefined;
@@ -1258,7 +1291,13 @@ async function runRoutineFiring(input: {
     );
     input.runStore.updateRoutineFiringState(input.firingId, "running");
     input.activeRuns.attachProvider(input.firingId, {
-      cancel: () => input.provider.cancel(input.firingId),
+      // Start the settlement clock before delegating to the provider: the
+      // registry latches cancelRequested once, so this is the only chance to
+      // bound the running-phase awaits `provider.cancel()` cannot reach.
+      cancel: async () => {
+        cancellation.cancel();
+        await input.provider.cancel(input.firingId);
+      },
       provider: input.provider,
       respectsIssueLabels: false
     });
@@ -1278,17 +1317,19 @@ async function runRoutineFiring(input: {
       );
     }
 
-    githubBefore = await deadline.race(
-      captureRoutineGithubSnapshot({
-        branchName: prepared.branchName,
-        env: input.env,
-        githubIssuesApi: input.githubIssuesApi,
-        kind: input.routine.kind,
-        logger: input.logger,
-        project: input.project,
-        routineName: input.routine.name,
-        since: githubSnapshotSince
-      })
+    githubBefore = await cancellation.race(
+      deadline.race(
+        captureRoutineGithubSnapshot({
+          branchName: prepared.branchName,
+          env: input.env,
+          githubIssuesApi: input.githubIssuesApi,
+          kind: input.routine.kind,
+          logger: input.logger,
+          project: input.project,
+          routineName: input.routine.name,
+          since: githubSnapshotSince
+        })
+      )
     );
 
     // A cancel can also land DURING the snapshot read just above; the
@@ -1354,28 +1395,32 @@ async function runRoutineFiring(input: {
     let outcome: RoutineTerminalOutcome =
       cancelEntry?.cancelRequested === true
         ? routineCancellationOutcome(cancelEntry.cancelReason)
-        : await deadline.race(
-            classifyRoutineOutcome(events, {
-              baseBranch: input.project.workspace.git.base_branch,
-              kind: input.routine.kind,
-              stderrLogPath: evidence.stderrLogPath,
-              workspacePath: prepared.workspacePath
-            })
+        : await cancellation.race(
+            deadline.race(
+              classifyRoutineOutcome(events, {
+                baseBranch: input.project.workspace.git.base_branch,
+                kind: input.routine.kind,
+                stderrLogPath: evidence.stderrLogPath,
+                workspacePath: prepared.workspacePath
+              })
+            )
           );
     const githubAfter =
       githubBefore === null
         ? null
-        : await deadline.race(
-            captureRoutineGithubSnapshot({
-              branchName: prepared.branchName,
-              env: input.env,
-              githubIssuesApi: input.githubIssuesApi,
-              kind: input.routine.kind,
-              logger: input.logger,
-              project: input.project,
-              routineName: input.routine.name,
-              since: githubSnapshotSince
-            })
+        : await cancellation.race(
+            deadline.race(
+              captureRoutineGithubSnapshot({
+                branchName: prepared.branchName,
+                env: input.env,
+                githubIssuesApi: input.githubIssuesApi,
+                kind: input.routine.kind,
+                logger: input.logger,
+                project: input.project,
+                routineName: input.routine.name,
+                since: githubSnapshotSince
+              })
+            )
           );
     // A cancel can also land DURING the snapshot read just above, after
     // `outcome` above was already classified as succeeded/failed. Downgrade
@@ -1405,16 +1450,18 @@ async function runRoutineFiring(input: {
           runStore: input.runStore
         });
       } else {
-        await discoverRoutinePullRequests({
-          branchName: prepared.branchName,
-          env: input.env,
-          firingId: input.firingId,
-          githubIssuesApi: input.githubIssuesApi,
-          logger: input.logger,
-          project: input.project,
-          routineName: input.routine.name,
-          runStore: input.runStore
-        });
+        await cancellation.race(
+          discoverRoutinePullRequests({
+            branchName: prepared.branchName,
+            env: input.env,
+            firingId: input.firingId,
+            githubIssuesApi: input.githubIssuesApi,
+            logger: input.logger,
+            project: input.project,
+            routineName: input.routine.name,
+            runStore: input.runStore
+          })
+        );
       }
     }
     // Re-check for a cancel that landed during discovery: an operator cancel
@@ -1428,14 +1475,16 @@ async function runRoutineFiring(input: {
     const commitsAhead =
       outcome.kind === "succeeded"
         ? input.routine.kind === "git"
-        : await inspectRoutineCommitsAhead({
-            baseBranch: input.project.workspace.git.base_branch,
-            kind: input.routine.kind,
-            logger: input.logger,
-            routineName: input.routine.name,
-            inspectWorkspaceCommitsAhead: input.inspectWorkspaceCommitsAhead,
-            workspacePath: prepared.workspacePath
-          });
+        : await cancellation.race(
+            inspectRoutineCommitsAhead({
+              baseBranch: input.project.workspace.git.base_branch,
+              kind: input.routine.kind,
+              logger: input.logger,
+              routineName: input.routine.name,
+              inspectWorkspaceCommitsAhead: input.inspectWorkspaceCommitsAhead,
+              workspacePath: prepared.workspacePath
+            })
+          );
     // The failed/cancelled retention inspection above shells out to Git. A
     // cancel can land while that subprocess is running, so use a fresh entry
     // for both lifecycle classification and its matching cancel reason.
@@ -1528,18 +1577,20 @@ async function runRoutineFiring(input: {
     const githubAfter =
       githubBefore === null || prepared === undefined
         ? null
-        : await deadline
+        : await cancellation
             .race(
-              captureRoutineGithubSnapshot({
-                branchName: prepared.branchName,
-                env: input.env,
-                githubIssuesApi: input.githubIssuesApi,
-                kind: input.routine.kind,
-                logger: input.logger,
-                project: input.project,
-                routineName: input.routine.name,
-                since: githubSnapshotSince
-              })
+              deadline.race(
+                captureRoutineGithubSnapshot({
+                  branchName: prepared.branchName,
+                  env: input.env,
+                  githubIssuesApi: input.githubIssuesApi,
+                  kind: input.routine.kind,
+                  logger: input.logger,
+                  project: input.project,
+                  routineName: input.routine.name,
+                  since: githubSnapshotSince
+                })
+              )
             )
             .catch((snapshotError: unknown) => {
               if (snapshotError instanceof RoutineFiringTimeoutError) {
@@ -1563,14 +1614,19 @@ async function runRoutineFiring(input: {
     const commitsAhead =
       prepared === undefined
         ? false
-        : await inspectRoutineCommitsAhead({
-            baseBranch: input.project.workspace.git.base_branch,
-            kind: input.routine.kind,
-            logger: input.logger,
-            routineName: input.routine.name,
-            inspectWorkspaceCommitsAhead: input.inspectWorkspaceCommitsAhead,
-            workspacePath: prepared.workspacePath
-          });
+        : await cancellation
+            .race(
+              inspectRoutineCommitsAhead({
+                baseBranch: input.project.workspace.git.base_branch,
+                kind: input.routine.kind,
+                logger: input.logger,
+                routineName: input.routine.name,
+                inspectWorkspaceCommitsAhead:
+                  input.inspectWorkspaceCommitsAhead,
+                workspacePath: prepared.workspacePath
+              })
+            )
+            .catch(() => false);
     // Re-read after the Git subprocess for the same reason as the try path.
     // Either timeout signal still wins over a cancellation that arrived
     // during snapshot capture or commit inspection.
@@ -1625,6 +1681,7 @@ async function runRoutineFiring(input: {
     });
   } finally {
     deadline.clear();
+    cancellation.clear();
     // Best effort, and a no-op when the firing never reached the provider.
     // A timed-out firing has already had its provider cancelled above, so
     // nothing meaningful is still writing here; anything left behind is
@@ -2020,6 +2077,45 @@ function routinePullRequestObservations(
     };
   }
   return observations;
+}
+
+// The cancellation half of the running phase's two bounds. `deadline` bounds
+// how long a firing may run; this bounds how long a *cancelled* firing may
+// keep waiting on work it already started. The two are separate because
+// `deadline.clear()` fires before post-terminal enrichment on purpose — an
+// expired execution deadline must not rewrite a classified outcome — while a
+// cancel has to keep interrupting right through that enrichment.
+function routineFiringCancellation(
+  settleMs: number = ROUTINE_CANCELLATION_SETTLE_MS
+): {
+  cancel: () => void;
+  clear: () => void;
+  race: <T>(operation: Promise<T>) => Promise<T>;
+} {
+  let timer: NodeJS.Timeout | undefined;
+  let abandon: (error: Error) => void = () => undefined;
+  const abandoned = new Promise<never>((_resolve, reject) => {
+    abandon = reject;
+  });
+  // Nothing races `abandoned` until the running phase starts, and a firing
+  // cancelled after its last raced await never races it at all. Marking it
+  // handled here keeps that from surfacing as an unhandled rejection.
+  abandoned.catch(() => undefined);
+  return {
+    cancel: () => {
+      timer ??= setTimeout(
+        () => abandon(new RoutineFiringCancelledError()),
+        settleMs
+      );
+    },
+    clear: () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    },
+    race: (operation) => Promise.race([operation, abandoned])
+  };
 }
 
 function routineFiringDeadline(timeoutMinutes: number | undefined): {

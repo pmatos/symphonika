@@ -40,6 +40,24 @@ ordinary outcome and commits-ahead evidence path, and releases capacity in its e
 The firing remains non-terminal until that lifecycle settles, so Routine Fan-out delivery cannot
 observe a prematurely terminal leg with incomplete outcome evidence.
 
+Because the durable latch removes the firing from every later Watchdog pass, "until that lifecycle
+settles" has to be bounded. `provider.cancel()` alone does not bound it: it is a no-op before
+`runAttempt` starts and after it finishes, and the running phase brackets provider execution with
+awaits that have no bound of their own when the Routine declares no `timeout_minutes` — the
+before/after GitHub snapshot reads, pull-request discovery, and the Git commits-ahead probe. A
+cancellation therefore starts a settlement clock: work already in flight gets the remainder of that
+window and is then abandoned, so the firing always reaches a terminal row and always releases its
+slot. An ordinary operator cancel finishes that work in a second or two and keeps collecting the
+same evidence it does today; only a genuinely wedged await is dropped.
+
+Terminal completion is fenced on the latch. The Watchdog writes `cancel_requested` durably and then
+cancels in memory, so a provider that finishes between those two steps would otherwise reach
+`completeRoutineFiring` seeing no cancellation and persist `succeeded` over a firing the Watchdog
+has already announced as terminated. `completeRoutineFiring` re-reads the latch inside its write
+transaction — the one place the two passes serialize — and lets it win. Only the lifecycle verdict
+is overridden: the outcome and commits-ahead evidence that completing call gathered is real, and
+workspace retention still depends on it.
+
 Routine Firings do not gain a `stale` state. `stale` is an issue-Run verdict coupled to operational
 labels and explicit stale-claim recovery; Routine Firings have no corresponding claim label to
 clear. A provider that violated the firing's liveness contract is a terminal failed firing, with
@@ -60,12 +78,26 @@ declared firing deadline and progress liveness.
   only for work whose owning daemon process was actually lost.
 - Operators can distinguish the failure from a declared deadline (`firing_timeout`) and from an
   explicit cancellation (`cancelled`) through `terminal_reason = 'no_progress'`.
+- A Watchdog-terminated firing never reports `succeeded`, so the termination notification and the
+  durable row always agree.
+- Post-cancellation GitHub and Git evidence is best-effort: a firing whose enrichment is itself
+  wedged settles without it rather than holding its slot.
 
 ## Alternatives considered
 
 **Run the startup orphan sweep periodically.** Rejected. It cannot distinguish healthy live
 firings from abandoned ones and would fail every queued, preparing, or running firing on a live
 daemon.
+
+**Abandon in-flight work the instant a cancel is requested.** Rejected. Operator cancellation of a
+healthy firing still needs the commits-ahead probe to run, because workspace retention only
+protects a firing whose canonical outcome is a verified `commit` (ADR 0068). Dropping it
+immediately would let age-based pruning delete real commits.
+
+**Delay the `running` transition until provider execution begins.** Rejected. It would hide the
+before-snapshot read from the Watchdog rather than bound it, and it does nothing for the
+post-provider enrichment phase, where the row is legitimately `running` and `provider.cancel()` is
+equally powerless.
 
 **Add a dispatcher-local staleness timer.** Rejected. It would duplicate the Watchdog's Progress
 Signal, grace policy, Project overrides, and sampling races while producing a second definition of

@@ -99,14 +99,14 @@ function seedShutdownCancelledRun(
 }
 
 async function withRunStore<T>(
-  fn: (store: RunStore) => Promise<T>
+  fn: (store: RunStore, root: string) => Promise<T>
 ): Promise<T> {
   const root = await mkdtemp(
     path.join(tmpdir(), "symphonika-shutdown-resume-")
   );
   const store = openRunStore({ stateRoot: root });
   try {
-    return await fn(store);
+    return await fn(store, root);
   } finally {
     store.close();
     await rm(root, { force: true, recursive: true });
@@ -116,13 +116,18 @@ async function withRunStore<T>(
 function controller(input: {
   activeRuns: ActiveRunRegistry;
   githubIssuesApi: GitHubIssuesApi;
+  // Kept inside the test's own mkdtemp directory rather than a fixed /tmp
+  // path: nothing here writes through these, but a hardcoded OS-temp path is
+  // both a collision risk across concurrent runs and a CodeQL
+  // js/insecure-temporary-file finding.
+  root: string;
   runStore: RunStore;
   schedule: ScheduleHandler;
 }): RunController {
   return new RunController({
     activeRuns: input.activeRuns,
     agentProviders: {},
-    configDir: "/tmp/symphonika-config",
+    configDir: path.join(input.root, "config"),
     env: { GITHUB_TOKEN: "secret" },
     githubIssuesApi: input.githubIssuesApi,
     projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
@@ -133,13 +138,13 @@ function controller(input: {
       }),
     runStore: input.runStore,
     schedule: input.schedule,
-    stateRoot: "/tmp/symphonika-state"
+    stateRoot: path.join(input.root, "state")
   });
 }
 
 describe("resumeShutdownCancelledRuns", () => {
   it("schedules a state advance at the killed run's workflow state", async () => {
-    await withRunStore(async (store) => {
+    await withRunStore(async (store, root) => {
       const runId = seedShutdownCancelledRun(store, {
         currentStateId: "implement"
       });
@@ -161,6 +166,7 @@ describe("resumeShutdownCancelledRuns", () => {
         runController: controller({
           activeRuns,
           githubIssuesApi,
+          root,
           runStore: store,
           schedule
         }),
@@ -190,7 +196,7 @@ describe("resumeShutdownCancelledRuns", () => {
   });
 
   it("clears a sym:stale verdict left by an earlier boot when it resumes", async () => {
-    await withRunStore(async (store) => {
+    await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, { currentStateId: "implement" });
       const activeRuns = new ActiveRunRegistry();
       const schedule = vi.fn();
@@ -212,6 +218,7 @@ describe("resumeShutdownCancelledRuns", () => {
         runController: controller({
           activeRuns,
           githubIssuesApi,
+          root,
           runStore: store,
           schedule
         }),
@@ -231,7 +238,7 @@ describe("resumeShutdownCancelledRuns", () => {
   });
 
   it("releases the claim instead of resuming when no workflow state was persisted", async () => {
-    await withRunStore(async (store) => {
+    await withRunStore(async (store, root) => {
       const runId = seedShutdownCancelledRun(store);
       const activeRuns = new ActiveRunRegistry();
       const schedule = vi.fn();
@@ -253,6 +260,7 @@ describe("resumeShutdownCancelledRuns", () => {
         runController: controller({
           activeRuns,
           githubIssuesApi,
+          root,
           runStore: store,
           schedule
         }),
@@ -280,7 +288,7 @@ describe("resumeShutdownCancelledRuns", () => {
   });
 
   it("does not let stale detection re-strand an issue whose claim it just released", async () => {
-    await withRunStore(async (store) => {
+    await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store);
       const activeRuns = new ActiveRunRegistry();
       const schedule = vi.fn();
@@ -308,6 +316,7 @@ describe("resumeShutdownCancelledRuns", () => {
         runController: controller({
           activeRuns,
           githubIssuesApi,
+          root,
           runStore: store,
           schedule
         })
@@ -324,7 +333,7 @@ describe("resumeShutdownCancelledRuns", () => {
   });
 
   it("defers the resume when clearing an earlier sym:stale fails, and retries next pass", async () => {
-    await withRunStore(async (store) => {
+    await withRunStore(async (store, root) => {
       const activeRuns = new ActiveRunRegistry();
       const schedule = vi.fn();
       const removeLabelsFromIssue = vi
@@ -349,6 +358,7 @@ describe("resumeShutdownCancelledRuns", () => {
           runController: controller({
             activeRuns,
             githubIssuesApi,
+            root,
             runStore: store,
             schedule
           }),
@@ -373,7 +383,7 @@ describe("resumeShutdownCancelledRuns", () => {
   });
 
   it("keeps the run resumable when the release label write fails", async () => {
-    await withRunStore(async (store) => {
+    await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store);
       const activeRuns = new ActiveRunRegistry();
       const schedule = vi.fn();
@@ -392,6 +402,7 @@ describe("resumeShutdownCancelledRuns", () => {
         runController: controller({
           activeRuns,
           githubIssuesApi,
+          root,
           runStore: store,
           schedule
         }),
@@ -404,7 +415,7 @@ describe("resumeShutdownCancelledRuns", () => {
   });
 
   it("skips an issue that already has live or scheduled work", async () => {
-    await withRunStore(async (store) => {
+    await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, { currentStateId: "implement" });
       const activeRuns = new ActiveRunRegistry();
       activeRuns.register({
@@ -429,6 +440,7 @@ describe("resumeShutdownCancelledRuns", () => {
         runController: controller({
           activeRuns,
           githubIssuesApi,
+          root,
           runStore: store,
           schedule
         }),
@@ -441,7 +453,7 @@ describe("resumeShutdownCancelledRuns", () => {
   });
 
   it("defers a disabled project without declining the run", async () => {
-    await withRunStore(async (store) => {
+    await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, { currentStateId: "implement" });
       const activeRuns = new ActiveRunRegistry();
       const schedule = vi.fn();
@@ -460,6 +472,7 @@ describe("resumeShutdownCancelledRuns", () => {
         runController: controller({
           activeRuns,
           githubIssuesApi,
+          root,
           runStore: store,
           schedule
         }),
@@ -473,7 +486,7 @@ describe("resumeShutdownCancelledRuns", () => {
   });
 
   it("defers an issue the poll snapshot does not carry", async () => {
-    await withRunStore(async (store) => {
+    await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, { currentStateId: "implement" });
       const activeRuns = new ActiveRunRegistry();
       const schedule = vi.fn();
@@ -492,6 +505,7 @@ describe("resumeShutdownCancelledRuns", () => {
         runController: controller({
           activeRuns,
           githubIssuesApi,
+          root,
           runStore: store,
           schedule
         }),
@@ -505,7 +519,7 @@ describe("resumeShutdownCancelledRuns", () => {
   });
 
   it("skips when the project tracker token env var is unset", async () => {
-    await withRunStore(async (store) => {
+    await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, { currentStateId: "implement" });
       const activeRuns = new ActiveRunRegistry();
       const schedule = vi.fn();
@@ -524,6 +538,7 @@ describe("resumeShutdownCancelledRuns", () => {
         runController: controller({
           activeRuns,
           githubIssuesApi,
+          root,
           runStore: store,
           schedule
         }),

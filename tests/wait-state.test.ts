@@ -341,6 +341,56 @@ async function writeWaitStateProject(root: string): Promise<void> {
   );
 }
 
+// A wait that routes reviewer feedback into an agent state. Since the global
+// PR follow-up loop defers to a parked raw-FSM run (issue #616), this is the
+// shape a review round takes: the park observes the feedback and advances.
+async function writeReviewRepairWaitProject(root: string): Promise<void> {
+  await writeWaitStateProject(root);
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: agent_then_review_repair",
+      "  initial: planning",
+      "  states:",
+      "    planning:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      transitions:",
+      "        - to: holding",
+      "    holding:",
+      "      action:",
+      "        kind: wait",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            checks: success",
+      "            mergeable: true",
+      "            unresolved_review_threads: 0",
+      "        - to: repair",
+      "          when:",
+      "            has_unresolved_reviews: true",
+      "    repair:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: plan-prompt.md",
+      "      transitions:",
+      "        - to: holding",
+      "          when:",
+      "            provider_success: true",
+      "        - to: failed",
+      "    done:",
+      "      terminal: success",
+      "    failed:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
+}
+
 // A wait state gated on BOTH an artifact and a PR signal. Exercises the
 // carry-forward of workspace_path onto the waiting row (ADR 0087): without it
 // the row's workspacePath is "" and the artifact predicate is unevaluable, so
@@ -815,9 +865,14 @@ describe("wait state lifecycle", () => {
     }
   });
 
-  it("keeps an open PR review follow-up alive while provider validation is pending", async () => {
+  it("keeps a review-driven state advance alive while provider validation is pending", async () => {
+    // Label immunity across the reserve-slot-to-validated window, for the run
+    // a review round now produces: the park sees unresolved feedback and
+    // advances into the repair state itself. Before issue #616 this arrived
+    // as a global review dispatch instead; the window it has to survive is
+    // the same one, and a raw-FSM run is FSM-governed either way (ADR 0046).
     const root = await makeTempRoot();
-    await writeWaitStateProject(root);
+    await writeReviewRepairWaitProject(root);
 
     const preparedWorkspace = preparedWorkspaceFixture(root);
     await createGitWorkspaceAhead(preparedWorkspace);
@@ -846,6 +901,15 @@ describe("wait state lifecycle", () => {
         workspacePath: preparedWorkspace.workspacePath
       });
       seedStore.updateRunState("parent-run", "succeeded");
+      // The park the review round is observed from.
+      seedStore.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        workspacePath: preparedWorkspace.workspacePath
+      });
       seedStore.trackPullRequest({
         branchName: preparedWorkspace.branchName,
         headSha: "review-head",
@@ -918,13 +982,11 @@ describe("wait state lifecycle", () => {
     });
 
     try {
-      // PR follow-up is throttled for the first second after daemon startup.
-      await new Promise((resolve) => setTimeout(resolve, 1_050));
       await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       await provider.ready;
 
-      // Reconcile the label-ineligible issue while the review continuation has
-      // only reserved its slot and is still validating the provider.
+      // Reconcile the label-ineligible issue while the advanced run has only
+      // reserved its slot and is still validating the provider.
       await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
       provider.release();
 

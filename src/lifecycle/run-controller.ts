@@ -1860,6 +1860,17 @@ export class RunController {
         isContinuation: true,
         issue: refreshed,
         parentRunId: payload.parentRunId,
+        // Decide label immunity at the claim, not after the workflow reload
+        // inside runAttemptLifecycle. Its fallback computes the same answer,
+        // but only once the attempt is already under way -- so reserveSlot
+        // registers a raw-FSM advance as label-controlled, and a reconcile
+        // landing in the window before attachProvider cancels it as
+        // ELIGIBILITY_LOSS. A raw FSM legitimately removes `agent-ready` as
+        // it works, so that window is reachable on the expected path. The old
+        // review dispatch set this flag explicitly for the same reason; the
+        // advance path is where review rounds arrive now. See ADR 0046.
+        respectsIssueLabels:
+          loadedWorkflow.expandedWorkflow.source.kind !== "raw_fsm",
         project: {
           ...project,
           workflow: {
@@ -2333,39 +2344,38 @@ export class RunController {
       };
     }
 
-    const providersConfig = await this.providersLoader();
-
-    // This dispatch starts a fresh continuation at expandedWorkflow.initial
-    // (inheritParentState: false below), so it must honor action.provider on
-    // that raw-FSM initial state the same way dispatchOneFresh and
-    // executeStateAdvance do for their own initial/target states — otherwise
-    // a review-followup on an initial state that declares a non-default
-    // provider would silently launch the wrong one. See issue #358.
-    let initialAction: WorkflowAction | undefined;
+    // A raw FSM decides for itself where work resumes: it has a position, and
+    // that position is the only thing allowed to name a start state. This
+    // dispatch has no position to offer -- it would have to pick one, and the
+    // only one it could pick is `expandedWorkflow.initial`, which replays the
+    // pipeline against a finished PR (issue #616). A markdown
+    // compatibility-graph workflow has no state machine and no position, so
+    // its single entry point is the right and only answer, and this path
+    // stays its follow-up route.
+    //
+    // The global loop already declines to call this for a parked raw-FSM
+    // Issue (isIssueOwnedByWorkflow). This is the same rule stated where it
+    // is enforceable: a raw FSM whose run is NOT parked has terminated or
+    // blocked, and replaying it from the top is no more correct there.
     try {
       const loaded = await this.loadWorkflow(project.workflow);
       if (
         loaded.errors.length === 0 &&
         loaded.expandedWorkflow.source.kind === "raw_fsm"
       ) {
-        const initialState = findWorkflowState(
-          loaded.expandedWorkflow,
-          loaded.expandedWorkflow.initial
-        );
-        if (initialState?.action !== undefined) {
-          initialAction = initialState.action;
-        }
+        return {
+          dispatched: false,
+          reason: "raw_fsm workflow owns its own review follow-up"
+        };
       }
     } catch {
-      // Workflow load failure falls back to the project default; the same
-      // error surfaces from runAttemptLifecycle's reload during the attempt.
+      // Workflow load failure falls through to the markdown path, where the
+      // same error surfaces from runAttemptLifecycle's reload during the
+      // attempt.
     }
 
-    const providerName =
-      initialAction?.kind === "agent" && initialAction.provider !== undefined
-        ? initialAction.provider
-        : project.agent.provider;
-
+    const providersConfig = await this.providersLoader();
+    const providerName = project.agent.provider;
     const provider = this.agentProviders[providerName];
     if (provider === undefined) {
       return {
@@ -2427,11 +2437,6 @@ export class RunController {
       await this.runFreshLifecycle({
         attemptNumber: 1,
         extraInstructions: renderReviewFollowupInstructions(input.review),
-        // The parent is whatever run is currently tracked against this PR —
-        // by construction that run is parked at a wait/merge_pr state, so its
-        // current_state_id is never a valid start state for this dispatch.
-        // Fall back to expandedWorkflow.initial instead. See issue #358.
-        inheritParentState: false,
         isContinuation: true,
         issue: refreshed,
         parentRunId: input.parentRunId,
@@ -2589,7 +2594,6 @@ export class RunController {
     attemptNumber: number;
     claimGuard?: () => boolean;
     extraInstructions?: string;
-    inheritParentState?: boolean;
     isContinuation: boolean;
     issue: IssueSnapshot;
     parentRunId: string | null;
@@ -2641,7 +2645,6 @@ export class RunController {
 
   private async claimAndPersistRun(input: {
     claimGuard?: () => boolean;
-    inheritParentState?: boolean;
     isContinuation: boolean;
     issue: IssueSnapshot;
     parentRunId: string | null;
@@ -2780,9 +2783,6 @@ export class RunController {
       if (input.isContinuation && input.parentRunId !== null) {
         this.runStore.createContinuationRun({
           ...createInput,
-          ...(input.inheritParentState === undefined
-            ? {}
-            : { inheritParentState: input.inheritParentState }),
           parentRunId: input.parentRunId
         });
       } else {

@@ -417,6 +417,80 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("refuses a raw_fsm review dispatch even with no parked run to defer to", async () => {
+    // The global loop's deference covers a parked run. This is the same rule
+    // stated where it is enforceable: a raw FSM whose run is not parked has
+    // terminated or blocked, so there is no position to resume from and
+    // replaying the pipeline from `initial` is no more correct there than it
+    // was for a parked one. Nothing outside the FSM picks a start state.
+    // See issue #616.
+    const root = await makeTempRoot();
+    await writeRawFsmReviewFollowupProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup";
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        "symphonika",
+        "issues",
+        "54-review-followup"
+      );
+      await createGitWorkspaceAhead({ branchName, workspacePath });
+
+      // A terminated run, not a parked one: nothing for the loop to defer to.
+      store.createRun({
+        id: "parent-run",
+        issue: normalizedIssue(),
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+
+      const providerInputs: ProviderRunInput[] = [];
+      const provider = fakeProvider(providerInputs);
+      const project = rawFsmReviewFollowupProjectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue(issueFixture()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider,
+        root,
+        runStore: store,
+        workspacePath
+      });
+
+      const result = await controller.dispatchReviewFollowup({
+        issueNumber: 54,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        review: {
+          headSha: "abc123",
+          pullRequestNumber: 81,
+          pullRequestUrl: "https://example.test/pr/81",
+          reviewDecision: "CHANGES_REQUESTED",
+          statusCheckRollupState: "SUCCESS",
+          unresolvedThreads: []
+        }
+      });
+
+      expect(result).toEqual({
+        dispatched: false,
+        reason: "raw_fsm workflow owns its own review follow-up"
+      });
+      expect(providerInputs).toHaveLength(0);
+    } finally {
+      store.close();
+    }
+  });
+
   it("keeps a markdown PR follow-up retry label-immune across the retry handoff", async () => {
     const root = await makeTempRoot();
     // writeProject writes a markdown (non-raw_fsm) WORKFLOW.md. The label-

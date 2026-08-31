@@ -1107,17 +1107,15 @@ export class RunStore {
     }));
   }
 
-  // Inheriting the parent's current_state_id is only correct when the caller
-  // has already forward-stamped that parent row with the state this
-  // continuation should start at (recordWorkflowStateAdvance / createWaitingRun
-  // do this before scheduling). A caller whose "parent" is simply whatever run
-  // is currently associated with an issue/PR — e.g. PR review-followup, where
-  // the parent is by construction parked at a wait/merge_pr state — must pass
-  // inheritParentState: false so the continuation instead falls back to
-  // expandedWorkflow.initial in runAttemptLifecycle. See issue #358.
+  // A continuation resumes at its parent's current_state_id, which every
+  // caller has forward-stamped with the state this continuation should start
+  // at (recordWorkflowStateAdvance / createWaitingRun do this before
+  // scheduling). There is deliberately no opt-out: a caller that cannot name
+  // a position has no business starting a raw-FSM run, and the one that used
+  // to (PR review follow-up, which fell back to expandedWorkflow.initial and
+  // replayed the pipeline) now defers to the workflow instead. See issue #616.
   createContinuationRun(
     input: CreateRunInput & {
-      inheritParentState?: boolean;
       parentRunId: string;
     }
   ): void {
@@ -1134,9 +1132,6 @@ export class RunStore {
       providerName: input.providerName,
       state: "queued"
     });
-    if (input.inheritParentState === false) {
-      return;
-    }
     const parent = this.database
       .prepare("select current_state_id from runs where id = ?")
       .get(input.parentRunId) as

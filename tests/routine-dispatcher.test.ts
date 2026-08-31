@@ -4666,12 +4666,16 @@ describe("RoutineFiringDispatcher", () => {
         await Promise.resolve();
         yield {
           normalized: {
-            message: `inherited env leaked password ${secret}`,
+            message: `inherited env leaked password ${secret} and token tracker-token-value`,
             type: "message"
           },
-          raw: { delta: `inherited env leaked password ${secret}` }
+          raw: {
+            delta: `inherited env leaked password ${secret} and token tracker-token-value`
+          }
         };
-        throw new Error(`provider crashed while holding ${secret}`);
+        throw new Error(
+          `provider crashed while holding ${secret} and tracker-token-value`
+        );
       }),
       validate: vi.fn().mockResolvedValue(undefined)
     } satisfies AgentProvider;
@@ -4752,7 +4756,7 @@ describe("RoutineFiringDispatcher", () => {
       const firing = runStore.getRoutineFiring("fire-redact-evidence");
       expect(firing?.state).toBe("failed");
       expect(firing?.terminalReason).toBe(
-        "provider crashed while holding [REDACTED]"
+        "provider crashed while holding [REDACTED] and [REDACTED]"
       );
       expect(firing?.terminalReason).not.toContain(secret);
 
@@ -4790,6 +4794,11 @@ describe("RoutineFiringDispatcher", () => {
       // process's env, so an agent echoing it would otherwise write it into
       // the same artifact (SPEC.md §6).
       expect(handedStderrRedactSecrets).toContain("tracker-token-value");
+      // ... and it is scrubbed from the JSONL evidence and the terminal reason
+      // on the same terms as the SMTP password, not only from the tee.
+      expect(rawLog).not.toContain("tracker-token-value");
+      expect(normalizedLog).not.toContain("tracker-token-value");
+      expect(firing?.terminalReason).not.toContain("tracker-token-value");
 
       expect(delivered).toHaveLength(1);
       expect(delivered[0]?.text).not.toContain(secret);

@@ -1131,6 +1131,16 @@ async function runRoutineFiring(input: {
   stateRoot: string;
 }): Promise<RoutineFiringResult> {
   const events: NormalizedProviderEvent[] = [];
+  // One secret list for every writer in this firing. The notification config
+  // supplies the SMTP password; the tracker token is env-backed and resolved
+  // here rather than stored. Providers run full-permission and inherit this
+  // process's environment, so either can come back out of a provider's own
+  // output and must be scrubbed from the JSONL evidence, the stderr tee, and
+  // any terminal reason derived from them alike (SPEC.md §6).
+  const redactSecrets = (): string[] => [
+    ...input.redactSecrets(),
+    ...routineTrackerTokens(input.project, input.env)
+  ];
   const deadline = routineFiringDeadline(input.routine.timeoutMinutes);
   const scratchIdentity = { attempt: 1, id: input.firingId };
   let prepared: PreparedRoutineWorkspace | undefined;
@@ -1279,14 +1289,8 @@ async function runRoutineFiring(input: {
         stderrLogPath: evidence.stderrLogPath,
         // The stderr tee lands in the same evidence directory as the raw and
         // normalized logs and is served by the same artifact routes, so it
-        // honours the same redaction invariant they do (SPEC.md §6). The
-        // tracker token is added on top of the JSONL writers' own list:
-        // providers inherit this process's env, so an agent that echoes the
-        // token would otherwise persist it verbatim.
-        stderrRedactSecrets: [
-          ...input.redactSecrets(),
-          ...routineTrackerTokens(input.project, input.env)
-        ],
+        // scrubs the same secrets they do.
+        stderrRedactSecrets: redactSecrets(),
         workspacePath: prepared.workspacePath
       })) {
         const normalizedLogCursor = await appendRoutineEvent({
@@ -1296,7 +1300,7 @@ async function runRoutineFiring(input: {
           normalizedLogOffset,
           normalizedLogSequence,
           rawLogPath,
-          redactSecrets: input.redactSecrets
+          redactSecrets
         });
         normalizedLogOffset = normalizedLogCursor.offset;
         normalizedLogSequence = normalizedLogCursor.sequence;
@@ -1407,7 +1411,7 @@ async function runRoutineFiring(input: {
       input.routine.kind,
       githubSnapshotSince
     );
-    const resolvedRedactSecrets = input.redactSecrets();
+    const resolvedRedactSecrets = redactSecrets();
     const redactedTerminalReason =
       outcome.reason.length === 0
         ? null
@@ -1550,7 +1554,7 @@ async function runRoutineFiring(input: {
     const explainedFinalReason = finalCancelled
       ? finalReason
       : await withProviderStderrTail(finalReason, stderrLogPath);
-    const resolvedRedactSecrets = input.redactSecrets();
+    const resolvedRedactSecrets = redactSecrets();
     const redactedFinalReason = redactAll(
       explainedFinalReason,
       resolvedRedactSecrets

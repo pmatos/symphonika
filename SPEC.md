@@ -911,8 +911,10 @@ a Run or Firing ends without a clean provider exit, the tail of that log is appe
 terminal reason, which otherwise carries nothing but `process_exit_<code>` or `firing_timeout`.
 
 Provider stderr is redacted on the way to disk, streamed so a secret split across two reads is
-still caught: a Routine Firing scrubs the same secret list §6 requires for its raw and normalized
-evidence, and an issue Run scrubs its project's resolved tracker token. The
+still caught. A Routine Firing scrubs the same list its raw and normalized evidence and terminal
+reason use — the configured SMTP password plus the project's resolved tracker token. An issue Run
+scrubs its project's resolved tracker token; the rest of a Run's evidence has no redaction pass at
+all, which is tracked separately. The
 provider adapter waits for that write to flush before its attempt generator returns, so the
 terminal-reason excerpt is read after the bytes land rather than racing them; the wait is bounded,
 because evidence capture is best-effort and must never keep a Run or Firing from reaching a

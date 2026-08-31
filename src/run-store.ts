@@ -15,7 +15,6 @@ import {
   encodeJsonArrayColumn
 } from "./run-store-json-columns.js";
 import type { AgentProviderName, NormalizedProviderEvent } from "./provider.js";
-import { PROVIDER_STREAM_STALL_THRESHOLD_MS } from "./provider-stream-status.js";
 import { providerStderrLogPath } from "./providers/provider-stderr.js";
 import type {
   RoutineOutcome,
@@ -493,21 +492,28 @@ export type ProviderEventRecord = {
   type: string;
 };
 
+// Matches Codex's built-in stream idle timeout. It has no control effect —
+// nothing terminates on it — so it stays a constant until recovered-gap
+// evidence justifies tuning. See ADR 0090.
+export const PROVIDER_STREAM_STALL_THRESHOLD_MS = 5 * 60_000;
+
 export type ProviderStreamStallRecord = {
   attemptId: string;
   durationMs: number;
   gapStartedAt: string;
-  lastEventSequence: number | null;
+  lastEventSequence: number;
   resumedAt: string;
   resumedWithSequence: number;
   runId: string;
 };
 
-export type ProviderStreamEventRecord = {
+// One watermark row per Attempt, not a log: the newest raw provider-event
+// receipt the orchestrator has durably observed.
+export type ProviderStreamReceipt = {
   attemptId: string;
-  createdAt: string;
+  lastEventAt: string;
+  lastEventSequence: number;
   runId: string;
-  sequence: number;
 };
 
 export type WatchdogSample = {
@@ -597,7 +603,7 @@ export type ProviderEventMetadataInput = {
   sequence: number;
 };
 
-export type ProviderStreamEventInput = {
+export type ProviderStreamReceiptInput = {
   attemptId: string;
   runId: string;
   sequence: number;
@@ -691,13 +697,13 @@ type ProviderStreamStallRow = {
   attempt_id: string;
   duration_ms: number;
   gap_started_at: string;
-  last_event_sequence: number | null;
+  last_event_sequence: number;
   resumed_at: string;
   resumed_with_sequence: number;
   run_id: string;
 };
 
-type ProviderStreamEventRow = {
+type ProviderStreamReceiptRow = {
   attempt_id: string;
   last_event_at: string;
   last_event_sequence: number;
@@ -4001,73 +4007,61 @@ export class RunStore {
           sequence: input.sequence,
           type: input.normalized.type
         });
-      this.insertProviderStreamEvent(input, createdAt);
+      this.insertProviderStreamReceipt(input, createdAt);
     });
     apply();
   }
 
-  recordProviderStreamEvent(input: ProviderStreamEventInput): void {
+  recordProviderStreamReceipt(input: ProviderStreamReceiptInput): void {
     const apply = this.database.transaction(() => {
-      this.insertProviderStreamEvent(input, timestamp());
+      this.insertProviderStreamReceipt(input, timestamp());
     });
     apply();
   }
 
-  private insertProviderStreamEvent(
-    input: ProviderStreamEventInput,
-    createdAt: string
+  private insertProviderStreamReceipt(
+    input: ProviderStreamReceiptInput,
+    receivedAt: string
   ): void {
-    const previous = this.database
-      .prepare(
-        [
-          "select run_id, attempt_id, last_event_sequence, last_event_at",
-          "from provider_stream_events where attempt_id = ?"
-        ].join(" ")
-      )
-      .get(input.attemptId) as ProviderStreamEventRow | undefined;
-
-    const gapStartedAt =
-      previous?.last_event_at ??
-      (
+    const previous = this.getProviderStreamReceipt(input.attemptId);
+    // Only a gap between two receipts is transport silence. The wait before an
+    // Attempt's first event is workspace preparation and provider startup, so
+    // recording it here would corrupt the very duration distribution this
+    // evidence exists to measure. The page still labels that quiet window as
+    // stalled from the Attempt's creation time; it just is not durable
+    // stall evidence. See ADR 0090.
+    if (previous !== undefined) {
+      const durationMs =
+        Date.parse(receivedAt) - Date.parse(previous.lastEventAt);
+      if (durationMs >= PROVIDER_STREAM_STALL_THRESHOLD_MS) {
         this.database
-          .prepare("select created_at from attempts where id = ?")
-          .get(input.attemptId) as { created_at: string } | undefined
-      )?.created_at;
-    const durationMs =
-      gapStartedAt === undefined
-        ? Number.NaN
-        : Date.parse(createdAt) - Date.parse(gapStartedAt);
-    if (
-      Number.isFinite(durationMs) &&
-      durationMs >= PROVIDER_STREAM_STALL_THRESHOLD_MS
-    ) {
-      this.database
-        .prepare(
-          [
-            "insert or ignore into provider_stream_stalls (",
-            "run_id, attempt_id, last_event_sequence, resumed_with_sequence,",
-            "gap_started_at, resumed_at, duration_ms",
-            ") values (",
-            "@run_id, @attempt_id, @last_event_sequence, @resumed_with_sequence,",
-            "@gap_started_at, @resumed_at, @duration_ms",
-            ")"
-          ].join(" ")
-        )
-        .run({
-          attempt_id: input.attemptId,
-          duration_ms: Math.floor(durationMs),
-          gap_started_at: gapStartedAt,
-          last_event_sequence: previous?.last_event_sequence ?? null,
-          resumed_at: createdAt,
-          resumed_with_sequence: input.sequence,
-          run_id: input.runId
-        });
+          .prepare(
+            [
+              "insert or ignore into provider_stream_stalls (",
+              "run_id, attempt_id, last_event_sequence, resumed_with_sequence,",
+              "gap_started_at, resumed_at, duration_ms",
+              ") values (",
+              "@run_id, @attempt_id, @last_event_sequence, @resumed_with_sequence,",
+              "@gap_started_at, @resumed_at, @duration_ms",
+              ")"
+            ].join(" ")
+          )
+          .run({
+            attempt_id: input.attemptId,
+            duration_ms: Math.floor(durationMs),
+            gap_started_at: previous.lastEventAt,
+            last_event_sequence: previous.lastEventSequence,
+            resumed_at: receivedAt,
+            resumed_with_sequence: input.sequence,
+            run_id: input.runId
+          });
+      }
     }
 
     this.database
       .prepare(
         [
-          "insert into provider_stream_events (",
+          "insert into provider_stream_receipts (",
           "run_id, attempt_id, last_event_sequence, last_event_at",
           ") values (@run_id, @attempt_id, @last_event_sequence, @last_event_at)",
           "on conflict(attempt_id) do update set",
@@ -4078,7 +4072,7 @@ export class RunStore {
       )
       .run({
         attempt_id: input.attemptId,
-        last_event_at: createdAt,
+        last_event_at: receivedAt,
         last_event_sequence: input.sequence,
         run_id: input.runId
       });
@@ -4363,24 +4357,24 @@ export class RunStore {
     return rows.map((row) => mapProviderStreamStallRow(row));
   }
 
-  getLatestProviderStreamEvent(
+  getProviderStreamReceipt(
     attemptId: string
-  ): ProviderStreamEventRecord | undefined {
+  ): ProviderStreamReceipt | undefined {
     const row = this.database
       .prepare(
         [
           "select run_id, attempt_id, last_event_sequence, last_event_at",
-          "from provider_stream_events where attempt_id = ?"
+          "from provider_stream_receipts where attempt_id = ?"
         ].join(" ")
       )
-      .get(attemptId) as ProviderStreamEventRow | undefined;
+      .get(attemptId) as ProviderStreamReceiptRow | undefined;
     return row === undefined
       ? undefined
       : {
           attemptId: row.attempt_id,
-          createdAt: row.last_event_at,
-          runId: row.run_id,
-          sequence: row.last_event_sequence
+          lastEventAt: row.last_event_at,
+          lastEventSequence: row.last_event_sequence,
+          runId: row.run_id
         };
   }
 
@@ -5233,7 +5227,7 @@ export class RunStore {
         foreign key (attempt_id) references attempts(id)
       );
 
-      create table if not exists provider_stream_events (
+      create table if not exists provider_stream_receipts (
         attempt_id text primary key,
         run_id text not null,
         last_event_sequence integer not null,
@@ -5246,7 +5240,7 @@ export class RunStore {
         id integer primary key autoincrement,
         run_id text not null,
         attempt_id text not null,
-        last_event_sequence integer,
+        last_event_sequence integer not null,
         resumed_with_sequence integer not null,
         gap_started_at text not null,
         resumed_at text not null,
@@ -5258,17 +5252,6 @@ export class RunStore {
 
       create index if not exists provider_stream_stalls_run_resumed_idx
         on provider_stream_stalls(run_id, resumed_at);
-
-      insert or ignore into provider_stream_events (
-        run_id, attempt_id, last_event_sequence, last_event_at
-      )
-      select event.run_id, event.attempt_id, event.sequence, event.created_at
-      from provider_events event
-      inner join (
-        select attempt_id, max(id) as id
-        from provider_events
-        group by attempt_id
-      ) latest on latest.id = event.id;
 
       create table if not exists tracked_pull_requests (
         id integer primary key autoincrement,
@@ -5776,7 +5759,35 @@ export class RunStore {
       from watchdog_samples;
     `);
 
+    this.backfillProviderStreamReceipts();
     this.backfillAttemptMetadataPaths();
+  }
+
+  // Seeds one receipt per Attempt from the newest normalized event a database
+  // recorded before raw receipts became durable. Raw-only activity from before
+  // this evidence existed cannot be reconstructed, so this is a floor, not a
+  // replay. Guarded because it scans all of provider_events: once any receipt
+  // exists the table is authoritative and re-running it on every open would
+  // buy nothing. See ADR 0090.
+  private backfillProviderStreamReceipts(): void {
+    const seeded = this.database
+      .prepare("select 1 from provider_stream_receipts limit 1")
+      .get();
+    if (seeded !== undefined) {
+      return;
+    }
+    this.database.exec(`
+      insert or ignore into provider_stream_receipts (
+        run_id, attempt_id, last_event_sequence, last_event_at
+      )
+      select event.run_id, event.attempt_id, event.sequence, event.created_at
+      from provider_events event
+      inner join (
+        select attempt_id, max(id) as id
+        from provider_events
+        group by attempt_id
+      ) latest on latest.id = event.id;
+    `);
   }
 
   private backfillRunIssueRepositories(): void {

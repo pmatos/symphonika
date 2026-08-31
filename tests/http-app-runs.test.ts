@@ -718,7 +718,7 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
-  it("preserves a recovered stall that ended with the attempt's first event", async () => {
+  it("does not record the wait for an attempt's first event as stall evidence", async () => {
     const test = await setup();
     try {
       withClaimTime("2026-08-28T13:00:00.000Z", () => {
@@ -768,20 +768,18 @@ describe("HTTP app — runs API and pages", () => {
         "/api/runs/provider-stream-first-event"
       );
       const body = (await response.json()) as {
-        providerStream: { recoveredStalls: unknown[] };
+        providerStream: {
+          lastEventAt: string | null;
+          recoveredStalls: unknown[];
+        };
       };
 
-      expect(body.providerStream.recoveredStalls).toEqual([
-        {
-          attemptId: "provider-stream-first-event-attempt-1",
-          durationMs: 360_000,
-          gapStartedAt: "2026-08-28T13:00:00.000Z",
-          lastEventSequence: null,
-          resumedAt: "2026-08-28T13:06:00.000Z",
-          resumedWithSequence: 1,
-          runId: "provider-stream-first-event"
-        }
-      ]);
+      // The six minutes before the first event are workspace preparation and
+      // provider startup, not transport silence, so they must not enter the
+      // measured stall distribution — while the receipt itself is still
+      // recorded.
+      expect(body.providerStream.lastEventAt).toBe("2026-08-28T13:06:00.000Z");
+      expect(body.providerStream.recoveredStalls).toEqual([]);
     } finally {
       test.cleanup();
     }
@@ -825,7 +823,7 @@ describe("HTTP app — runs API and pages", () => {
         });
       });
       withClaimTime("2026-08-28T13:04:00.000Z", () => {
-        test.runStore.recordProviderStreamEvent({
+        test.runStore.recordProviderStreamReceipt({
           attemptId: "provider-stream-raw-activity-attempt-1",
           runId: "provider-stream-raw-activity",
           sequence: 2

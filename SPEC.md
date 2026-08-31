@@ -2523,8 +2523,12 @@ The Run-detail page renders the same Provider stream evidence unconditionally: l
 event (or `none`), time since that event, the five-minute threshold, and recovered-stall count. A
 running gap at or beyond the threshold adds `Stream stalled, provider retrying (Nm)`. This is a
 non-terminal observation, not an idle-kill timer or a Watchdog Progress Signal. The next raw event
-clears it and durably records the gap's start, nullable prior sequence, resuming sequence and
-timestamp, and duration for distribution measurement. See ADR 0090.
+clears it and, when the gap fell between two receipts, durably records the gap's start, prior and
+resuming sequences, resume timestamp, and duration for distribution measurement. The wait before an
+Attempt's first receipt is workspace preparation rather than transport silence, so it is never
+recorded as a stall. Both the Run-detail page and `GET /api/runs/:id` read the same effective clock
+the Watchdog uses, so a terminal Run does not pair a frozen Watchdog age with a drifting
+provider-event age. See ADR 0090.
 
 The server-rendered dashboard and `/runs` list surface the same idle/grace state as a small
 "watchdog idle since X (Y remaining)" badge next to the state pill, shown only for active

@@ -594,11 +594,20 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       }
       const events = runStore.listProviderEvents(detail.id, { limit: 100 });
       const activeAttempt = detail.attempts[detail.attempts.length - 1];
-      const latestEvent =
+      const streamReceipt =
         activeAttempt === undefined
           ? undefined
-          : runStore.getLatestProviderStreamEvent(activeAttempt.id);
+          : runStore.getProviderStreamReceipt(activeAttempt.id);
       const { attempts, transitions, ...run } = detail;
+      // Both observability sections read the same effective clock so a
+      // terminal Run does not pair a frozen Watchdog age with an ever-drifting
+      // provider-event age. See resolveWatchdogNowMs in watchdog-status.ts.
+      const detailNowMs = resolveWatchdogNowMs({
+        liveNowMs: now(),
+        runId: run.id,
+        runState: run.state,
+        runStore
+      });
       const pullRequestFollowup = buildPullRequestFollowupAttention({
         detail,
         maxDispatches:
@@ -612,8 +621,8 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         events,
         providerStream: buildProviderStreamStatus({
           attempt: activeAttempt,
-          latestEvent,
-          nowMs: now(),
+          nowMs: detailNowMs,
+          receipt: streamReceipt,
           recoveredStalls: runStore.listProviderStreamStalls(detail.id),
           runState: run.state
         }),
@@ -626,12 +635,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
             ? null
             : buildWatchdogStatus({
                 config: watchdogConfig,
-                nowMs: resolveWatchdogNowMs({
-                  liveNowMs: now(),
-                  runId: run.id,
-                  runState: run.state,
-                  runStore
-                }),
+                nowMs: detailNowMs,
                 runCreatedAt: run.createdAt,
                 runId: run.id,
                 runStore

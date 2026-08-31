@@ -3799,7 +3799,7 @@ export class RunController {
         : [appendJsonl(input.normalizedLogPath, input.event.normalized)])
     ]);
     if (input.event.normalized === undefined) {
-      this.runStore.recordProviderStreamEvent({
+      this.runStore.recordProviderStreamReceipt({
         attemptId: input.attemptId,
         runId: input.runId,
         sequence: input.sequence

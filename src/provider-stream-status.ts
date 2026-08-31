@@ -1,11 +1,10 @@
-import type {
-  AttemptStatus,
-  ProviderStreamEventRecord,
-  ProviderStreamStallRecord,
-  RunState
+import {
+  PROVIDER_STREAM_STALL_THRESHOLD_MS,
+  type AttemptStatus,
+  type ProviderStreamReceipt,
+  type ProviderStreamStallRecord,
+  type RunState
 } from "./run-store.js";
-
-export const PROVIDER_STREAM_STALL_THRESHOLD_MS = 5 * 60_000;
 
 export type ProviderStreamStatus = {
   lastEventAgeMs: number | null;
@@ -18,17 +17,20 @@ export type ProviderStreamStatus = {
 
 export function buildProviderStreamStatus(input: {
   attempt: AttemptStatus | undefined;
-  latestEvent: ProviderStreamEventRecord | undefined;
   nowMs: number;
-  recoveredStalls?: ProviderStreamStallRecord[];
+  receipt: ProviderStreamReceipt | undefined;
+  recoveredStalls: ProviderStreamStallRecord[];
   runState: RunState;
 }): ProviderStreamStatus {
-  const lastEventAt = input.latestEvent?.createdAt ?? null;
+  const lastEventAt = input.receipt?.lastEventAt ?? null;
   const lastEventAtMs =
     lastEventAt === null ? Number.NaN : Date.parse(lastEventAt);
   const lastEventAgeMs = Number.isNaN(lastEventAtMs)
     ? null
     : Math.max(0, input.nowMs - lastEventAtMs);
+  // Before the first receipt the Attempt's own start is the gap origin, so a
+  // Run that has produced nothing at all still reads as stalled rather than
+  // merely blank. It is deliberately not durable stall evidence — see ADR 0090.
   const quietSince = lastEventAt ?? input.attempt?.createdAt;
   const quietSinceMs =
     quietSince === undefined ? Number.NaN : Date.parse(quietSince);
@@ -43,7 +45,7 @@ export function buildProviderStreamStatus(input: {
   return {
     lastEventAgeMs,
     lastEventAt,
-    recoveredStalls: input.recoveredStalls ?? [],
+    recoveredStalls: input.recoveredStalls,
     stalled,
     stalledForMs: stalled ? quietForMs : null,
     thresholdMs: PROVIDER_STREAM_STALL_THRESHOLD_MS

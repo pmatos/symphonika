@@ -642,10 +642,10 @@ export function registerPages(options: RegisterPagesOptions): void {
     const isFailure =
       FAILURE_STATES.has(detail.state) || BLOCKED_STATES.has(detail.state);
     const terminalAttempt = detail.attempts[detail.attempts.length - 1];
-    const latestAttemptEvent =
+    const streamReceipt =
       terminalAttempt === undefined
         ? undefined
-        : options.runStore.getLatestProviderStreamEvent(terminalAttempt.id);
+        : options.runStore.getProviderStreamReceipt(terminalAttempt.id);
     const failureEvent = isFailure
       ? options.runStore.getLastFailureEvent(id, terminalAttempt?.id)
       : undefined;
@@ -700,8 +700,8 @@ export function registerPages(options: RegisterPagesOptions): void {
           });
     const providerStream = buildProviderStreamStatus({
       attempt: terminalAttempt,
-      latestEvent: latestAttemptEvent,
-      nowMs: now(),
+      nowMs: detailNowMs,
+      receipt: streamReceipt,
       recoveredStalls: options.runStore.listProviderStreamStalls(detail.id),
       runState: detail.state
     });

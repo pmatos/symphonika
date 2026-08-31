@@ -381,7 +381,7 @@ describe("daemon dispatch", () => {
         expect(
           database
             .prepare(
-              "select last_event_sequence from provider_stream_events where run_id = ?"
+              "select last_event_sequence from provider_stream_receipts where run_id = ?"
             )
             .get("run-issue-8")
         ).toMatchObject({ last_event_sequence: 4 });

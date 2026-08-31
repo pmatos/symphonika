@@ -1872,7 +1872,6 @@ describe("doctor", () => {
       await writeFile(
         path.join(unitDir, "symphonika-providers.slice"),
         renderProvidersSliceUnit()
-          .replace("MemoryHigh=24G", "MemoryHigh=8G")
           .replace("MemoryMax=32G", "MemoryMax=12G")
           .replace("TasksMax=4096", "TasksMax=2048"),
         "utf8"
@@ -1885,6 +1884,53 @@ describe("doctor", () => {
       });
 
       expect(report.warnings).toEqual([]);
+    });
+
+    // `service install --force` never reaches a host that doesn't re-run it,
+    // so an installed providers slice still carrying the MemoryHigh= that
+    // docs/adr/0089 removed keeps throttling every concurrent provider at
+    // once — with nothing killed — exactly as before the fix. Structural
+    // presence is checked here, never the operator's chosen value.
+    it("warns when the installed providers slice still declares MemoryHigh=", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      const unitBin = path.join(homeDir, "bin");
+      await mkdir(unitDir, { recursive: true });
+      await writeStubExecutables(unitBin, ["gh"]);
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        currentServiceUnit(unitBin),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit(),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit().replace(
+          "MemoryMax=32G",
+          "MemoryHigh=24G\nMemoryMax=32G"
+        ),
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("symphonika-providers.slice") &&
+            warning.includes("MemoryHigh=") &&
+            warning.includes("service install")
+        )
+      ).toBe(true);
     });
 
     it("reports no warnings when the installed units match the current generator output", async () => {

@@ -660,7 +660,11 @@ async function runLiveCheck(
 // file can't be regenerated and byte-compared generically; only structural
 // markers (Slice=, Type=notify) are checked there. The `.slice` files are
 // also checked structurally because their resource-limit values are
-// operator-customizable (README.md).
+// operator-customizable (README.md) — presence, never value. A removed
+// directive is checked the same way: `service install --force` cannot reach
+// a host that never re-runs it, so an installed providers slice still
+// carrying the MemoryHigh= that docs/adr/0089 removed keeps reproducing the
+// stall it was removed for, and only a warning here surfaces that.
 async function checkInstalledUnitDrift(
   unitDir: string,
   servicePath: string,
@@ -712,8 +716,17 @@ async function checkInstalledUnitDrift(
   warnings.push(
     ...(await checkSliceDrift(
       path.join(unitDir, "symphonika-providers.slice"),
-      ["MemoryHigh", "MemoryMax", "TasksMax"],
-      reinstallHint
+      ["MemoryMax", "TasksMax"],
+      reinstallHint,
+      [
+        {
+          name: "MemoryHigh",
+          why:
+            "a soft limit on the slice every concurrent provider shares " +
+            "throttles them all at once without killing the one at fault, " +
+            "stalling whole fan-outs (docs/adr/0089)"
+        }
+      ]
     ))
   );
 
@@ -723,7 +736,8 @@ async function checkInstalledUnitDrift(
 async function checkSliceDrift(
   slicePath: string,
   requiredDirectives: string[],
-  reinstallHint: string
+  reinstallHint: string,
+  obsoleteDirectives: Array<{ name: string; why: string }> = []
 ): Promise<string[]> {
   const content = await readFileIfExists(slicePath);
   if (content === undefined) {
@@ -733,17 +747,25 @@ async function checkSliceDrift(
   if (directives === undefined) {
     return [`${slicePath} has no [Slice] section — ${reinstallHint}`];
   }
+  const warnings: string[] = [];
   const missingDirectives = requiredDirectives.filter(
     (directive) => !directives.has(directive)
   );
   if (missingDirectives.length > 0) {
-    return [
+    warnings.push(
       `${slicePath} is missing required [Slice] directives (${missingDirectives
         .map((directive) => `${directive}=`)
         .join(", ")}) — ${reinstallHint}`
-    ];
+    );
   }
-  return [];
+  for (const obsolete of obsoleteDirectives) {
+    if (directives.has(obsolete.name)) {
+      warnings.push(
+        `${slicePath} still declares ${obsolete.name}= — ${obsolete.why} — ${reinstallHint}`
+      );
+    }
+  }
+  return warnings;
 }
 
 function sliceDirectiveNames(content: string): Set<string> | undefined {

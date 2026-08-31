@@ -126,9 +126,9 @@ function flushGracePeriod(): Promise<void> {
 // Buffers what a byte-boundary redactor cannot yet rule out. `data` chunks
 // split at arbitrary byte offsets, so a secret — or even a single multi-byte
 // character — can straddle two of them; decoding through StringDecoder and
-// holding back `longest secret - 1` characters is what makes a split secret
-// still match. With no secrets configured the stream passes through as raw
-// bytes, so the common case stays byte-identical to a plain tee.
+// holding back the tail is what makes a split secret still match. With no
+// secrets configured the stream passes through as raw bytes, so the common
+// case stays byte-identical to a plain tee.
 function createStreamingRedactor(secrets: readonly string[]): {
   flush: () => Buffer;
   push: (chunk: Buffer) => Buffer;
@@ -140,7 +140,6 @@ function createStreamingRedactor(secrets: readonly string[]): {
     };
   }
 
-  const holdback = Math.max(...secrets.map((secret) => secret.length)) - 1;
   const decoder = new StringDecoder("utf8");
   let carry = "";
 
@@ -154,12 +153,41 @@ function createStreamingRedactor(secrets: readonly string[]): {
       const redacted = redactAll(carry + decoder.write(chunk), secrets);
       const boundary = holdbackBoundary(
         redacted,
-        redacted.length - Math.min(holdback, redacted.length)
+        redacted.length - pendingSecretPrefixLength(redacted, secrets)
       );
       carry = redacted.slice(boundary);
       return Buffer.from(redacted.slice(0, boundary), "utf8");
     }
   };
+}
+
+// How much of the tail must be withheld because it could still turn out to be
+// the start of a secret. Only a suffix that is a *proper prefix of some
+// secret* qualifies; everything before it can never become part of a match and
+// goes to disk now.
+//
+// A blanket `longest secret - 1` holdback would be simpler but would defeat
+// this module's whole purpose: with a 40-character tracker token in the secret
+// list, a short diagnostic like `fatal: disk full` would sit in memory and
+// never reach disk if the orchestrator itself is killed — the crash-recovery
+// case the tee exists to serve — and longer streams would always trail their
+// last 39 characters.
+function pendingSecretPrefixLength(
+  text: string,
+  secrets: readonly string[]
+): number {
+  const longest = Math.max(...secrets.map((secret) => secret.length));
+  for (let length = Math.min(longest - 1, text.length); length > 0; length--) {
+    const suffix = text.slice(text.length - length);
+    if (
+      secrets.some(
+        (secret) => secret.length > length && secret.startsWith(suffix)
+      )
+    ) {
+      return length;
+    }
+  }
+  return 0;
 }
 
 // Each side of the holdback split is encoded by its own `Buffer.from`, so a

@@ -252,6 +252,71 @@ describe("attachProviderStderrLog redaction", () => {
   });
 });
 
+describe("attachProviderStderrLog redaction durability", () => {
+  it("puts a short diagnostic on disk before the stream ends", async () => {
+    // The whole point of teeing the head of the stream is that an orchestrator
+    // killed mid-run still leaves the evidence behind. A blanket
+    // `longest secret - 1` holdback would keep a message shorter than the
+    // secret in memory forever — with a 40-character token, `fatal: disk full`
+    // would never reach disk at all.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+    const token = `ghp_${"a".repeat(36)}`;
+    const child: ChildProcessWithoutNullStreams = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        "process.stderr.write('fatal: disk full\\n'); await new Promise((r) => setTimeout(r, 5_000));"
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    child.stdout.resume();
+    const capture = attachProviderStderrLog(child, logPath, {
+      redactSecrets: [token]
+    });
+
+    try {
+      // No EOF, no flush — only the tee's own incremental writes.
+      await expect
+        .poll(() => readProviderStderrTail(logPath), { timeout: 4_000 })
+        .toBe("fatal: disk full");
+    } finally {
+      child.kill("SIGKILL");
+      await capture.waitForFlush();
+    }
+  });
+
+  it("withholds only a tail that could still complete a secret", async () => {
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+    const child: ChildProcessWithoutNullStreams = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        "process.stderr.write('warn: token=hun'); await new Promise((r) => setTimeout(r, 5_000));"
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    child.stdout.resume();
+    const capture = attachProviderStderrLog(child, logPath, {
+      redactSecrets: ["hunter2"]
+    });
+
+    try {
+      // "hun" could still become "hunter2", so it stays in the carry; the
+      // text before it is already unambiguous and goes to disk now.
+      await expect
+        .poll(() => readProviderStderrTail(logPath), { timeout: 4_000 })
+        .toBe("warn: token=");
+    } finally {
+      child.kill("SIGKILL");
+      await capture.waitForFlush();
+    }
+  });
+});
+
 describe("attachProviderStderrLog flush barrier", () => {
   it("orders the tail read after the write, with no sleep", async () => {
     // The production callers read this file to explain an unclean exit as soon

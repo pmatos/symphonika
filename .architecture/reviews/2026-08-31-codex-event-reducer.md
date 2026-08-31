@@ -166,4 +166,23 @@ This pick is a clean, behaviour-preserving pure-function extraction with a priva
 
 ## Design
 
-_Written in step 4 (design-it-twice + adjudication); the file is amended and committed again after this section is filled._
+Three interfaces were designed in parallel by sub-agents, then adjudicated by a fourth that authored none of them. All three extract the mapping into `src/providers/codex-events.ts`; they differ in how the mapping-state (`lastAgentMessage` delta accumulation, `lastProgressMarkerAtMs` rate-limit) is carried, and in how the read-only `threadId`/`turnId` — written by session setup at `codex.ts:232,290`, read by `cancel()` at `105-113`, only *read* by the mapper — is reached.
+
+**A — minimal surface, in-place state.** `mapCodexJsonRpcMessage(raw, state: CodexEventState): ProviderEvent`, where `CodexEventState` is the narrow slice `{ now, threadId?, turnId?, lastAgentMessage?, lastProgressMarkerAtMs? }` and `ActiveCodexRun` structurally satisfies it, so the provider passes `activeRun` unchanged and the function mutates it in place. Smallest diff to `codex.ts`.
+
+**B — pure immutable reducer.** `mapCodexJsonRpcMessage(raw, state, nowMs): { event, state }`, returning a new immutable state the read loop threads (`mapState = result.state`). Referentially transparent; `now` lifted out of state so state stays a value-equality record.
+
+**C — stateful reducer closure (WINNER).** `createCodexEventReducer({ now, session: () => CodexTurnContext }) => { reduce(raw): ProviderEvent }`. The two mapper-owned accumulators become closure `let`s that no caller can name; `threadId`/`turnId` stay owned by `ActiveCodexRun` and are read live through the read-only `session()` getter. `ActiveCodexRun` drops `lastAgentMessage`/`lastProgressMarkerAtMs`/`now` and gains one opaque `reducer` field; `providerEventFromQueueItem` calls `activeRun.reducer.reduce(item.raw)`.
+
+**Adjudication.** C wins criteria 1–3 (depth, locality, seam) and loses only criterion 5 (blast radius) to A. On **depth** — the highest separating criterion — A's interface *publishes* the two accumulators as fields the whole file must know not to touch (TypeScript only "catches drift at the call site" because nothing pins the slice to the module), whereas C's per-call interface is just `reduce(raw)` with the accumulators sealed in the closure. Same behaviour, strictly narrower and harder-to-misuse surface. The construction-order objection is moot: because the mapper never *writes* `threadId`/`turnId`, C's read-only `session()` reproduces today's `?? activeRun.threadId` fallback exactly, undefined-during-setup included. A's smaller diff is criterion 5, reserved for otherwise-equal designs — which these are not. **B** was weakest: it pushes state-threading onto the caller across `readUntilResponse`/`drainUntilExit` (largest blast radius) and its immutable snapshot would freeze the asynchronously-written `threadId`/`turnId`.
+
+**Runner-up design: A.** It loses to C on depth, as above.
+
+### Implementation shape
+
+- **New `src/providers/codex-json.ts`** — the leaf JSON accessors (`field`/`objectField`/`stringField`/`numberField`/`booleanField`/`stringArrayField`/`responseId`) plus `JsonObject`, imported by both `codex.ts` (used 79× there) and `codex-events.ts`. A dedicated leaf module keeps `codex-events.ts` cohesive and breaks the would-be import cycle (`codex.ts` → `codex-events.ts` for the reducer, both → `codex-json.ts` for parsing primitives).
+- **New `src/providers/codex-events.ts`** — `createCodexEventReducer` + the reducer/deps/context types, the moved mapping helpers (`thinkingEvent`, `progressMarkerEvent`, `codexToolCallInput`, `isInputRequiredMethod`, `CodexProgressSignal`, `PROGRESS_MARKER_MIN_INTERVAL_MS`), and the two stateless event builders the read loop still needs (`jsonRpcErrorEvent`, `isTerminalFailure`), which `codex.ts` imports back.
+- **`src/providers/codex.ts`** — construct the reducer at `activeRun` creation with `session: () => ({ threadId: activeRun.threadId, turnId: activeRun.turnId })` (closure captured lazily, so no TDZ), swap the mapper call for `activeRun.reducer.reduce`, and delete the moved code.
+- **New `tests/codex-events.test.ts`** — drives message sequences through `createCodexEventReducer(...).reduce(...)` with a fake `now` and a fixed session context: subprocess-free assertions on delta accumulation, the `PROGRESS_MARKER_MIN_INTERVAL_MS` rate-limit, `willRetry`→`progress` vs terminal error, input-required detection, and `turn/completed` result capture. The existing `tests/codex-provider.test.ts` end-to-end suite stays green, pinning behaviour preservation.
+
+Estimate: ~4 files (one over the ~3 scored; the extra is `codex-json.ts`, still well within the blast-radius-2 band — no published interface moves).

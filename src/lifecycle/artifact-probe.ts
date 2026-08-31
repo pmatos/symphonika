@@ -70,7 +70,12 @@ export function statePredicateKeys(state: ExpandedWorkflowState): Set<string> {
   return keys;
 }
 
-function collectArtifactPaths(state: ExpandedWorkflowState): Set<string> {
+// Exported so the progress fingerprint can observe exactly the paths this
+// state's predicates name -- a second, independently derived path list would
+// let the fingerprint miss an artifact the decision actually turned on.
+export function collectArtifactPaths(
+  state: ExpandedWorkflowState
+): Set<string> {
   const paths = new Set<string>();
   addArtifactPaths(state.completeWhen, paths);
   for (const transition of state.transitions) {

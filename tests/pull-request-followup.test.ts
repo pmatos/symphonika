@@ -169,15 +169,18 @@ describe("pull request follow-up", () => {
     }
   });
 
-  it("actually runs the review-followup agent when the tracked PR's run is parked at a raw_fsm wait state", async () => {
-    // Regression for #358: dispatchReviewFollowup's parentRunId always points
-    // at whichever run is currently associated with the tracked PR — which,
-    // for a PR under active follow-up, is always parked at a `kind: wait`
-    // state (that's why it's being followed up on). createContinuationRun's
-    // parent-state inheritance is only valid when the parent's current state
-    // was just forward-stamped as a target for this exact continuation
-    // (state-advance, wait-park-advance); here it's stale, and inheriting it
-    // used to trip the parked-action guard and silently no-op the dispatch.
+  it("defers to the workflow when the tracked PR's run is parked at a raw_fsm state", async () => {
+    // Issue #616. The run associated with a tracked PR under follow-up is by
+    // construction parked at a state of its own -- that is why it is being
+    // polled at all. This loop used to dispatch anyway, re-entering the
+    // workflow at `expandedWorkflow.initial`, which replayed the whole
+    // pipeline against a finished PR and left the Issue with two live FSM
+    // positions: the untouched parked row and the fresh chain racing it.
+    //
+    // Supersedes the #358 regression this replaces. That fix made the
+    // dispatch actually launch an agent; the agent it launched was at the
+    // wrong state. The FSM position is now the only thing that decides where
+    // work resumes, so the loop observes and records but does not act.
     const root = await makeTempRoot();
     await writeRawFsmReviewFollowupProject(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -191,14 +194,8 @@ describe("pull request follow-up", () => {
         "issues",
         "54-review-followup"
       );
-      // The branch is already ahead of main, mirroring an open PR's branch —
-      // the follow-up run's transition back to wait_for_pr requires
-      // branch_ahead_of_base, which classifyFailure verifies against the
-      // real git state of this workspace.
       await createGitWorkspaceAhead({ branchName, workspacePath });
 
-      // The run associated with the tracked PR sits parked at wait_for_pr —
-      // exactly where every tracked PR's run is while it's being polled.
       seedWaitingParentRun(store, {
         branchName,
         currentStateId: "wait_for_pr",
@@ -269,43 +266,32 @@ describe("pull request follow-up", () => {
       });
 
       expect(result).toEqual({
-        action: "review_dispatch",
-        prNumber: 81,
-        runId: "review-run-1"
+        action: "none",
+        reason: "no pull request follow-up action"
       });
+      expect(providerInputs).toHaveLength(0);
+      expect(store.getRun("review-run-1")).toBeUndefined();
 
-      // The core bug: dispatch was recorded as successful, but the agent
-      // that was supposed to read the review feedback never launched.
-      expect(providerInputs).toHaveLength(1);
-      expect(providerInputs[0]!.prompt).toContain(
-        "Pull request review follow-up"
-      );
-      expect(providerInputs[0]!.prompt).toContain(
-        "Please wire this into the daemon poll loop."
-      );
-
-      // Not just "did it launch" — it must also complete successfully and
-      // re-advance the FSM (implement's transition requires
-      // branch_ahead_of_base as well as provider_success), not land on the
-      // `to: failed` catch-all.
-      const reviewRun = store.getRun("review-run-1");
-      expect(reviewRun).toMatchObject({
-        continuationParentRunId: "parent-run",
-        isContinuation: true,
-        state: "succeeded"
+      // The one live FSM position stays exactly where it was, still owned by
+      // the workflow and still eligible for its own re-evaluation.
+      expect(store.getRun("parent-run")).toMatchObject({
+        currentStateId: "wait_for_pr",
+        state: "waiting"
+      });
+      expect(store.listOpenTrackedPullRequests()[0]).toMatchObject({
+        reviewDispatchCount: 0
       });
     } finally {
       store.close();
     }
   });
 
-  it("resolves the raw-FSM initial state's declared provider for review-followup dispatch, not just the project default", async () => {
-    // Regression for the codex review on #360: dispatchReviewFollowup now
-    // launches the initial state (see the test above), but until it resolves
-    // that state's own action.provider it always used project.agent.provider
-    // — silently launching the wrong provider whenever the initial state
-    // declares a different one, exactly like dispatchOneFresh/executeStateAdvance
-    // already handle for their own initial/target states.
+  it("defers to the workflow regardless of what provider its initial state declares", async () => {
+    // The deference is a property of the Issue being workflow-owned, not of
+    // the workflow's shape. This fixture's initial state declares `claude`
+    // while the project default is `codex` -- the divergence that used to
+    // matter because the dispatch launched that initial state. Nothing
+    // launches now, so neither provider runs. See issue #616.
     const root = await makeTempRoot();
     await writeRawFsmReviewFollowupProjectWithClaudeInitial(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -344,8 +330,6 @@ describe("pull request follow-up", () => {
         ...fakeProvider(claudeInputs),
         name: "claude"
       };
-      // projectConfig()'s agent.provider is "codex" — the project default —
-      // while the workflow's initial state (above) declares "claude".
       const project = rawFsmReviewFollowupProjectConfig();
       const githubIssuesApi: GitHubIssuesApi = {
         addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
@@ -418,26 +402,15 @@ describe("pull request follow-up", () => {
       });
 
       expect(result).toEqual({
-        action: "review_dispatch",
-        prNumber: 81,
-        runId: "review-run-1"
+        action: "none",
+        reason: "no pull request follow-up action"
       });
-
-      // The initial state's own declared provider (claude) must run — not
-      // the project default (codex).
-      expect(claudeInputs).toHaveLength(1);
+      expect(claudeInputs).toHaveLength(0);
       expect(codexInputs).toHaveLength(0);
-      expect(claudeInputs[0]!.provider).toEqual({
-        command: providersConfig().claude.command,
-        name: "claude"
-      });
-
-      const reviewRun = store.getRun("review-run-1");
-      expect(reviewRun).toMatchObject({
-        continuationParentRunId: "parent-run",
-        isContinuation: true,
-        provider: "claude",
-        state: "succeeded"
+      expect(store.getRun("review-run-1")).toBeUndefined();
+      expect(store.getRun("parent-run")).toMatchObject({
+        currentStateId: "wait_for_pr",
+        state: "waiting"
       });
     } finally {
       store.close();

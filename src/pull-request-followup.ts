@@ -354,17 +354,39 @@ async function processTrackedPullRequests(input: {
     const headSha =
       state.headSha === "" ? tracked.lastSeenHeadSha : state.headSha;
     const trackingState = trackedStateFor(state);
+    // A raw-FSM workflow parked on this Issue decides what happens to its own
+    // pull request -- both the merge (ADR 0048) and the review feedback. This
+    // loop observes and records; it does not act. Acting anyway is what gave
+    // one Issue two live FSM positions, the second replaying the pipeline from
+    // `initial` against a finished PR. See issue #616.
+    const workflowOwned =
+      trackingState === "open" &&
+      (await input.runController.isIssueOwnedByWorkflow({
+        issueNumber: tracked.issueNumber,
+        projectName: tracked.projectName
+      }));
     input.runStore.recordPullRequestObservation({
       headSha,
       id: tracked.id,
       prUrl: state.url,
+      // The global dispatch cap cannot be reached on a PR this loop never
+      // dispatches for. A workflow-owned park that stops making progress
+      // raises its own attention instead (progress guard, issue #616).
       reviewFollowupCapReached:
+        !workflowOwned &&
         trackingState === "open" &&
         pullRequestNeedsReviewFollowup(state) &&
         tracked.reviewDispatchCount >= input.policy.maxReviewDispatchesPerPr,
       state: trackingState
     });
     if (trackingState !== "open") {
+      continue;
+    }
+    if (workflowOwned) {
+      input.logger?.debug(
+        { prNumber: tracked.prNumber, issueNumber: tracked.issueNumber },
+        "symphonika PR follow-up deferred: workflow owns this issue"
+      );
       continue;
     }
 
@@ -384,22 +406,6 @@ async function processTrackedPullRequests(input: {
     }
 
     if (!pullRequestReadyToMerge(state, input.policy)) {
-      continue;
-    }
-    // Defer to the workflow when a merge_pr state is parked on this issue —
-    // otherwise the first-discovery tick would merge with the global method
-    // before reEvaluateWaitingRun has a chance to apply the workflow's
-    // method override and record merge_pr evidence. See ADR 0048.
-    if (
-      await input.runController.isIssueParkedInMergePrState({
-        issueNumber: tracked.issueNumber,
-        projectName: tracked.projectName
-      })
-    ) {
-      input.logger?.info(
-        { prNumber: tracked.prNumber, issueNumber: tracked.issueNumber },
-        "symphonika PR follow-up merge deferred: workflow merge_pr state will handle"
-      );
       continue;
     }
     // Another GitHub subsystem can engage this project's credential

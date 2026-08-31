@@ -1065,13 +1065,24 @@ export class RunController {
     }
   }
 
-  // Tells the global PR follow-up loop whether a tracked PR's merge belongs
-  // to a workflow-controlled merge_pr state. When true, the global loop
-  // must skip the auto-merge so the next reEvaluateWaitingRun tick can
-  // apply the workflow's method override and record merge_pr evidence —
-  // otherwise discovery and global merge happen in the same tick before
-  // the merge_pr state's re-evaluation sees the tracked PR. See ADR 0048.
-  async isIssueParkedInMergePrState(input: {
+  // Tells the global PR follow-up loop whether a raw-FSM workflow already owns
+  // this Issue -- that is, whether it is parked at a state of its own and will
+  // decide what happens next on its own tick. When true, the global loop must
+  // act on neither the merge nor the review feedback.
+  //
+  // This started life as `isIssueParkedInMergePrState`, asking only about the
+  // merge (ADR 0048): without it, discovery and the global merge happen in the
+  // same tick, before the merge_pr state's re-evaluation ever sees the tracked
+  // PR. Review feedback needed exactly the same deference and did not have it,
+  // so a parked run and a workflow-unaware review dispatch ran as two live FSM
+  // positions on one Issue, the second replaying the pipeline from `initial`
+  // against a finished PR. Asking the general question is what makes that
+  // unrepresentable rather than merely guarded against. See issue #616.
+  //
+  // Scoped to raw_fsm because only a raw FSM has a position to be parked at.
+  // A markdown compatibility-graph workflow has no state machine, so the
+  // global loop remains its only follow-up path.
+  async isIssueOwnedByWorkflow(input: {
     issueNumber: number;
     projectName: string;
   }): Promise<boolean> {
@@ -1093,11 +1104,16 @@ export class RunController {
     if (loaded.errors.length > 0) {
       return false;
     }
-    const state = findWorkflowState(
-      loaded.expandedWorkflow,
-      waiting.currentStateId
+    if (loaded.expandedWorkflow.source.kind !== "raw_fsm") {
+      return false;
+    }
+    // A `current_state_id` naming a state the workflow no longer has means the
+    // workflow was edited out from under the park. Nothing will advance that
+    // row, so claiming ownership here would strand the PR entirely.
+    return (
+      findWorkflowState(loaded.expandedWorkflow, waiting.currentStateId) !==
+      undefined
     );
-    return state?.action?.kind === "merge_pr";
   }
 
   // Observes the tracked pull request and projects it into the wait state's

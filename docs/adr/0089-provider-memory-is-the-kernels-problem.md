@@ -90,9 +90,18 @@ addition is needed for that.
   files and runs `daemon-reload`; a running daemon keeps its old slice until
   `systemctl --user restart symphonika.service`. An operator who never re-runs install keeps a
   providers slice with `MemoryHigh=24G` and keeps reproducing the incident. `doctor` therefore
-  warns when the installed providers slice still declares `MemoryHigh=`, alongside its existing
-  drift warnings. This is a structural check on the directive's *presence*, consistent with the
-  slice-drift design's rule that operator-chosen *values* are never drift.
+  warns when a providers slice still has a finite `MemoryHigh=` in force, alongside its existing
+  drift warnings. This one check reads values, unlike every other slice-drift check: systemd applies
+  drop-ins after the base unit in sorted order and the last scalar assignment wins, so the warning
+  resolves the winning assignment across `symphonika-providers.slice` and
+  `symphonika-providers.slice.d/*.conf`, and treats an empty assignment or `infinity` as no limit at
+  all — a drop-in reading `MemoryHigh=infinity` is the idiomatic way to neutralize the base unit's
+  value, and warning on the directive's mere presence would nag exactly the operator who fixed it.
+  Where the winning assignment lives also decides the remediation: `install --force` rewrites only
+  the base unit, so a drop-in-sourced limit is reported against that file with a
+  remove-or-override-then-`daemon-reload` instruction instead. The slice-drift design's rule that
+  operator-chosen *values* are never drift still governs the *required* directives, which stay a
+  presence check against the base file alone.
 - **The slice and scope machinery is unchanged in every other respect.** Scopes still give
   cancellation a whole-cgroup kill, still give the startup sweep leaked units to reap, and
   `TasksMax=4096` still bounds a fork bomb. Removing limits is not removing isolation.

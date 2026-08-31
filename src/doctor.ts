@@ -660,11 +660,15 @@ async function runLiveCheck(
 // file can't be regenerated and byte-compared generically; only structural
 // markers (Slice=, Type=notify) are checked there. The `.slice` files are
 // also checked structurally because their resource-limit values are
-// operator-customizable (README.md) — presence, never value. A removed
-// directive is checked the same way: `service install --force` cannot reach
-// a host that never re-runs it, so an installed providers slice still
-// carrying the MemoryHigh= that docs/adr/0089 removed keeps reproducing the
-// stall it was removed for, and only a warning here surfaces that.
+// operator-customizable (README.md) — presence, never value. A directive a
+// slice is supposed to have SHED is the one exception, and it has to read
+// values: `service install --force` cannot reach a host that never re-runs
+// it, so an installed providers slice still carrying the MemoryHigh= that
+// docs/adr/0089 removed keeps reproducing the stall it was removed for, and
+// only a warning here surfaces that — but `MemoryHigh=infinity` in a drop-in
+// is the idiomatic way to neutralize the limit without touching the base
+// unit, so warning on the directive's mere presence would nag exactly the
+// operator who fixed it. See winningAssignment.
 async function checkInstalledUnitDrift(
   unitDir: string,
   servicePath: string,
@@ -743,13 +747,19 @@ async function checkSliceDrift(
   if (content === undefined) {
     return [`${slicePath} is missing — ${reinstallHint}`];
   }
-  const directives = sliceDirectiveNames(content);
-  if (directives === undefined) {
+  const baseAssignments = sliceAssignments(content, slicePath);
+  if (baseAssignments === undefined) {
     return [`${slicePath} has no [Slice] section — ${reinstallHint}`];
   }
   const warnings: string[] = [];
+  // Required directives are checked against the BASE file alone, unlike the
+  // obsolete ones below. `service install` writes the base unit, so that is
+  // the only place a required directive can go missing; folding drop-ins in
+  // here would instead let one that happens to re-state a directive mask a
+  // genuinely truncated base unit.
+  const baseNames = new Set(baseAssignments.map((entry) => entry.name));
   const missingDirectives = requiredDirectives.filter(
-    (directive) => !directives.has(directive)
+    (directive) => !baseNames.has(directive)
   );
   if (missingDirectives.length > 0) {
     warnings.push(
@@ -758,18 +768,110 @@ async function checkSliceDrift(
         .join(", ")}) — ${reinstallHint}`
     );
   }
-  for (const obsolete of obsoleteDirectives) {
-    if (directives.has(obsolete.name)) {
+  if (obsoleteDirectives.length > 0) {
+    const effective = await effectiveSliceAssignments(
+      slicePath,
+      baseAssignments
+    );
+    for (const obsolete of obsoleteDirectives) {
+      const winning = winningAssignment(effective, obsolete.name);
+      if (winning === undefined) {
+        continue;
+      }
       warnings.push(
-        `${slicePath} still declares ${obsolete.name}= — ${obsolete.why} — ${reinstallHint}`
+        obsoleteDirectiveWarning(slicePath, obsolete, winning, reinstallHint)
       );
     }
   }
   return warnings;
 }
 
-function sliceDirectiveNames(content: string): Set<string> | undefined {
-  const directives = new Set<string>();
+type SliceAssignment = { name: string; source: string; value: string };
+
+// A drop-in can carry the directive the slice is supposed to have shed, and
+// `service install --force` rewrites only the base unit (see
+// runServiceInstall) — so telling an operator to re-install would be useless
+// advice for a drop-in-sourced assignment, and the warning has to name the
+// file that actually has to change.
+function obsoleteDirectiveWarning(
+  slicePath: string,
+  obsolete: { name: string; why: string },
+  winning: SliceAssignment,
+  reinstallHint: string
+): string {
+  const declaration = `still declares ${obsolete.name}=${winning.value} — ${obsolete.why}`;
+  if (winning.source === slicePath) {
+    return `${slicePath} ${declaration} — ${reinstallHint}`;
+  }
+  return (
+    `${winning.source} ${declaration} — remove that assignment or ` +
+    `neutralize it with a later \`${obsolete.name}=infinity\` drop-in, then ` +
+    "run `systemctl --user daemon-reload` and restart the daemon; " +
+    "`symphonika service install --force` rewrites only the base unit and " +
+    "will not clear it"
+  );
+}
+
+// systemd applies drop-ins after the base unit, in sorted filename order, and
+// for a scalar directive the last successfully parsed assignment wins — so
+// only the winner decides whether the limit is really in force. An empty
+// assignment resets the directive and `infinity` means no limit at all, so
+// both count as "not declared" rather than as an obsolete leftover: an
+// operator who neutralized the base unit's value from a drop-in did exactly
+// the right thing and must not be warned about it.
+function winningAssignment(
+  assignments: SliceAssignment[],
+  name: string
+): SliceAssignment | undefined {
+  let winner: SliceAssignment | undefined;
+  for (const assignment of assignments) {
+    if (assignment.name === name) {
+      winner = assignment;
+    }
+  }
+  if (
+    winner === undefined ||
+    winner.value.length === 0 ||
+    winner.value.toLowerCase() === "infinity"
+  ) {
+    return undefined;
+  }
+  return winner;
+}
+
+async function effectiveSliceAssignments(
+  slicePath: string,
+  baseAssignments: SliceAssignment[]
+): Promise<SliceAssignment[]> {
+  const dropInDir = `${slicePath}.d`;
+  let dropInNames: string[];
+  try {
+    dropInNames = (await readdir(dropInDir))
+      .filter((name) => name.endsWith(".conf"))
+      .sort();
+  } catch {
+    return baseAssignments;
+  }
+
+  const assignments = [...baseAssignments];
+  for (const dropInName of dropInNames) {
+    const dropInPath = path.join(dropInDir, dropInName);
+    const content = await readFileIfExists(dropInPath);
+    if (content === undefined) {
+      continue;
+    }
+    assignments.push(...(sliceAssignments(content, dropInPath) ?? []));
+  }
+  return assignments;
+}
+
+// Returns the [Slice] section's assignments in file order, each tagged with
+// the file it came from, or undefined when the file has no [Slice] section.
+function sliceAssignments(
+  content: string,
+  source: string
+): SliceAssignment[] | undefined {
+  const assignments: SliceAssignment[] = [];
   let inSliceSection = false;
   let sawSliceSection = false;
 
@@ -786,11 +888,15 @@ function sliceDirectiveNames(content: string): Set<string> | undefined {
     }
     const equalsIndex = trimmed.indexOf("=");
     if (equalsIndex > 0) {
-      directives.add(trimmed.slice(0, equalsIndex).trim());
+      assignments.push({
+        name: trimmed.slice(0, equalsIndex).trim(),
+        source,
+        value: trimmed.slice(equalsIndex + 1).trim()
+      });
     }
   }
 
-  return sawSliceSection ? directives : undefined;
+  return sawSliceSection ? assignments : undefined;
 }
 
 async function readEffectiveUnitContent(

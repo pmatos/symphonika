@@ -1933,6 +1933,151 @@ describe("doctor", () => {
       ).toBe(true);
     });
 
+    // Regression: `service install --force` rewrites only the base unit, so a
+    // MemoryHigh= an operator or config manager parked in a drop-in survives
+    // the upgrade and keeps throttling the whole slice. The base file alone
+    // shows nothing wrong.
+    it("warns when a providers-slice drop-in declares MemoryHigh=", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      const unitBin = path.join(homeDir, "bin");
+      const dropInDir = path.join(unitDir, "symphonika-providers.slice.d");
+      await mkdir(dropInDir, { recursive: true });
+      await writeStubExecutables(unitBin, ["gh"]);
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        currentServiceUnit(unitBin),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit(),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit(),
+        "utf8"
+      );
+      await writeFile(
+        path.join(dropInDir, "10-local.conf"),
+        "[Slice]\nMemoryHigh=24G\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      // The remediation must name the drop-in, not the base unit: re-running
+      // `service install --force` would never clear it.
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("10-local.conf") &&
+            warning.includes("MemoryHigh=24G") &&
+            warning.includes("daemon-reload")
+        )
+      ).toBe(true);
+    });
+
+    // systemd applies drop-ins after the base unit in sorted order and the
+    // last scalar assignment wins, so `MemoryHigh=infinity` there is the
+    // idiomatic way to neutralize a limit without editing the base unit.
+    // Warning on the directive's presence would nag the operator who fixed it.
+    it("does not warn when a drop-in neutralizes MemoryHigh= with infinity", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      const unitBin = path.join(homeDir, "bin");
+      const dropInDir = path.join(unitDir, "symphonika-providers.slice.d");
+      await mkdir(dropInDir, { recursive: true });
+      await writeStubExecutables(unitBin, ["gh"]);
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        currentServiceUnit(unitBin),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit(),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit().replace(
+          "MemoryMax=32G",
+          "MemoryHigh=24G\nMemoryMax=32G"
+        ),
+        "utf8"
+      );
+      await writeFile(
+        path.join(dropInDir, "20-no-soft-limit.conf"),
+        "[Slice]\nMemoryHigh=infinity\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(report.warnings).toEqual([]);
+    });
+
+    // The required-directive half stays base-only on purpose: `service
+    // install` writes the base unit, so that is the only place a required
+    // directive can go missing, and folding drop-ins in would let one that
+    // re-states a directive mask a truncated base unit.
+    it("still reports a required directive missing from the base slice when a drop-in supplies it", async () => {
+      const root = await makeTempRoot();
+      const homeDir = await makeTempRoot();
+      const unitDir = path.join(homeDir, ".config", "systemd", "user");
+      const unitBin = path.join(homeDir, "bin");
+      const dropInDir = path.join(unitDir, "symphonika-providers.slice.d");
+      await mkdir(dropInDir, { recursive: true });
+      await writeStubExecutables(unitBin, ["gh"]);
+      await writeFile(
+        path.join(unitDir, "symphonika.service"),
+        currentServiceUnit(unitBin),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-daemon.slice"),
+        renderSliceUnit(),
+        "utf8"
+      );
+      await writeFile(
+        path.join(unitDir, "symphonika-providers.slice"),
+        renderProvidersSliceUnit().replace("MemoryMax=32G\n", ""),
+        "utf8"
+      );
+      await writeFile(
+        path.join(dropInDir, "10-local.conf"),
+        "[Slice]\nMemoryMax=32G\n",
+        "utf8"
+      );
+
+      const report = await runDoctor({
+        configPath: path.join(root, "nonexistent.yml"),
+        env: {},
+        homeDir
+      });
+
+      expect(
+        report.warnings.some(
+          (warning) =>
+            warning.includes("symphonika-providers.slice") &&
+            warning.includes("MemoryMax=") &&
+            warning.includes("missing required")
+        )
+      ).toBe(true);
+    });
+
     it("reports no warnings when the installed units match the current generator output", async () => {
       const root = await makeTempRoot();
       const homeDir = await makeTempRoot();

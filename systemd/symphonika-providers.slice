@@ -10,6 +10,11 @@ Description=Symphonika providers slice (spawned providers and verifiers)
 # symphonika-daemon.slice rather than its parent, it can no longer
 # throttle the daemon itself (docs/adr/0064).
 #
+# This is the AGGREGATE cap for every concurrent provider: each provider
+# runs as a transient scope inside this slice, and those scopes set no
+# memory limits of their own, so this bounds their total no matter how
+# many run at once and is the only memory ceiling in the path.
+#
 # There is deliberately no MemoryHigh= here. A soft limit on a slice
 # shared by every concurrent provider throttles reclaim and socket
 # allocation for all of them at once without killing anything, which
@@ -17,3 +22,9 @@ Description=Symphonika providers slice (spawned providers and verifiers)
 # MemoryMax= kills; MemoryHigh= only stalls.
 MemoryMax=32G
 TasksMax=4096
+
+# Lower I/O weight than symphonika-daemon.slice (500): under contention
+# the daemon wins, which is what keeps the dashboard and tick loop
+# responsive while an agent's build hammers the disk. Best effort — see
+# the note in the daemon slice about the cgroup v2 io controller.
+IOWeight=50

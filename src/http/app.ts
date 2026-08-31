@@ -42,6 +42,7 @@ import type {
   RunStatus,
   RunStore
 } from "../run-store.js";
+import { TERMINAL_RUN_STATES } from "../run-store.js";
 import {
   buildWatchdogIdleStatus,
   buildWatchdogStatus,
@@ -162,6 +163,7 @@ export type FireRoutineResult =
         | RoutineState
         | "concurrency_cap"
         | "daemon_shutdown"
+        | "host_pressure"
         | "overlap"
         | "self_update_draining";
     }
@@ -189,6 +191,20 @@ export type HttpAppOptions = {
       maxInFlight: number;
       projectName: string;
     }>;
+  };
+  // Host pressure-stall admission state (ADR 0088): the current verdict plus
+  // the sample behind it, so an operator can tell a deferred dispatch from an
+  // idle one without reading the journal.
+  getHostPressure?: () => {
+    admitted: boolean;
+    observed?: number;
+    reason?: string;
+    resource?: string;
+    sample?: {
+      fullAvg60: Record<string, number>;
+      unavailable: Record<string, string>;
+    };
+    threshold?: number;
   };
   getActiveRuns?: () => Array<{
     cancelReason: string | null;
@@ -245,7 +261,10 @@ export type HttpAppOptions = {
   getStatusSnapshot?: () => StatusSnapshot;
   getWatchdogConfig?: (
     projectName: string
-  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes" | "outputTokenBudget">;
+  ) => Pick<
+    WatchdogConfig,
+    "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
+  >;
   issuePollStatus?: IssuePollStatus;
   monotonicNow?: () => number;
   // Wall clock used by human/API-facing timestamps and ages.
@@ -304,15 +323,6 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "cancelled",
   "stale",
   "waiting"
-]);
-
-const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([
-  "cancelled",
-  "failed",
-  "blocked",
-  "input_required",
-  "stale",
-  "succeeded"
 ]);
 
 const RUN_ARTIFACT_CONTENT_TYPES: Record<RunArtifactKind, string> = {
@@ -409,6 +419,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         options.getConcurrency === undefined
           ? undefined
           : options.getConcurrency(),
+      hostPressure: options.getHostPressure?.(),
       stateRoot: options.stateRoot,
       tickAgeMs: lastTickAt === null ? null : now() - lastTickAt,
       uptimeMs: uptimeMs(startedAtMs, now)
@@ -504,7 +515,11 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         case "refused":
           return context.json(
             result,
-            result.reason === "concurrency_cap" ? 429 : 409
+            // Both are "come back later", not "this request is wrong".
+            result.reason === "concurrency_cap" ||
+              result.reason === "host_pressure"
+              ? 429
+              : 409
           );
       }
     }
@@ -591,6 +606,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
             runState: run.state,
             runStore
           }),
+          runCreatedAt: run.createdAt,
           runId: run.id,
           runStore
         })

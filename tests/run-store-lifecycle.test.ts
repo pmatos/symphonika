@@ -38,6 +38,7 @@ function seedRun(
     id?: string;
     issueNumber?: number;
     projectName?: string;
+    url?: string;
   } = {}
 ): string {
   const id = overrides.id ?? "run-1";
@@ -56,7 +57,7 @@ function seedRun(
       state: "open",
       title: "fixture",
       updated_at: "2025-01-01T00:00:00Z",
-      url: "https://example/1"
+      url: overrides.url ?? "https://example/1"
     },
     projectName: overrides.projectName ?? "symphonika",
     providerCommand: "fake",
@@ -1237,6 +1238,67 @@ describe("run-store schema migration", () => {
     }
   });
 
+  it("backfills issue_owner/issue_repo from persisted snapshot urls", async () => {
+    const root = await makeTempRoot();
+    const dbPath = databasePath(root);
+    const writer = new Database(dbPath);
+    try {
+      writer.exec(`
+        create table runs (
+          id text primary key,
+          project_name text not null,
+          issue_number integer not null,
+          issue_title text not null,
+          state text not null,
+          issue_snapshot_json text not null,
+          metadata_path text,
+          created_at text not null,
+          updated_at text not null
+        );
+        insert into runs (
+          id, project_name, issue_number, issue_title, state,
+          issue_snapshot_json, created_at, updated_at
+        ) values (
+          'legacy-github', 'symphonika', 7, 't', 'cancelled',
+          '{"url":"https://github.com/acme/alpha/issues/7"}',
+          '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
+        ), (
+          'legacy-unparseable', 'symphonika', 8, 't', 'cancelled',
+          '{"url":"https://example/8"}',
+          '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
+        ), (
+          'legacy-empty', 'symphonika', 9, 't', 'cancelled', '{}',
+          '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
+        );
+      `);
+    } finally {
+      writer.close();
+    }
+
+    const store = openRunStore({ stateRoot: root });
+    store.close();
+
+    const reader = new Database(dbPath, { readonly: true });
+    try {
+      expect(columnNames(reader, "runs")).toEqual(
+        expect.arrayContaining(["issue_owner", "issue_repo"])
+      );
+      expect(
+        reader
+          .prepare(
+            "select id, issue_owner, issue_repo from runs order by id asc"
+          )
+          .all()
+      ).toEqual([
+        { id: "legacy-empty", issue_owner: null, issue_repo: null },
+        { id: "legacy-github", issue_owner: "acme", issue_repo: "alpha" },
+        { id: "legacy-unparseable", issue_owner: null, issue_repo: null }
+      ]);
+    } finally {
+      reader.close();
+    }
+  });
+
   it("backfills sample history when upgrading a pre-history watchdog_samples table", async () => {
     const root = await makeTempRoot();
     const dbPath = databasePath(root);
@@ -1460,6 +1522,101 @@ describe("listResumableShutdownRuns", () => {
       expect(reopened.listResumableShutdownRuns()).toEqual([]);
     } finally {
       reopened.close();
+    }
+  });
+
+  it("scopes the newest-run guard per repository when a project is retargeted", async () => {
+    // The #602 reproduction: project P is retargeted from repository A to B,
+    // an issue with the same number is shutdown-cancelled in each, and the
+    // tracker returns to A. Before the repository partition, B's newer row
+    // eliminated A's, `resumeShutdownCancelledRuns` refused B at the origin
+    // gate, and A#7 stayed `sym:claimed` with no live run.
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const inA = seedRun(store, {
+        id: "run-a",
+        url: "https://github.com/acme/alpha/issues/7"
+      });
+      store.setRunCurrentState(inA, "implement");
+      store.markCancelRequested(inA, "daemon_shutdown");
+      store.updateRunState(inA, "cancelled");
+
+      const inB = seedRun(store, {
+        id: "run-b",
+        url: "https://github.com/acme/beta/issues/7"
+      });
+      store.setRunCurrentState(inB, "plan");
+      store.markCancelRequested(inB, "daemon_shutdown");
+      store.updateRunState(inB, "cancelled");
+
+      expect(
+        store
+          .listResumableShutdownRuns()
+          .map((entry) => ({
+            repository: entry.issueRepository,
+            runId: entry.runId
+          }))
+          .sort((left, right) => left.runId.localeCompare(right.runId))
+      ).toEqual([
+        { repository: { owner: "acme", repo: "alpha" }, runId: "run-a" },
+        { repository: { owner: "acme", repo: "beta" }, runId: "run-b" }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("treats a differently-cased repository as the same run history", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const older = seedRun(store, {
+        id: "run-1",
+        url: "https://github.com/acme/alpha/issues/7"
+      });
+      store.setRunCurrentState(older, "plan");
+      store.markCancelRequested(older, "daemon_shutdown");
+      store.updateRunState(older, "cancelled");
+
+      const newer = seedRun(store, {
+        id: "run-2",
+        url: "https://github.com/ACME/Alpha/issues/7"
+      });
+      store.setRunCurrentState(newer, "implement");
+      store.markCancelRequested(newer, "daemon_shutdown");
+      store.updateRunState(newer, "cancelled");
+
+      expect(
+        store.listResumableShutdownRuns().map((entry) => entry.runId)
+      ).toEqual(["run-2"]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps rows of undetermined origin in one history rather than splitting them", async () => {
+    // Two unparseable rows must not both surface: null is one bucket, not a
+    // value that matches nothing, or every legacy issue would be resumed
+    // twice.
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const older = seedRun(store, { id: "run-1" });
+      store.setRunCurrentState(older, "plan");
+      store.markCancelRequested(older, "daemon_shutdown");
+      store.updateRunState(older, "cancelled");
+
+      const newer = seedRun(store, { id: "run-2" });
+      store.setRunCurrentState(newer, "implement");
+      store.markCancelRequested(newer, "daemon_shutdown");
+      store.updateRunState(newer, "cancelled");
+
+      expect(
+        store.listResumableShutdownRuns().map((entry) => entry.runId)
+      ).toEqual(["run-2"]);
+    } finally {
+      store.close();
     }
   });
 

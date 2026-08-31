@@ -451,11 +451,13 @@ host is a declaration-time validation error. See ADR 0062. `symphonika init-proj
 routine-host` scaffolds a host without issue-filter, priority, or label-creation prompts.
 
 A Project may override `watchdog.grace_minutes` (a positive integer),
-`watchdog.output_token_budget` (a non-negative integer), and `watchdog.mtime_include` (a list of
-workspace-relative directories); each is optional and merges independently over daemon scope. A
+`watchdog.output_token_budget` (a non-negative integer), `watchdog.max_run_minutes` (a non-negative
+integer), and `watchdog.mtime_include` (a list of workspace-relative directories); each is optional
+and merges independently over daemon scope. A
 Project-level `mtime_include` replaces the daemon-scope list rather than adding to it. It inherits
 `watchdog.enabled`, `watchdog.sample_interval_seconds`, and `watchdog.mtime_ignore` from daemon
-scope, so a Project can lengthen its grace window, raise its convergence budget, or opt a build
+scope, so a Project can lengthen its grace window, raise its convergence budget, lengthen or waive
+its wall-clock cap, or opt a build
 tree back into the workspace walk, but cannot opt into a daemon-disabled Watchdog.
 Project overrides are part of the defensive Service Config reload snapshot: any invalid value or
 unknown key rejects the candidate snapshot for all Projects and leaves the last known-good snapshot
@@ -862,9 +864,19 @@ Recommended layout:
         prompt-metadata.json
         issue-snapshot.json
         workflow-graph.json
+  scratch/
+    <run-id>-attempt-<n>/
 ```
 
 Agents may modify workspaces, so orchestrator evidence must stay outside the Git worktree.
+
+`scratch/` holds one directory per provider attempt, passed to the spawned provider as `TMPDIR`
+(and `TMP`/`TEMP`). Without it a provider inherits the daemon's own temporary directory, which on
+most systemd hosts is a RAM-backed `/tmp` where multi-gigabyte build output permanently consumes
+memory. The directory is removed when the attempt ends, and daemon startup sweeps whatever a
+crashed instance left behind. It is transient, not evidence: nothing under `scratch/` is read
+back by any operator surface. Cargo output under a Project's own `target/` is deliberately left in
+the Workspace, where `watchdog.mtime_include` can still read it as progress. See ADR 0088.
 When the daemon is running, `daemon.json` records the local API endpoint for that state root.
 Operator CLI commands that use the descriptor must preflight the daemon status and reject endpoints
 whose reported state root differs from the configured state root.
@@ -925,9 +937,10 @@ On daemon startup:
    `terminal_reason = "provider requested input (legacy)"`.
 4. Validate Projects.
 5. Reconcile stale labels and previous run state.
-6. Start local UI/API if enabled.
-7. Perform an immediate poll.
-8. Schedule interval polling.
+6. Sweep provider scratch directories left behind by a previous daemon instance.
+7. Start local UI/API if enabled.
+8. Perform an immediate poll.
+9. Schedule interval polling.
 
 Default poll interval: `30000` ms.
 
@@ -940,8 +953,8 @@ pending. Validation and status commands must not dispatch work.
 
 The daemon also runs the Watchdog during reconciliation according to
 `watchdog.sample_interval_seconds`. The default Watchdog policy is enabled with a 30 minute
-no-progress grace window, a 150000 output-token convergence budget, and 60 second sampling
-interval.
+no-progress grace window, a 150000 output-token convergence budget, a 360 minute wall-clock Run cap,
+and 60 second sampling interval.
 
 ### 8.3 Multi-Project Dispatch
 
@@ -954,6 +967,21 @@ Dispatch uses weighted round-robin across Projects. Within each Project, issues 
 1. configured priority label mapping
 2. oldest creation time
 3. issue number
+
+Before the concurrency caps, admission consults the host itself. The orchestrator reads Linux's
+pressure-stall counters (`/proc/pressure/memory` and `/proc/pressure/io`) and defers claiming new
+work while a gated resource's `full avg60` percentage is at or above its configured ceiling. This
+is a separate verdict from the concurrency caps, with its own reason strings and its own
+`host_pressure` Routine skip reason, so a stalled host is never reported as a full cap. The
+counters are sampled at most once per `global.pressure.sample_interval_seconds` and refreshed once
+per daemon tick, so every admission decision in a tick sees one consistent reading. Runs already
+in flight are unaffected; this gates admission only.
+
+Defaults, applied when `global.pressure` is omitted: enabled, memory gated at 10%, I/O ungated,
+10 second sampling. I/O is opt-in because a healthy build host sustains an I/O `full avg60` in the
+50s under ordinary compilation, so no default ceiling is safe for every host. A threshold set to
+`null` ungates that resource. Where the counters cannot be read — non-Linux, or a kernel without
+`CONFIG_PSI` — the gate admits. See ADR 0088.
 
 A Dispatch Project may opt into `dispatch.overlap_guard: true` (default `false`). After the global
 and per-Project concurrency caps and per-Issue reservation checks, the picker compares a
@@ -1139,7 +1167,8 @@ DST rules.
 
 Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs.
 Fan-out admission is per target rather than atomic: admitted siblings start concurrently, while a
-target whose cap is full records a `concurrency_cap` skip. If an earlier firing of the same Routine
+target whose cap is full records a `concurrency_cap` skip, and a target evaluated while the host
+is stalled records a `host_pressure` skip. If an earlier firing of the same Routine
 Target remains non-terminal, that target records an `overlap` skip unless `allow_overlap: true` is
 configured; overlap opt-in does not bypass concurrency caps. A partial group is therefore normal.
 Every skip atomically advances only that target's clock event, updates its latest-attempt/skip
@@ -1368,11 +1397,19 @@ On Watchdog no-progress termination:
 - preserve workspace and logs
 
 On Watchdog convergence-budget termination, the same steps apply with
-`terminal_reason = "no_convergence"`.
+`terminal_reason = "no_convergence"`, and on Watchdog wall-clock termination with
+`terminal_reason = "run_timeout"`.
 
 On stale startup state:
 
 - if GitHub has `sym:claimed` or `sym:running` but there is no live local run, mark `sym:stale`
+- liveness is keyed by `(Project, repository, Issue)`: a Run holding `A#42` does not vouch for
+  `B#42` after the Project's tracker is retargeted. A liveness source that cannot name its
+  repository — an in-memory reservation, or a Run row written before repository identity was
+  persisted — vouches for the Issue number in any repository, because over-covering leaves an
+  Issue unmarked while under-covering strands it
+- the `sym:stale` write goes to the repository the Issue was polled from, not to the repository
+  the Project's name-keyed config resolves to
 - treat a Run cancelled with `cancel_reason = "daemon_shutdown"` that is still the newest Run for
   its Issue as live, not stale: it is awaiting resumption (section 12.3), and marking it would
   exclude the Issue from polling permanently
@@ -1711,13 +1748,18 @@ cancel landing during the drain — cannot overwrite `daemon_shutdown` with anot
 
 A shutdown cancellation is a pause, not a verdict on the Issue. The next daemon resumes the Runs
 the previous one cancelled: for each Run cancelled with `cancel_reason = "daemon_shutdown"` that is
-still the newest Run for its `(Project, Issue)` pair, the reconcile pass schedules a State Advance
+still the newest Run for its `(Project, repository, Issue)` triple, the reconcile pass schedules a State Advance
 at the Run's persisted `current_state_id`, so the walk re-enters the state it was executing and
 reuses its deterministic Workspace and Issue Branch. A Run cancelled before that state was
 persisted has no walk to resume; its `sym:claimed` (and any `sym:stale` an earlier boot wrote) is
 released instead, returning the Issue to fresh dispatch. A Project that is missing, disabled, or
 absent from the current poll snapshot defers the Run to a later tick rather than abandoning it.
-See ADR 0088.
+Newestness is scoped by repository so a Project retargeted from repository A to B and back does
+not let B's Run suppress A's still-resumable one; a Run whose persisted repository disagrees with
+the Project's current tracker is deferred, never acted on, by both this pass and the reconcile
+pass. Every Run persists the repository its Issue lived in when it was created; a Run whose origin
+cannot be determined (a legacy row, a non-GitHub tracker) proves no mismatch and is treated as
+before. See ADR 0088 and ADR 0089.
 Delayed-work registration closes with cancellation: the scheduler refuses timers armed after
 that point, so nothing fires against a store that is closing. A Run that was about to park
 into a wait state when cancellation latched is classified `cancelled` instead of flipping to
@@ -1818,6 +1860,32 @@ opposite failure mode from `no_progress` — a Run doing plenty of observable wo
 finishing, which satisfies the liveness rule on every tick. The budget is checked before the idle
 clock, honours the same per-Project override scope as `grace_minutes`, and like `no_progress` is
 deterministic rather than a transient retry reason. See ADR 0086.
+
+Ahead of both, the Watchdog enforces a **wall-clock cap**: once a sampled Run's age — `now` minus
+its `runs.created_at`, the instant it claimed its Issue — reaches `watchdog.max_run_minutes`
+(default 360; `0` disables it), the Run transitions to `stale` with
+`terminal_reason = "run_timeout"` and its provider is cancelled the same way. This is the only
+bound that does not depend on what the Run is doing: a Run trickling real output indefinitely
+advances a liveness signal on every tick and can stay far below the convergence budget, so neither
+of the other two rules can ever fire, while it holds a `global.max_in_flight` slot and its share of
+the provider memory budget for as long as it lives (issue #605). Unlike the attempt-scoped
+Progress Signal the cap is Run-scoped: its origin is the Run row's claim, so it accumulates across
+workspace preparation and every retry attempt of that Run, and a transient retry does not reset it.
+Enforcement, however, is bounded by the sampling scope above: the verdict is reached on a sampled
+Run, and sampling is `running`-only. A Run wedged *before* its provider starts — a hung clone in
+workspace preparation, `provider.validate`, or the `sym:running` label write — is therefore not
+reached by the cap, even though it holds a `global.max_in_flight` slot from the moment it is
+claimed. Terminating such a Run would not release that slot either: the slot is freed only when the
+lifecycle's `finally` unregisters it, which cannot run until the wedged call returns, and a
+reserved-but-unattached slot's cancel handler is a no-op. Closing that window needs a cancellable
+preparation deadline rather than a wider Watchdog state scope, and is tracked separately. It does
+not span a Run *chain* — a continuation,
+an FSM state advance, and a shutdown resume each write their own `runs` row and so each start a
+fresh cap. A Run whose `created_at` cannot be parsed is treated as having an unknown age and is
+never terminated by the cap. The cap is checked before the convergence budget and the idle clock,
+so a Run that has overrun several bounds at once reports the outermost one; it honours the same
+per-Project override scope as `grace_minutes`, and like the other two verdicts is deterministic
+rather than a transient retry reason. See ADR 0089.
 
 ### 12.5 PR Follow-up
 
@@ -2353,7 +2421,8 @@ parameter disambiguates a target and `force=true` applies the narrow disabled-Ro
 ambiguity, and availability refusals return a specific error without advancing the Routine clock.
 
 `GET /api/runs/:id` exposes the latest sample as a camel-cased top-level `watchdog` object, including
-the effective `graceMs` and server-computed `graceRemainingMs`. `GET /api/status` adds a `watchdog`
+the effective `graceMs` and server-computed `graceRemainingMs`, plus the effective `maxRunMs` and
+server-computed `runRemainingMs` (omitted when the wall-clock cap is disabled). `GET /api/status` adds a `watchdog`
 object to each active Run with `idleSince` and `graceRemainingMs` when idle. When the effective
 Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }` for that object.
 

@@ -50,6 +50,10 @@ import {
   MAX_ROUTINE_WORKSPACE_RETENTION_DAYS,
   type RoutineWorkspaceRetentionPolicy
 } from "./routines/workspace-retention.js";
+import {
+  DEFAULT_HOST_PRESSURE_POLICY,
+  type HostPressurePolicy
+} from "./lifecycle/host-pressure.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 
 export type RuntimeConfigSnapshot = {
@@ -58,6 +62,10 @@ export type RuntimeConfigSnapshot = {
   // Global concurrency cap snapshot. `maxInFlight: undefined` means
   // unbounded. See ADR 0053.
   globalConcurrency: { maxInFlight: number | undefined };
+  // Host pressure-stall admission policy (ADR 0088). Sits beside the count
+  // cap because both answer "may another run start now?" — one from the
+  // daemon's own bookkeeping, the other from the kernel's.
+  hostPressure: HostPressurePolicy;
   // Routine declarations that failed to load this reload and have no prior
   // valid snapshot to carry forward — a brand-new file, invalid from the
   // start. `name` is present only when the front matter's `name` field
@@ -111,6 +119,13 @@ export type WatchdogConfig = {
   // churn count as progress and makes every walk proportionally more
   // expensive.
   mtimeInclude: string[];
+  // Wall-clock minutes a single Run may live, measured from its claim, before
+  // the Watchdog stops it as timed out (ADR 0089). Zero disables the cap. This
+  // is the only bound that does not depend on what the Run is doing: a Run
+  // trickling real output forever satisfies both the liveness rule and the
+  // convergence budget while holding a concurrency slot and its share of the
+  // provider memory budget.
+  maxRunMinutes: number;
   // Cumulative output tokens a single Run may spend before the Watchdog stops
   // it as non-converging (ADR 0086). Zero disables the convergence guard and
   // leaves only the ADR 0054 liveness rule.
@@ -120,6 +135,7 @@ export type WatchdogConfig = {
 
 type ProjectWatchdogConfig = {
   graceMinutes?: number;
+  maxRunMinutes?: number;
   mtimeInclude?: string[];
   outputTokenBudget?: number;
 };
@@ -139,6 +155,10 @@ export type WatchdogServiceConfig = {
 export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   enabled: true,
   graceMinutes: 30,
+  // Six hours: an order of magnitude above any healthy Run and well under the
+  // thirteen-hour Runs of issue #605, so the cap only ever fires on a Run that
+  // has already stopped being worth its slot.
+  maxRunMinutes: 360,
   mtimeIgnore: [],
   mtimeInclude: [],
   outputTokenBudget: 150_000,
@@ -161,6 +181,19 @@ const routineExecutionDefaultsSchema = z
   })
   .strict();
 
+// Host pressure-stall thresholds (ADR 0088). Percentages of the PSI
+// `full avg60` window, so 0 would defer every dispatch on a host that has
+// ever stalled — hence `positive()`, not `nonnegative()`. Omitting a
+// resource leaves it ungated.
+const hostPressureSchema = z
+  .object({
+    enabled: z.boolean().default(DEFAULT_HOST_PRESSURE_POLICY.enabled),
+    io_full_avg60_max: z.number().positive().max(100).nullable().optional(),
+    memory_full_avg60_max: z.number().positive().max(100).nullable().optional(),
+    sample_interval_seconds: z.number().positive().optional()
+  })
+  .passthrough();
+
 const watchdogConfigSchema = z
   .object({
     enabled: z.boolean().default(DEFAULT_WATCHDOG_CONFIG.enabled),
@@ -182,13 +215,20 @@ const watchdogConfigSchema = z
       .number()
       .int()
       .nonnegative()
-      .default(DEFAULT_WATCHDOG_CONFIG.outputTokenBudget)
+      .default(DEFAULT_WATCHDOG_CONFIG.outputTokenBudget),
+    // Wall-clock cap on one Run's lifetime; 0 disables it (ADR 0089).
+    max_run_minutes: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(DEFAULT_WATCHDOG_CONFIG.maxRunMinutes)
   })
   .passthrough();
 
 const projectWatchdogConfigSchema = z
   .object({
     grace_minutes: z.number().int().positive().optional(),
+    max_run_minutes: z.number().int().nonnegative().optional(),
     mtime_include: z.array(z.string().trim().min(1)).optional(),
     output_token_budget: z.number().int().nonnegative().optional()
   })
@@ -369,9 +409,12 @@ const serviceConfigSchema = z
       .passthrough()
       .optional(),
     // Optional global concurrency cap. Omitted = unbounded. See ADR 0053.
+    // `pressure` gates the same admission decision on host stall, not count
+    // (ADR 0088); omitting it keeps the memory-only defaults.
     global: z
       .object({
-        max_in_flight: z.number().int().positive().optional()
+        max_in_flight: z.number().int().positive().optional(),
+        pressure: hostPressureSchema.optional()
       })
       .passthrough()
       .optional(),
@@ -464,6 +507,10 @@ export class RuntimeConfigReloader {
 
   globalConcurrency(): { maxInFlight: number | undefined } {
     return this.snapshot?.globalConcurrency ?? { maxInFlight: undefined };
+  }
+
+  hostPressurePolicy(): HostPressurePolicy {
+    return this.snapshot?.hostPressure ?? DEFAULT_HOST_PRESSURE_POLICY;
   }
 
   emailConfig(): EmailNotificationConfig | undefined {
@@ -911,6 +958,7 @@ async function loadRuntimeConfigSnapshot(input: {
       globalConcurrency: {
         maxInFlight: parsed.data.global?.max_in_flight
       },
+      hostPressure: normalizeHostPressurePolicy(parsed.data.global?.pressure),
       invalidRoutines,
       loadedAt: input.attemptedAt,
       polling,
@@ -1207,12 +1255,57 @@ function loadRoutineHostProject(input: {
   return "ok";
 }
 
+// An omitted `pressure:` block keeps the defaults (memory gated, io opt-in);
+// an omitted key inside a present block keeps that key's default, so an
+// operator who only sets `io_full_avg60_max` does not silently lose the
+// memory gate. Setting a threshold to `null` is how a resource is explicitly
+// ungated — YAML's own "this key has no value" — since `undefined` is
+// indistinguishable from "not written".
+function normalizeHostPressurePolicy(
+  raw: z.infer<typeof hostPressureSchema> | undefined
+): HostPressurePolicy {
+  const defaults = DEFAULT_HOST_PRESSURE_POLICY;
+  if (raw === undefined) {
+    return defaults;
+  }
+  const sampleIntervalSeconds = raw.sample_interval_seconds;
+  return {
+    enabled: raw.enabled,
+    sampleIntervalMs:
+      sampleIntervalSeconds === undefined
+        ? defaults.sampleIntervalMs
+        : Math.round(sampleIntervalSeconds * 1000),
+    thresholds: {
+      io: resolvePressureThreshold(
+        raw.io_full_avg60_max,
+        defaults.thresholds.io
+      ),
+      memory: resolvePressureThreshold(
+        raw.memory_full_avg60_max,
+        defaults.thresholds.memory
+      )
+    }
+  };
+}
+
+function resolvePressureThreshold(
+  configured: number | null | undefined,
+  fallback: number | undefined
+): number | undefined {
+  if (configured === undefined) {
+    return fallback;
+  }
+  return configured ?? undefined;
+}
+
 function normalizeWatchdogConfig(
   raw: z.infer<typeof watchdogConfigSchema> | undefined
 ): WatchdogConfig {
   return {
     enabled: raw?.enabled ?? DEFAULT_WATCHDOG_CONFIG.enabled,
     graceMinutes: raw?.grace_minutes ?? DEFAULT_WATCHDOG_CONFIG.graceMinutes,
+    maxRunMinutes:
+      raw?.max_run_minutes ?? DEFAULT_WATCHDOG_CONFIG.maxRunMinutes,
     mtimeIgnore: raw?.mtime_ignore ?? DEFAULT_WATCHDOG_CONFIG.mtimeIgnore,
     mtimeInclude: raw?.mtime_include ?? DEFAULT_WATCHDOG_CONFIG.mtimeInclude,
     outputTokenBudget:
@@ -1234,6 +1327,9 @@ function projectWatchdogOverride(
       ...(raw.grace_minutes === undefined
         ? {}
         : { graceMinutes: raw.grace_minutes }),
+      ...(raw.max_run_minutes === undefined
+        ? {}
+        : { maxRunMinutes: raw.max_run_minutes }),
       ...(raw.mtime_include === undefined
         ? {}
         : { mtimeInclude: raw.mtime_include }),
@@ -1259,6 +1355,9 @@ export function resolveWatchdogConfig(
     ...(projectOverride.graceMinutes === undefined
       ? {}
       : { graceMinutes: projectOverride.graceMinutes }),
+    ...(projectOverride.maxRunMinutes === undefined
+      ? {}
+      : { maxRunMinutes: projectOverride.maxRunMinutes }),
     ...(projectOverride.mtimeInclude === undefined
       ? {}
       : { mtimeInclude: projectOverride.mtimeInclude }),

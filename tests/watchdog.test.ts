@@ -35,6 +35,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import {
   reconcileWatchdog,
+  runElapsedMs,
   sampleWorkspace,
   sampleWorkspaceMtimeMax,
   watchdogProgressObserved
@@ -359,6 +360,7 @@ describe("reconcileWatchdog", () => {
           mtimeIgnore: [],
           mtimeInclude: [],
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -389,6 +391,7 @@ describe("reconcileWatchdog", () => {
           mtimeIgnore: [],
           mtimeInclude: [],
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -460,6 +463,7 @@ describe("reconcileWatchdog", () => {
           config: {
             enabled: true,
             graceMinutes: 30,
+            maxRunMinutes: 0,
             mtimeIgnore: [],
             mtimeInclude: [],
             outputTokenBudget: 0,
@@ -566,6 +570,7 @@ describe("reconcileWatchdog", () => {
           mtimeIgnore: [],
           mtimeInclude: [],
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -631,6 +636,7 @@ describe("reconcileWatchdog", () => {
           mtimeIgnore: [],
           mtimeInclude: [],
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -706,6 +712,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 0,
@@ -784,6 +791,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 0,
@@ -895,6 +903,7 @@ describe("reconcileWatchdog", () => {
           mtimeIgnore: [],
           mtimeInclude: [],
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -1006,6 +1015,7 @@ describe("reconcileWatchdog", () => {
           mtimeIgnore: [],
           mtimeInclude: [],
           graceMinutes: 30,
+          maxRunMinutes: 0,
           outputTokenBudget: 0,
           sampleIntervalSeconds: 60
         },
@@ -1096,6 +1106,7 @@ describe("reconcileWatchdog", () => {
       mtimeIgnore: [],
       mtimeInclude: [],
       graceMinutes: 30,
+      maxRunMinutes: 0,
       outputTokenBudget: 0,
       sampleIntervalSeconds: 60
     };
@@ -1175,6 +1186,7 @@ describe("reconcileWatchdog", () => {
     const config = {
       enabled: true,
       graceMinutes: 30,
+      maxRunMinutes: 0,
       mtimeIgnore: [],
       mtimeInclude: [],
       outputTokenBudget: 0,
@@ -1339,6 +1351,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 0,
@@ -1444,6 +1457,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 0,
@@ -1554,6 +1568,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 0,
@@ -1668,6 +1683,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: ["build.log"],
           mtimeInclude: [],
           outputTokenBudget: 0,
@@ -1724,6 +1740,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 150_000,
@@ -1772,6 +1789,7 @@ describe("reconcileWatchdog", () => {
       const config = {
         enabled: true,
         graceMinutes: 30,
+        maxRunMinutes: 0,
         mtimeIgnore: [],
         mtimeInclude: [],
         outputTokenBudget: 150_000,
@@ -1838,6 +1856,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 150_000,
@@ -1899,6 +1918,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 0,
@@ -1958,6 +1978,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 0,
@@ -2016,6 +2037,7 @@ describe("reconcileWatchdog", () => {
           config: {
             enabled: true,
             graceMinutes: 30,
+            maxRunMinutes: 0,
             mtimeIgnore: [],
             mtimeInclude: [],
             outputTokenBudget: 0,
@@ -2063,6 +2085,7 @@ describe("reconcileWatchdog", () => {
           config: {
             enabled: true,
             graceMinutes: 30,
+            maxRunMinutes: 0,
             mtimeIgnore: [],
             mtimeInclude: [],
             outputTokenBudget: 0,
@@ -2104,6 +2127,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 0,
@@ -2151,6 +2175,7 @@ describe("reconcileWatchdog", () => {
         config: {
           enabled: true,
           graceMinutes: 30,
+          maxRunMinutes: 0,
           mtimeIgnore: [],
           mtimeInclude: [],
           outputTokenBudget: 0,
@@ -2169,7 +2194,235 @@ describe("reconcileWatchdog", () => {
       store.close();
     }
   });
+
+  it("stales a Run that outlives its wall-clock cap while still progressing", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(store, root, workspacePath, "run-slow", 605);
+      // The vow#1113 shape: real output keeps trickling in, so every liveness
+      // signal advances and the convergence budget is nowhere near — the two
+      // existing bounds are both satisfied on every tick.
+      await writeFile(
+        path.join(root, "run-slow.normalized.jsonl"),
+        JSON.stringify({ message: "still going", type: "message" }) + "\n"
+      );
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel,
+        issueNumber: 605,
+        projectName: "symphonika",
+        runId: "run-slow"
+      });
+
+      const result = await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          maxRunMinutes: 360,
+          mtimeIgnore: [],
+          mtimeInclude: [],
+          outputTokenBudget: 0,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => elapsedSinceClaim(store, "run-slow", 361),
+        runStore: store
+      });
+
+      expect(result.terminated).toBe(1);
+      expect(store.getRun("run-slow")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(activeRuns.get("run-slow")?.cancelReason).toBe("run_timeout");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("leaves a progressing Run alone inside its cap, and when the cap is disabled", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(store, root, workspacePath, "run-inside", 605);
+      await writeFile(
+        path.join(root, "run-inside.normalized.jsonl"),
+        JSON.stringify({ message: "working", type: "message" }) + "\n"
+      );
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: vi.fn().mockResolvedValue(undefined),
+        issueNumber: 605,
+        projectName: "symphonika",
+        runId: "run-inside"
+      });
+      const config = {
+        enabled: true,
+        graceMinutes: 30,
+        maxRunMinutes: 360,
+        mtimeIgnore: [],
+        mtimeInclude: [],
+        outputTokenBudget: 0,
+        sampleIntervalSeconds: 60
+      };
+
+      await reconcileWatchdog({
+        activeRuns,
+        config,
+        logger,
+        now: () => elapsedSinceClaim(store, "run-inside", 359),
+        runStore: store
+      });
+      expect(store.getRun("run-inside")?.state).toBe("running");
+
+      // Well past the cap, but with the cap switched off.
+      await appendNormalizedEvents(
+        path.join(root, "run-inside.normalized.jsonl"),
+        [{ message: "still working", type: "message" }]
+      );
+      await reconcileWatchdog({
+        activeRuns,
+        config: { ...config, maxRunMinutes: 0 },
+        logger,
+        now: () => elapsedSinceClaim(store, "run-inside", 6_000),
+        runStore: store
+      });
+      expect(store.getRun("run-inside")?.state).toBe("running");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reports run_timeout ahead of the budget and liveness verdicts", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(store, root, workspacePath, "run-all-three", 605);
+      // Idle past its grace AND over its budget AND over its cap. The Run only
+      // gets one terminal reason, and it must be the outermost bound so an
+      // operator is not told "no progress" about a Run that ran out of time.
+      await writeFile(
+        path.join(root, "run-all-three.normalized.jsonl"),
+        JSON.stringify({
+          tokenUsage: { total: { outputTokens: 200_000 } },
+          type: "usage_updated"
+        }) + "\n"
+      );
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: vi.fn().mockResolvedValue(undefined),
+        issueNumber: 605,
+        projectName: "symphonika",
+        runId: "run-all-three"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          maxRunMinutes: 360,
+          mtimeIgnore: [],
+          mtimeInclude: [],
+          outputTokenBudget: 150_000,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => elapsedSinceClaim(store, "run-all-three", 400),
+        runStore: store
+      });
+
+      expect(store.getRun("run-all-three")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("applies a per-Project wall-clock cap override", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(store, root, workspacePath, "run-cap-override", 605);
+      await writeFile(
+        path.join(root, "run-cap-override.normalized.jsonl"),
+        JSON.stringify({ message: "working", type: "message" }) + "\n"
+      );
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: vi.fn().mockResolvedValue(undefined),
+        issueNumber: 605,
+        projectName: "symphonika",
+        runId: "run-cap-override"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          maxRunMinutes: 360,
+          mtimeIgnore: [],
+          mtimeInclude: [],
+          outputTokenBudget: 0,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => elapsedSinceClaim(store, "run-cap-override", 400),
+        // A Project whose Runs legitimately take a working day buys headroom
+        // above the daemon default, the same way it can for grace_minutes.
+        projects: [{ name: "symphonika", watchdog: { maxRunMinutes: 720 } }],
+        runStore: store
+      });
+
+      expect(store.getRun("run-cap-override")?.state).toBe("running");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("never ages a Run whose claim timestamp cannot be parsed", () => {
+    const now = new Date("2026-05-22T10:00:00.000Z");
+    // A corrupt or pre-upgrade `created_at` reads as "age unknown", not as
+    // "infinitely old" — the cap is the one rule that could otherwise kill a
+    // healthy Run on the strength of a bad row.
+    expect(runElapsedMs("not-a-timestamp", now)).toBeUndefined();
+    // Clock skew that puts the claim in the future floors at zero rather than
+    // handing the cap a negative age.
+    expect(runElapsedMs("2026-05-22T11:00:00.000Z", now)).toBe(0);
+    expect(runElapsedMs("2026-05-22T09:00:00.000Z", now)).toBe(3_600_000);
+  });
 });
+
+// The Watchdog clock, placed a given number of minutes after the Run was
+// actually claimed. `createRun` stamps `created_at` from the wall clock, so a
+// fixed literal would drift with the calendar; deriving the clock from the row
+// keeps every wall-clock assertion exact.
+function elapsedSinceClaim(
+  store: RunStore,
+  runId: string,
+  minutes: number
+): Date {
+  const createdAt = store.getRun(runId)?.createdAt;
+  if (createdAt === undefined) {
+    throw new Error(`run ${runId} was not seeded`);
+  }
+  return new Date(Date.parse(createdAt) + minutes * 60_000);
+}
 
 function seedRun(
   store: RunStore,

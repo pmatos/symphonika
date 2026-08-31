@@ -9,3 +9,10 @@ Description=Symphonika daemon slice (daemon + dashboard only)
 # host you run on.
 MemoryHigh=4G
 MemoryMax=6G
+
+# I/O weight well above the providers slice's, so a provider tree
+# saturating the disk cannot starve the daemon's own writes (run store,
+# evidence logs) and stall the tick loop. Weights are relative shares
+# under cgroup v2's io controller; on a host where that controller is not
+# enabled for the backing device the directive is simply inert.
+IOWeight=500

@@ -1012,6 +1012,7 @@ describe("RunStore routines", () => {
           skipCounts24h: {
             catch_up_window: 0,
             concurrency_cap: 0,
+            host_pressure: 0,
             overlap: 0
           },
           sourcePath: "/tmp/daily-report.md",
@@ -1103,6 +1104,7 @@ describe("RunStore routines", () => {
           skipCounts24h: {
             catch_up_window: 0,
             concurrency_cap: 0,
+            host_pressure: 0,
             overlap: 0
           },
           sourcePath: "/tmp/daily-report.md",
@@ -1157,6 +1159,7 @@ describe("RunStore routines", () => {
         skipCounts24h: {
           catch_up_window: 0,
           concurrency_cap: 0,
+          host_pressure: 0,
           overlap: 1
         }
       });
@@ -1225,6 +1228,7 @@ describe("RunStore routines", () => {
           skipCounts24h: {
             catch_up_window: 0,
             concurrency_cap: 1,
+            host_pressure: 0,
             overlap: 0
           },
           state: "expired"

@@ -90,6 +90,11 @@ import {
   type ClassifiedTerminal
 } from "./classify-failure.js";
 import { DispatchFileOverlapGuard } from "./file-overlap-guard.js";
+import type { HostPressureGate, HostPressureVerdict } from "./host-pressure.js";
+import {
+  createProviderScratch,
+  removeProviderScratch
+} from "./provider-scratch.js";
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
 import { buildCapReachedReason } from "./terminal-reason.js";
 
@@ -159,7 +164,13 @@ export type RunControllerProjectConfig = {
   // still-configured routine is never mistaken for one removed from
   // routines:, mirroring trackerlessGitRoutines above. See ADR 0067.
   templateRejectedRoutines?: TargetedRoutineDeclaration[] | undefined;
-  watchdog?: { graceMinutes?: number; outputTokenBudget?: number } | undefined;
+  watchdog?:
+    | {
+        graceMinutes?: number;
+        maxRunMinutes?: number;
+        outputTokenBudget?: number;
+      }
+    | undefined;
 };
 
 // A Dispatch Project's runtime config: the issue-dispatch fields are required.
@@ -219,6 +230,10 @@ export type RunControllerOptions = {
   // Returns the global concurrency cap (undefined = unbounded). Per-project
   // caps are read from the project config inside the picker. See ADR 0053.
   globalConcurrencyLoader?: () => Promise<{ maxInFlight: number | undefined }>;
+  // Host pressure-stall admission gate (ADR 0088). Omitted means the
+  // controller never defers on host state -- the one-shot CLI's posture,
+  // matching how it already ignores max_in_flight.
+  hostPressureGate?: HostPressureGate;
   lifecyclePolicy?: LifecyclePolicy;
   logger?: Logger;
   prepareIssueWorkspace?: (
@@ -396,6 +411,7 @@ export class RunController {
   private readonly globalConcurrencyLoader: () => Promise<{
     maxInFlight: number | undefined;
   }>;
+  private readonly hostPressureGate: HostPressureGate | undefined;
   private readonly lifecyclePolicy: LifecyclePolicy;
   private readonly logger?: Logger;
   private readonly prepareIssueWorkspace: (
@@ -436,6 +452,7 @@ export class RunController {
       options.globalConcurrencyLoader ??
       ((): Promise<{ maxInFlight: number | undefined }> =>
         Promise.resolve({ maxInFlight: undefined }));
+    this.hostPressureGate = options.hostPressureGate;
     this.lifecyclePolicy = options.lifecyclePolicy ?? LIFECYCLE_POLICY;
     if (options.logger !== undefined) {
       this.logger = options.logger;
@@ -453,10 +470,36 @@ export class RunController {
     this.stateRoot = options.stateRoot;
   }
 
+  // Re-samples at most once per configured interval (createHostPressureGate
+  // owns the TTL), so a candidate loop pays one /proc read per interval
+  // rather than one per candidate. An absent gate admits.
+  private async refreshHostPressure(): Promise<HostPressureVerdict> {
+    if (this.hostPressureGate === undefined) {
+      return { admitted: true };
+    }
+    return this.hostPressureGate.refresh();
+  }
+
   async dispatchOneFresh(
     pollStatus: IssuePollStatus,
     options: DispatchOneFreshOptions = {}
   ): Promise<DispatchOneFreshResult> {
+    // Host pressure first: a stalled host makes every candidate
+    // undispatchable regardless of how much count-headroom the caps leave,
+    // so refusing here also skips the overlap guard's GitHub round-trips.
+    // The reason names the machine, not the config. See ADR 0088.
+    const pressure = await this.refreshHostPressure();
+    if (!pressure.admitted) {
+      this.logger?.info(
+        {
+          observed: pressure.observed,
+          resource: pressure.resource,
+          threshold: pressure.threshold
+        },
+        "symphonika dispatch deferred: host pressure"
+      );
+      return { dispatched: false, reason: pressure.reason };
+    }
     // Snapshot candidates before any await so a concurrent poll cannot wipe them.
     const candidates = pollStatus.candidateIssues.slice();
     const projects = await this.projectsLoader();
@@ -830,6 +873,10 @@ export class RunController {
       if (this.activeRuns.isShuttingDown()) {
         shuttingDown = true;
       } else {
+        // A retry re-entering dispatch is a fresh claim on host resources, so
+        // it faces the same pressure gate as a first attempt; deferring here
+        // reschedules the retry rather than breaching it. See ADR 0088.
+        const pressure = await this.refreshHostPressure();
         const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
         const capacity = evaluateConcurrencyCapacity({
           configuredProjectMax: project.max_in_flight,
@@ -838,7 +885,9 @@ export class RunController {
           projectInFlight: this.activeRuns.countInFlightByProject(project.name),
           projectName: project.name
         });
-        if (!capacity.admitted) {
+        if (!pressure.admitted) {
+          contention = new CapBreachedError(pressure.reason);
+        } else if (!capacity.admitted) {
           contention = new CapBreachedError(capacity.reason);
         } else if (
           this.activeRuns.isIssueReserved(project.name, refreshed.number)
@@ -2509,6 +2558,21 @@ export class RunController {
         `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
       );
     }
+    // Host pressure BEFORE the cap, matching the other two admission points
+    // and the contract in SPEC.md / ADR 0088. Both breaches raise the same
+    // CapBreachedError, so the order changes no control flow — only which
+    // reason reaches the operator, and on a stalled host at its cap (the
+    // common co-occurrence: pressure builds precisely while runs are in
+    // flight) cap-first would report a full cap and hide the real cause.
+    // Every claim path funnels through here inside the mutex — fresh
+    // dispatch, continuation, state advance and PR review follow-up alike —
+    // so this is the one place that guarantees no claim starts against a
+    // stalled host. Scheduled callers already treat CapBreachedError as
+    // "reschedule", the right response to transient pressure.
+    const hostPressure = await this.refreshHostPressure();
+    if (!hostPressure.admitted) {
+      throw new CapBreachedError(hostPressure.reason);
+    }
     // Re-check concurrency caps inside the mutex. pickTargetFromCandidates
     // ran without the lock, so two concurrent ticks could both observe a
     // below-cap count before either reserves a slot — without this guard,
@@ -2951,9 +3015,10 @@ export class RunController {
       // staled this run — even when a concurrent updateRunState(..., "running")
       // earlier in this same lifecycle clobbered the row back to a non-stale
       // state after the watchdog fired (updateRunState rewrites state but
-      // leaves terminal_reason intact). The watchdog samples queued /
-      // preparing_workspace / running rows, so that race is reachable whenever
-      // a run is staled before provider attach. Gate on terminal_reason rather
+      // leaves terminal_reason intact). The watchdog samples `running` rows
+      // only, so the race is the narrow one where a run is staled after its
+      // first `running` write and a later write in this same lifecycle
+      // overwrites the verdict. Gate on terminal_reason rather
       // than state === "stale" so the clobber cannot defeat the verdict, and
       // re-assert the stale state when it was overwritten. See ADR 0054.
       const watchdogTerminalReason = WATCHDOG_TERMINAL_REASONS.find(
@@ -3491,34 +3556,56 @@ export class RunController {
     runId: string;
     runtime: RunRuntime;
   }): Promise<void> {
+    const scratchIdentity = {
+      attempt: input.attemptNumber,
+      id: input.runId
+    };
+    // Allocated per attempt and removed below, so the agent's build output
+    // lands on disk instead of a RAM-backed /tmp and cannot outlive the
+    // attempt that produced it. See ADR 0088.
+    const scratchPath = await createProviderScratch(
+      this.stateRoot,
+      scratchIdentity
+    );
     let sequence = 0;
-    for await (const event of input.provider.runAttempt({
-      branchName: input.evidence.branchName,
-      issue: input.issue,
-      prompt: input.prompt,
-      promptPath: input.promptPath,
-      provider: {
-        command: input.providerCommand,
-        name: input.providerName
-      },
-      run: {
-        attempt: input.attemptNumber,
-        id: input.runId
-      },
-      workspacePath: input.evidence.workspacePath
-    })) {
-      sequence += 1;
-      await this.persistProviderEvent({
-        attemptId: input.attemptId,
-        event,
-        normalizedLogPath: input.evidence.normalizedLogPath,
-        rawLogPath: input.evidence.rawLogPath,
-        runId: input.runId,
-        sequence
-      });
-      if (event.normalized !== undefined) {
-        input.runtime.events.push(event.normalized);
+    try {
+      for await (const event of input.provider.runAttempt({
+        branchName: input.evidence.branchName,
+        issue: input.issue,
+        prompt: input.prompt,
+        promptPath: input.promptPath,
+        provider: {
+          command: input.providerCommand,
+          name: input.providerName
+        },
+        run: scratchIdentity,
+        scratchPath,
+        workspacePath: input.evidence.workspacePath
+      })) {
+        sequence += 1;
+        await this.persistProviderEvent({
+          attemptId: input.attemptId,
+          event,
+          normalizedLogPath: input.evidence.normalizedLogPath,
+          rawLogPath: input.evidence.rawLogPath,
+          runId: input.runId,
+          sequence
+        });
+        if (event.normalized !== undefined) {
+          input.runtime.events.push(event.normalized);
+        }
       }
+    } finally {
+      // Best effort: failing to delete temporary files must never mask the
+      // attempt's own outcome. The startup sweep reclaims what is left.
+      await this.bestEffort(
+        () => removeProviderScratch(this.stateRoot, scratchIdentity),
+        {
+          issueNumber: input.issue.number,
+          operation: "removeProviderScratch",
+          runId: input.runId
+        }
+      );
     }
   }
 

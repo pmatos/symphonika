@@ -19,6 +19,29 @@
 
 ### Added
 
+- The Watchdog enforces a wall-clock cap on how long one Issue Run may live. A Run whose age since
+  it claimed its Issue reaches `watchdog.max_run_minutes` (new; default 360, `0` disables, and
+  overridable per Project) is staled with the new `terminal_reason = "run_timeout"` and its provider
+  cancelled. This is the only bound a Run that keeps trickling output cannot satisfy its way past —
+  three vow Runs held concurrency slots and provider memory for thirteen hours while never once
+  looking idle. `show-run`, the Run-detail page, and `GET /api/runs/:id` render the time remaining
+  against the cap. See ADR 0089 and issue #605.
+- Dispatch admission now consults the host, not just a run count. Before claiming new work the
+  daemon reads Linux's pressure-stall counters (`/proc/pressure/{memory,io}`) and defers while a
+  gated resource's `full avg60` is at or above its ceiling — the signal that actually distinguishes
+  a thrashing host from a busy one, which neither load average nor the Watchdog can. Configured
+  under `global.pressure`; memory is gated at 10% by default, I/O is opt-in (a healthy build host
+  sustains an I/O `full avg60` in the 50s), and the gate is inert where PSI is unavailable. A
+  deferred Routine Firing records the new `host_pressure` skip reason; `/api/status` reports the
+  current verdict and sample. See ADR 0088.
+- Spawned providers get a disk-backed `TMPDIR` at `<state.root>/scratch/<run-id>-attempt-<n>`,
+  removed when the attempt ends and swept at daemon startup. Previously an agent's build output
+  went to the daemon's inherited `/tmp` — a tmpfs on most systemd hosts — where it permanently
+  consumed RAM until an operator cleared it by hand. See ADR 0088.
+- `symphonika-daemon.slice` and `symphonika-providers.slice` now set `IOWeight` (500 and 50), so a
+  provider's build cannot starve the daemon's own writes under disk contention. `doctor` reports an
+  installed slice missing the directive as drift; re-run `symphonika service install --force` to
+  refresh it.
 - The `artifact_exists` predicate is implemented, so a Workflow state can gate its transition on the
   artefact the stage was asked to produce: `when: { artifact_exists: PLAN.md }`, or a sequence for
   "all of these exist". Paths resolve against the Run Workspace and need not be committed; absolute
@@ -40,6 +63,15 @@
 
 ### Fixed
 
+- Run history is partitioned by repository, so retargeting a Project's tracker no longer hides a
+  resumable Run. Every Run persists the repository its Issue lived in (`issue_owner`/`issue_repo`,
+  backfilled from the stored snapshot URL on upgrade); the newest-Run relation, stale-claim
+  liveness, and the shutdown-resume and reconcile identity gates all key on
+  `(Project, repository, Issue)`. Previously a Project moved from repository A to B and back had
+  B's newer Run suppress A's still-resumable one, leaving A's Issue holding `sym:claimed` with no
+  live Run and no automatic recovery; a retarget mid-Run could also cancel a live Run with
+  `closed_issue` on a same-numbered Issue in the wrong repository. A Run whose origin cannot be
+  determined (a legacy row, a non-GitHub tracker) is treated exactly as before. See ADR 0089.
 - A daemon restart no longer strands the Issues it was working. Runs cancelled with
   `daemon_shutdown` are resumed on the next boot at the Workflow state they were executing, reusing
   their Workspace and Issue Branch; a Run cancelled before it had a Workflow state releases

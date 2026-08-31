@@ -44,6 +44,11 @@ import { interpretPullRequest } from "./pull-request-state.js";
 import { ActiveRunRegistry, CANCEL_REASONS } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 import { resolveProjectMaxInFlight } from "./lifecycle/concurrency-capacity.js";
+import {
+  createHostPressureGate,
+  type HostPressureSample
+} from "./lifecycle/host-pressure.js";
+import { sweepProviderScratch } from "./lifecycle/provider-scratch.js";
 import { resolveToken } from "./lifecycle/token.js";
 import {
   createDaemonHeartbeat,
@@ -138,6 +143,10 @@ export type StartDaemonOptions = {
   notificationSink?: NotificationSink;
   port?: number;
   processScope?: ProcessScope;
+  // Overrides the PSI counter read behind the host-pressure gate (ADR 0088).
+  // Production leaves this unset and reads /proc/pressure; tests inject a
+  // reading so a stalled host is reproducible off a healthy machine.
+  readHostPressure?: () => Promise<HostPressureSample>;
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
@@ -355,6 +364,19 @@ export async function startDaemon(
       "symphonika startup: routine firing sweep complete"
     );
   }
+  // A crashed or SIGKILLed daemon never runs its attempts' cleanup, so
+  // provider scratch trees can survive it. No attempt of THIS instance owns
+  // one yet, so every directory found here is stale. See ADR 0088.
+  const scratchSweep = await sweepProviderScratch(state.stateRoot);
+  if (scratchSweep.removed.length > 0 || scratchSweep.failures.length > 0) {
+    logger.info(
+      {
+        failures: scratchSweep.failures.length,
+        removed: scratchSweep.removed.length
+      },
+      "symphonika startup: provider scratch sweep complete"
+    );
+  }
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const runtimeConfig = new RuntimeConfigReloader({
@@ -458,6 +480,17 @@ export async function startDaemon(
   }> => {
     return Promise.resolve(runtimeConfig.globalConcurrency());
   };
+  // One PSI sample per configured interval, shared by fresh dispatch, retry
+  // re-admission and Routine Firings so a single tick cannot dispatch on two
+  // different readings of the same host. The policy is read through the
+  // reloader, so a config change takes effect without rebuilding the gate.
+  // See ADR 0088.
+  const hostPressureGate = createHostPressureGate({
+    policy: () => runtimeConfig.hostPressurePolicy(),
+    ...(options.readHostPressure === undefined
+      ? {}
+      : { readPressure: options.readHostPressure })
+  });
   const enqueueScheduledWork = (work: () => Promise<void>): void => {
     scheduledWork = scheduledWork.then(work, work);
     void scheduledWork;
@@ -472,6 +505,7 @@ export async function startDaemon(
     dispatchMutex,
     githubIssuesApi,
     globalConcurrencyLoader,
+    hostPressureGate,
     logger,
     projectsLoader,
     providersLoader,
@@ -1078,6 +1112,7 @@ export async function startDaemon(
           env,
           globalConcurrency: runtimeConfig.globalConcurrency(),
           githubIssuesApi,
+          hostPressure: hostPressureGate.current(),
           logger,
           notification: {
             createSink: (config) =>
@@ -1152,6 +1187,10 @@ export async function startDaemon(
   const tick = async (): Promise<void> => {
     await refreshIssuePollStatus();
     refreshPollingInterval();
+    // Sample before reconcile/launchWork so every admission decision this
+    // tick makes -- Routine Firings included, which read the cached verdict
+    // synchronously -- sees the same reading. See ADR 0088.
+    await refreshHostPressure();
     await reconcile();
     launchWork();
     updateCoordinator.tick();
@@ -1176,6 +1215,16 @@ export async function startDaemon(
     // monotonic timestamp used for elapsed-time liveness decisions.
     lastTickAtMs = Date.now();
     lastTickAtMonotonicMs = performance.now();
+  };
+  // A /proc read cannot be allowed to abort the tick: an unreadable counter
+  // already degrades to "admit" inside the gate, and anything unexpected
+  // here must leave the daemon ticking rather than stalling dispatch.
+  const refreshHostPressure = async (): Promise<void> => {
+    try {
+      await hostPressureGate.refresh();
+    } catch (error) {
+      logger.warn({ err: error }, "symphonika host pressure sample failed");
+    }
   };
   const refreshPollingInterval = (): void => {
     if (!state.configExists) {
@@ -1323,6 +1372,17 @@ export async function startDaemon(
       await reloadConfigAndRecordOutcome();
       const projects = runtimeConfig.projectsByName();
       synchronizeRoutineTargets({ projects, runStore });
+      // Re-sample for the same reason the snapshot is reloaded above: a
+      // manual fire is its own admission boundary and must not ride the tick
+      // cadence. `current()` applies no TTL, so between ticks it can hand
+      // back a verdict older than sample_interval_seconds (30s polling vs 10s
+      // sampling by default) — long enough for a host to become stalled and
+      // still admit. refresh() is TTL-guarded and collapses concurrent reads,
+      // so this costs at most one /proc read on a rare operator-driven path.
+      // Awaited HERE, before the drain re-check below, so the verdict is
+      // resolved to a value and the re-check remains the last thing between
+      // this await and the synchronous claim section. See ADR 0088.
+      const hostPressure = await hostPressureGate.refresh();
       // The reload awaits the reloader mutex and filesystem reads. A
       // self-update drain can begin during that gap, so repeat the admission
       // check immediately before the synchronous claim section.
@@ -1343,6 +1403,7 @@ export async function startDaemon(
         env,
         globalConcurrency: runtimeConfig.globalConcurrency(),
         githubIssuesApi,
+        hostPressure,
         logger,
         notification: {
           createSink: (config) =>
@@ -1386,6 +1447,29 @@ export async function startDaemon(
     getPollingIntervalMs: () => intervalMs,
     getTickLoopStartedAtMonotonic: () => tickLoopStartedAtMonotonicMs,
     monotonicNow: () => performance.now(),
+    getHostPressure: () => {
+      const verdict = hostPressureGate.current();
+      const sample = hostPressureGate.lastSample();
+      return {
+        admitted: verdict.admitted,
+        ...(verdict.admitted
+          ? {}
+          : {
+              observed: verdict.observed,
+              reason: verdict.reason,
+              resource: verdict.resource,
+              threshold: verdict.threshold
+            }),
+        ...(sample === undefined
+          ? {}
+          : {
+              sample: {
+                fullAvg60: sample.fullAvg60,
+                unavailable: sample.unavailable
+              }
+            })
+      };
+    },
     getConcurrency: () => {
       const { maxInFlight } = runtimeConfig.globalConcurrency();
       const perProject: Array<{
@@ -1677,6 +1761,16 @@ export async function startDaemon(
     stateRoot: state.stateRoot,
     version: VERSION
   });
+
+  // Seed the pressure gate before anything can dispatch. Both synchronous
+  // readers -- the Routine Firing path inside launchWork() and the manual
+  // /api/routines/.../fire endpoint -- take createHostPressureGate's cached
+  // verdict, which admits until a first sample exists. Without this the
+  // startup launchWork() below (and any manual fire in the window before the
+  // first tick, up to a whole polling interval later) would claim work
+  // unsampled -- on a host stalled badly enough that an operator has just
+  // restarted the daemon, which is exactly the #599 scenario. See ADR 0088.
+  await refreshHostPressure();
 
   const server = serve({
     fetch: app.fetch,

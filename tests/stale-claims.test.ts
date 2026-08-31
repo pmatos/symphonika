@@ -361,6 +361,75 @@ describe("detectStaleClaims", () => {
     });
   });
 
+  it("does not mark an issue whose run awaits shutdown resumption", async () => {
+    await withRunStore(async (store) => {
+      const issue = snapshot({ labels: ["agent-ready", "sym:claimed"] });
+      // A graceful shutdown cancelled this run pre-emptively; the resume pass
+      // still owns it, so the claim is a live reservation, not a stale one.
+      store.createRun({
+        id: "run-shutdown",
+        issue,
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.setRunCurrentState("run-shutdown", "implement");
+      store.markCancelRequested("run-shutdown", CANCEL_REASONS.DAEMON_SHUTDOWN);
+      store.updateRunState("run-shutdown", "cancelled");
+
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const marks = await detectStaleClaims({
+        activeRuns: new ActiveRunRegistry(),
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        logger,
+        pollStatus: pollStatusWithFiltered([issue]),
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      expect(addLabelsToIssue).not.toHaveBeenCalled();
+      expect(marks).toEqual([]);
+    });
+  });
+
+  it("marks an issue whose shutdown-cancelled run has been declined", async () => {
+    await withRunStore(async (store) => {
+      const issue = snapshot({ labels: ["agent-ready", "sym:claimed"] });
+      store.createRun({
+        id: "run-shutdown",
+        issue,
+        projectName: project.name,
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.setRunCurrentState("run-shutdown", "implement");
+      store.markCancelRequested("run-shutdown", CANCEL_REASONS.DAEMON_SHUTDOWN);
+      store.updateRunState("run-shutdown", "cancelled");
+      store.markShutdownResumeDeclined("run-shutdown");
+
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const marks = await detectStaleClaims({
+        activeRuns: new ActiveRunRegistry(),
+        env: { GITHUB_TOKEN: "secret" },
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        logger,
+        pollStatus: pollStatusWithFiltered([issue]),
+        projects: new Map([[project.name, project]]),
+        runStore: store
+      });
+
+      expect(addLabelsToIssue).toHaveBeenCalledTimes(1);
+      expect(marks).toEqual([{ project: project.name, issueNumber: 7 }]);
+    });
+  });
+
   it("does not mark when run-store reports an active run for the issue", async () => {
     await withRunStore(async (store) => {
       const issue = snapshot({ labels: ["agent-ready", "sym:claimed"] });

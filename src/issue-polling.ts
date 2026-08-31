@@ -985,6 +985,57 @@ export function emptyIssuePollStatus(): IssuePollStatus {
   };
 }
 
+// Looks one (project, repository, issue) up in a poll snapshot across both
+// bands. The candidate band alone is not enough for the reconciliation passes:
+// an Issue carrying an operational label (`sym:claimed` above all) is filtered
+// rather than a candidate, yet those passes are exactly the ones that need its
+// current state and labels.
+//
+// `repository` is part of the key, not decoration. Duplicate Project
+// declarations sharing a name are not rejected at load — `projectsByName`
+// resolves them to the last match — while the poll loop walks the config
+// array and so records an entry per declaration. Keyed on the name alone this
+// would hand a caller the shadowed repository's labels while its writes went
+// to the surviving declaration's tracker, which is exactly the provenance ADR
+// 0077 requires be preserved under duplicate names.
+export function findPolledIssueSnapshot(
+  pollStatus: IssuePollStatus,
+  projectName: string,
+  repository: { owner: string; repo: string },
+  issueNumber: number
+): IssueSnapshot | undefined {
+  for (const candidate of pollStatus.candidateIssues) {
+    if (
+      candidate.project === projectName &&
+      candidate.issue.number === issueNumber &&
+      sameIssueRepository(candidate.repository, repository)
+    ) {
+      return candidate.issue;
+    }
+  }
+  for (const filtered of pollStatus.filteredIssues) {
+    if (
+      filtered.project === projectName &&
+      filtered.issue.number === issueNumber &&
+      sameIssueRepository(filtered.repository, repository)
+    ) {
+      return filtered.issue;
+    }
+  }
+  return undefined;
+}
+
+// GitHub owners and repository names are case-insensitive.
+function sameIssueRepository(
+  left: { owner: string; repo: string },
+  right: { owner: string; repo: string }
+): boolean {
+  return (
+    left.owner.toLowerCase() === right.owner.toLowerCase() &&
+    left.repo.toLowerCase() === right.repo.toLowerCase()
+  );
+}
+
 export function replaceIssuePollStatus(
   target: IssuePollStatus,
   source: IssuePollStatus

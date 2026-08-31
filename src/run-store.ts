@@ -1528,6 +1528,77 @@ export class RunStore {
     }));
   }
 
+  // Runs a graceful shutdown cancelled pre-emptively, still owning their
+  // Issue's `sym:claimed` label and still the newest Run for that Issue. A
+  // restart is routine, so these are candidates for resumption rather than
+  // losses: the newest-Run guard is what makes a resumed row drop out of
+  // this list (its continuation is newer), and
+  // `shutdown_resume_declined_at` is what makes a *declined* row drop out.
+  // `currentStateId` is null when the Run was cancelled before its workflow
+  // state was persisted (queued, or a Project with no workflow) — there is
+  // no walk to resume, so the caller releases the claim instead. See
+  // docs/adr/0088.
+  listResumableShutdownRuns(): {
+    currentStateId: string | null;
+    // The repository the Issue actually lived in when the Run was created,
+    // recovered from the persisted snapshot's `html_url`. `runs` stores no
+    // repository columns, and a Project's tracker can be retargeted while a
+    // resumable row waits, so the caller needs this to refuse acting on a
+    // same-numbered Issue in a different repository. Undefined when the
+    // stored URL is not a GitHub issue URL (legacy or non-GitHub rows) — the
+    // caller then has nothing to compare and proceeds as before.
+    issueRepository: { owner: string; repo: string } | undefined;
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select r.id, r.project_name, r.issue_number, r.current_state_id,",
+          "r.issue_snapshot_json",
+          "from runs r",
+          "where r.cancel_reason = ?",
+          "and r.state = 'cancelled'",
+          "and r.shutdown_resume_declined_at is null",
+          "and not exists (",
+          "  select 1 from runs n",
+          "  where n.project_name = r.project_name",
+          "  and n.issue_number = r.issue_number",
+          "  and (n.created_at > r.created_at",
+          "       or (n.created_at = r.created_at and n.id > r.id))",
+          ")",
+          "order by r.created_at asc"
+        ].join(" ")
+      )
+      .all(SHUTDOWN_PREEMPTIVE_REASON) as {
+      id: string;
+      project_name: string;
+      issue_number: number;
+      current_state_id: string | null;
+      issue_snapshot_json: string;
+    }[];
+    return rows.map((row) => ({
+      currentStateId: row.current_state_id,
+      issueNumber: row.issue_number,
+      issueRepository: parseIssueRepository(row.issue_snapshot_json),
+      projectName: row.project_name,
+      runId: row.id
+    }));
+  }
+
+  // Records that a shutdown-cancelled Run will never be resumed, so
+  // `listResumableShutdownRuns` stops returning it and the daemon stops
+  // retrying it on every tick.
+  markShutdownResumeDeclined(runId: string): void {
+    const now = timestamp();
+    this.database
+      .prepare(
+        "update runs set shutdown_resume_declined_at = ?, updated_at = ? where id = ?"
+      )
+      .run(now, now, runId);
+  }
+
   private recordRunRow(input: InsertRunRowInput): void {
     this.publishChange(this.insertRunRow(input));
   }
@@ -5068,6 +5139,7 @@ export class RunStore {
       ["runs", "terminal_reason", "text"],
       ["runs", "cancel_requested", "integer not null default 0"],
       ["runs", "cancel_reason", "text"],
+      ["runs", "shutdown_resume_declined_at", "text"],
       ["runs", "pr_discovery_attempts", "integer not null default 0"],
       ["runs", "workflow_graph_path", "text"],
       ["runs", "current_state_id", "text"],
@@ -5545,6 +5617,36 @@ function nextRoutineFiringTransitionSequence(
     .get(firingId) as { next_sequence?: number } | undefined;
 
   return row?.next_sequence ?? 1;
+}
+
+// Recovers `{owner, repo}` from a persisted IssueSnapshot's `url`, which is
+// the Issue's GitHub `html_url`. Returns undefined for anything that is not a
+// GitHub issue URL — test fixtures, non-GitHub trackers, or a row written
+// before `url` was populated — so callers treat "cannot tell" as "no
+// mismatch proven" rather than as a mismatch.
+function parseIssueRepository(
+  issueSnapshotJson: string
+): { owner: string; repo: string } | undefined {
+  let url: unknown;
+  try {
+    url = (JSON.parse(issueSnapshotJson) as { url?: unknown }).url;
+  } catch {
+    return undefined;
+  }
+  if (typeof url !== "string") {
+    return undefined;
+  }
+  const match =
+    /^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/issues\/\d+/.exec(
+      url
+    );
+  if (match === null) {
+    return undefined;
+  }
+  const [, owner, repo] = match;
+  return owner === undefined || repo === undefined
+    ? undefined
+    : { owner, repo };
 }
 
 function timestamp(): string {

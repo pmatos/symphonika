@@ -1,10 +1,10 @@
 import type { Logger } from "pino";
 
 import {
+  findPolledIssueSnapshot,
   tryGetIssue,
   type GitHubIssuesApi,
-  type IssuePollStatus,
-  type IssueSnapshot
+  type IssuePollStatus
 } from "../issue-polling.js";
 import type { RunStore } from "../run-store.js";
 
@@ -52,9 +52,10 @@ export async function reconcileActiveRuns(
       continue;
     }
 
-    const snapshot = findIssueSnapshot(
+    const snapshot = findPolledIssueSnapshot(
       input.pollStatus,
       entry.projectName,
+      project.tracker,
       entry.issueNumber
     );
     if (snapshot === undefined) {
@@ -149,30 +150,6 @@ function markCancelled(
 ): Promise<void> {
   input.runStore.markCancelRequested(runId, reason);
   return input.activeRuns.requestCancel(runId, reason);
-}
-
-function findIssueSnapshot(
-  pollStatus: IssuePollStatus,
-  projectName: string,
-  issueNumber: number
-): IssueSnapshot | undefined {
-  for (const candidate of pollStatus.candidateIssues) {
-    if (
-      candidate.project === projectName &&
-      candidate.issue.number === issueNumber
-    ) {
-      return candidate.issue;
-    }
-  }
-  for (const filtered of pollStatus.filteredIssues) {
-    if (
-      filtered.project === projectName &&
-      filtered.issue.number === issueNumber
-    ) {
-      return filtered.issue;
-    }
-  }
-  return undefined;
 }
 
 export async function reconcileWaitingRuns(input: {

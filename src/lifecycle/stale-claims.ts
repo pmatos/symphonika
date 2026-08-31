@@ -114,6 +114,17 @@ function collectLiveKeys(input: DetectStaleClaimsInput): Set<string> {
   for (const entry of input.runStore.listWaitingRunIds()) {
     keys.add(issueKey(entry.projectName, entry.issueNumber));
   }
+  // A Run a graceful shutdown cancelled is awaiting resumption, not dead: the
+  // claim it left on the Issue is the reservation the resume pass reuses.
+  // Marking such an Issue `sym:stale` is what stranded it permanently before
+  // #594 — every Project's `labels_none` excludes the label, and nothing
+  // clears it automatically. The resume pass registers scheduled work (which
+  // `activeRuns.issueKeys()` above already covers) but only once it has run;
+  // this durable source closes the window before that and across the ticks
+  // where the resume has to be deferred. See docs/adr/0088.
+  for (const entry of input.runStore.listResumableShutdownRuns()) {
+    keys.add(issueKey(entry.projectName, entry.issueNumber));
+  }
   return keys;
 }
 

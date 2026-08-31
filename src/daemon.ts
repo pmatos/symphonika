@@ -69,6 +69,7 @@ import {
   type RunControllerProvidersConfig,
   type WorkflowSnapshot
 } from "./lifecycle/run-controller.js";
+import { resumeShutdownCancelledRuns } from "./lifecycle/shutdown-resume.js";
 import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import { pollConfiguredGitHubPullRequestsFromConfig } from "./pull-request-polling.js";
 import type { AgentProviderRegistry } from "./provider.js";
@@ -875,6 +876,31 @@ export async function startDaemon(
         logger.error({ err: error }, "symphonika waiting reconcile failed");
       } finally {
         dispatchMutex.release();
+      }
+    }
+
+    // Recovers the Issues the previous daemon's graceful shutdown cancelled
+    // (#594). Gated on the drain flag for the same reason wait
+    // reconciliation is — the resume it schedules ends in a fresh provider
+    // run — and skipped while the mutex is held so its liveness reads
+    // (isIssueReserved) never race a claim in progress, exactly as
+    // detectStaleClaims below does. The pass only registers scheduled work,
+    // so it must not hold the mutex itself: each resumed advance acquires it
+    // over its own narrowed claim section when the timer fires.
+    if (!updateCoordinator.isDrainRequested() && !dispatchMutex.held) {
+      try {
+        await resumeShutdownCancelledRuns({
+          activeRuns,
+          env,
+          githubIssuesApi,
+          logger,
+          pollStatus: issuePollStatus,
+          projects,
+          runController,
+          runStore
+        });
+      } catch (error) {
+        logger.error({ err: error }, "symphonika shutdown resume failed");
       }
     }
 

@@ -10,9 +10,12 @@ type NormalizedProviderEventType =
   // A provider-neutral boundary marker for model reasoning. Providers expose
   // summaries, never raw chain-of-thought content, through this event.
   | "thinking"
-  // A payload-free liveness marker: the provider reported observable work
-  // (streaming command output, a changed workspace diff) that carries no
-  // content worth persisting. `signal` names the source (ADR 0087).
+  // A liveness marker: the provider reported observable work whose content
+  // belongs only in the raw log. `signal` names the source (ADR 0087).
+  // Markers are payload-free — streaming command output and a changed
+  // workspace diff carry nothing worth persisting — with one exception:
+  // `stream_retry` carries the provider's short reconnect `message`, the only
+  // human-readable explanation of the gap it reports (ADR 0088).
   | "progress"
   | "usage_updated"
   | "rate_limit_updated"

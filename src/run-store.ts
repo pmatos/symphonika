@@ -1232,6 +1232,18 @@ export class RunStore {
         ].join(" ")
       )
       .run(input.terminalStateId, input.transitionReason, timestamp(), runId);
+    // A terminal ends the run chain, so the progress history it accumulated
+    // has nothing left to guard. Clearing here rather than at each of the
+    // several call sites keeps every terminal path covered by construction.
+    const row = this.database
+      .prepare("select project_name, issue_number from runs where id = ?")
+      .get(runId) as { issue_number: number; project_name: string } | undefined;
+    if (row !== undefined) {
+      this.clearProgressFingerprints({
+        issueNumber: row.issue_number,
+        projectName: row.project_name
+      });
+    }
   }
 
   recordWorkflowBlocked(

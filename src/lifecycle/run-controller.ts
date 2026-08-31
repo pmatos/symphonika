@@ -2748,6 +2748,13 @@ export class RunController {
           parentRunId: input.parentRunId
         });
       } else {
+        // A fresh claim opens a new run chain for this Issue. Any progress
+        // history belongs to the chain before it, and holding it would park
+        // the new chain on an edge it has never taken. See issue #616.
+        this.runStore.clearProgressFingerprints({
+          issueNumber: input.issue.number,
+          projectName: input.project.name
+        });
         this.runStore.createRun(createInput);
       }
       runCreated = true;

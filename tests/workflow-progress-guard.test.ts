@@ -394,6 +394,82 @@ describe("workflow progress guard", () => {
     }
   });
 
+  it("clears the guard's history when the chain reaches a terminal", async () => {
+    const root = await makeTempRoot();
+    await writeCyclingProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.trackPullRequest({
+        branchName: "sym/symphonika/616-progress-guard-fixture",
+        headSha: "deadbeef",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const getPullRequestFollowupState = vi
+        .fn()
+        .mockResolvedValueOnce(prState())
+        .mockResolvedValueOnce(prState({ unresolvedReviewThreads: [] }))
+        .mockResolvedValue(prState());
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState,
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        root,
+        runStore: store
+      });
+
+      seedPark(store, issue, "waiting-1");
+      await controller.reEvaluateWaitingRun("waiting-1");
+      expect(
+        store.readProgressFingerprint({
+          fromStateId: "holding",
+          issueNumber: issue.number,
+          projectName: "symphonika",
+          toStateId: "repair"
+        })
+      ).toBeDefined();
+
+      // The threads got resolved, so the next park terminates the chain.
+      seedPark(store, issue, "waiting-2");
+      await controller.reEvaluateWaitingRun("waiting-2");
+      expect(store.getRun("waiting-2")?.terminalStateId).toBe("done");
+      expect(
+        store.readProgressFingerprint({
+          fromStateId: "holding",
+          issueNumber: issue.number,
+          projectName: "symphonika",
+          toStateId: "repair"
+        })
+      ).toBeUndefined();
+
+      // A later chain on the same Issue is not held by the old history.
+      seedPark(store, issue, "waiting-3");
+      await controller.reEvaluateWaitingRun("waiting-3");
+      expect(store.getRun("waiting-3")?.currentStateId).toBe("repair");
+    } finally {
+      store.close();
+    }
+  });
+
   it("does not guard an advance into a terminal state", async () => {
     const root = await makeTempRoot();
     await writeCyclingProject(root);

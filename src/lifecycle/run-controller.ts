@@ -2463,6 +2463,21 @@ export class RunController {
         `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
       );
     }
+    // Host pressure BEFORE the cap, matching the other two admission points
+    // and the contract in SPEC.md / ADR 0088. Both breaches raise the same
+    // CapBreachedError, so the order changes no control flow — only which
+    // reason reaches the operator, and on a stalled host at its cap (the
+    // common co-occurrence: pressure builds precisely while runs are in
+    // flight) cap-first would report a full cap and hide the real cause.
+    // Every claim path funnels through here inside the mutex — fresh
+    // dispatch, continuation, state advance and PR review follow-up alike —
+    // so this is the one place that guarantees no claim starts against a
+    // stalled host. Scheduled callers already treat CapBreachedError as
+    // "reschedule", the right response to transient pressure.
+    const hostPressure = await this.refreshHostPressure();
+    if (!hostPressure.admitted) {
+      throw new CapBreachedError(hostPressure.reason);
+    }
     // Re-check concurrency caps inside the mutex. pickTargetFromCandidates
     // ran without the lock, so two concurrent ticks could both observe a
     // below-cap count before either reserves a slot — without this guard,
@@ -2483,16 +2498,6 @@ export class RunController {
     });
     if (!capacity.admitted) {
       throw new CapBreachedError(capacity.reason);
-    }
-    // Every claim path funnels through here inside the mutex — fresh
-    // dispatch, continuation and PR review follow-up alike — so this is the
-    // one place that guarantees no claim starts against a stalled host.
-    // Scheduled callers already treat CapBreachedError as "reschedule",
-    // which is exactly the right response to transient host pressure.
-    // See ADR 0088.
-    const hostPressure = await this.refreshHostPressure();
-    if (!hostPressure.admitted) {
-      throw new CapBreachedError(hostPressure.reason);
     }
 
     // Re-check per-(project, issue) reservation inside the mutex. With

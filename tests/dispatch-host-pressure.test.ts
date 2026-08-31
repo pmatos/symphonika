@@ -130,6 +130,65 @@ describe("issue dispatch under host pressure", () => {
   });
 });
 
+describe("in-mutex claim under host pressure", () => {
+  it("reports host pressure without consulting the concurrency cap", async () => {
+    // claimAndPersistRun is the one admission point every claim path funnels
+    // through — continuation, state advance and PR review follow-up reach it
+    // cold. Checking the cap first would report a full cap on a stalled host,
+    // hiding the real cause; assert the pressure check short-circuits before
+    // the concurrency loader is even consulted. See ADR 0088.
+    let reads = 0;
+    let concurrencyLoads = 0;
+    const harness = await createHarness({
+      globalConcurrencyLoader: () => {
+        concurrencyLoads += 1;
+        return Promise.resolve({ maxInFlight: undefined });
+      },
+      hostPressureGate: createHostPressureGate({
+        policy: () => STALLED_POLICY,
+        // Healthy for dispatchOneFresh's own gate, stalled by the time the
+        // in-mutex re-check runs — the window this check exists to cover.
+        readPressure: () => {
+          reads += 1;
+          return Promise.resolve({
+            fullAvg60: { memory: reads === 1 ? 0 : 42 },
+            unavailable: {}
+          });
+        }
+      })
+    });
+
+    const result = await harness.controller.dispatchOneFresh(pollStatus());
+
+    expect(result).toEqual({
+      dispatched: false,
+      reason:
+        "host memory pressure (full avg60 42.00% >= 10%) — deferring dispatch"
+    });
+    expect(reads).toBe(2);
+    // Exactly one load — pickTargetFromCandidates' own global-cap check. A
+    // second would mean claimAndPersistRun evaluated capacity despite the
+    // stalled host, i.e. the cap-first ordering this test pins against.
+    expect(concurrencyLoads).toBe(1);
+    expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
+  });
+
+  it("still reports the concurrency cap when only the cap is breached", async () => {
+    const harness = await createHarness({
+      globalConcurrencyLoader: () => Promise.resolve({ maxInFlight: 1 }),
+      hostPressureGate: gateReading(0),
+      inFlightRuns: [{ issueNumber: 99, runId: "other-run" }]
+    });
+
+    const result = await harness.controller.dispatchOneFresh(pollStatus());
+
+    expect(result).toEqual({
+      dispatched: false,
+      reason: "no eligible issue has a registered provider"
+    });
+  });
+});
+
 describe("routine firing under host pressure", () => {
   it("skips a due Routine and records the host_pressure reason", async () => {
     const harness = await createRoutineHarness();
@@ -266,7 +325,13 @@ function projectConfig(root: string): RunControllerProjectConfig {
 }
 
 async function createHarness(
-  options: { hostPressureGate?: HostPressureGate } = {}
+  options: {
+    globalConcurrencyLoader?: () => Promise<{
+      maxInFlight: number | undefined;
+    }>;
+    hostPressureGate?: HostPressureGate;
+    inFlightRuns?: Array<{ issueNumber: number; runId: string }>;
+  } = {}
 ): Promise<{
   activeRuns: ActiveRunRegistry;
   addLabelsToIssue: ReturnType<typeof vi.fn>;
@@ -281,6 +346,9 @@ async function createHarness(
   openStores.push(runStore);
   runStore.syncProjectStates([{ name: "alpha", weight: 1 }]);
   const activeRuns = new ActiveRunRegistry();
+  for (const entry of options.inFlightRuns ?? []) {
+    activeRuns.reserveSlot({ ...entry, projectName: "alpha" });
+  }
   const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
 
   let runCounter = 0;
@@ -296,6 +364,9 @@ async function createHarness(
       listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     },
+    ...(options.globalConcurrencyLoader === undefined
+      ? {}
+      : { globalConcurrencyLoader: options.globalConcurrencyLoader }),
     ...(options.hostPressureGate === undefined
       ? {}
       : { hostPressureGate: options.hostPressureGate }),

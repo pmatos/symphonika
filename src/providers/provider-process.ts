@@ -5,6 +5,9 @@ import type { ProcessCommand } from "../lifecycle/process-scope.js";
 const GRACEFUL_EOF_MS = 250;
 const FORCE_KILL_GRACE_MS = 1_000;
 const SHUTDOWN_PREPARATION_TIMEOUT_MS = 250;
+const PROVIDER_OOM_SCORE_ADJUST = "500";
+const PROVIDER_OOM_SCORE_SHIM =
+  'printf \'%s\\n\' "$1" > /proc/self/oom_score_adj; shift 2; exec "$@"';
 type ProviderShutdownIntent = "cancellation" | "completion";
 type ProviderProcessExit = {
   exitCode: number | null;
@@ -211,14 +214,38 @@ export function spawnProviderProcess(
     });
   }
 
+  // Linux inherits oom_score_adj across fork/exec, so change it only in the
+  // child branch that becomes the provider. The detached supervisor and its
+  // guardian must retain the daemon's protected score: raising either would
+  // weaken the process-group lifetime boundary, and an unprivileged process
+  // cannot lower its score again. Wrapping here also covers both the
+  // systemd-run command and the non-systemd fallback without teaching either
+  // path about the other's argv shape. A failed /proc write is non-fatal;
+  // the shell continues to exec the provider with the inherited score.
+  const providerCommand: ProcessCommand =
+    process.platform === "linux"
+      ? {
+          args: [
+            "-c",
+            PROVIDER_OOM_SCORE_SHIM,
+            "sh",
+            PROVIDER_OOM_SCORE_ADJUST,
+            "--",
+            command.executable,
+            ...command.args
+          ],
+          executable: "/bin/sh"
+        }
+      : command;
+
   const child = spawn(
     process.execPath,
     [
       "--input-type=module",
       "--eval",
       PROVIDER_SUPERVISOR_SOURCE,
-      command.executable,
-      ...command.args
+      providerCommand.executable,
+      ...providerCommand.args
     ],
     {
       cwd: workspacePath,

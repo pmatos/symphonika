@@ -651,7 +651,8 @@ async function runLiveCheck(
 
 // Detects an installed unit that predates a systemd-unit-shape change (the
 // daemon/provider cgroup split, docs/adr/0064; the watchdog heartbeat,
-// docs/adr/0065; or EnvironmentFile secret injection, docs/adr/0055) so
+// docs/adr/0065; OOM victim bias, docs/adr/0091; or EnvironmentFile secret
+// injection, docs/adr/0055) so
 // operators learn to re-run `service install --force`
 // instead of silently running on stale units indefinitely. Skips entirely
 // when no unit is installed at all (`service install` was never run) —
@@ -692,6 +693,19 @@ async function checkInstalledUnitDrift(
   if (!serviceContent.includes("Slice=symphonika-daemon.slice")) {
     warnings.push(
       `${servicePath} predates the daemon/provider cgroup split (docs/adr/0064) — ${reinstallHint}`
+    );
+  }
+  const oomScoreAdjust = winningServiceAssignment(
+    serviceContent,
+    "OOMScoreAdjust"
+  );
+  if (
+    oomScoreAdjust === undefined ||
+    !/^-[1-9]\d*$/.test(oomScoreAdjust) ||
+    Number(oomScoreAdjust) < -1000
+  ) {
+    warnings.push(
+      `${servicePath} does not request daemon protection from OOM victim selection (docs/adr/0091) — ${reinstallHint}`
     );
   }
   if (
@@ -735,6 +749,41 @@ async function checkInstalledUnitDrift(
   );
 
   return warnings;
+}
+
+// readEffectiveUnitContent concatenates the base unit and sorted drop-ins in
+// systemd application order. Scalar service directives use their final
+// assignment, so checking for any negative line would miss a later
+// OOMScoreAdjust=0 (or empty reset) that neutralizes the generated request.
+function winningServiceAssignment(
+  content: string,
+  name: string
+): string | undefined {
+  let inServiceSection = false;
+  let winner: string | undefined;
+
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const section = /^\[([^\]]+)\]$/.exec(trimmed);
+    if (section !== null) {
+      inServiceSection = section[1] === "Service";
+      continue;
+    }
+    if (
+      !inServiceSection ||
+      trimmed.startsWith("#") ||
+      trimmed.startsWith(";")
+    ) {
+      continue;
+    }
+    const equalsIndex = trimmed.indexOf("=");
+    if (equalsIndex <= 0 || trimmed.slice(0, equalsIndex).trim() !== name) {
+      continue;
+    }
+    winner = trimmed.slice(equalsIndex + 1).trim();
+  }
+
+  return winner;
 }
 
 async function checkSliceDrift(

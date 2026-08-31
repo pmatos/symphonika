@@ -58,14 +58,25 @@ as no change. Reusing the review-feedback fingerprint `PullRequestState` already
 ids, comment bodies, review decision — answers the second, and is the same value the global loop
 uses to decide a markdown workflow's review round is new.
 
-What the guard deliberately does not do is bound a cycle whose observation genuinely changes each
+The original decision deliberately did not bound a cycle whose observation genuinely changed each
 round. An agent that pushes something every time it runs, without ever resolving the feedback, moves
-the head SHA and so never trips the guard. `maxReviewDispatchesPerPr` was an absolute count and did
-bound that case; nothing replaces it for a workflow-owned Issue, which leaves the per-run watchdog
-caps (ADR 0089) as the only ceiling on such a loop. Adding an absolute per-edge budget alongside the
-fingerprint is the obvious complement and is deliberately deferred, not overlooked: it is a second
-mechanism with its own failure mode (killing a long but genuinely converging repair loop), and the
-fingerprint covers the case actually observed in issue #616.
+the head SHA and so never trips the fingerprint. `maxReviewDispatchesPerPr` was an absolute count
+and did bound that case; after the global loop deferred to a workflow-owned Issue, only the per-Run
+watchdog caps (ADR 0089) remained, and every state advance started a new Run.
+
+**Amended by issue #619.** The Progress Guard now pairs the fingerprint with an absolute accepted
+claim count on the same `(project, issue, from state, to state)` row. A changed observation advances
+only while `claim_count` is below the edge budget; after that, the Run stays parked with an
+`edge_budget_exhausted` manual-attention reason. The default is ten accepted advances—deliberately
+above the old three-review-dispatch default so a legitimate multi-round repair has more room—and a
+Dispatch Project may set `progress_guard.max_claims_per_edge`; zero disables this absolute half of
+the guard without weakening the fingerprint. A pre-amendment row migrates with `claim_count = 1`
+because its existence proves one accepted advance. The existing chain-boundary delete resets both
+the fingerprint and the count.
+
+This complement has the anticipated failure mode: it can park a long but genuinely converging loop.
+The per-Project override and opt-out make that tradeoff explicit instead of removing the head SHA or
+review-feedback fingerprint and reintroducing the false parks those inputs prevent.
 
 Terminal targets are never guarded — they end the chain and cannot loop. Progress history is cleared
 when a chain reaches a terminal and when a fresh claim opens a new one, so a re-dispatched Issue is

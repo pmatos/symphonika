@@ -14,14 +14,53 @@ import type { ArtifactExistsResolver } from "./state-machine-dispatch.js";
 // (fsm-expansion.ts), so ":" cannot occur inside one and the token is
 // unambiguous.
 const NO_PROGRESS_PREFIX = "no_progress:";
+const EDGE_BUDGET_EXHAUSTED_PREFIX = "edge_budget_exhausted:";
+
+// Ten accepted advances leave substantially more room than the old default
+// of three review follow-up dispatches while still placing a finite bound on
+// a park-mediated cycle whose observation changes forever (issue #619).
+export const DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS = 10;
 
 export type NoProgressEdge = {
   fromStateId: string;
   toStateId: string;
 };
 
+export type EdgeBudgetExhausted = NoProgressEdge & {
+  maxClaims: number;
+};
+
 export function buildNoProgressReason(edge: NoProgressEdge): string {
   return `${NO_PROGRESS_PREFIX}${edge.fromStateId}:${edge.toStateId}`;
+}
+
+export function buildEdgeBudgetExhaustedReason(
+  edge: NoProgressEdge,
+  maxClaims: number
+): string {
+  return `${EDGE_BUDGET_EXHAUSTED_PREFIX}${edge.fromStateId}:${edge.toStateId}:${maxClaims}`;
+}
+
+export function parseEdgeBudgetExhaustedReason(
+  reason: string | null
+): EdgeBudgetExhausted | null {
+  if (reason === null || !reason.startsWith(EDGE_BUDGET_EXHAUSTED_PREFIX)) {
+    return null;
+  }
+  const [fromStateId, toStateId, maxClaimsText, ...rest] = reason
+    .slice(EDGE_BUDGET_EXHAUSTED_PREFIX.length)
+    .split(":");
+  const maxClaims = Number(maxClaimsText);
+  if (
+    rest.length > 0 ||
+    !fromStateId ||
+    !toStateId ||
+    !Number.isInteger(maxClaims) ||
+    maxClaims <= 0
+  ) {
+    return null;
+  }
+  return { fromStateId, maxClaims, toStateId };
 }
 
 export function parseNoProgressReason(

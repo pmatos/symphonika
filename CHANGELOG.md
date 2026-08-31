@@ -63,6 +63,12 @@
 
 ### Fixed
 
+- The raw-FSM Progress Guard now bounds a park-mediated edge even when every round changes its
+  observation. Each `(Project, Issue, from state, to state)` edge gets ten accepted claims per
+  workflow chain by default, with a per-Project `progress_guard.max_claims_per_edge` override and
+  `0` opt-out; identical-observation fingerprinting remains independent. Exhaustion parks the Run
+  with distinct operator-visible attention instead of allowing endless no-op pushes to start fresh
+  per-Run watchdog budgets. See ADR 0090 and issue #619.
 - Run history is partitioned by repository, so retargeting a Project's tracker no longer hides a
   resumable Run. Every Run persists the repository its Issue lived in (`issue_owner`/`issue_repo`,
   backfilled from the stored snapshot URL on upgrade); the newest-Run relation, stale-claim

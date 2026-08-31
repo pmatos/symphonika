@@ -35,9 +35,9 @@ describe("RunStore workflow progress claims", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      expect(store.claimProgressEdge(edge, "abc")).toBe(true);
-      expect(store.claimProgressEdge(edge, "abc")).toBe(false);
-      expect(store.claimProgressEdge(edge, "abc")).toBe(false);
+      expect(store.claimProgressEdge(edge, "abc")).toBe("claimed");
+      expect(store.claimProgressEdge(edge, "abc")).toBe("unchanged");
+      expect(store.claimProgressEdge(edge, "abc")).toBe("unchanged");
     } finally {
       store.close();
     }
@@ -47,12 +47,12 @@ describe("RunStore workflow progress claims", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      expect(store.claimProgressEdge(edge, "abc")).toBe(true);
-      expect(store.claimProgressEdge(edge, "def")).toBe(true);
+      expect(store.claimProgressEdge(edge, "abc")).toBe("claimed");
+      expect(store.claimProgressEdge(edge, "def")).toBe("claimed");
       // The new observation is now the one being guarded against.
-      expect(store.claimProgressEdge(edge, "def")).toBe(false);
+      expect(store.claimProgressEdge(edge, "def")).toBe("unchanged");
       // The superseded one is not remembered, so it reads as new again.
-      expect(store.claimProgressEdge(edge, "abc")).toBe(true);
+      expect(store.claimProgressEdge(edge, "abc")).toBe("claimed");
     } finally {
       store.close();
     }
@@ -62,23 +62,23 @@ describe("RunStore workflow progress claims", () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      expect(store.claimProgressEdge(edge, "abc")).toBe(true);
+      expect(store.claimProgressEdge(edge, "abc")).toBe("claimed");
 
       // Same park, different target: its own history.
       expect(
         store.claimProgressEdge({ ...edge, toStateId: "merge" }, "abc")
-      ).toBe(true);
+      ).toBe("claimed");
       // Same edge shape, different issue.
       expect(store.claimProgressEdge({ ...edge, issueNumber: 43 }, "abc")).toBe(
-        true
+        "claimed"
       );
       // Same edge shape, different project.
       expect(
         store.claimProgressEdge({ ...edge, projectName: "other" }, "abc")
-      ).toBe(true);
+      ).toBe("claimed");
 
       // ...and the original is still guarded.
-      expect(store.claimProgressEdge(edge, "abc")).toBe(false);
+      expect(store.claimProgressEdge(edge, "abc")).toBe("unchanged");
     } finally {
       store.close();
     }
@@ -98,13 +98,13 @@ describe("RunStore workflow progress claims", () => {
       });
 
       // Cleared history reads as never claimed.
-      expect(store.claimProgressEdge(edge, "abc")).toBe(true);
+      expect(store.claimProgressEdge(edge, "abc")).toBe("claimed");
       expect(
         store.claimProgressEdge({ ...edge, toStateId: "merge" }, "def")
-      ).toBe(true);
+      ).toBe("claimed");
       // The neighbouring issue kept its own.
       expect(store.claimProgressEdge({ ...edge, issueNumber: 43 }, "ghi")).toBe(
-        false
+        "unchanged"
       );
     } finally {
       store.close();

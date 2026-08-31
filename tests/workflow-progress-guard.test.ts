@@ -218,6 +218,7 @@ function projectFixture(): RunControllerProjectConfig {
 
 function buildController(input: {
   githubIssuesApi: GitHubIssuesApi;
+  project?: RunControllerProjectConfig;
   providerInputs?: ProviderRunInput[];
   root: string;
   runStore: ReturnType<typeof openRunStore>;
@@ -255,7 +256,9 @@ function buildController(input: {
     prepareIssueWorkspace: () =>
       Promise.resolve(preparedWorkspaceFixture(input.root)),
     projectsLoader: () =>
-      Promise.resolve(new Map([["symphonika", projectFixture()]])),
+      Promise.resolve(
+        new Map([["symphonika", input.project ?? projectFixture()]])
+      ),
     providersLoader: (): Promise<RunControllerProvidersConfig> =>
       Promise.resolve({
         claude: { command: "claude" },
@@ -391,6 +394,107 @@ describe("workflow progress guard", () => {
     }
   });
 
+  it("parks a changing cycle once the edge budget is exhausted", async () => {
+    const root = await makeTempRoot();
+    await writeCyclingProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      seedTrackedPr(store, issue);
+
+      let observation = 0;
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve(
+              prState({ headSha: `changed-head-${++observation}` })
+            )
+          ),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        root,
+        runStore: store
+      });
+
+      for (let claim = 1; claim <= 10; claim += 1) {
+        const runId = `waiting-${claim}`;
+        seedPark(store, issue, runId);
+        await controller.reEvaluateWaitingRun(runId);
+        expect(store.getRun(runId)?.state).toBe("succeeded");
+      }
+
+      seedPark(store, issue, "waiting-11");
+      await controller.reEvaluateWaitingRun("waiting-11");
+
+      const exhausted = store.getRun("waiting-11");
+      expect(exhausted?.state).toBe("waiting");
+      expect(exhausted?.currentStateId).toBe("holding");
+      expect(exhausted?.stateTransitionReason).toBe(
+        "edge_budget_exhausted:holding:repair:10"
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("uses the Project edge budget instead of the default", async () => {
+    const root = await makeTempRoot();
+    await writeCyclingProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      seedTrackedPr(store, issue);
+
+      let observation = 0;
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve(
+              prState({ headSha: `changed-head-${++observation}` })
+            )
+          ),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: {
+          ...projectFixture(),
+          progressGuard: { maxClaimsPerEdge: 2 }
+        },
+        root,
+        runStore: store
+      });
+
+      for (let claim = 1; claim <= 2; claim += 1) {
+        const runId = `waiting-${claim}`;
+        seedPark(store, issue, runId);
+        await controller.reEvaluateWaitingRun(runId);
+        expect(store.getRun(runId)?.state).toBe("succeeded");
+      }
+
+      seedPark(store, issue, "waiting-3");
+      await controller.reEvaluateWaitingRun("waiting-3");
+
+      expect(store.getRun("waiting-3")?.stateTransitionReason).toBe(
+        "edge_budget_exhausted:holding:repair:2"
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("clears the guard's history when the chain reaches a terminal", async () => {
     const root = await makeTempRoot();
     await writeCyclingProject(root);
@@ -435,7 +539,7 @@ describe("workflow progress guard", () => {
       expect(store.getRun("waiting-2")?.terminalStateId).toBe("done");
       // History for the edge is gone: any fingerprint reads as a fresh claim.
       expect(store.claimProgressEdge(guardedEdge, "any-fingerprint")).toBe(
-        true
+        "claimed"
       );
       store.clearProgressFingerprints({
         issueNumber: issue.number,

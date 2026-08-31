@@ -83,7 +83,10 @@ import {
 } from "./active-runs.js";
 import { probeStateArtifacts, statePredicateKeys } from "./artifact-probe.js";
 import {
+  buildEdgeBudgetExhaustedReason,
   buildNoProgressReason,
+  DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS,
+  parseEdgeBudgetExhaustedReason,
   parseNoProgressReason,
   progressFingerprint
 } from "./progress-fingerprint.js";
@@ -153,6 +156,9 @@ export type RunControllerProjectConfig = {
   // Dispatch-only. Routine Hosts have no issue filters, priority, or workflow.
   issue_filters?: PollingProjectConfig["issue_filters"] | undefined;
   priority?: PollingProjectConfig["priority"] | undefined;
+  // Project-owned bound for changing park-mediated cycles. Zero disables the
+  // absolute budget while leaving identical-observation fingerprinting live.
+  progressGuard?: { maxClaimsPerEdge: number } | undefined;
   agent: { provider: AgentProviderName } & Record<string, unknown>;
   workspace: {
     git: {
@@ -1415,7 +1421,10 @@ export class RunController {
       // firing: the observation moved on and the state simply has nothing to
       // match now. Clear it, or the manual-attention banner would outlive the
       // condition that raised it.
-      if (parseNoProgressReason(row.stateTransitionReason) !== null) {
+      if (
+        parseNoProgressReason(row.stateTransitionReason) !== null ||
+        parseEdgeBudgetExhaustedReason(row.stateTransitionReason) !== null
+      ) {
         this.runStore.recordWaitingActivity(runId, decision.reason);
       }
       this.logger?.debug(
@@ -1455,37 +1464,47 @@ export class RunController {
       }
       // The loop-breaker. A park can only make progress on what it observed,
       // so re-taking the same edge on an identical observation would put the
-      // workflow back where it already was — the `autofix -> wait_for_pr ->
-      // autofix` cycle that a review-feedback transition opens up, and every
-      // other cycle an author can write. Stay parked instead, and say so.
+      // workflow back where it already was. A changed observation can still
+      // churn forever, so the edge also has an absolute accepted-claim budget.
+      // Stay parked when either half refuses the edge, and say which one did.
       // Terminal targets are exempt: they end the chain, so they cannot loop.
-      // See issue #616.
+      // See issues #616 and #619.
       const edge: ProgressEdge = {
         fromStateId: waitState.id,
         issueNumber: row.issueNumber,
         projectName: row.project,
         toStateId: decision.to
       };
-      const claimed = this.runStore.claimProgressEdge(
+      const maxEdgeClaims =
+        project.progressGuard?.maxClaimsPerEdge ??
+        DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS;
+      const claim = this.runStore.claimProgressEdge(
         edge,
         progressFingerprint({
           artifactExists: waitArtifactExists,
           pullRequestState,
           signals,
           state: waitState
-        })
+        }),
+        maxEdgeClaims
       );
-      if (!claimed) {
-        this.runStore.recordWaitingActivity(runId, buildNoProgressReason(edge));
+      if (claim !== "claimed") {
+        this.runStore.recordWaitingActivity(
+          runId,
+          claim === "unchanged"
+            ? buildNoProgressReason(edge)
+            : buildEdgeBudgetExhaustedReason(edge, maxEdgeClaims)
+        );
         this.logger?.warn(
           {
+            claim,
             fromStateId: waitState.id,
             issueNumber: row.issueNumber,
             project: row.project,
             runId,
             toStateId: decision.to
           },
-          "symphonika wait re-eval parked: workflow made no progress"
+          "symphonika wait re-eval parked: workflow progress guard refused edge"
         );
         return;
       }

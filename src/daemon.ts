@@ -44,6 +44,8 @@ import { interpretPullRequest } from "./pull-request-state.js";
 import { ActiveRunRegistry, CANCEL_REASONS } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
 import { resolveProjectMaxInFlight } from "./lifecycle/concurrency-capacity.js";
+import { createHostPressureGate } from "./lifecycle/host-pressure.js";
+import { sweepProviderScratch } from "./lifecycle/provider-scratch.js";
 import { resolveToken } from "./lifecycle/token.js";
 import {
   createDaemonHeartbeat,
@@ -354,6 +356,19 @@ export async function startDaemon(
       "symphonika startup: routine firing sweep complete"
     );
   }
+  // A crashed or SIGKILLed daemon never runs its attempts' cleanup, so
+  // provider scratch trees can survive it. No attempt of THIS instance owns
+  // one yet, so every directory found here is stale. See ADR 0088.
+  const scratchSweep = await sweepProviderScratch(state.stateRoot);
+  if (scratchSweep.removed.length > 0 || scratchSweep.failures.length > 0) {
+    logger.info(
+      {
+        failures: scratchSweep.failures.length,
+        removed: scratchSweep.removed.length
+      },
+      "symphonika startup: provider scratch sweep complete"
+    );
+  }
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const runtimeConfig = new RuntimeConfigReloader({
@@ -457,6 +472,14 @@ export async function startDaemon(
   }> => {
     return Promise.resolve(runtimeConfig.globalConcurrency());
   };
+  // One PSI sample per configured interval, shared by fresh dispatch, retry
+  // re-admission and Routine Firings so a single tick cannot dispatch on two
+  // different readings of the same host. The policy is read through the
+  // reloader, so a config change takes effect without rebuilding the gate.
+  // See ADR 0088.
+  const hostPressureGate = createHostPressureGate({
+    policy: () => runtimeConfig.hostPressurePolicy()
+  });
   const enqueueScheduledWork = (work: () => Promise<void>): void => {
     scheduledWork = scheduledWork.then(work, work);
     void scheduledWork;
@@ -471,6 +494,7 @@ export async function startDaemon(
     dispatchMutex,
     githubIssuesApi,
     globalConcurrencyLoader,
+    hostPressureGate,
     logger,
     projectsLoader,
     providersLoader,
@@ -1052,6 +1076,7 @@ export async function startDaemon(
           env,
           globalConcurrency: runtimeConfig.globalConcurrency(),
           githubIssuesApi,
+          hostPressure: hostPressureGate.current(),
           logger,
           notification: {
             createSink: (config) =>
@@ -1126,6 +1151,10 @@ export async function startDaemon(
   const tick = async (): Promise<void> => {
     await refreshIssuePollStatus();
     refreshPollingInterval();
+    // Sample before reconcile/launchWork so every admission decision this
+    // tick makes -- Routine Firings included, which read the cached verdict
+    // synchronously -- sees the same reading. See ADR 0088.
+    await refreshHostPressure();
     await reconcile();
     launchWork();
     updateCoordinator.tick();
@@ -1150,6 +1179,16 @@ export async function startDaemon(
     // monotonic timestamp used for elapsed-time liveness decisions.
     lastTickAtMs = Date.now();
     lastTickAtMonotonicMs = performance.now();
+  };
+  // A /proc read cannot be allowed to abort the tick: an unreadable counter
+  // already degrades to "admit" inside the gate, and anything unexpected
+  // here must leave the daemon ticking rather than stalling dispatch.
+  const refreshHostPressure = async (): Promise<void> => {
+    try {
+      await hostPressureGate.refresh();
+    } catch (error) {
+      logger.warn({ err: error }, "symphonika host pressure sample failed");
+    }
   };
   const refreshPollingInterval = (): void => {
     if (!state.configExists) {
@@ -1317,6 +1356,7 @@ export async function startDaemon(
         env,
         globalConcurrency: runtimeConfig.globalConcurrency(),
         githubIssuesApi,
+        hostPressure: hostPressureGate.current(),
         logger,
         notification: {
           createSink: (config) =>
@@ -1360,6 +1400,29 @@ export async function startDaemon(
     getPollingIntervalMs: () => intervalMs,
     getTickLoopStartedAtMonotonic: () => tickLoopStartedAtMonotonicMs,
     monotonicNow: () => performance.now(),
+    getHostPressure: () => {
+      const verdict = hostPressureGate.current();
+      const sample = hostPressureGate.lastSample();
+      return {
+        admitted: verdict.admitted,
+        ...(verdict.admitted
+          ? {}
+          : {
+              observed: verdict.observed,
+              reason: verdict.reason,
+              resource: verdict.resource,
+              threshold: verdict.threshold
+            }),
+        ...(sample === undefined
+          ? {}
+          : {
+              sample: {
+                fullAvg60: sample.fullAvg60,
+                unavailable: sample.unavailable
+              }
+            })
+      };
+    },
     getConcurrency: () => {
       const { maxInFlight } = runtimeConfig.globalConcurrency();
       const perProject: Array<{

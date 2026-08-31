@@ -862,9 +862,19 @@ Recommended layout:
         prompt-metadata.json
         issue-snapshot.json
         workflow-graph.json
+  scratch/
+    <run-id>-attempt-<n>/
 ```
 
 Agents may modify workspaces, so orchestrator evidence must stay outside the Git worktree.
+
+`scratch/` holds one directory per provider attempt, passed to the spawned provider as `TMPDIR`
+(and `TMP`/`TEMP`). Without it a provider inherits the daemon's own temporary directory, which on
+most systemd hosts is a RAM-backed `/tmp` where multi-gigabyte build output permanently consumes
+memory. The directory is removed when the attempt ends, and daemon startup sweeps whatever a
+crashed instance left behind. It is transient, not evidence: nothing under `scratch/` is read
+back by any operator surface. Cargo output under a Project's own `target/` is deliberately left in
+the Workspace, where `watchdog.mtime_include` can still read it as progress. See ADR 0088.
 When the daemon is running, `daemon.json` records the local API endpoint for that state root.
 Operator CLI commands that use the descriptor must preflight the daemon status and reject endpoints
 whose reported state root differs from the configured state root.
@@ -925,9 +935,10 @@ On daemon startup:
    `terminal_reason = "provider requested input (legacy)"`.
 4. Validate Projects.
 5. Reconcile stale labels and previous run state.
-6. Start local UI/API if enabled.
-7. Perform an immediate poll.
-8. Schedule interval polling.
+6. Sweep provider scratch directories left behind by a previous daemon instance.
+7. Start local UI/API if enabled.
+8. Perform an immediate poll.
+9. Schedule interval polling.
 
 Default poll interval: `30000` ms.
 
@@ -954,6 +965,21 @@ Dispatch uses weighted round-robin across Projects. Within each Project, issues 
 1. configured priority label mapping
 2. oldest creation time
 3. issue number
+
+Before the concurrency caps, admission consults the host itself. The orchestrator reads Linux's
+pressure-stall counters (`/proc/pressure/memory` and `/proc/pressure/io`) and defers claiming new
+work while a gated resource's `full avg60` percentage is at or above its configured ceiling. This
+is a separate verdict from the concurrency caps, with its own reason strings and its own
+`host_pressure` Routine skip reason, so a stalled host is never reported as a full cap. The
+counters are sampled at most once per `global.pressure.sample_interval_seconds` and refreshed once
+per daemon tick, so every admission decision in a tick sees one consistent reading. Runs already
+in flight are unaffected; this gates admission only.
+
+Defaults, applied when `global.pressure` is omitted: enabled, memory gated at 10%, I/O ungated,
+10 second sampling. I/O is opt-in because a healthy build host sustains an I/O `full avg60` in the
+50s under ordinary compilation, so no default ceiling is safe for every host. A threshold set to
+`null` ungates that resource. Where the counters cannot be read — non-Linux, or a kernel without
+`CONFIG_PSI` — the gate admits. See ADR 0088.
 
 A Dispatch Project may opt into `dispatch.overlap_guard: true` (default `false`). After the global
 and per-Project concurrency caps and per-Issue reservation checks, the picker compares a
@@ -1139,7 +1165,8 @@ DST rules.
 
 Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs.
 Fan-out admission is per target rather than atomic: admitted siblings start concurrently, while a
-target whose cap is full records a `concurrency_cap` skip. If an earlier firing of the same Routine
+target whose cap is full records a `concurrency_cap` skip, and a target evaluated while the host
+is stalled records a `host_pressure` skip. If an earlier firing of the same Routine
 Target remains non-terminal, that target records an `overlap` skip unless `allow_overlap: true` is
 configured; overlap opt-in does not bypass concurrency caps. A partial group is therefore normal.
 Every skip atomically advances only that target's clock event, updates its latest-attempt/skip

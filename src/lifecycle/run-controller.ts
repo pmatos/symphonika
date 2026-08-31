@@ -2986,6 +2986,7 @@ export class RunController {
         provider: input.provider,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
+        repositoryToken: input.repository.token,
         runId: input.runId,
         runtime
       });
@@ -3550,6 +3551,7 @@ export class RunController {
     provider: AgentProvider;
     providerCommand: string;
     providerName: AgentProviderName;
+    repositoryToken: string;
     runId: string;
     runtime: RunRuntime;
   }): Promise<void> {
@@ -3578,6 +3580,13 @@ export class RunController {
         run: scratchIdentity,
         scratchPath,
         stderrLogPath: providerStderrLogPath(input.evidence.rawLogPath),
+        // Providers run full-permission and inherit this process's env
+        // (provider-process.ts spawns with `{ ...process.env }`), so an agent
+        // that echoes its GitHub token would otherwise persist it verbatim
+        // into an artifact the dashboard serves. SPEC.md §6. The wider gap —
+        // this token is not scrubbed from a Run's own raw/normalized evidence
+        // either, and the Run path resolves no other secrets — is issue #612.
+        stderrRedactSecrets: [input.repositoryToken],
         workspacePath: input.evidence.workspacePath
       })) {
         sequence += 1;

@@ -910,8 +910,9 @@ created on the provider's first stderr byte, so its absence means the provider s
 a Run or Firing ends without a clean provider exit, the tail of that log is appended to the
 terminal reason, which otherwise carries nothing but `process_exit_<code>` or `firing_timeout`.
 
-Routine Firing stderr is redacted on the way to disk with the same secret list §6 requires for the
-raw and normalized evidence, streamed so a secret split across two reads is still caught. The
+Provider stderr is redacted on the way to disk, streamed so a secret split across two reads is
+still caught: a Routine Firing scrubs the same secret list §6 requires for its raw and normalized
+evidence, and an issue Run scrubs its project's resolved tracker token. The
 provider adapter waits for that write to flush before its attempt generator returns, so the
 terminal-reason excerpt is read after the bytes land rather than racing them; the wait is bounded,
 because evidence capture is best-effort and must never keep a Run or Firing from reaching a

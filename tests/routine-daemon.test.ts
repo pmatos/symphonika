@@ -1136,6 +1136,87 @@ describe("daemon routine firing", () => {
     }
   });
 
+  it("re-samples host pressure on a manual fire instead of riding the tick cadence", async () => {
+    // A manual fire is its own admission boundary. `current()` applies no
+    // TTL, so between ticks it hands back whatever the last tick sampled --
+    // here, the healthy reading taken at startup. Polling is set to 60s so
+    // no tick can re-sample during the test: only the manual path's own
+    // refresh can observe the stall. See ADR 0088.
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work.");
+    await writeFile(
+      path.join(root, "daily-report.md"),
+      [
+        "---",
+        "name: daily-report",
+        "schedule:",
+        `  at: ${new Date(Date.now() + 3_600_000).toISOString()}`,
+        "kind: report",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+    // A near-zero sampling interval keeps the gate's TTL from masking a
+    // fresh reading; 60s polling keeps the tick from being what catches the
+    // stall, isolating the manual-fire path under test.
+    await writeProjectConfig(
+      root,
+      "alpha",
+      ["./daily-report.md"],
+      false,
+      60_000,
+      ["global:", "  pressure:", "    sample_interval_seconds: 0.001"]
+    );
+    // Flipped by the test immediately before the manual fire, after every
+    // startup refresh has already cached a healthy verdict. `current()` would
+    // still hand back that cached value; only a fresh read sees the stall.
+    let stalled = false;
+    const provider = quietProvider();
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      readHostPressure: () =>
+        Promise.resolve({
+          fullAvg60: { memory: stalled ? 90 : 0 },
+          unavailable: {}
+        }),
+      prepareRoutineWorkspace: vi.fn().mockResolvedValue({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        cachePath: path.join(root, ".cache", "repo.git"),
+        reused: false,
+        workspacePath: path.join(root, "manual-workspace")
+      })
+    });
+
+    try {
+      await waitForRoutine(daemon.url, "active");
+      stalled = true;
+      const response = await fetch(
+        `${daemon.url}/api/routines/daily-report/fire?project=alpha`,
+        { method: "POST" }
+      );
+
+      expect(response.status).toBe(429);
+      expect(await response.json()).toMatchObject({
+        kind: "refused",
+        reason: "host_pressure"
+      });
+      expect(vi.mocked(provider.runAttempt)).not.toHaveBeenCalled();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("samples host pressure before the startup dispatch, so a due Routine cannot fire onto a stalled host", async () => {
     // The startup path calls launchWork() directly rather than through tick(),
     // and Routine dispatch reads the gate's cached verdict synchronously —
@@ -1286,7 +1367,8 @@ async function writeProjectConfig(
   projectName: string,
   routines: string[],
   disabled = false,
-  pollingIntervalMs = 25
+  pollingIntervalMs = 25,
+  extraServiceLines: string[] = []
 ): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
@@ -1295,6 +1377,7 @@ async function writeProjectConfig(
       "  root: ./.symphonika",
       "polling:",
       `  interval_ms: ${pollingIntervalMs}`,
+      ...extraServiceLines,
       "providers:",
       "  codex:",
       '    command: "codex fake"',

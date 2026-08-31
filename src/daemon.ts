@@ -1346,6 +1346,17 @@ export async function startDaemon(
       await reloadConfigAndRecordOutcome();
       const projects = runtimeConfig.projectsByName();
       synchronizeRoutineTargets({ projects, runStore });
+      // Re-sample for the same reason the snapshot is reloaded above: a
+      // manual fire is its own admission boundary and must not ride the tick
+      // cadence. `current()` applies no TTL, so between ticks it can hand
+      // back a verdict older than sample_interval_seconds (30s polling vs 10s
+      // sampling by default) — long enough for a host to become stalled and
+      // still admit. refresh() is TTL-guarded and collapses concurrent reads,
+      // so this costs at most one /proc read on a rare operator-driven path.
+      // Awaited HERE, before the drain re-check below, so the verdict is
+      // resolved to a value and the re-check remains the last thing between
+      // this await and the synchronous claim section. See ADR 0088.
+      const hostPressure = await hostPressureGate.refresh();
       // The reload awaits the reloader mutex and filesystem reads. A
       // self-update drain can begin during that gap, so repeat the admission
       // check immediately before the synchronous claim section.
@@ -1366,7 +1377,7 @@ export async function startDaemon(
         env,
         globalConcurrency: runtimeConfig.globalConcurrency(),
         githubIssuesApi,
-        hostPressure: hostPressureGate.current(),
+        hostPressure,
         logger,
         notification: {
           createSink: (config) =>

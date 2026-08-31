@@ -20,6 +20,7 @@ import {
 } from "../src/lifecycle/run-controller.js";
 import type { ProviderEvent, ProviderRunInput } from "../src/provider.js";
 import { openRunStore } from "../src/run-store.js";
+import { loadExpandedWorkflow } from "../src/workflow/fsm-expansion.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
@@ -660,5 +661,30 @@ describe("workflow progress guard", () => {
     } finally {
       store.close();
     }
+  });
+});
+
+describe("this repository's own workflow", () => {
+  it("routes unresolved review feedback out of wait_for_pr", async () => {
+    const loaded = await loadExpandedWorkflow("./workflow.yml", "auto");
+    expect(loaded.errors).toEqual([]);
+
+    const wait = loaded.workflow.states.find(
+      (state) => state.id === "wait_for_pr"
+    );
+    expect(wait).toBeDefined();
+
+    const targets = wait!.transitions.map((transition) => transition.to);
+    const reviewIndex = wait!.transitions.findIndex(
+      (transition) => transition.when.has_unresolved_reviews === true
+    );
+    const mergeIndex = targets.indexOf("merge");
+
+    // The global follow-up loop defers to this park now (issue #616), so a
+    // case this state does not name is a case nothing handles.
+    expect(reviewIndex).toBeGreaterThanOrEqual(0);
+    expect(wait!.transitions[reviewIndex]!.to).toBe("autofix");
+    // Ordered after merge, so a clean and fully resolved PR still merges.
+    expect(reviewIndex).toBeGreaterThan(mergeIndex);
   });
 });

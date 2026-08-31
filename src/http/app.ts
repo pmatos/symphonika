@@ -593,11 +593,6 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         return context.json({ error: "run not found" }, 404);
       }
       const events = runStore.listProviderEvents(detail.id, { limit: 100 });
-      const activeAttempt = detail.attempts[detail.attempts.length - 1];
-      const streamReceipt =
-        activeAttempt === undefined
-          ? undefined
-          : runStore.getProviderStreamReceipt(activeAttempt.id);
       const { attempts, transitions, ...run } = detail;
       // Both observability sections read the same effective clock so a
       // terminal Run does not pair a frozen Watchdog age with an ever-drifting
@@ -620,11 +615,11 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         attempts,
         events,
         providerStream: buildProviderStreamStatus({
-          attempt: activeAttempt,
+          attempt: attempts.at(-1),
           nowMs: detailNowMs,
-          receipt: streamReceipt,
-          recoveredStalls: runStore.listProviderStreamStalls(detail.id),
-          runState: run.state
+          runId: run.id,
+          runState: run.state,
+          runStore
         }),
         pullRequestFollowup,
         run,

@@ -80,6 +80,44 @@ function withClaimTime(instant: string, create: () => void): void {
   }
 }
 
+// The createRun + running transition + attempt-1 preamble every provider
+// stream fixture needs before it can record events. Branch and attempt ids
+// are derived from the run id so a caller only has to name the run; returns
+// the attempt id the events are recorded against.
+function seedRunningAttempt(
+  runStore: RunStore,
+  runId: string,
+  workspacePath: string
+): string {
+  runStore.createRun({
+    id: runId,
+    issue: sampleIssue({ number: 591 }),
+    projectName: "alpha",
+    providerCommand: "x",
+    providerName: "codex"
+  });
+  runStore.updateRunState(runId, "running");
+  const attemptId = `${runId}-attempt-1`;
+  runStore.createAttempt({
+    attemptNumber: 1,
+    branchName: `sym/${runId}`,
+    branchRef: `refs/heads/sym/${runId}`,
+    id: attemptId,
+    issueSnapshotPath: "",
+    metadataPath: "",
+    normalizedLogPath: "",
+    promptPath: "",
+    providerCommand: "x",
+    providerName: "codex",
+    rawLogPath: "",
+    runId,
+    state: "running",
+    workflowGraphPath: "",
+    workspacePath
+  });
+  return attemptId;
+}
+
 describe("HTTP app — runs API and pages", () => {
   it("shows each Run's current workflow state on /runs", async () => {
     const test = await setup();
@@ -580,31 +618,11 @@ describe("HTTP app — runs API and pages", () => {
     const test = await setup();
     try {
       withClaimTime("2026-08-28T13:00:00.000Z", () => {
-        test.runStore.createRun({
-          id: "provider-stream-detail",
-          issue: sampleIssue({ number: 591 }),
-          projectName: "alpha",
-          providerCommand: "x",
-          providerName: "codex"
-        });
-        test.runStore.updateRunState("provider-stream-detail", "running");
-        test.runStore.createAttempt({
-          attemptNumber: 1,
-          branchName: "sym/provider-stream-detail",
-          branchRef: "refs/heads/sym/provider-stream-detail",
-          id: "provider-stream-detail-attempt-1",
-          issueSnapshotPath: "",
-          metadataPath: "",
-          normalizedLogPath: "",
-          promptPath: "",
-          providerCommand: "x",
-          providerName: "codex",
-          rawLogPath: "",
-          runId: "provider-stream-detail",
-          state: "running",
-          workflowGraphPath: "",
-          workspacePath: test.stateRoot
-        });
+        seedRunningAttempt(
+          test.runStore,
+          "provider-stream-detail",
+          test.stateRoot
+        );
         test.runStore.recordProviderEvent({
           attemptId: "provider-stream-detail-attempt-1",
           normalized: { type: "session_started" },
@@ -641,31 +659,7 @@ describe("HTTP app — runs API and pages", () => {
     let runStore = openRunStore({ stateRoot });
     try {
       withClaimTime("2026-08-28T13:00:00.000Z", () => {
-        runStore.createRun({
-          id: "provider-stream-recovered",
-          issue: sampleIssue({ number: 591 }),
-          projectName: "alpha",
-          providerCommand: "x",
-          providerName: "codex"
-        });
-        runStore.updateRunState("provider-stream-recovered", "running");
-        runStore.createAttempt({
-          attemptNumber: 1,
-          branchName: "sym/provider-stream-recovered",
-          branchRef: "refs/heads/sym/provider-stream-recovered",
-          id: "provider-stream-recovered-attempt-1",
-          issueSnapshotPath: "",
-          metadataPath: "",
-          normalizedLogPath: "",
-          promptPath: "",
-          providerCommand: "x",
-          providerName: "codex",
-          rawLogPath: "",
-          runId: "provider-stream-recovered",
-          state: "running",
-          workflowGraphPath: "",
-          workspacePath: stateRoot
-        });
+        seedRunningAttempt(runStore, "provider-stream-recovered", stateRoot);
         runStore.recordProviderEvent({
           attemptId: "provider-stream-recovered-attempt-1",
           normalized: { type: "message", message: "before retry" },
@@ -722,31 +716,11 @@ describe("HTTP app — runs API and pages", () => {
     const test = await setup();
     try {
       withClaimTime("2026-08-28T13:00:00.000Z", () => {
-        test.runStore.createRun({
-          id: "provider-stream-first-event",
-          issue: sampleIssue({ number: 591 }),
-          projectName: "alpha",
-          providerCommand: "x",
-          providerName: "codex"
-        });
-        test.runStore.updateRunState("provider-stream-first-event", "running");
-        test.runStore.createAttempt({
-          attemptNumber: 1,
-          branchName: "sym/provider-stream-first-event",
-          branchRef: "refs/heads/sym/provider-stream-first-event",
-          id: "provider-stream-first-event-attempt-1",
-          issueSnapshotPath: "",
-          metadataPath: "",
-          normalizedLogPath: "",
-          promptPath: "",
-          providerCommand: "x",
-          providerName: "codex",
-          rawLogPath: "",
-          runId: "provider-stream-first-event",
-          state: "running",
-          workflowGraphPath: "",
-          workspacePath: test.stateRoot
-        });
+        seedRunningAttempt(
+          test.runStore,
+          "provider-stream-first-event",
+          test.stateRoot
+        );
       });
       withClaimTime("2026-08-28T13:06:00.000Z", () => {
         test.runStore.recordProviderEvent({
@@ -789,31 +763,11 @@ describe("HTTP app — runs API and pages", () => {
     const test = await setup();
     try {
       withClaimTime("2026-08-28T13:00:00.000Z", () => {
-        test.runStore.createRun({
-          id: "provider-stream-raw-activity",
-          issue: sampleIssue({ number: 591 }),
-          projectName: "alpha",
-          providerCommand: "x",
-          providerName: "codex"
-        });
-        test.runStore.updateRunState("provider-stream-raw-activity", "running");
-        test.runStore.createAttempt({
-          attemptNumber: 1,
-          branchName: "sym/provider-stream-raw-activity",
-          branchRef: "refs/heads/sym/provider-stream-raw-activity",
-          id: "provider-stream-raw-activity-attempt-1",
-          issueSnapshotPath: "",
-          metadataPath: "",
-          normalizedLogPath: "",
-          promptPath: "",
-          providerCommand: "x",
-          providerName: "codex",
-          rawLogPath: "",
-          runId: "provider-stream-raw-activity",
-          state: "running",
-          workflowGraphPath: "",
-          workspacePath: test.stateRoot
-        });
+        seedRunningAttempt(
+          test.runStore,
+          "provider-stream-raw-activity",
+          test.stateRoot
+        );
         test.runStore.recordProviderEvent({
           attemptId: "provider-stream-raw-activity-attempt-1",
           normalized: { type: "session_started" },

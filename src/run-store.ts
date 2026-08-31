@@ -736,6 +736,17 @@ function mapProviderStreamStallRow(
   };
 }
 
+function mapProviderStreamReceiptRow(
+  row: ProviderStreamReceiptRow
+): ProviderStreamReceipt {
+  return {
+    attemptId: row.attempt_id,
+    lastEventAt: row.last_event_at,
+    lastEventSequence: row.last_event_sequence,
+    runId: row.run_id
+  };
+}
+
 type WatchdogCandidateRunRow = {
   created_at: string;
   evidence_ignore_json: string;
@@ -4368,14 +4379,7 @@ export class RunStore {
         ].join(" ")
       )
       .get(attemptId) as ProviderStreamReceiptRow | undefined;
-    return row === undefined
-      ? undefined
-      : {
-          attemptId: row.attempt_id,
-          lastEventAt: row.last_event_at,
-          lastEventSequence: row.last_event_sequence,
-          runId: row.run_id
-        };
+    return row === undefined ? undefined : mapProviderStreamReceiptRow(row);
   }
 
   // Provider event `sequence` resets to 1 on every attempt, so an unscoped
@@ -5757,6 +5761,18 @@ export class RunStore {
         workspace_mtime_max, turn_id_set_size, output_tokens_total,
         normalized_log_offset, normalized_log_path, idle_since
       from watchdog_samples;
+    `);
+
+    // provider_events is the largest append-only table in the schema — one row
+    // per normalized stream event, with no retention sweep and no index beyond
+    // its rowid. backfillProviderStreamReceipts' newest-per-attempt lookup,
+    // listProviderEvents and getLastFailureEvent all filter or group by
+    // attempt_id, so without this they scan the whole table and build a temp
+    // b-tree. Created before the backfill below so the one-shot migration
+    // reads it.
+    this.database.exec(`
+      create index if not exists provider_events_attempt_idx
+      on provider_events(attempt_id, id);
     `);
 
     this.backfillProviderStreamReceipts();

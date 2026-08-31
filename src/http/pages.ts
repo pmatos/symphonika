@@ -642,10 +642,6 @@ export function registerPages(options: RegisterPagesOptions): void {
     const isFailure =
       FAILURE_STATES.has(detail.state) || BLOCKED_STATES.has(detail.state);
     const terminalAttempt = detail.attempts[detail.attempts.length - 1];
-    const streamReceipt =
-      terminalAttempt === undefined
-        ? undefined
-        : options.runStore.getProviderStreamReceipt(terminalAttempt.id);
     const failureEvent = isFailure
       ? options.runStore.getLastFailureEvent(id, terminalAttempt?.id)
       : undefined;
@@ -701,9 +697,9 @@ export function registerPages(options: RegisterPagesOptions): void {
     const providerStream = buildProviderStreamStatus({
       attempt: terminalAttempt,
       nowMs: detailNowMs,
-      receipt: streamReceipt,
-      recoveredStalls: options.runStore.listProviderStreamStalls(detail.id),
-      runState: detail.state
+      runId: detail.id,
+      runState: detail.state,
+      runStore: options.runStore
     });
     const outputTokenGrowth5m =
       watchdog?.enabled === true && watchdog.sampledAt !== undefined
@@ -719,7 +715,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       renderPullRequestFollowupAttention(pullRequestFollowup),
       renderWorkflowProgressAttention(buildWorkflowProgressAttention(detail)),
       renderRunSummary(detail, capContext),
-      renderProviderStreamSection(providerStream),
+      renderProviderStreamSection(providerStream, detailNowMs),
       renderWatchdogSection(watchdog, outputTokenGrowth5m, detailNowMs),
       renderWorkflowGraphSummary(detail.id, workflowGraph),
       renderCancelForm(detail, csrfToken),
@@ -6828,19 +6824,24 @@ function renderWatchdogSection(
 </dl></section>`;
 }
 
-function renderProviderStreamSection(status: ProviderStreamStatus): string {
+function renderProviderStreamSection(
+  status: ProviderStreamStatus,
+  nowMs: number
+): string {
+  const threshold = escapeHtml(formatWatchdogDuration(status.thresholdMs));
   const stalledBanner =
-    status.stalled && status.stalledForMs !== null
-      ? `<div class="banner banner--attention"><p class="banner-title">Stream stalled, provider retrying (${escapeHtml(formatWatchdogDuration(status.stalledForMs))})</p><p class="banner-reason">No provider event has arrived beyond the normal five-minute stream idle window. The provider may recover within its own retry budget; this is an observation, not a termination signal.</p></div>`
-      : "";
+    status.stalledForMs === null
+      ? ""
+      : `<div class="banner banner--attention"><p class="banner-title">Stream stalled, provider retrying (${escapeHtml(formatWatchdogDuration(status.stalledForMs))})</p><p class="banner-reason">No provider event has arrived beyond the normal ${threshold} stream idle window. The provider may recover within its own retry budget; this is an observation, not a termination signal.</p></div>`;
   const lastEvent =
-    status.lastEventAt === null || status.lastEventAgeMs === null
+    status.lastEventAt === null
       ? `<span class="muted">none recorded</span>`
-      : `<code>${renderTimestamp(status.lastEventAt)}</code> <span class="muted">(${escapeHtml(formatWatchdogDuration(status.lastEventAgeMs))} ago)</span>`;
+      : `<code>${renderTimestamp(status.lastEventAt)}</code> <span class="muted">(${escapeHtml(formatAge(status.lastEventAt, nowMs))})</span>`;
+  const latestStall = status.recoveredStalls.at(-1);
   const recoveredStalls =
-    status.recoveredStalls.length === 0
+    latestStall === undefined
       ? "0"
-      : `${status.recoveredStalls.length} <span class="muted">(latest ${escapeHtml(formatWatchdogDuration(status.recoveredStalls[status.recoveredStalls.length - 1]?.durationMs ?? 0))})</span>`;
+      : `${status.recoveredStalls.length} <span class="muted">(latest ${escapeHtml(formatWatchdogDuration(latestStall.durationMs))})</span>`;
   return `<section>${sectionHead("Provider stream")}${stalledBanner}<dl class="fields">
   <dt>Last provider event</dt><dd>${lastEvent}</dd>
   <dt>Stall threshold</dt><dd>${escapeHtml(formatWatchdogDuration(status.thresholdMs))}</dd>

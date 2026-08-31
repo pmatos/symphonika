@@ -4803,6 +4803,11 @@ describe("RoutineFiringDispatcher", () => {
       expect(delivered).toHaveLength(1);
       expect(delivered[0]?.text).not.toContain(secret);
       expect(delivered[0]?.html).not.toContain(secret);
+      // The email is the one channel that leaves the machine, so it is the
+      // last place a leaked credential can still be caught — the tracker token
+      // has to be scrubbed here too, not only from the on-disk evidence.
+      expect(delivered[0]?.text).not.toContain("tracker-token-value");
+      expect(delivered[0]?.html).not.toContain("tracker-token-value");
 
       const database = await readFile(path.join(stateRoot, "symphonika.db"));
       expect(database.includes(Buffer.from(secret))).toBe(false);

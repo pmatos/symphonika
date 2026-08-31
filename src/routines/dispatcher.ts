@@ -988,10 +988,13 @@ async function deliverReadyRoutineFanouts(
   // delivery and the next. Re-resolving here would let a later fan-out's
   // redaction secret drift from the config `sink` above actually delivers
   // through for the rest of this tick.
-  const fanoutRedactSecrets = secretsForEmailConfig(
-    config,
-    input.env ?? process.env
-  );
+  const fanoutRedactSecrets = [
+    ...secretsForEmailConfig(config, input.env ?? process.env),
+    // A fan-out renders several projects' firings into one email, so every
+    // participating project's tracker token has to be scrubbed, not just the
+    // one whose firing is being rendered at the time.
+    ...projectTrackerTokens(input.projects, input.env ?? process.env)
+  ];
   // notify is uniform across every target of one fan-out (it lives on the
   // shared RoutineDeclaration, materialized identically per project — ADR
   // 0069), so any one target row's value is authoritative for the group.
@@ -1695,7 +1698,13 @@ async function recordRoutineFiringNotification(
     return;
   }
   const sink = input.notification.createSink(config);
-  const redactSecrets = resolveRedactSecrets(input.notification, input.env);
+  // The tracker token belongs here for the same reason the SMTP password
+  // does: this text leaves the machine, so it is the last place a leaked
+  // credential can still be caught.
+  const redactSecrets = [
+    ...resolveRedactSecrets(input.notification, input.env),
+    ...routineTrackerTokens(input.project, input.env)
+  ];
   const outcome = await deliverRoutineFiringNotification({
     config,
     firing: {
@@ -2526,6 +2535,20 @@ function redactValueDeep(value: unknown, redactSecrets: string[]): unknown {
 // The tracker token is env-backed and resolved per call rather than stored,
 // mirroring captureRoutineGithubSnapshot. Absent tracker or unset variable
 // yields nothing to redact.
+// Every distinct tracker token across the projects a fan-out can render.
+function projectTrackerTokens(
+  projects: ReadonlyMap<string, RunControllerProjectConfig>,
+  env: NodeJS.ProcessEnv
+): string[] {
+  return [
+    ...new Set(
+      [...projects.values()].flatMap((project) =>
+        routineTrackerTokens(project, env)
+      )
+    )
+  ];
+}
+
 function routineTrackerTokens(
   project: RunControllerProjectConfig,
   env: NodeJS.ProcessEnv

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { progressFingerprint } from "../src/lifecycle/progress-fingerprint.js";
+import {
+  formatNoProgressReason,
+  parseNoProgressReason,
+  progressFingerprint
+} from "../src/lifecycle/progress-fingerprint.js";
 import type { ExpandedWorkflowState } from "../src/workflow/types.js";
 
 function waitState(
@@ -135,5 +139,24 @@ describe("progressFingerprint", () => {
       state
     });
     expect(withResolver).toBe(withoutResolver);
+  });
+});
+
+describe("no-progress reason round trip", () => {
+  it("parses back the edge it formatted", () => {
+    const reason = formatNoProgressReason("wait_for_pr", "autofix");
+    expect(parseNoProgressReason(reason)).toEqual({
+      fromStateId: "wait_for_pr",
+      toStateId: "autofix"
+    });
+  });
+
+  it("ignores reasons written by anything but the guard", () => {
+    expect(parseNoProgressReason(null)).toBeNull();
+    expect(parseNoProgressReason(undefined)).toBeNull();
+    expect(parseNoProgressReason("holding advanced to done")).toBeNull();
+    expect(
+      parseNoProgressReason("merge_pr merged PR #99 via squash")
+    ).toBeNull();
   });
 });

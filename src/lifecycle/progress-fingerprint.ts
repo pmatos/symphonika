@@ -6,10 +6,44 @@ import type {
 import { collectArtifactPaths } from "./artifact-probe.js";
 import type { ArtifactExistsResolver } from "./state-machine-dispatch.js";
 
-// Marks a `state_transition_reason` written because the progress guard held a
-// park in place. One definition, shared by the guard that writes it and the
-// detail surfaces that render it as a manual-attention warning.
-export const noProgressReasonPrefix = "workflow made no progress: ";
+// The `state_transition_reason` written when the progress guard holds a park
+// in place, and its inverse. Both live here so the guard that writes the
+// reason and the detail surfaces that render it as a manual-attention warning
+// cannot drift apart on the format.
+const NO_PROGRESS_PREFIX = "workflow made no progress: ";
+const NO_PROGRESS_SUFFIX = " under an unchanged observation";
+
+export function formatNoProgressReason(
+  fromStateId: string,
+  toStateId: string
+): string {
+  return `${NO_PROGRESS_PREFIX}${fromStateId} -> ${toStateId}${NO_PROGRESS_SUFFIX}`;
+}
+
+export function parseNoProgressReason(
+  reason: string | null | undefined
+): { fromStateId: string; toStateId: string } | null {
+  if (
+    reason === null ||
+    reason === undefined ||
+    !reason.startsWith(NO_PROGRESS_PREFIX) ||
+    !reason.endsWith(NO_PROGRESS_SUFFIX)
+  ) {
+    return null;
+  }
+  const edge = reason.slice(
+    NO_PROGRESS_PREFIX.length,
+    reason.length - NO_PROGRESS_SUFFIX.length
+  );
+  const separator = edge.indexOf(" -> ");
+  if (separator < 0) {
+    return null;
+  }
+  return {
+    fromStateId: edge.slice(0, separator),
+    toStateId: edge.slice(separator + " -> ".length)
+  };
+}
 
 // Everything a park re-evaluation learned this tick, hashed into one value.
 // Two ticks with the same fingerprint observed the same world, so re-taking a

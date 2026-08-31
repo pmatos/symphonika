@@ -82,7 +82,7 @@ import {
 } from "./active-runs.js";
 import { probeStateArtifacts, statePredicateKeys } from "./artifact-probe.js";
 import {
-  noProgressReasonPrefix,
+  formatNoProgressReason,
   progressFingerprint
 } from "./progress-fingerprint.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
@@ -1426,7 +1426,7 @@ export class RunController {
       if (lastFingerprint === fingerprint) {
         this.runStore.recordWaitingActivity(
           runId,
-          `${noProgressReasonPrefix}${waitState.id} -> ${decision.to} under an unchanged observation`
+          formatNoProgressReason(waitState.id, decision.to)
         );
         this.logger?.warn(
           {

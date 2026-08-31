@@ -20,6 +20,7 @@ import type {
   WriteIssueLabelsFn
 } from "./app.js";
 import type { AsyncMutex } from "../lifecycle/async-mutex.js";
+import { parseNoProgressReason } from "../lifecycle/progress-fingerprint.js";
 import type { PullRequestState } from "../pull-request-state.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
@@ -268,6 +269,15 @@ export type PullRequestFollowupAttention = {
   maxDispatches: number;
   prNumber: number;
   prUrl: string;
+};
+
+// A park the progress guard is holding in place. Reported separately from the
+// review-dispatch cap because it is not a pull-request fact: an artifact-only
+// wait parks this way too, on a workspace that stopped changing.
+export type WorkflowProgressAttention = {
+  attention: "no_progress";
+  fromStateId: string;
+  toStateId: string;
 };
 
 const TERMINAL_FIRING_STATES: ReadonlySet<RoutineFiringState> = new Set([
@@ -676,6 +686,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       `<h1 class="page-title">Run <code>${escapeHtml(detail.id)}</code></h1>`,
       renderOutcomeBanner(detail, failureEvent, exitEvent),
       renderPullRequestFollowupAttention(pullRequestFollowup),
+      renderWorkflowProgressAttention(buildWorkflowProgressAttention(detail)),
       renderRunSummary(detail, capContext),
       renderWatchdogSection(watchdog, outputTokenGrowth5m, detailNowMs),
       renderWorkflowGraphSummary(detail.id, workflowGraph),
@@ -6641,6 +6652,25 @@ export function buildPullRequestFollowupAttention(input: {
     prNumber: tracked.prNumber,
     prUrl: tracked.prUrl
   };
+}
+
+export function buildWorkflowProgressAttention(
+  detail: Pick<RunStatus, "state" | "stateTransitionReason">
+): WorkflowProgressAttention | null {
+  if (detail.state !== "waiting") {
+    return null;
+  }
+  const edge = parseNoProgressReason(detail.stateTransitionReason);
+  return edge === null ? null : { attention: "no_progress", ...edge };
+}
+
+function renderWorkflowProgressAttention(
+  attention: WorkflowProgressAttention | null
+): string {
+  if (attention === null) {
+    return "";
+  }
+  return `<section class="banner banner--attention"><p class="banner-title">Manual attention required</p><p class="banner-reason">The workflow is parked because taking <code>${escapeHtml(attention.fromStateId)}</code> &rarr; <code>${escapeHtml(attention.toStateId)}</code> again would repeat work it already did: nothing it can observe has changed since that transition last ran.</p></section>`;
 }
 
 function renderDaemonStaleBanner(

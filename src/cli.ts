@@ -1581,6 +1581,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           const watchdog = buildWatchdogStatus({
             config: resolveWatchdogConfig(watchdogService, detail.project),
             nowMs,
+            runCreatedAt: detail.createdAt,
             runId: detail.id,
             runStore: store
           });
@@ -2831,7 +2832,15 @@ function formatProgressSignal(
     return "\nProgress Signal:\n  watchdog: disabled\n";
   }
   if (watchdog.sampledAt === undefined) {
-    return "\nProgress Signal:\n  (no sample persisted)\n";
+    // No sample yet says nothing about the wall-clock cap, which is measured
+    // from the claim rather than from a sample — and a Run is sampleless for
+    // the whole of preparation plus its first sampling interval, which is
+    // exactly when an operator most wants to see the deadline (ADR 0089).
+    const deadline =
+      watchdog.runRemainingMs === undefined
+        ? ""
+        : `  run timeout in: ${formatWatchdogDuration(watchdog.runRemainingMs)} (cap ${formatWatchdogDuration(watchdog.maxRunMs)})\n`;
+    return `\nProgress Signal:\n  (no sample persisted)\n${deadline}`;
   }
 
   const lines = [
@@ -2854,6 +2863,11 @@ function formatProgressSignal(
   if (watchdog.graceRemainingMs !== undefined) {
     lines.push(
       `  grace remaining: ${formatWatchdogDuration(watchdog.graceRemainingMs)}`
+    );
+  }
+  if (watchdog.runRemainingMs !== undefined) {
+    lines.push(
+      `  run timeout in: ${formatWatchdogDuration(watchdog.runRemainingMs)} (cap ${formatWatchdogDuration(watchdog.maxRunMs)})`
     );
   }
   return `${lines.join("\n")}\n`;

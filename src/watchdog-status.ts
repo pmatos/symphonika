@@ -1,4 +1,5 @@
 import type { WatchdogConfig } from "./reload.js";
+import { TERMINAL_RUN_STATES } from "./run-store.js";
 import type { RunState, RunStore } from "./run-store.js";
 
 export type WatchdogStatus =
@@ -10,9 +11,15 @@ export type WatchdogStatus =
       idleSince?: string;
       lastProgressAt?: string | null;
       lastToolCallAt?: string | null;
+      // Zero when no wall-clock cap is configured (ADR 0089). `runRemainingMs`
+      // accompanies a configured cap whenever the caller supplied the Run's
+      // claim timestamp, and goes negative once the cap is overrun but the
+      // next Watchdog tick has not landed yet.
+      maxRunMs: number;
       // Zero when no convergence budget is configured (ADR 0086).
       outputTokenBudget: number;
       outputTokensTotal?: number;
+      runRemainingMs?: number;
       sampledAt?: string;
       turnIdSetSize?: number;
       workspaceMtimeMax?: string | null;
@@ -29,10 +36,15 @@ export type WatchdogIdleStatus =
 export function buildWatchdogStatus(input: {
   config: Pick<
     WatchdogConfig,
-    "enabled" | "graceMinutes" | "outputTokenBudget"
+    "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
   >;
   nowMs: number;
   runId: string;
+  // The Run's claim timestamp, which the wall-clock countdown is measured
+  // from. Optional because buildWatchdogIdleStatus projects only the idle
+  // fields and has no run row to read it from; every caller that renders the
+  // full status has the Run detail in hand and should pass it.
+  runCreatedAt?: string;
   runStore: RunStore;
 }): WatchdogStatus {
   if (!input.config.enabled) {
@@ -40,16 +52,25 @@ export function buildWatchdogStatus(input: {
   }
 
   const graceMs = input.config.graceMinutes * 60_000;
+  const maxRunMs = input.config.maxRunMinutes * 60_000;
   const outputTokenBudget = input.config.outputTokenBudget;
+  const runRemaining =
+    maxRunMs > 0 && input.runCreatedAt !== undefined
+      ? runRemainingMs(input.runCreatedAt, maxRunMs, input.nowMs)
+      : undefined;
+  const deadline =
+    runRemaining === undefined ? {} : { runRemainingMs: runRemaining };
   const sample = input.runStore.getWatchdogSample(input.runId);
   if (sample === undefined) {
-    return { enabled: true, graceMs, outputTokenBudget };
+    return { enabled: true, graceMs, maxRunMs, outputTokenBudget, ...deadline };
   }
 
   return {
     enabled: true,
     graceMs,
+    maxRunMs,
     outputTokenBudget,
+    ...deadline,
     ...(sample.idleSince === null
       ? {}
       : {
@@ -66,10 +87,23 @@ export function buildWatchdogStatus(input: {
   };
 }
 
+// Milliseconds left before the wall-clock cap terminates the Run, against the
+// same effective clock the rest of the Progress Signal uses. An unparseable
+// claim timestamp yields no countdown rather than a nonsensical one, matching
+// the Watchdog's own refusal to age a Run it cannot date.
+function runRemainingMs(
+  runCreatedAt: string,
+  maxRunMs: number,
+  nowMs: number
+): number | undefined {
+  const claimedAtMs = Date.parse(runCreatedAt);
+  return Number.isNaN(claimedAtMs) ? undefined : claimedAtMs + maxRunMs - nowMs;
+}
+
 export function buildWatchdogIdleStatus(input: {
   config: Pick<
     WatchdogConfig,
-    "enabled" | "graceMinutes" | "outputTokenBudget"
+    "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
   >;
   nowMs: number;
   runId: string;
@@ -111,7 +145,27 @@ export function resolveWatchdogNowMs(input: {
     return input.liveNowMs;
   }
   const sample = input.runStore.getWatchdogSample(input.runId);
-  return sample === undefined ? input.liveNowMs : Date.parse(sample.sampledAt);
+  if (sample !== undefined) {
+    return Date.parse(sample.sampledAt);
+  }
+  // No sample and nowhere left to go: the live clock would tick forever
+  // against a Run that stopped moving, so pin it to the moment it stopped.
+  // A sampleless terminal Run is the common case rather than an exotic one —
+  // entering preparing_workspace clears the latest sample, so every Run is
+  // sampleless until a full sampling interval into `running`, and one that
+  // fails validation or finishes quickly never gets a sample at all. Until
+  // ADR 0089 added the wall-clock countdown nothing consumed this clock
+  // without a sample, which is why the fallback was previously unreachable.
+  if (TERMINAL_RUN_STATES.has(input.runState)) {
+    const stoppedAt = input.runStore.latestRunStateTransitionAt(input.runId);
+    if (stoppedAt !== undefined) {
+      const stoppedAtMs = Date.parse(stoppedAt);
+      if (!Number.isNaN(stoppedAtMs)) {
+        return stoppedAtMs;
+      }
+    }
+  }
+  return input.liveNowMs;
 }
 
 export function formatWatchdogDuration(durationMs: number): string {

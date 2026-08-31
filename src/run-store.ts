@@ -49,6 +49,19 @@ export type RunState =
   | "stale"
   | "waiting";
 
+// The Run states with no further transition ahead of them. Hoisted here beside
+// RunState because three surfaces plus the Progress Signal's effective clock
+// all need the same answer, and a copy that drifts would have each of them
+// disagree about whether a Run is still moving.
+export const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([
+  "blocked",
+  "cancelled",
+  "failed",
+  "input_required",
+  "stale",
+  "succeeded"
+]);
+
 export type FailureClassification =
   "transient" | "deterministic" | "input_required";
 
@@ -61,14 +74,18 @@ export type CancelReason =
   | "eligibility_loss"
   | "no_convergence"
   | "no_progress"
-  | "operator";
+  | "operator"
+  | "run_timeout";
 
 // Terminal reasons the Watchdog owns. `no_progress` is the ADR 0054 liveness
 // verdict (nothing observable happened); `no_convergence` is the ADR 0086
-// budget verdict (plenty happened, none of it finishing the work).
+// budget verdict (plenty happened, none of it finishing the work);
+// `run_timeout` is the ADR 0089 wall-clock verdict (the Run outlived its cap,
+// whatever it was doing).
 export const WATCHDOG_TERMINAL_REASONS = [
   "no_convergence",
-  "no_progress"
+  "no_progress",
+  "run_timeout"
 ] as const;
 
 export type WatchdogTerminalReason = (typeof WATCHDOG_TERMINAL_REASONS)[number];
@@ -478,6 +495,11 @@ export type WatchdogSample = {
 };
 
 export type WatchdogCandidateRun = {
+  // Claim time, and therefore the origin of the Run's wall-clock age. Every
+  // fresh lifecycle — a first dispatch, a continuation, an FSM state advance,
+  // a shutdown resume — writes its own `runs` row, so this is the age of this
+  // agent invocation and not of the whole Issue (ADR 0089).
+  createdAt: string;
   evidenceIgnore: readonly string[];
   issueNumber: number;
   normalizedLogPath: string;
@@ -632,6 +654,7 @@ function mapProviderEventRow(row: ProviderEventRow): ProviderEventRecord {
 }
 
 type WatchdogCandidateRunRow = {
+  created_at: string;
   evidence_ignore_json: string;
   id: string;
   issue_number: number;
@@ -1274,7 +1297,7 @@ export class RunStore {
       .prepare(
         [
           "select id, project_name, issue_number, state, evidence_ignore_json,",
-          "workspace_path, normalized_log_path, watchdog_generation",
+          "workspace_path, normalized_log_path, watchdog_generation, created_at",
           "from runs",
           // ADR 0054: only `running` Runs have a live provider that can wedge.
           // queued/preparing_workspace have no provider yet (no liveness signal
@@ -1285,6 +1308,7 @@ export class RunStore {
       )
       .all() as WatchdogCandidateRunRow[];
     return rows.map((row) => ({
+      createdAt: row.created_at,
       evidenceIgnore: parseEvidenceIgnore(row.evidence_ignore_json),
       issueNumber: row.issue_number,
       normalizedLogPath: row.normalized_log_path ?? "",
@@ -4051,6 +4075,18 @@ export class RunStore {
     return Promise.resolve(
       this.openArtifactPath(row.run_id, attemptArtifactPath(row, kind))
     );
+  }
+
+  // The moment a Run last changed state, used as the effective Progress Signal
+  // clock for a terminal Run that never got a Watchdog sample. Reads one row
+  // rather than the whole transition history, which is all the clock needs.
+  latestRunStateTransitionAt(runId: string): string | undefined {
+    const row = this.database
+      .prepare(
+        "select created_at from run_state_transitions where run_id = ? order by sequence desc limit 1"
+      )
+      .get(runId) as { created_at: string } | undefined;
+    return row?.created_at;
   }
 
   listRunStateTransitions(runId: string): RunStateTransition[] {

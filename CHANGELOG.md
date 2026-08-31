@@ -19,6 +19,13 @@
 
 ### Added
 
+- The Watchdog enforces a wall-clock cap on how long one Issue Run may live. A Run whose age since
+  it claimed its Issue reaches `watchdog.max_run_minutes` (new; default 360, `0` disables, and
+  overridable per Project) is staled with the new `terminal_reason = "run_timeout"` and its provider
+  cancelled. This is the only bound a Run that keeps trickling output cannot satisfy its way past —
+  three vow Runs held concurrency slots and provider memory for thirteen hours while never once
+  looking idle. `show-run`, the Run-detail page, and `GET /api/runs/:id` render the time remaining
+  against the cap. See ADR 0089 and issue #605.
 - Dispatch admission now consults the host, not just a run count. Before claiming new work the
   daemon reads Linux's pressure-stall counters (`/proc/pressure/{memory,io}`) and defers while a
   gated resource's `full avg60` is at or above its ceiling — the signal that actually distinguishes

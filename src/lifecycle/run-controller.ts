@@ -164,7 +164,13 @@ export type RunControllerProjectConfig = {
   // still-configured routine is never mistaken for one removed from
   // routines:, mirroring trackerlessGitRoutines above. See ADR 0067.
   templateRejectedRoutines?: TargetedRoutineDeclaration[] | undefined;
-  watchdog?: { graceMinutes?: number; outputTokenBudget?: number } | undefined;
+  watchdog?:
+    | {
+        graceMinutes?: number;
+        maxRunMinutes?: number;
+        outputTokenBudget?: number;
+      }
+    | undefined;
 };
 
 // A Dispatch Project's runtime config: the issue-dispatch fields are required.
@@ -3009,9 +3015,10 @@ export class RunController {
       // staled this run — even when a concurrent updateRunState(..., "running")
       // earlier in this same lifecycle clobbered the row back to a non-stale
       // state after the watchdog fired (updateRunState rewrites state but
-      // leaves terminal_reason intact). The watchdog samples queued /
-      // preparing_workspace / running rows, so that race is reachable whenever
-      // a run is staled before provider attach. Gate on terminal_reason rather
+      // leaves terminal_reason intact). The watchdog samples `running` rows
+      // only, so the race is the narrow one where a run is staled after its
+      // first `running` write and a later write in this same lifecycle
+      // overwrites the verdict. Gate on terminal_reason rather
       // than state === "stale" so the clobber cannot defeat the verdict, and
       // re-assert the stale state when it was overwritten. See ADR 0054.
       const watchdogTerminalReason = WATCHDOG_TERMINAL_REASONS.find(

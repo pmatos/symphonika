@@ -10,6 +10,11 @@ watchdog:
   # Cumulative output tokens one Run may spend before it is stopped as
   # non-converging (ADR 0086). 0 disables the convergence guard.
   output_token_budget: 150000
+  # Wall-clock minutes one Run may live, measured from the moment it claimed
+  # its Issue, before it is stopped as timed out (ADR 0089). This is the only
+  # bound a Run that keeps trickling output cannot satisfy its way past.
+  # 0 disables the cap.
+  max_run_minutes: 360
   sample_interval_seconds: 60
 
 # Automatic Routine Firing workspace reclamation. Successful workspaces have
@@ -113,6 +118,7 @@ projects:
     # watchdog:
     #   grace_minutes: 180
     #   output_token_budget: 400000
+    #   max_run_minutes: 720
     #   mtime_include: ["target"]
     tracker:
       kind: github

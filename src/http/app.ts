@@ -42,6 +42,7 @@ import type {
   RunStatus,
   RunStore
 } from "../run-store.js";
+import { TERMINAL_RUN_STATES } from "../run-store.js";
 import {
   buildWatchdogIdleStatus,
   buildWatchdogStatus,
@@ -260,7 +261,10 @@ export type HttpAppOptions = {
   getStatusSnapshot?: () => StatusSnapshot;
   getWatchdogConfig?: (
     projectName: string
-  ) => Pick<WatchdogConfig, "enabled" | "graceMinutes" | "outputTokenBudget">;
+  ) => Pick<
+    WatchdogConfig,
+    "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
+  >;
   issuePollStatus?: IssuePollStatus;
   monotonicNow?: () => number;
   // Wall clock used by human/API-facing timestamps and ages.
@@ -319,15 +323,6 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "cancelled",
   "stale",
   "waiting"
-]);
-
-const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([
-  "cancelled",
-  "failed",
-  "blocked",
-  "input_required",
-  "stale",
-  "succeeded"
 ]);
 
 const RUN_ARTIFACT_CONTENT_TYPES: Record<RunArtifactKind, string> = {
@@ -611,6 +606,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
             runState: run.state,
             runStore
           }),
+          runCreatedAt: run.createdAt,
           runId: run.id,
           runStore
         })

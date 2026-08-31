@@ -262,10 +262,12 @@ export type HttpAppOptions = {
   getStatusSnapshot?: () => StatusSnapshot;
   getWatchdogConfig?: (
     projectName: string
-  ) => Pick<
-    WatchdogConfig,
-    "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
-  >;
+  ) =>
+    | Pick<
+        WatchdogConfig,
+        "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
+      >
+    | undefined;
   issuePollStatus?: IssuePollStatus;
   monotonicNow?: () => number;
   // Wall clock used by human/API-facing timestamps and ages.
@@ -352,6 +354,8 @@ export function createHttpApp(options: HttpAppOptions): Hono {
   const getRuns = options.getRuns ?? (() => []);
   const getActiveRuns = options.getActiveRuns ?? (() => []);
   const getScheduled = options.getScheduled ?? (() => []);
+  const getWatchdogConfig =
+    options.getWatchdogConfig ?? (() => DEFAULT_WATCHDOG_CONFIG);
   const runStore = options.runStore;
   const cancelRun =
     options.cancelRun ??
@@ -383,21 +387,24 @@ export function createHttpApp(options: HttpAppOptions): Hono {
   app.get("/api/status", (context) => {
     const lastTickAt = options.getLastTickAt?.() ?? null;
     return context.json({
-      active: getActiveRuns().map((run) =>
-        runStore === undefined
-          ? run
-          : {
-              ...run,
-              watchdog: buildWatchdogIdleStatus({
-                config:
-                  options.getWatchdogConfig?.(run.projectName) ??
-                  DEFAULT_WATCHDOG_CONFIG,
-                nowMs: now(),
-                runId: run.runId,
-                runStore
-              })
-            }
-      ),
+      active: getActiveRuns().map((run) => {
+        if (runStore === undefined) {
+          return run;
+        }
+        const watchdogConfig = getWatchdogConfig(run.projectName);
+        return {
+          ...run,
+          watchdog:
+            watchdogConfig === undefined
+              ? null
+              : buildWatchdogIdleStatus({
+                  config: watchdogConfig,
+                  nowMs: now(),
+                  runId: run.runId,
+                  runStore
+                })
+        };
+      }),
       candidateIssues: issuePollStatus.candidateIssues,
       filteredIssues: issuePollStatus.filteredIssues,
       issuePolling: {
@@ -593,6 +600,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
           null,
         runStore
       });
+      const watchdogConfig = getWatchdogConfig(run.project);
       return context.json({
         attempts,
         events,
@@ -600,19 +608,21 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         run,
         transitions,
         workflowProgress: buildWorkflowProgressAttention(detail),
-        watchdog: buildWatchdogStatus({
-          config:
-            options.getWatchdogConfig?.(run.project) ?? DEFAULT_WATCHDOG_CONFIG,
-          nowMs: resolveWatchdogNowMs({
-            liveNowMs: now(),
-            runId: run.id,
-            runState: run.state,
-            runStore
-          }),
-          runCreatedAt: run.createdAt,
-          runId: run.id,
-          runStore
-        })
+        watchdog:
+          watchdogConfig === undefined
+            ? null
+            : buildWatchdogStatus({
+                config: watchdogConfig,
+                nowMs: resolveWatchdogNowMs({
+                  liveNowMs: now(),
+                  runId: run.id,
+                  runState: run.state,
+                  runStore
+                }),
+                runCreatedAt: run.createdAt,
+                runId: run.id,
+                runStore
+              })
       });
     });
 

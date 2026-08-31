@@ -1709,8 +1709,12 @@ export async function startDaemon(
       }
     },
     getRuns: () => runStore.listRuns(),
-    getWatchdogConfig: (projectName) =>
-      resolveWatchdogConfig(runtimeConfig.watchdogServiceConfig(), projectName),
+    getWatchdogConfig: (projectName) => {
+      const serviceConfig = runtimeConfig.watchdogServiceConfig();
+      return serviceConfig === undefined
+        ? undefined
+        : resolveWatchdogConfig(serviceConfig, projectName);
+    },
     getScheduled: () => activeRuns.peekDelayed(),
     getStatusSnapshot: () =>
       buildStatusSnapshot({

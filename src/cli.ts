@@ -910,7 +910,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                 routines: store.listRoutines(),
                 runs: all,
                 stateRoot,
-                watchdogByRun
+                watchdogByRun,
+                watchdogConfigAvailable: watchdogService !== undefined
               });
               if (redrawState !== undefined) {
                 const frame = renderStatusDashboardRedrawFrame(
@@ -926,6 +927,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             }
 
             writeOut(program, `state root: ${stateRoot}\n`);
+            if (watchdogService === undefined) {
+              writeOut(
+                program,
+                "watchdog config: unavailable (no valid runtime configuration snapshot)\n"
+              );
+            }
             if (daemonUrl !== undefined) {
               writeOut(
                 program,
@@ -1578,15 +1585,21 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             runState: detail.state,
             runStore: store
           });
-          const watchdog = buildWatchdogStatus({
-            config: resolveWatchdogConfig(watchdogService, detail.project),
-            nowMs,
-            runCreatedAt: detail.createdAt,
-            runId: detail.id,
-            runStore: store
-          });
+          const watchdog =
+            watchdogService === undefined
+              ? undefined
+              : buildWatchdogStatus({
+                  config: resolveWatchdogConfig(
+                    watchdogService,
+                    detail.project
+                  ),
+                  nowMs,
+                  runCreatedAt: detail.createdAt,
+                  runId: detail.id,
+                  runStore: store
+                });
           const growth =
-            watchdog.enabled && watchdog.sampledAt !== undefined
+            watchdog?.enabled === true && watchdog.sampledAt !== undefined
               ? store.watchdogOutputTokenGrowth(
                   detail.id,
                   new Date(
@@ -2822,17 +2835,20 @@ function formatFiringDuration(
 
 async function loadWatchdogServiceConfig(
   configPath: string
-): Promise<WatchdogServiceConfig> {
+): Promise<WatchdogServiceConfig | undefined> {
   const reloader = new RuntimeConfigReloader({ configPath });
   await reloader.reload();
   return reloader.watchdogServiceConfig();
 }
 
 function formatProgressSignal(
-  watchdog: WatchdogStatus,
+  watchdog: WatchdogStatus | undefined,
   outputTokenGrowth5m: number,
   nowMs: number
 ): string {
+  if (watchdog === undefined) {
+    return "\nProgress Signal:\n  watchdog: unavailable (no valid runtime configuration snapshot)\n";
+  }
   if (!watchdog.enabled) {
     return "\nProgress Signal:\n  watchdog: disabled\n";
   }
@@ -2881,10 +2897,13 @@ function formatProgressSignal(
 function collectWatchdogIdleStatuses(
   store: RunStore,
   runs: RunStatus[],
-  serviceConfig: WatchdogServiceConfig,
+  serviceConfig: WatchdogServiceConfig | undefined,
   nowMs: number
 ): Map<string, WatchdogIdleStatus> {
   const statuses = new Map<string, WatchdogIdleStatus>();
+  if (serviceConfig === undefined) {
+    return statuses;
+  }
   for (const run of runs) {
     if (!statusDashboardShowsLatestEvent(run.state)) {
       continue;

@@ -178,10 +178,12 @@ export type RegisterPagesOptions = {
   claimMutex?: AsyncMutex;
   getWatchdogConfig?: (
     projectName: string
-  ) => Pick<
-    WatchdogConfig,
-    "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
-  >;
+  ) =>
+    | Pick<
+        WatchdogConfig,
+        "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
+      >
+    | undefined;
   issuePollStatus?: IssuePollStatus;
   // #309 part 3's guarded-merge action. See HttpAppOptions.mergePullRequest
   // (src/http/app.ts).
@@ -677,15 +679,19 @@ export function registerPages(options: RegisterPagesOptions): void {
       runState: detail.state,
       runStore: options.runStore
     });
-    const watchdog = buildWatchdogStatus({
-      config: getWatchdogConfig(detail.project),
-      nowMs: detailNowMs,
-      runCreatedAt: detail.createdAt,
-      runId: detail.id,
-      runStore: options.runStore
-    });
+    const watchdogConfig = getWatchdogConfig(detail.project);
+    const watchdog =
+      watchdogConfig === undefined
+        ? undefined
+        : buildWatchdogStatus({
+            config: watchdogConfig,
+            nowMs: detailNowMs,
+            runCreatedAt: detail.createdAt,
+            runId: detail.id,
+            runStore: options.runStore
+          });
     const outputTokenGrowth5m =
-      watchdog.enabled && watchdog.sampledAt !== undefined
+      watchdog?.enabled === true && watchdog.sampledAt !== undefined
         ? options.runStore.watchdogOutputTokenGrowth(
             detail.id,
             new Date(Date.parse(watchdog.sampledAt) - 5 * 60_000).toISOString()
@@ -6509,10 +6515,12 @@ function collectActiveWatchdogIdleStatuses(
   runs: RunStatus[],
   getWatchdogConfig: (
     projectName: string
-  ) => Pick<
-    WatchdogConfig,
-    "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
-  >,
+  ) =>
+    | Pick<
+        WatchdogConfig,
+        "enabled" | "graceMinutes" | "maxRunMinutes" | "outputTokenBudget"
+      >
+    | undefined,
   nowMs: number
 ): Map<string, WatchdogIdleStatus> {
   const statuses = new Map<string, WatchdogIdleStatus>();
@@ -6520,10 +6528,14 @@ function collectActiveWatchdogIdleStatuses(
     if (!ACTIVE_WATCHDOG_STATES.has(run.state)) {
       continue;
     }
+    const config = getWatchdogConfig(run.project);
+    if (config === undefined) {
+      continue;
+    }
     statuses.set(
       run.id,
       buildWatchdogIdleStatus({
-        config: getWatchdogConfig(run.project),
+        config,
         nowMs,
         runId: run.id,
         runStore
@@ -6751,10 +6763,13 @@ function renderRunSummary(
 }
 
 function renderWatchdogSection(
-  watchdog: WatchdogStatus,
+  watchdog: WatchdogStatus | undefined,
   outputTokenGrowth5m: number,
   nowMs: number
 ): string {
+  if (watchdog === undefined) {
+    return `<section><h2>Watchdog</h2><p class="muted">Watchdog policy unavailable because no valid runtime configuration snapshot is loaded.</p></section>`;
+  }
   if (!watchdog.enabled) {
     return "";
   }

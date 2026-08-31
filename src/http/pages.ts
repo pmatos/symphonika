@@ -62,6 +62,7 @@ import type {
   RunStore,
   TrackedPullRequest
 } from "../run-store.js";
+import { TERMINAL_RUN_STATES } from "../run-store.js";
 import {
   readRecentRoutineEvents,
   routineEvidencePaths,
@@ -268,15 +269,6 @@ export type PullRequestFollowupAttention = {
   prNumber: number;
   prUrl: string;
 };
-
-const TERMINAL_STATES: ReadonlySet<RunState> = new Set([
-  "cancelled",
-  "failed",
-  "blocked",
-  "input_required",
-  "stale",
-  "succeeded"
-]);
 
 const TERMINAL_FIRING_STATES: ReadonlySet<RoutineFiringState> = new Set([
   "succeeded",
@@ -3308,10 +3300,10 @@ type ProjectRow = {
 };
 
 // Runs whose terminal outcome is worth showing as a project's "last run" —
-// TERMINAL_STATES minus nothing; a currently-running/queued Run would just
+// TERMINAL_RUN_STATES minus nothing; a currently-running/queued Run would just
 // restate the In-flight column instead of answering "how did the last one
 // go" (PRODUCT.md principle 4 wants the real outcome, not the live state).
-const PROJECT_LAST_RUN_STATES = Array.from(TERMINAL_STATES);
+const PROJECT_LAST_RUN_STATES: RunState[] = Array.from(TERMINAL_RUN_STATES);
 
 function buildProjectRows(
   projectStates: ProjectState[],
@@ -6715,7 +6707,14 @@ function renderWatchdogSection(
     return "";
   }
   if (watchdog.sampledAt === undefined) {
-    return `<section>${sectionHead("Watchdog")}<div class="empty"><strong>No sample yet</strong>No Progress Signal has been persisted for this Run.</div></section>`;
+    // The wall-clock cap is measured from the claim, not from a sample, so it
+    // still has something to say here — and a Run is sampleless for the whole
+    // of preparation plus its first sampling interval (ADR 0089).
+    const deadline =
+      watchdog.runRemainingMs === undefined
+        ? ""
+        : `<dl class="fields"><dt>Run timeout in</dt><dd>${escapeHtml(formatWatchdogDuration(watchdog.runRemainingMs))} <span class="muted">(cap ${escapeHtml(formatWatchdogDuration(watchdog.maxRunMs))})</span></dd></dl>`;
+    return `<section>${sectionHead("Watchdog")}<div class="empty"><strong>No sample yet</strong>No Progress Signal has been persisted for this Run.</div>${deadline}</section>`;
   }
   const idleRow =
     watchdog.idleSince !== undefined
@@ -6750,7 +6749,7 @@ function renderCancelForm(
   detail: { id: string; state: RunState },
   csrfToken: string
 ): string {
-  if (TERMINAL_STATES.has(detail.state)) {
+  if (TERMINAL_RUN_STATES.has(detail.state)) {
     return "";
   }
   return `<section><form method="post" action="/api/runs/${encodeURIComponent(detail.id)}/cancel" onsubmit="return window.confirm('Cancel this run? Any active provider process will be stopped. This action cannot be undone.')"><input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(csrfToken)}"><button class="btn" type="submit">Cancel run</button></form></section>`;

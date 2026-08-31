@@ -251,8 +251,11 @@ export async function reconcileWatchdog(
   return { sampled, terminated };
 }
 
-// Each Watchdog verdict cancels under its own name, so an operator reading the
-// cancellation can tell which of the three bounds the Run hit.
+// Each Watchdog verdict cancels under its own name, so the three bounds stay
+// distinguishable on the in-flight registry entry while the Run is still live.
+// This reason is in-memory only — `markRunWatchdogStale` deliberately does not
+// write `runs.cancel_reason` (it reads `cancel_requested = 0` as its guard
+// against a competing cancel), so the durable verdict is `terminal_reason`.
 const WATCHDOG_CANCEL_REASONS: Readonly<
   Record<WatchdogTerminalReason, CancelReason>
 > = {

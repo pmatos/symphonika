@@ -49,6 +49,19 @@ export type RunState =
   | "stale"
   | "waiting";
 
+// The Run states with no further transition ahead of them. Hoisted here beside
+// RunState because three surfaces plus the Progress Signal's effective clock
+// all need the same answer, and a copy that drifts would have each of them
+// disagree about whether a Run is still moving.
+export const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([
+  "blocked",
+  "cancelled",
+  "failed",
+  "input_required",
+  "stale",
+  "succeeded"
+]);
+
 export type FailureClassification =
   "transient" | "deterministic" | "input_required";
 
@@ -4062,6 +4075,18 @@ export class RunStore {
     return Promise.resolve(
       this.openArtifactPath(row.run_id, attemptArtifactPath(row, kind))
     );
+  }
+
+  // The moment a Run last changed state, used as the effective Progress Signal
+  // clock for a terminal Run that never got a Watchdog sample. Reads one row
+  // rather than the whole transition history, which is all the clock needs.
+  latestRunStateTransitionAt(runId: string): string | undefined {
+    const row = this.database
+      .prepare(
+        "select created_at from run_state_transitions where run_id = ? order by sequence desc limit 1"
+      )
+      .get(runId) as { created_at: string } | undefined;
+    return row?.created_at;
   }
 
   listRunStateTransitions(runId: string): RunStateTransition[] {

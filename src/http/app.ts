@@ -42,6 +42,7 @@ import type {
   RunStatus,
   RunStore
 } from "../run-store.js";
+import { TERMINAL_RUN_STATES } from "../run-store.js";
 import {
   buildWatchdogIdleStatus,
   buildWatchdogStatus,
@@ -322,15 +323,6 @@ const KNOWN_RUN_STATES: ReadonlySet<RunState> = new Set([
   "cancelled",
   "stale",
   "waiting"
-]);
-
-const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([
-  "cancelled",
-  "failed",
-  "blocked",
-  "input_required",
-  "stale",
-  "succeeded"
 ]);
 
 const RUN_ARTIFACT_CONTENT_TYPES: Record<RunArtifactKind, string> = {

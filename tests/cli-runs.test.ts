@@ -1462,12 +1462,14 @@ describe("CLI run commands", () => {
   it("show-run drops the prior Progress Signal while a retried Run is preparing_workspace", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
-    store.createRun({
-      id: "progress-retrying-preparing",
-      issue: sampleIssue({ number: 214, title: "Retrying after failure" }),
-      projectName: "alpha",
-      providerCommand: "x",
-      providerName: "codex"
+    withClaimTime("2026-05-22T11:20:00.000Z", () => {
+      store.createRun({
+        id: "progress-retrying-preparing",
+        issue: sampleIssue({ number: 214, title: "Retrying after failure" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
     });
     store.updateRunState("progress-retrying-preparing", "running");
     store.upsertWatchdogSample({
@@ -1504,7 +1506,8 @@ describe("CLI run commands", () => {
 
       expect(progressSignalBlock(present.output.stdout)).toMatchInlineSnapshot(`
         "Progress Signal:
-          (no sample persisted)"
+          (no sample persisted)
+          run timeout in: 5h 20m (cap 6h)"
       `);
     } finally {
       vi.useRealTimers();

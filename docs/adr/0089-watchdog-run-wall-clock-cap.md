@@ -32,9 +32,14 @@ The Watchdog gains a third, independent rule: a **wall-clock cap** on how long o
 When a sampled Run's age — `now` minus its `runs.created_at`, the instant it claimed its Issue —
 reaches `watchdog.max_run_minutes`, the Watchdog transitions it to `stale` with
 `terminal_reason = "run_timeout"` and cancels the provider through the existing
-`activeRuns.requestCancel` path, leaving the Workspace intact. The cancellation carries its own
-`cancel_reason = "run_timeout"`, so the three Watchdog verdicts stay distinguishable at the
-cancellation as well as at the terminal reason.
+`activeRuns.requestCancel` path, leaving the Workspace intact. The cancellation is *issued* under
+its own `CancelReason` (`run_timeout`), which the in-flight registry renders while the Run is still
+live, so the three Watchdog verdicts are distinguishable there too. The durable distinguisher on
+the finished row is `terminal_reason`, written in the same statement that marks the Run stale —
+`markRunWatchdogStale` does not write the `cancel_requested` / `cancel_reason` columns, and
+deliberately so: it reads `cancel_requested = 0` as its guard against a competing operator or
+closed-issue cancel, so a Watchdog verdict that set that column would make itself
+indistinguishable from the cancel it is meant to yield to.
 
 The default is **360 minutes**, configurable at daemon scope and per Project. `0` disables the cap
 and reproduces pre-0089 behaviour exactly.

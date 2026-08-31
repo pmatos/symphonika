@@ -1,4 +1,5 @@
 import type { WatchdogConfig } from "./reload.js";
+import { TERMINAL_RUN_STATES } from "./run-store.js";
 import type { RunState, RunStore } from "./run-store.js";
 
 export type WatchdogStatus =
@@ -144,7 +145,27 @@ export function resolveWatchdogNowMs(input: {
     return input.liveNowMs;
   }
   const sample = input.runStore.getWatchdogSample(input.runId);
-  return sample === undefined ? input.liveNowMs : Date.parse(sample.sampledAt);
+  if (sample !== undefined) {
+    return Date.parse(sample.sampledAt);
+  }
+  // No sample and nowhere left to go: the live clock would tick forever
+  // against a Run that stopped moving, so pin it to the moment it stopped.
+  // A sampleless terminal Run is the common case rather than an exotic one —
+  // entering preparing_workspace clears the latest sample, so every Run is
+  // sampleless until a full sampling interval into `running`, and one that
+  // fails validation or finishes quickly never gets a sample at all. Until
+  // ADR 0089 added the wall-clock countdown nothing consumed this clock
+  // without a sample, which is why the fallback was previously unreachable.
+  if (TERMINAL_RUN_STATES.has(input.runState)) {
+    const stoppedAt = input.runStore.latestRunStateTransitionAt(input.runId);
+    if (stoppedAt !== undefined) {
+      const stoppedAtMs = Date.parse(stoppedAt);
+      if (!Number.isNaN(stoppedAtMs)) {
+        return stoppedAtMs;
+      }
+    }
+  }
+  return input.liveNowMs;
 }
 
 export function formatWatchdogDuration(durationMs: number): string {

@@ -6664,19 +6664,13 @@ export function buildWorkflowProgressAttention(
   return edge === null ? null : { attention: "no_progress", ...edge };
 }
 
-// The prose for a no_progress token. Kept next to the banner that shows it
-// rather than beside the token itself, so the wording is a surface concern.
-function noProgressSentence(attention: WorkflowProgressAttention): string {
-  return `The workflow is parked because taking <code>${escapeHtml(attention.fromStateId)}</code> &rarr; <code>${escapeHtml(attention.toStateId)}</code> again would repeat work it already did: nothing it can observe has changed since that transition last ran.`;
-}
-
 function renderWorkflowProgressAttention(
   attention: WorkflowProgressAttention | null
 ): string {
   if (attention === null) {
     return "";
   }
-  return `<section class="banner banner--attention"><p class="banner-title">Manual attention required</p><p class="banner-reason">${noProgressSentence(attention)}</p></section>`;
+  return `<section class="banner banner--attention"><p class="banner-title">Manual attention required</p><p class="banner-reason">The workflow is parked because taking <code>${escapeHtml(attention.fromStateId)}</code> &rarr; <code>${escapeHtml(attention.toStateId)}</code> again would repeat work it already did: nothing it can observe has changed since that transition last ran.</p></section>`;
 }
 
 function renderDaemonStaleBanner(

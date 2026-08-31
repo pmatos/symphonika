@@ -30,73 +30,55 @@ const edge = {
   toStateId: "autofix"
 };
 
-describe("RunStore workflow progress fingerprints", () => {
-  it("reads back a recorded fingerprint for an edge", async () => {
-    const stateRoot = await makeTempRoot();
-    const store = openRunStore({ stateRoot });
-    try {
-      store.claimProgressEdge(edge, "abc");
-      expect(store.readProgressFingerprint(edge)).toBe("abc");
-    } finally {
-      store.close();
-    }
-  });
-
-  it("refuses a second claim on the same edge and fingerprint", async () => {
+describe("RunStore workflow progress claims", () => {
+  it("grants a first claim and refuses a repeat on the same observation", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
       expect(store.claimProgressEdge(edge, "abc")).toBe(true);
       expect(store.claimProgressEdge(edge, "abc")).toBe(false);
-      // A changed observation is a new claim, and re-arms the guard.
+      expect(store.claimProgressEdge(edge, "abc")).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("grants again once the observation changes", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      expect(store.claimProgressEdge(edge, "abc")).toBe(true);
       expect(store.claimProgressEdge(edge, "def")).toBe(true);
+      // The new observation is now the one being guarded against.
       expect(store.claimProgressEdge(edge, "def")).toBe(false);
+      // The superseded one is not remembered, so it reads as new again.
+      expect(store.claimProgressEdge(edge, "abc")).toBe(true);
     } finally {
       store.close();
     }
   });
 
-  it("returns undefined for an edge that has never been taken", async () => {
+  it("tracks each edge, issue and project independently", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
     try {
-      store.claimProgressEdge(edge, "abc");
-      expect(
-        store.readProgressFingerprint({ ...edge, toStateId: "merge" })
-      ).toBeUndefined();
-      expect(
-        store.readProgressFingerprint({ ...edge, issueNumber: 43 })
-      ).toBeUndefined();
-      expect(
-        store.readProgressFingerprint({ ...edge, projectName: "other" })
-      ).toBeUndefined();
-    } finally {
-      store.close();
-    }
-  });
+      expect(store.claimProgressEdge(edge, "abc")).toBe(true);
 
-  it("overwrites the fingerprint in place rather than accumulating rows", async () => {
-    const stateRoot = await makeTempRoot();
-    const store = openRunStore({ stateRoot });
-    try {
-      store.claimProgressEdge(edge, "abc");
-      store.claimProgressEdge(edge, "def");
-      expect(store.readProgressFingerprint(edge)).toBe("def");
-    } finally {
-      store.close();
-    }
-  });
-
-  it("keeps separate fingerprints per edge out of the same park state", async () => {
-    const stateRoot = await makeTempRoot();
-    const store = openRunStore({ stateRoot });
-    try {
-      store.claimProgressEdge(edge, "abc");
-      store.claimProgressEdge({ ...edge, toStateId: "merge" }, "def");
-      expect(store.readProgressFingerprint(edge)).toBe("abc");
+      // Same park, different target: its own history.
       expect(
-        store.readProgressFingerprint({ ...edge, toStateId: "merge" })
-      ).toBe("def");
+        store.claimProgressEdge({ ...edge, toStateId: "merge" }, "abc")
+      ).toBe(true);
+      // Same edge shape, different issue.
+      expect(store.claimProgressEdge({ ...edge, issueNumber: 43 }, "abc")).toBe(
+        true
+      );
+      // Same edge shape, different project.
+      expect(
+        store.claimProgressEdge({ ...edge, projectName: "other" }, "abc")
+      ).toBe(true);
+
+      // ...and the original is still guarded.
+      expect(store.claimProgressEdge(edge, "abc")).toBe(false);
     } finally {
       store.close();
     }
@@ -115,12 +97,14 @@ describe("RunStore workflow progress fingerprints", () => {
         projectName: "symphonika"
       });
 
-      expect(store.readProgressFingerprint(edge)).toBeUndefined();
+      // Cleared history reads as never claimed.
+      expect(store.claimProgressEdge(edge, "abc")).toBe(true);
       expect(
-        store.readProgressFingerprint({ ...edge, toStateId: "merge" })
-      ).toBeUndefined();
-      expect(store.readProgressFingerprint({ ...edge, issueNumber: 43 })).toBe(
-        "ghi"
+        store.claimProgressEdge({ ...edge, toStateId: "merge" }, "def")
+      ).toBe(true);
+      // The neighbouring issue kept its own.
+      expect(store.claimProgressEdge({ ...edge, issueNumber: 43 }, "ghi")).toBe(
+        false
       );
     } finally {
       store.close();

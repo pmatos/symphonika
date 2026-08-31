@@ -1997,10 +1997,10 @@ Lifecycle:
    taken. An advance that would repeat an edge under an identical fingerprint has learned nothing
    since that edge last ran, so it cannot make progress: the Run stays parked and its detail
    surfaces report the edge it refused as requiring manual attention. Terminal destinations are
-   exempt, since they end the chain and cannot loop. This is the state machine's only loop-breaker
-   and bounds every cycle a workflow author can write, not only the review-feedback one. Progress
-   history is cleared when a chain reaches a terminal and when a fresh claim opens a new one. See
-   ADR 0090.
+   exempt, since they end the chain and cannot loop. This is the state machine's only loop-breaker.
+   It bounds cycles that pass through a park, which is every cycle a wait state participates in; a
+   cycle among agent states alone is not guarded. Progress history is cleared when a chain reaches a
+   terminal and when a fresh claim opens a new one. See ADR 0090.
 5. If no transition matches and the wait state's `complete_when` is not violated, the wait stays
    parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick. For a workflow
    whose Issue is not workflow-owned, unresolved review feedback that has exhausted the PR

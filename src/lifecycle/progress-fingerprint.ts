@@ -33,13 +33,7 @@ export function parseNoProgressReason(
   const [fromStateId, toStateId, ...rest] = reason
     .slice(NO_PROGRESS_PREFIX.length)
     .split(":");
-  if (
-    rest.length > 0 ||
-    fromStateId === undefined ||
-    toStateId === undefined ||
-    fromStateId === "" ||
-    toStateId === ""
-  ) {
+  if (rest.length > 0 || !fromStateId || !toStateId) {
     return null;
   }
   return { fromStateId, toStateId };
@@ -49,13 +43,21 @@ export function parseNoProgressReason(
 // Two ticks with the same fingerprint observed the same world, so re-taking a
 // transition between them cannot make progress.
 //
-// `pullRequestState` contributes two things the projected signals cannot say on
-// their own. Its head SHA distinguishes a push that changed the code while
-// leaving check status and thread count untouched. Its review feedback
-// fingerprint — thread ids, comment bodies, review decision — distinguishes a
-// changed conversation at an unchanged count: a reviewer resolving one thread
-// and opening another moves nothing in the projected map, and without it the
-// guard would park a workflow that had genuinely new feedback to act on.
+// Ordering is by code unit rather than locale: this hash is compared across
+// processes and must not depend on ICU collation.
+//
+// `pullRequestState` covers two changes the projected signals cannot express,
+// both of which would otherwise park a workflow that was in fact progressing.
+// A push that changed the code while leaving check status and thread count
+// untouched moves the head SHA. A reviewer resolving one thread while opening
+// another moves nothing in the projected map at all — same count, same checks —
+// and is caught by the review-feedback fingerprint over thread ids, comment
+// bodies and review decision.
+//
+// `computeReviewFeedbackFingerprint` happens to fold the head SHA in too, so
+// `head` is redundant today. It stays named here because push-detection is a
+// property this guard depends on, and inlining that dependency into another
+// module's private choice of hash inputs would let it disappear silently.
 export function progressFingerprint(input: {
   artifactExists: ArtifactExistsResolver | undefined;
   pullRequestState: PullRequestState | undefined;
@@ -63,12 +65,12 @@ export function progressFingerprint(input: {
   state: ExpandedWorkflowState;
 }): string {
   const signals = Object.entries(input.signals).sort(([left], [right]) =>
-    left.localeCompare(right)
+    left < right ? -1 : left > right ? 1 : 0
   );
 
   const artifactExists = input.artifactExists;
   const artifacts = [...collectArtifactPaths(input.state)]
-    .sort((left, right) => left.localeCompare(right))
+    .sort()
     .map((candidate): [string, boolean | null] => [
       candidate,
       artifactExists === undefined ? null : artifactExists(candidate)

@@ -1467,13 +1467,7 @@ export class RunController {
         })
       );
       if (!claimed) {
-        this.runStore.recordWaitingActivity(
-          runId,
-          buildNoProgressReason({
-            fromStateId: waitState.id,
-            toStateId: decision.to
-          })
-        );
+        this.runStore.recordWaitingActivity(runId, buildNoProgressReason(edge));
         this.logger?.warn(
           {
             fromStateId: waitState.id,
@@ -2388,9 +2382,15 @@ export class RunController {
         };
       }
     } catch {
-      // Workflow load failure falls through to the markdown path, where the
-      // same error surfaces from runAttemptLifecycle's reload during the
-      // attempt.
+      // Refuse rather than fall through. The caller's own deference also fails
+      // open on a load error (isIssueOwnedByWorkflow returns false), so a
+      // transient failure would otherwise defeat both guards at once and
+      // replay a raw FSM from `initial` — exactly what issue #616 is about.
+      // A markdown workflow loses one tick of follow-up and retries.
+      return {
+        dispatched: false,
+        reason: "workflow could not be loaded to establish ownership"
+      };
     }
 
     const providersConfig = await this.providersLoader();

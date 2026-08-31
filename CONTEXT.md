@@ -143,8 +143,9 @@ _Avoid_: arbitrary PR detection
 
 **Progress Guard**:
 The rule that a parked Run may not re-take a transition it already took under an identical
-observation — the projected signals, the artefact probe, and the tracked head SHA. It is the state
-machine's only loop-breaker; a guarded park raises manual attention naming the edge it refused.
+observation — the projected signals, the artefact probe, the tracked head SHA, and the review
+conversation. It is the state machine's only loop-breaker, and it bounds cycles that pass through a
+park; a guarded park raises manual attention naming the edge it refused.
 _Avoid_: review dispatch cap (that is the markdown-workflow mechanism it replaces for FSM work)
 
 **Pull Request State**:
@@ -422,7 +423,7 @@ _Avoid_: chat session
 - A **PR Follow-up** watches only PRs associated with completed Symphonika **Runs**
 - A **PR Follow-up** remains eligible while its Issue is open even when workflow labels drift
 - A **PR Follow-up** defers to the **Workflow** when a raw FSM is parked on the **Issue**
-- A **Progress Guard** bounds every cycle a **Workflow** can express
+- A **Progress Guard** bounds every **Workflow** cycle that passes through a park
 - **Pull Request State** is derived from tracker observations and feeds **Workflow Predicate** projection and **PR Follow-up** verdicts
 - Each dispatched **Issue** has exactly one active **Workspace** per run
 - Each **Workspace** uses one **Issue Branch**

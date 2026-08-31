@@ -267,6 +267,29 @@ function buildController(input: {
   });
 }
 
+function seedTrackedPr(
+  store: ReturnType<typeof openRunStore>,
+  issue: IssueSnapshot
+): void {
+  store.createRun({
+    id: "parent-run",
+    issue,
+    projectName: "symphonika",
+    providerCommand: DEFAULT_CODEX_COMMAND,
+    providerName: "codex"
+  });
+  store.updateRunState("parent-run", "succeeded");
+  store.trackPullRequest({
+    branchName: "sym/symphonika/616-progress-guard-fixture",
+    headSha: "deadbeef",
+    issueNumber: issue.number,
+    prNumber: 99,
+    prUrl: "https://example.test/pr/99",
+    projectName: "symphonika",
+    runId: "parent-run"
+  });
+}
+
 function seedPark(
   store: ReturnType<typeof openRunStore>,
   issue: IssueSnapshot,
@@ -288,23 +311,7 @@ describe("workflow progress guard", () => {
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       const issue = issueFixture();
-      store.createRun({
-        id: "parent-run",
-        issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunState("parent-run", "succeeded");
-      store.trackPullRequest({
-        branchName: "sym/symphonika/616-progress-guard-fixture",
-        headSha: "deadbeef",
-        issueNumber: issue.number,
-        prNumber: 99,
-        prUrl: "https://example.test/pr/99",
-        projectName: "symphonika",
-        runId: "parent-run"
-      });
+      seedTrackedPr(store, issue);
 
       const githubIssuesApi: GitHubIssuesApi = {
         getIssue: vi.fn().mockResolvedValue({
@@ -347,23 +354,7 @@ describe("workflow progress guard", () => {
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       const issue = issueFixture();
-      store.createRun({
-        id: "parent-run",
-        issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunState("parent-run", "succeeded");
-      store.trackPullRequest({
-        branchName: "sym/symphonika/616-progress-guard-fixture",
-        headSha: "deadbeef",
-        issueNumber: issue.number,
-        prNumber: 99,
-        prUrl: "https://example.test/pr/99",
-        projectName: "symphonika",
-        runId: "parent-run"
-      });
+      seedTrackedPr(store, issue);
 
       const getPullRequestFollowupState = vi
         .fn()
@@ -406,23 +397,7 @@ describe("workflow progress guard", () => {
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       const issue = issueFixture();
-      store.createRun({
-        id: "parent-run",
-        issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunState("parent-run", "succeeded");
-      store.trackPullRequest({
-        branchName: "sym/symphonika/616-progress-guard-fixture",
-        headSha: "deadbeef",
-        issueNumber: issue.number,
-        prNumber: 99,
-        prUrl: "https://example.test/pr/99",
-        projectName: "symphonika",
-        runId: "parent-run"
-      });
+      seedTrackedPr(store, issue);
 
       const getPullRequestFollowupState = vi
         .fn()
@@ -445,27 +420,27 @@ describe("workflow progress guard", () => {
 
       seedPark(store, issue, "waiting-1");
       await controller.reEvaluateWaitingRun("waiting-1");
-      expect(
-        store.readProgressFingerprint({
-          fromStateId: "holding",
-          issueNumber: issue.number,
-          projectName: "symphonika",
-          toStateId: "repair"
-        })
-      ).toBeDefined();
+      const guardedEdge = {
+        fromStateId: "holding",
+        issueNumber: issue.number,
+        projectName: "symphonika",
+        toStateId: "repair"
+      };
+      const observed = store.getRun("waiting-1")?.stateTransitionReason;
+      expect(observed).not.toBeNull();
 
       // The threads got resolved, so the next park terminates the chain.
       seedPark(store, issue, "waiting-2");
       await controller.reEvaluateWaitingRun("waiting-2");
       expect(store.getRun("waiting-2")?.terminalStateId).toBe("done");
-      expect(
-        store.readProgressFingerprint({
-          fromStateId: "holding",
-          issueNumber: issue.number,
-          projectName: "symphonika",
-          toStateId: "repair"
-        })
-      ).toBeUndefined();
+      // History for the edge is gone: any fingerprint reads as a fresh claim.
+      expect(store.claimProgressEdge(guardedEdge, "any-fingerprint")).toBe(
+        true
+      );
+      store.clearProgressFingerprints({
+        issueNumber: issue.number,
+        projectName: "symphonika"
+      });
 
       // A later chain on the same Issue is not held by the old history.
       seedPark(store, issue, "waiting-3");
@@ -483,23 +458,7 @@ describe("workflow progress guard", () => {
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       const issue = issueFixture();
-      store.createRun({
-        id: "parent-run",
-        issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunState("parent-run", "succeeded");
-      store.trackPullRequest({
-        branchName: "sym/symphonika/616-progress-guard-fixture",
-        headSha: "deadbeef",
-        issueNumber: issue.number,
-        prNumber: 99,
-        prUrl: "https://example.test/pr/99",
-        projectName: "symphonika",
-        runId: "parent-run"
-      });
+      seedTrackedPr(store, issue);
 
       const githubIssuesApi: GitHubIssuesApi = {
         addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
@@ -547,23 +506,7 @@ describe("workflow progress guard", () => {
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       const issue = issueFixture();
-      store.createRun({
-        id: "parent-run",
-        issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunState("parent-run", "succeeded");
-      store.trackPullRequest({
-        branchName: "sym/symphonika/616-progress-guard-fixture",
-        headSha: "deadbeef",
-        issueNumber: issue.number,
-        prNumber: 99,
-        prUrl: "https://example.test/pr/99",
-        projectName: "symphonika",
-        runId: "parent-run"
-      });
+      seedTrackedPr(store, issue);
 
       const githubIssuesApi: GitHubIssuesApi = {
         addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
@@ -614,23 +557,7 @@ describe("workflow progress guard", () => {
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       const issue = issueFixture();
-      store.createRun({
-        id: "parent-run",
-        issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunState("parent-run", "succeeded");
-      store.trackPullRequest({
-        branchName: "sym/symphonika/616-progress-guard-fixture",
-        headSha: "deadbeef",
-        issueNumber: issue.number,
-        prNumber: 99,
-        prUrl: "https://example.test/pr/99",
-        projectName: "symphonika",
-        runId: "parent-run"
-      });
+      seedTrackedPr(store, issue);
 
       // Third observation matches no transition at all: checks pending, so
       // neither `done`, `repair` nor the failure route fires.
@@ -684,23 +611,7 @@ describe("workflow progress guard", () => {
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       const issue = issueFixture();
-      store.createRun({
-        id: "parent-run",
-        issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunState("parent-run", "succeeded");
-      store.trackPullRequest({
-        branchName: "sym/symphonika/616-progress-guard-fixture",
-        headSha: "deadbeef",
-        issueNumber: issue.number,
-        prNumber: 99,
-        prUrl: "https://example.test/pr/99",
-        projectName: "symphonika",
-        runId: "parent-run"
-      });
+      seedTrackedPr(store, issue);
 
       const githubIssuesApi: GitHubIssuesApi = {
         getIssue: vi.fn().mockResolvedValue({

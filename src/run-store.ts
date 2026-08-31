@@ -4464,76 +4464,38 @@ export class RunStore {
   // taken on. Returns false when this exact edge was already taken on an
   // identical observation, which is the progress guard's whole question: the
   // caller has learned nothing since, so re-taking it cannot make progress.
-  // A true claim records the new fingerprint.
   //
-  // Read, compare and write live here as one statement rather than three calls
-  // on the caller's side, so the decision is made where the data is and cannot
-  // interleave with another writer's claim on the same edge.
+  // One statement rather than a read followed by a write, so the claim cannot
+  // interleave with another writer's on the same edge. `is not` is SQLite's
+  // null-safe comparison, so a first claim (no row, nothing to compare)
+  // inserts and reports one change, and a repeat claim on an identical
+  // fingerprint updates nothing and reports none.
   //
   // Keyed by issue rather than run id because each park creates a fresh
   // waiting row: a cycle through a park would otherwise never see its own
   // history.
   claimProgressEdge(edge: ProgressEdge, fingerprint: string): boolean {
-    return this.database.transaction((): boolean => {
-      const row = this.database
-        .prepare(
-          [
-            "select fingerprint",
-            "from workflow_progress",
-            "where project_name = ? and issue_number = ?",
-            "and from_state_id = ? and to_state_id = ?"
-          ].join(" ")
-        )
-        .get(
-          edge.projectName,
-          edge.issueNumber,
-          edge.fromStateId,
-          edge.toStateId
-        ) as { fingerprint: string } | undefined;
-      if (row?.fingerprint === fingerprint) {
-        return false;
-      }
-      this.database
-        .prepare(
-          [
-            "insert into workflow_progress",
-            "(project_name, issue_number, from_state_id, to_state_id, fingerprint, recorded_at)",
-            "values (@projectName, @issueNumber, @fromStateId, @toStateId, @fingerprint, @recordedAt)",
-            "on conflict(project_name, issue_number, from_state_id, to_state_id)",
-            "do update set fingerprint = excluded.fingerprint,",
-            "recorded_at = excluded.recorded_at"
-          ].join(" ")
-        )
-        .run({
-          fingerprint,
-          fromStateId: edge.fromStateId,
-          issueNumber: edge.issueNumber,
-          projectName: edge.projectName,
-          recordedAt: timestamp(),
-          toStateId: edge.toStateId
-        });
-      return true;
-    })();
-  }
-
-  // Test and diagnostic accessor for what claimProgressEdge recorded.
-  readProgressFingerprint(edge: ProgressEdge): string | undefined {
-    const row = this.database
+    const result = this.database
       .prepare(
         [
-          "select fingerprint",
-          "from workflow_progress",
-          "where project_name = ? and issue_number = ?",
-          "and from_state_id = ? and to_state_id = ?"
+          "insert into workflow_progress",
+          "(project_name, issue_number, from_state_id, to_state_id, fingerprint, recorded_at)",
+          "values (@projectName, @issueNumber, @fromStateId, @toStateId, @fingerprint, @recordedAt)",
+          "on conflict(project_name, issue_number, from_state_id, to_state_id)",
+          "do update set fingerprint = excluded.fingerprint,",
+          "recorded_at = excluded.recorded_at",
+          "where workflow_progress.fingerprint is not excluded.fingerprint"
         ].join(" ")
       )
-      .get(
-        edge.projectName,
-        edge.issueNumber,
-        edge.fromStateId,
-        edge.toStateId
-      ) as { fingerprint: string } | undefined;
-    return row?.fingerprint;
+      .run({
+        fingerprint,
+        fromStateId: edge.fromStateId,
+        issueNumber: edge.issueNumber,
+        projectName: edge.projectName,
+        recordedAt: timestamp(),
+        toStateId: edge.toStateId
+      });
+    return result.changes === 1;
   }
 
   // Called at run-chain boundaries (fresh dispatch, terminal) so a

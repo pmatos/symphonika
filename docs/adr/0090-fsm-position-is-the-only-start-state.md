@@ -67,12 +67,24 @@ fingerprint is the obvious complement and is deliberately deferred, not overlook
 mechanism with its own failure mode (killing a long but genuinely converging repair loop), and the
 fingerprint covers the case actually observed in issue #616.
 
-Two exemptions keep the guard from parking work that is genuinely progressing. Terminal targets are
-never guarded — they end the chain and cannot loop. Agent-outcome advances are out of scope
-entirely: the agent ran, so something plausibly changed, its signals are agent signals rather than
-pull-request ones, and every cycle passes through a park anyway, so guarding the park side alone is
-sufficient. Progress history is cleared when a chain reaches a terminal and when a fresh claim opens
-a new one, so a re-dispatched Issue is never parked on an edge its own chain has not taken.
+Terminal targets are never guarded — they end the chain and cannot loop. Progress history is cleared
+when a chain reaches a terminal and when a fresh claim opens a new one, so a re-dispatched Issue is
+never parked on an edge its own chain has not taken.
+
+The guard covers **park-mediated cycles only**, which is narrower than "every cycle a workflow can
+express". Symphonika has two advance paths — `reEvaluateWaitingRun` for a park and
+`applyWorkflowOutcome` for an agent result — and the guard sits on the first. A cycle among agent
+states alone (`implement → review → implement`, no wait between them) is authorable today, since
+nothing in `src/workflow/` validates acyclicity, and it remains unguarded. The park-mediated case is
+the one this ADR's own change creates, and the one issue #616 observed. Extending the guard to
+agent-outcome advances is not a free generalisation: an agent's signals are `provider_success: true`
+whether or not it accomplished anything, so the same fingerprint would park a legitimate multi-pass
+agent loop as readily as a stuck one. That needs its own progress signal, and its own decision.
+
+The deeper structural point is that those two advance paths are near-duplicates — each finds the
+target state, records a terminal or an advance, and parks or schedules. A single advance seam would
+be worth having on its own merits, and would make where the guard applies a choice rather than an
+accident of which copy was edited.
 
 `maxReviewDispatchesPerPr` and the `cap_reached` attention it raises remain live for markdown
 workflows, which still dispatch through the global loop. For a workflow-owned Issue the cap cannot

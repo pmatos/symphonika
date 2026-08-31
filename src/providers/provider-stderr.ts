@@ -13,8 +13,11 @@
 import { createWriteStream, type WriteStream } from "node:fs";
 import { open } from "node:fs/promises";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+
+import { redactAll } from "../redaction.js";
 
 // A disk guard, not a diagnostic budget: real providers write kilobytes here.
 export const PROVIDER_STDERR_LOG_MAX_BYTES = 1_048_576;
@@ -22,6 +25,35 @@ const PROVIDER_STDERR_TAIL_BYTES = 4_096;
 // terminal_reason is rendered on one CLI line and in notification digests, so
 // the surfaced excerpt stays short enough not to swamp them.
 const PROVIDER_STDERR_REASON_CHARS = 200;
+// How long `finished` will wait on a sink that never settles. Evidence capture
+// is best-effort by design, so a wedged write (full disk, stalled network state
+// root) must degrade to a missing stderr excerpt, never to a Run or Firing that
+// cannot reach a terminal state.
+const PROVIDER_STDERR_FLUSH_TIMEOUT_MS = 2_000;
+
+export type ProviderStderrCapture = {
+  // Waits until the tee has flushed everything it is going to flush: the sink
+  // finished, the sink failed, or the bounded grace period above elapsed.
+  // Never rejects, and never waits longer than that grace period even if the
+  // provider is still running — evidence capture is best-effort, so a wedged
+  // write must degrade to a missing stderr excerpt, never to a Run or Firing
+  // that cannot reach a terminal state.
+  //
+  // Awaiting this before the adapter returns is what gives
+  // `readProviderStderrTail` a happens-before edge against the write. Without
+  // it the caller classifies the exit while the flush is still in flight and
+  // silently drops the provider's last words from the terminal reason.
+  waitForFlush: () => Promise<void>;
+};
+
+export type AttachProviderStderrLogOptions = {
+  maxBytes?: number;
+  // Resolved secret values to scrub before anything reaches disk. The routine
+  // dispatcher already redacts its raw/normalized evidence and terminal
+  // reasons; this file lands in the same evidence directory and is served by
+  // the same artifact routes, so it must honour the same invariant.
+  redactSecrets?: readonly string[];
+};
 
 // The stderr log is a sibling of the attempt's raw log and shares its
 // attempt suffix, so the two are derived from one another rather than being
@@ -43,55 +75,170 @@ export function providerStderrLogPath(rawLogPath: string): string {
 export function attachProviderStderrLog(
   child: ChildProcessWithoutNullStreams,
   filePath: string | undefined,
-  maxBytes: number = PROVIDER_STDERR_LOG_MAX_BYTES
-): void {
+  options: AttachProviderStderrLogOptions = {}
+): ProviderStderrCapture {
   if (filePath === undefined) {
     child.stderr.resume();
-    return;
+    return { waitForFlush: () => Promise.resolve() };
   }
 
-  let sink: WriteStream | undefined;
+  const maxBytes = options.maxBytes ?? PROVIDER_STDERR_LOG_MAX_BYTES;
+  const secrets = (options.redactSecrets ?? []).filter(
+    (secret) => secret.length > 0
+  );
+  const sink = createProviderStderrSink(filePath, maxBytes);
+  const redactor = createStreamingRedactor(secrets);
+
+  child.stderr.on("data", (chunk: Buffer) => {
+    sink.write(redactor.push(chunk));
+  });
+
+  const finalize = (): void => {
+    // The held-back carry must be flushed BEFORE ending the sink, or the last
+    // few bytes of stderr — the provider's actual last words — are silently
+    // dropped, which would make this fix worse than the bug it prevents.
+    sink.write(redactor.flush());
+    sink.end();
+  };
+  // `end` covers an ordinary EOF; `close` covers forceKillProviderProcess
+  // destroying the stream, which skips `end` entirely. Both may fire, so
+  // `finalize` is idempotent through the sink's own `ended` latch.
+  child.stderr.once("end", finalize);
+  child.stderr.once("close", finalize);
+
+  return {
+    waitForFlush: () =>
+      Promise.race([sink.finished, flushGracePeriod()]).then(() => undefined)
+  };
+}
+
+// The bound is applied at the await, not when the sink is created: an adapter
+// can reach its cleanup path while the provider is still alive and its stderr
+// still open (a caller that abandons the iterator), in which case the sink has
+// no completion to offer and an unbounded await would hang the generator.
+function flushGracePeriod(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, PROVIDER_STDERR_FLUSH_TIMEOUT_MS);
+    timer.unref();
+  });
+}
+
+// Buffers what a byte-boundary redactor cannot yet rule out. `data` chunks
+// split at arbitrary byte offsets, so a secret — or even a single multi-byte
+// character — can straddle two of them; decoding through StringDecoder and
+// holding back `longest secret - 1` characters is what makes a split secret
+// still match. With no secrets configured the stream passes through as raw
+// bytes, so the common case stays byte-identical to a plain tee.
+function createStreamingRedactor(secrets: readonly string[]): {
+  flush: () => Buffer;
+  push: (chunk: Buffer) => Buffer;
+} {
+  if (secrets.length === 0) {
+    return {
+      flush: () => Buffer.alloc(0),
+      push: (chunk) => chunk
+    };
+  }
+
+  const holdback = Math.max(...secrets.map((secret) => secret.length)) - 1;
+  const decoder = new StringDecoder("utf8");
+  let carry = "";
+
+  return {
+    flush: () => {
+      const remaining = redactAll(carry + decoder.end(), secrets);
+      carry = "";
+      return Buffer.from(remaining, "utf8");
+    },
+    push: (chunk) => {
+      const redacted = redactAll(carry + decoder.write(chunk), secrets);
+      const keep = Math.min(holdback, redacted.length);
+      carry = redacted.slice(redacted.length - keep);
+      return Buffer.from(redacted.slice(0, redacted.length - keep), "utf8");
+    }
+  };
+}
+
+// Owns the write stream, the byte cap, and the completion promise. The file is
+// opened lazily on the first byte that survives redaction, so a provider that
+// said nothing — or said only a secret — leaves no file behind.
+function createProviderStderrSink(
+  filePath: string,
+  maxBytes: number
+): {
+  end: () => void;
+  finished: Promise<void>;
+  write: (chunk: Buffer) => void;
+} {
+  let stream: WriteStream | undefined;
   let written = 0;
   let capped = false;
   let failed = false;
-
-  const write = (chunk: Buffer): void => {
-    if (failed || capped || chunk.length === 0) {
+  let ended = false;
+  let settle!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  let settled = false;
+  const done = (): void => {
+    if (settled) {
       return;
     }
-    if (sink === undefined) {
-      sink = createWriteStream(filePath, { flags: "a" });
-      // Evidence capture is best-effort: an unwritable state directory must
-      // not take the run down with it.
-      sink.on("error", () => {
-        failed = true;
+    settled = true;
+    settle();
+  };
+
+  return {
+    end: () => {
+      if (ended) {
+        return;
+      }
+      ended = true;
+      if (stream === undefined) {
+        done();
+        return;
+      }
+      // A sink that never reaches `finish` must not hold the caller forever;
+      // the timer is unref'd so it cannot by itself keep the process alive.
+      const timer = setTimeout(done, PROVIDER_STDERR_FLUSH_TIMEOUT_MS);
+      timer.unref();
+      stream.end(() => {
+        clearTimeout(timer);
+        done();
       });
+    },
+    finished,
+    write: (chunk: Buffer) => {
+      if (failed || capped || ended || chunk.length === 0) {
+        return;
+      }
+      if (stream === undefined) {
+        stream = createWriteStream(filePath, { flags: "a" });
+        // Evidence capture is best-effort: an unwritable state directory must
+        // not take the run down with it, and must not strand `finished`.
+        stream.on("error", () => {
+          failed = true;
+          done();
+        });
+      }
+      // The cap counts post-redaction bytes — it is a disk guard, and
+      // `[REDACTED]` is longer than most secrets it replaces.
+      const remaining = maxBytes - written;
+      if (chunk.length <= remaining) {
+        written += chunk.length;
+        stream.write(chunk);
+        return;
+      }
+      capped = true;
+      if (remaining > 0) {
+        written += remaining;
+        stream.write(chunk.subarray(0, remaining));
+      }
+      stream.write(
+        `\n[symphonika] provider stderr truncated at ${maxBytes} bytes\n`
+      );
     }
-    const remaining = maxBytes - written;
-    if (chunk.length <= remaining) {
-      written += chunk.length;
-      sink.write(chunk);
-      return;
-    }
-    capped = true;
-    if (remaining > 0) {
-      written += remaining;
-      sink.write(chunk.subarray(0, remaining));
-    }
-    sink.write(
-      `\n[symphonika] provider stderr truncated at ${maxBytes} bytes\n`
-    );
   };
-
-  child.stderr.on("data", write);
-  const close = (): void => {
-    sink?.end();
-    sink = undefined;
-  };
-  // `end` covers an ordinary EOF; `close` covers forceKillProviderProcess
-  // destroying the stream, which skips `end` entirely.
-  child.stderr.once("end", close);
-  child.stderr.once("close", close);
 }
 
 // Reads the last bytes of the log. The tee writes the head, so for any

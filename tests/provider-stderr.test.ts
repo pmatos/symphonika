@@ -9,7 +9,8 @@ import {
   attachProviderStderrLog,
   providerStderrLogPath,
   readProviderStderrTail,
-  withProviderStderrTail
+  withProviderStderrTail,
+  type AttachProviderStderrLogOptions
 } from "../src/providers/provider-stderr.js";
 
 const tempRoots: string[] = [];
@@ -30,11 +31,13 @@ afterEach(async () => {
 
 // Spawns a node child that writes `source` (an expression evaluated in the
 // child) to stderr, tees it, and resolves once both the process and the tee's
-// own file stream have finished.
+// own file stream have finished. The only synchronization is the capture's own
+// `waitForFlush` — the same barrier the provider adapters await — so these
+// tests fail rather than flake if that barrier stops ordering the flush.
 async function runWithStderr(
   source: string,
   filePath: string | undefined,
-  maxBytes?: number
+  options: AttachProviderStderrLogOptions = {}
 ): Promise<void> {
   const child: ChildProcessWithoutNullStreams = spawn(
     process.execPath,
@@ -42,17 +45,13 @@ async function runWithStderr(
     { stdio: ["pipe", "pipe", "pipe"] }
   );
   child.stdout.resume();
-  attachProviderStderrLog(child, filePath, maxBytes);
+  const capture = attachProviderStderrLog(child, filePath, options);
   await new Promise<void>((resolve) => {
     child.once("close", () => {
       resolve();
     });
   });
-  // The tee ends its write stream from the stderr 'end'/'close' handler, which
-  // can land in the same tick as the process close; give the flush a turn.
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, 50);
-  });
+  await capture.waitForFlush();
 }
 
 describe("providerStderrLogPath", () => {
@@ -103,7 +102,7 @@ describe("attachProviderStderrLog", () => {
     await runWithStderr(
       "for (let i = 0; i < 64; i += 1) { process.stderr.write('x'.repeat(64)); }",
       logPath,
-      128
+      { maxBytes: 128 }
     );
 
     const contents = await readFile(logPath, "utf8");
@@ -128,6 +127,160 @@ describe("attachProviderStderrLog", () => {
 
   it("defaults to a cap large enough for ordinary provider chatter", () => {
     expect(PROVIDER_STDERR_LOG_MAX_BYTES).toBeGreaterThanOrEqual(1_000_000);
+  });
+});
+
+describe("attachProviderStderrLog redaction", () => {
+  it("scrubs a configured secret before it reaches disk", async () => {
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+
+    await runWithStderr(
+      "process.stderr.write('smtp auth failed for hunter2 (retrying)\\n');",
+      logPath,
+      { redactSecrets: ["hunter2"] }
+    );
+
+    const contents = await readFile(logPath, "utf8");
+    expect(contents).not.toContain("hunter2");
+    expect(contents).toBe("smtp auth failed for [REDACTED] (retrying)\n");
+  });
+
+  it("scrubs a secret split across two stderr writes", async () => {
+    // `data` chunks break at arbitrary byte offsets, so a redactor that only
+    // looks at one chunk at a time leaks any secret straddling the boundary.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+
+    await runWithStderr(
+      [
+        "process.stderr.write('token=hun');",
+        "await new Promise((r) => setTimeout(r, 20));",
+        "process.stderr.write('ter2 rejected\\n');"
+      ].join("\n"),
+      logPath,
+      { redactSecrets: ["hunter2"] }
+    );
+
+    const contents = await readFile(logPath, "utf8");
+    expect(contents).not.toContain("hunter2");
+    expect(contents).toBe("token=[REDACTED] rejected\n");
+  });
+
+  it("still flushes the held-back tail when the stream ends mid-holdback", async () => {
+    // The redactor holds back `longest secret - 1` characters against a future
+    // match; if finalization forgot to flush that carry, the provider's actual
+    // last words would be the bytes silently dropped.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+
+    await runWithStderr("process.stderr.write('fatal: giving up');", logPath, {
+      redactSecrets: ["hunter2"]
+    });
+
+    expect(await readFile(logPath, "utf8")).toBe("fatal: giving up");
+  });
+
+  it("writes only the marker when the secret was the whole of stderr", async () => {
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+
+    await runWithStderr("process.stderr.write('hunter2');", logPath, {
+      redactSecrets: ["hunter2"]
+    });
+
+    expect(await readFile(logPath, "utf8")).toBe("[REDACTED]");
+  });
+
+  it("keeps multi-byte characters intact across a chunk boundary", async () => {
+    // A byte-sliced carry would decode to U+FFFD; the redactor carries decoded
+    // characters instead.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+
+    await runWithStderr(
+      [
+        "const b = Buffer.from('déjà vu — hunter2\\n', 'utf8');",
+        "process.stderr.write(b.subarray(0, 3));",
+        "await new Promise((r) => setTimeout(r, 20));",
+        "process.stderr.write(b.subarray(3));"
+      ].join("\n"),
+      logPath,
+      { redactSecrets: ["hunter2"] }
+    );
+
+    const contents = await readFile(logPath, "utf8");
+    expect(contents).toBe("déjà vu — [REDACTED]\n");
+    expect(contents).not.toContain("\uFFFD");
+  });
+});
+
+describe("attachProviderStderrLog flush barrier", () => {
+  it("orders the tail read after the write, with no sleep", async () => {
+    // The production callers read this file to explain an unclean exit as soon
+    // as the adapter returns. waitForFlush is the only thing ordering that
+    // read after the tee's write.
+    const root = await makeTempRoot();
+    const logPath = path.join(root, "provider.stderr.log");
+    const child: ChildProcessWithoutNullStreams = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        "process.stderr.write('boom: out of memory\\n'); process.exit(9);"
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    child.stdout.resume();
+    const capture = attachProviderStderrLog(child, logPath, {});
+
+    await new Promise<void>((resolve) => {
+      child.once("close", () => {
+        resolve();
+      });
+    });
+    await capture.waitForFlush();
+
+    expect(await readProviderStderrTail(logPath)).toBe("boom: out of memory");
+  });
+
+  it("resolves without a sink when the provider wrote nothing", async () => {
+    const root = await makeTempRoot();
+    const child: ChildProcessWithoutNullStreams = spawn(
+      process.execPath,
+      ["--input-type=module", "--eval", "process.exit(0);"],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    child.stdout.resume();
+    const capture = attachProviderStderrLog(
+      child,
+      path.join(root, "provider.stderr.log"),
+      {}
+    );
+
+    await new Promise<void>((resolve) => {
+      child.once("close", () => {
+        resolve();
+      });
+    });
+    await expect(capture.waitForFlush()).resolves.toBeUndefined();
+  });
+
+  it("resolves immediately when no evidence path is configured", async () => {
+    const child: ChildProcessWithoutNullStreams = spawn(
+      process.execPath,
+      ["--input-type=module", "--eval", "process.stderr.write('x');"],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    child.stdout.resume();
+    const capture = attachProviderStderrLog(child, undefined);
+
+    await expect(capture.waitForFlush()).resolves.toBeUndefined();
+    await new Promise<void>((resolve) => {
+      child.once("close", () => {
+        resolve();
+      });
+    });
   });
 });
 

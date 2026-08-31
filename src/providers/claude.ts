@@ -124,7 +124,13 @@ export function createClaudeProvider(
           : { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" })
       });
       activeRun.child = child;
-      attachProviderStderrLog(child, input.stderrLogPath);
+      const stderrCapture = attachProviderStderrLog(
+        child,
+        input.stderrLogPath,
+        input.stderrRedactSecrets === undefined
+          ? {}
+          : { redactSecrets: input.stderrRedactSecrets }
+      );
       const queue = createJsonlProcessQueue(child);
 
       try {
@@ -157,6 +163,11 @@ export function createClaudeProvider(
         // can outlive that exit as a detached grandchild; stopping the
         // run's scope here is what actually reaps it (see docs/adr/0064).
         await processScope.stopProviderScope(input.run);
+        // Last, so scope teardown is never delayed by it: the caller reads
+        // the stderr log to explain an unclean exit as soon as this generator
+        // returns, and only this await orders that read after the tee's write
+        // (bounded, so a wedged sink cannot strand the attempt).
+        await stderrCapture.waitForFlush();
       }
     },
     validate: async (command, values = {}) => {

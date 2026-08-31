@@ -153,7 +153,13 @@ export function createOmpProvider(
         providerScratchEnvironment(input.scratchPath)
       );
       activeRun.child = child;
-      attachProviderStderrLog(child, input.stderrLogPath);
+      const stderrCapture = attachProviderStderrLog(
+        child,
+        input.stderrLogPath,
+        input.stderrRedactSecrets === undefined
+          ? {}
+          : { redactSecrets: input.stderrRedactSecrets }
+      );
       const queue = createProcessQueue(child, {
         isPromptDispatched: () => activeRun.promptDispatched
       });
@@ -303,6 +309,11 @@ export function createOmpProvider(
         activeRuns.delete(input.run.id);
         await shutdownProviderProcess(child);
         await processScope.stopProviderScope(input.run);
+        // Last, so scope teardown is never delayed by it: the caller reads
+        // the stderr log to explain an unclean exit as soon as this generator
+        // returns, and only this await orders that read after the tee's write
+        // (bounded, so a wedged sink cannot strand the attempt).
+        await stderrCapture.waitForFlush();
       }
     },
     validate: async (command, values = {}) => {

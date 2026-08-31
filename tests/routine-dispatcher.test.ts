@@ -4652,13 +4652,17 @@ describe("RoutineFiringDispatcher", () => {
     const secret = "smtp-password-that-must-never-leak";
     const runStore = openRunStore({ stateRoot });
     const delivered: NotificationMessage[] = [];
+    let handedStderrRedactSecrets: readonly string[] | undefined;
     const provider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
       // A full-permission provider process can inherit the daemon's env and
       // echo it back — this simulates that leak path to prove evidence and
       // the terminal reason both come out redacted regardless of source.
-      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        handedStderrRedactSecrets = input.stderrRedactSecrets;
         await Promise.resolve();
         yield {
           normalized: {
@@ -4773,6 +4777,12 @@ describe("RoutineFiringDispatcher", () => {
       expect(rawLog).not.toContain(secret);
       expect(normalizedLog).toContain("[REDACTED]");
       expect(normalizedLog).not.toContain(secret);
+      // provider.stderr.log lands in this same directory and is served by the
+      // same artifact route, so the tee gets the same secret list the JSONL
+      // evidence writer uses. (What the tee then does with it — including
+      // secrets split across chunk boundaries — is covered by
+      // tests/provider-stderr.test.ts.)
+      expect(handedStderrRedactSecrets).toContain(secret);
 
       expect(delivered).toHaveLength(1);
       expect(delivered[0]?.text).not.toContain(secret);

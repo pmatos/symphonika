@@ -38,6 +38,7 @@ import type { NotificationDeliveryTracker } from "../notifications/delivery-trac
 import { deliverRoutineFanoutNotification } from "../notifications/routine-fanout.js";
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
+import { redactAll } from "../redaction.js";
 import type { RoutineFanoutHoldReason, RunStore } from "../run-store.js";
 import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
@@ -1276,6 +1277,10 @@ async function runRoutineFiring(input: {
         routine: routineOverrides,
         scratchPath,
         stderrLogPath: evidence.stderrLogPath,
+        // The stderr tee lands in the same evidence directory as the raw and
+        // normalized logs and is served by the same artifact routes, so it
+        // honours the same redaction invariant they do (SPEC.md §6).
+        stderrRedactSecrets: input.redactSecrets(),
         workspacePath: prepared.workspacePath
       })) {
         const normalizedLogCursor = await appendRoutineEvent({
@@ -2473,17 +2478,6 @@ function serializeJsonl(value: unknown, redactSecrets: string[]): Buffer {
   const redacted =
     redactSecrets.length === 0 ? value : redactValueDeep(value, redactSecrets);
   return Buffer.from(`${JSON.stringify(redacted)}\n`, "utf8");
-}
-
-// A provider's own output can echo back environment values it inherited
-// (full-permission execution, see CLAUDE.md) — persisted evidence and any
-// terminal reason derived from it must never retain the raw SMTP password.
-function redactAll(message: string, redactSecrets: string[]): string {
-  return redactSecrets.reduce(
-    (acc, secret) =>
-      secret.length === 0 ? acc : acc.split(secret).join("[REDACTED]"),
-    message
-  );
 }
 
 function redactRoutineOutcomeClaim(

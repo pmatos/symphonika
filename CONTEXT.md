@@ -32,6 +32,13 @@ runtime settings. It is the only registry that knows Project names, so it is whe
 Projects are declared.
 _Avoid_: workflow when referring to the multi-project registry
 
+**Runtime Config Snapshot**:
+The atomic, fully validated effective view built from the Service Config, referenced Workflow
+Contracts, and Routine declarations. A failed reload keeps the last-known-good snapshot; a
+first-load failure has no effective snapshot, so snapshot-derived policy is unavailable rather than
+partially salvaged or replaced with defaults (ADR 0092).
+_Avoid_: parsed config when referring to rejected candidate fields
+
 **Workflow Contract**:
 The reloadable canonical repository-owned instructions and runtime policy used to execute one issue.
 _Avoid_: service config when referring to repo-owned agent policy

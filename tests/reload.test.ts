@@ -2044,6 +2044,7 @@ describe("RuntimeConfigReloader watchdog config", () => {
     // candidate: nothing goes live, not even the valid sibling "vow".
     expect(snapshot).toBeUndefined();
     expect(reloader.getSnapshot()).toBeUndefined();
+    expect(reloader.watchdogServiceConfig()).toBeUndefined();
     expect(reloader.projectsByName().size).toBe(0);
     expect(reloader.getStatus()).toMatchObject({
       ok: false,

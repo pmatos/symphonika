@@ -19,6 +19,31 @@ async function makeTempRoot(): Promise<string> {
   return root;
 }
 
+async function writeDefaultWatchdogConfig(root: string): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "providers:",
+      "  codex:",
+      '    command: "codex -p symphonika"',
+      "  claude:",
+      '    command: "claude -p"',
+      "projects:",
+      "  - name: alpha",
+      "    mode: routine_host",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/alpha",
+      "      git:",
+      "        remote: git@github.com:pmatos/symphonika.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
 afterEach(async () => {
   await Promise.all(
     tempRoots
@@ -203,6 +228,7 @@ describe("CLI run commands", () => {
 
   it("status identifies only active runs inside the watchdog grace window", async () => {
     const stateRoot = await makeTempRoot();
+    await writeDefaultWatchdogConfig(stateRoot);
     const store = openRunStore({ stateRoot });
     for (const [id, issueNumber] of [
       ["idle-active", 202],
@@ -266,6 +292,60 @@ describe("CLI run commands", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("status reports watchdog policy unavailable when runtime config has no valid snapshot", async () => {
+    const stateRoot = await makeTempRoot();
+    const configPath = path.join(stateRoot, "symphonika.yml");
+    await writeFile(configPath, "watchdog:\n  enabled: false\n", "utf8");
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "status-watchdog-unavailable",
+      issue: sampleIssue({ number: 268 }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("status-watchdog-unavailable", "running");
+    store.close();
+
+    const doctorReport = {
+      configPath,
+      environment: TEST_DOCTOR_ENVIRONMENT,
+      errors: ["runtime configuration is invalid"],
+      ok: false,
+      projects: [],
+      warnings: []
+    } satisfies DoctorReport;
+    const present = captureProgram(stateRoot, {
+      runDoctor: () => Promise.resolve(doctorReport)
+    });
+    await present.program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--config",
+      configPath
+    ]);
+
+    expect(present.output.stdout).toContain(
+      "watchdog config: unavailable (no valid runtime configuration snapshot)"
+    );
+
+    const dashboard = captureProgram(stateRoot, {
+      runDoctor: () => Promise.resolve(doctorReport)
+    });
+    await dashboard.program.parseAsync([
+      "node",
+      "symphonika",
+      "status",
+      "--dashboard",
+      "--config",
+      configPath
+    ]);
+    expect(dashboard.output.stdout).toContain(
+      "Watchdog config: unavailable (no valid runtime configuration snapshot)"
+    );
   });
 
   it("status dashboard does not show the prior attempt's watchdog idle sample while a retry prepares", async () => {
@@ -436,6 +516,7 @@ describe("CLI run commands", () => {
 
   it("status --dashboard renders a compact terminal dashboard with active event context", async () => {
     const stateRoot = await makeTempRoot();
+    await writeDefaultWatchdogConfig(stateRoot);
     const resolvedStateRoot = path.join(stateRoot, ".symphonika");
     const store = openRunStore({ stateRoot });
     store.createRun({
@@ -1090,6 +1171,7 @@ describe("CLI run commands", () => {
 
   it("show-run renders a not-yet-idle Progress Signal from persisted samples", async () => {
     const stateRoot = await makeTempRoot();
+    await writeDefaultWatchdogConfig(stateRoot);
     const store = openRunStore({ stateRoot });
     withClaimTime("2026-05-22T11:50:00.000Z", () => {
       store.createRun({
@@ -1153,6 +1235,7 @@ describe("CLI run commands", () => {
 
   it("show-run renders an idle Progress Signal within its grace window", async () => {
     const stateRoot = await makeTempRoot();
+    await writeDefaultWatchdogConfig(stateRoot);
     const store = openRunStore({ stateRoot });
     withClaimTime("2026-05-22T11:30:00.000Z", () => {
       store.createRun({
@@ -1314,8 +1397,91 @@ describe("CLI run commands", () => {
     }
   });
 
+  it("show-run reports watchdog policy unavailable when the first runtime snapshot fails", async () => {
+    const stateRoot = await makeTempRoot();
+    const configPath = path.join(stateRoot, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "watchdog:",
+        "  enabled: false",
+        "providers:",
+        "  codex:",
+        '    command: "codex -p symphonika"',
+        "  claude:",
+        '    command: "claude -p"',
+        "projects:",
+        "  - name: alpha",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/alpha",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./MISSING-WORKFLOW.md",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "unavailable-watchdog",
+      issue: sampleIssue({ number: 268, title: "Unavailable watchdog" }),
+      projectName: "alpha",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    store.updateRunState("unavailable-watchdog", "running");
+    store.upsertWatchdogSample({
+      idleSince: "2026-05-22T11:45:00.000Z",
+      lastMessageAt: null,
+      lastProgressAt: null,
+      lastToolCallAt: null,
+      normalizedLogOffset: 0,
+      normalizedLogPath: "",
+      outputTokensTotal: 0,
+      runId: "unavailable-watchdog",
+      sampledAt: "2026-05-22T11:59:00.000Z",
+      turnIdSetSize: 0,
+      workspaceDigest: "",
+      workspaceMtimeMax: 0
+    });
+    store.close();
+
+    const present = captureProgram(stateRoot);
+    await present.program.parseAsync([
+      "node",
+      "symphonika",
+      "show-run",
+      "unavailable-watchdog",
+      "--config",
+      configPath
+    ]);
+
+    expect(progressSignalBlock(present.output.stdout)).toBe(
+      "Progress Signal:\n  watchdog: unavailable (no valid runtime configuration snapshot)"
+    );
+    expect(present.output.stdout).not.toContain("watchdog: disabled");
+    expect(present.output.stdout).not.toContain("grace remaining:");
+  });
+
   it("show-run preserves the final Progress Signal after watchdog termination", async () => {
     const stateRoot = await makeTempRoot();
+    await writeDefaultWatchdogConfig(stateRoot);
     const store = openRunStore({ stateRoot });
     withClaimTime("2026-05-22T11:20:00.000Z", () => {
       store.createRun({
@@ -1387,6 +1553,7 @@ describe("CLI run commands", () => {
 
   it("show-run's Progress Signal does not drift when viewed long after watchdog termination", async () => {
     const stateRoot = await makeTempRoot();
+    await writeDefaultWatchdogConfig(stateRoot);
     const store = openRunStore({ stateRoot });
     withClaimTime("2026-05-22T11:20:00.000Z", () => {
       store.createRun({
@@ -1461,6 +1628,7 @@ describe("CLI run commands", () => {
 
   it("show-run drops the prior Progress Signal while a retried Run is preparing_workspace", async () => {
     const stateRoot = await makeTempRoot();
+    await writeDefaultWatchdogConfig(stateRoot);
     const store = openRunStore({ stateRoot });
     withClaimTime("2026-05-22T11:20:00.000Z", () => {
       store.createRun({

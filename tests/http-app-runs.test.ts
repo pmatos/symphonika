@@ -680,6 +680,62 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("reports watchdog policy as unavailable when no runtime snapshot exists", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "watchdog-unavailable",
+        issue: sampleIssue({ number: 268 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+
+      const app = createHttpApp({
+        getWatchdogConfig: () => undefined,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/runs/watchdog-unavailable");
+      const body = (await response.json()) as { watchdog?: unknown };
+
+      expect(response.status).toBe(200);
+      expect(body.watchdog).toBeNull();
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows unavailable watchdog policy on the run page without a runtime snapshot", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "watchdog-unavailable-page",
+        issue: sampleIssue({ number: 268 }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+
+      const app = createHttpApp({
+        getWatchdogConfig: () => undefined,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/watchdog-unavailable-page");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("Watchdog policy unavailable");
+      expect(body).not.toContain("Grace remaining");
+      expect(body).not.toContain("30m");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("streams /api/runs/:id/files/provider_raw only for artifacts inside the run evidence dir", async () => {
     const test = await setup();
     try {

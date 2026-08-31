@@ -316,6 +316,10 @@ manual poll-now trigger, and manual Routine Firing request. A valid reload repla
 snapshot used for future polling, dispatch, retry, continuation, provider-command selection, PR
 follow-up policy, and manual Routine Firing admission. An invalid reload is surfaced in structured
 logs and operator status while the daemon keeps using the last known good effective snapshot.
+Defaults are applied only while building a valid candidate snapshot. On a first-load failure with
+no last-known-good snapshot, snapshot-derived policy is unavailable: Watchdog operator surfaces in
+particular must not substitute the default policy or salvage Watchdog fields from the rejected
+candidate. See ADR 0092.
 
 `symphonika init` initializes Symphonika's user Service Config independently of any repository. It
 prompts for service-level state, polling, pull-request merge policy, and Codex/Claude/OMP commands,
@@ -2206,6 +2210,9 @@ cache when an operator explicitly wants every frame to perform full validation.
 mtime ages, observed turn-id count, five-minute output-token growth, and `idle_since` plus effective
 grace remaining when idle. `status` and its dashboard render an idle indicator only for active Runs
 whose latest sample has `idle_since` set.
+When no valid runtime snapshot exists, `status` and its dashboard report the Watchdog configuration
+as unavailable and render no idle/grace indicator, while `show-run` reports the Progress Signal's
+Watchdog policy as unavailable. They do not calculate timing or budget fields from defaults.
 
 `routines` groups Routine Targets under their globally unique Routine name and target list, then
 shows each Project's `state`, `next_fire_at`, `last_fired_at`, `last_attempted_at`,
@@ -2493,6 +2500,9 @@ the effective `graceMs` and server-computed `graceRemainingMs`, plus the effecti
 server-computed `runRemainingMs` (omitted when the wall-clock cap is disabled). `GET /api/status` adds a `watchdog`
 object to each active Run with `idleSince` and `graceRemainingMs` when idle. When the effective
 Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }` for that object.
+When no valid runtime snapshot (including a last-known-good snapshot) exists, both endpoints return
+`watchdog: null`; `null` means unavailable and is distinct from the explicitly disabled object.
+The server-rendered Run page shows the same unavailable state and calculates no Watchdog fields.
 
 The server-rendered dashboard and `/runs` list surface the same idle/grace state as a small
 "watchdog idle since X (Y remaining)" badge next to the state pill, shown only for active

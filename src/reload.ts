@@ -519,10 +519,13 @@ export class RuntimeConfigReloader {
     return this.snapshot?.email;
   }
 
-  watchdogServiceConfig(): WatchdogServiceConfig {
+  watchdogServiceConfig(): WatchdogServiceConfig | undefined {
+    if (this.snapshot === undefined) {
+      return undefined;
+    }
     return {
-      projects: this.snapshot?.projects ?? [],
-      watchdog: this.snapshot?.watchdog ?? DEFAULT_WATCHDOG_CONFIG
+      projects: this.snapshot.projects,
+      watchdog: this.snapshot.watchdog
     };
   }
 

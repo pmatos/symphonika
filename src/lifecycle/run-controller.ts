@@ -473,24 +473,6 @@ class FreshClaimDeferredError extends Error {
   readonly name = "FreshClaimDeferredError";
 }
 
-// Separates a failure after this claim created its Run row from a createRun
-// failure that happens to collide with a pre-existing row under the same id.
-// runFreshLifecycle must reconcile only the former; inferring ownership from
-// getRun(runId) would mutate somebody else's durable row in the latter case.
-class PostCreateRunClaimError extends Error {
-  readonly name = "PostCreateRunClaimError";
-
-  constructor(readonly claimError: unknown) {
-    super(
-      claimError instanceof Error
-        ? claimError.message
-        : typeof claimError === "string"
-          ? claimError
-          : "unknown post-create Run claim failure"
-    );
-  }
-}
-
 // The Watchdog policy slice a Run Slot Deadline needs: whether the cap is on
 // at all, and how many wall-clock minutes it allows from the Run's claim.
 type RunDeadlinePolicy = Pick<WatchdogConfig, "enabled" | "maxRunMinutes">;
@@ -3009,22 +2991,14 @@ export class RunController {
     // streaming runs AFTER mutex release. CapBreachedError and
     // IssueReservedError propagate to the caller, which decides whether to
     // silently no-op (fresh dispatch) or reschedule (continuation / state
-    // advance / PR followup). See ADR 0052 / ADR 0053.
+    // advance / PR followup). See ADR 0052 / ADR 0053. A failure after
+    // claimAndPersistRun's own createRun call reconciles the orphaned Run row
+    // (label writes and scheduleNext included) before rethrowing, so that
+    // reconciliation also runs inside this same mutex hold. See ADR 0093.
     let deadline: RunSlotDeadline;
     await this.dispatchMutex.acquire();
     try {
-      try {
-        deadline = await this.claimAndPersistRun(input);
-      } catch (error) {
-        if (error instanceof PostCreateRunClaimError) {
-          await this.reconcilePostCreateClaimFailure({
-            error: error.claimError,
-            ...input
-          });
-          throw error.claimError;
-        }
-        throw error;
-      }
+      deadline = await this.claimAndPersistRun(input);
     } finally {
       this.dispatchMutex.release();
     }
@@ -3069,10 +3043,6 @@ export class RunController {
     // detection cannot observe a queued row between slot cleanup and its
     // terminal state.
     this.activeRuns.unregister(input.runId);
-    const run = this.runStore.getRun(input.runId);
-    if (run?.state !== "queued") {
-      return;
-    }
 
     const terminal = await classifyFailure({
       error: input.error,
@@ -3091,16 +3061,7 @@ export class RunController {
       terminal.classification
     );
     this.runStore.updateRunState(input.runId, state);
-    if (!willRetry) {
-      try {
-        this.runStore.markRunNotificationPending(input.runId);
-      } catch (error) {
-        this.logger?.warn(
-          { err: error, runId: input.runId },
-          "symphonika issue Run notification evidence write failed"
-        );
-      }
-    }
+    this.markNotificationPendingIfNeeded(input.runId, willRetry);
     await this.applyTerminalLabels({
       fsmContinuing: false,
       issueNumber: input.issue.number,
@@ -3146,12 +3107,35 @@ export class RunController {
     );
   }
 
+  // Shared by reconcilePostCreateClaimFailure and runAttemptLifecycle's
+  // terminal handling: once the retry budget is spent, this is the point
+  // that makes the attempt visible to the durable notification digest (ADR
+  // 0071); a still-retryable run defers, since the same Run row is reused.
+  private markNotificationPendingIfNeeded(
+    runId: string,
+    willRetry: boolean
+  ): void {
+    if (willRetry) {
+      return;
+    }
+    try {
+      this.runStore.markRunNotificationPending(runId);
+    } catch (error) {
+      this.logger?.warn(
+        { err: error, runId },
+        "symphonika issue Run notification evidence write failed"
+      );
+    }
+  }
+
   private async claimAndPersistRun(input: {
+    attemptNumber: number;
     claimGuard?: () => boolean;
+    extraInstructions?: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
     parentRunId: string | null;
-    project: RunControllerProjectConfig;
+    project: DispatchProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
     repository: GitHubIssueRepositoryInput;
@@ -3427,7 +3411,7 @@ export class RunController {
         rollbackDeadline.clear();
       }
       if (runCreated && !(error instanceof RegistryShutdownError)) {
-        throw new PostCreateRunClaimError(error);
+        await this.reconcilePostCreateClaimFailure({ ...input, error });
       }
       throw error;
     } finally {
@@ -3947,20 +3931,11 @@ export class RunController {
             effectiveOutcome.classification === "transient" &&
             this.runStore.runRetryCount(input.runId) <
               this.lifecyclePolicy.retry.cap;
-          if (!willRetry) {
-            // updateRunState deliberately defers transient failures because the
-            // same Run row is reused by retries. Once the budget is exhausted,
-            // this is the point that makes the genuinely-terminal attempt
-            // visible to the durable notification digest (ADR 0071).
-            try {
-              this.runStore.markRunNotificationPending(input.runId);
-            } catch (error) {
-              this.logger?.warn(
-                { err: error, runId: input.runId },
-                "symphonika issue Run notification evidence write failed"
-              );
-            }
-          }
+          // updateRunState deliberately defers transient failures because the
+          // same Run row is reused by retries. Once the budget is exhausted,
+          // this is the point that makes the genuinely-terminal attempt
+          // visible to the durable notification digest (ADR 0071).
+          this.markNotificationPendingIfNeeded(input.runId, willRetry);
 
           this.logger?.info(
             {

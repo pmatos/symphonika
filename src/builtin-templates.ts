@@ -182,7 +182,7 @@ const AUTOFIX_UNTIL_CLEAN = [
   "          checks: failure",
   "      - to: autofix",
   "        when:",
-  "          checks: success",
+  "          has_unresolved_reviews: true",
   "  autofix:",
   "    action:",
   "      kind: agent",

@@ -287,6 +287,14 @@ terminates the provider process tree, waits for that work to settle, and records
 with `terminal_reason = "firing_timeout"`. This declared deadline is independent of Watchdog
 progress-liveness: useful progress does not extend it.
 
+While a Routine Firing is `running`, the Watchdog samples the same provider and Workspace Progress
+Signal used for issue Runs. If no signal advances for the target Project's effective
+`watchdog.grace_minutes`, the Watchdog requests provider cancellation and the firing settles as
+`state = failed` with `terminal_reason = "no_progress"`; the dispatcher's `finally` then releases
+its shared in-flight slot. This liveness guard is independent of the optional declared deadline.
+The convergence budget and `max_run_minutes` remain issue-Run policies and do not apply to Routine
+Firings.
+
 A clock event skipped for catch-up policy or overlap is not a Routine Firing: no `routine_firings`
 row is created. The Routine instead records `last_attempted_at`, `last_skip_reason`, and
 `last_skip_at`, together with rolling 24-hour counts for each skip reason. A capacity refusal
@@ -580,6 +588,19 @@ wait state whose predicates are only artefact predicates is polled without a tra
 while a wait state that also names PR predicates and every `merge_pr` state still require one. See
 ADR 0087.
 
+Expanded-graph validation rejects a `wait` state whose PR-signal transitions leave a settled,
+actionable pull-request observation uncovered. The validator enumerates successful or failed
+checks, concrete mergeability, resolved or unresolved review feedback, open or closed PR state,
+merged state, and every review decision, with a coherent representative unresolved-thread count. At
+least one transition must match every such observation. Pending or unknown checks remain a
+legitimate polling state throughout, and unknown mergeability is likewise excluded while the PR is
+still open; once a tracked PR closes, merged or not, GitHub stops recomputing mergeability, so
+unknown mergeability becomes a settled, actionable outcome the validator requires coverage for
+instead. An artefact-gated wait is also outside PR-signal coverage validation because absence of its
+file is itself an
+intentional reason to stay parked. The same error is surfaced by `workflow validate`, `doctor`, and
+defensive reload. See ADRs 0047 and 0090.
+
 The daemon must not dispatch a Dispatch Project when its workflow contract is missing or invalid. A
 Routine Host is never dispatched, so this gate does not apply to it.
 
@@ -854,7 +875,8 @@ SQLite stores durable orchestration state:
 - normalized event metadata
 - per-Attempt latest raw provider-event receipt metadata and recovered Provider Stream Stall
   intervals
-- Watchdog samples for no-progress and convergence-budget detection
+- Watchdog samples for issue-Run no-progress and convergence-budget detection
+- per-firing Watchdog samples for Routine Firing no-progress detection
 - workflow progress fingerprints and accepted claim counts for park-edge cycle detection
 - raw log file paths
 - routines
@@ -998,8 +1020,9 @@ pending. Validation and status commands must not dispatch work.
 
 The daemon also runs the Watchdog during reconciliation according to
 `watchdog.sample_interval_seconds`. The default Watchdog policy is enabled with a 30 minute
-no-progress grace window, a 150000 output-token convergence budget, a 360 minute wall-clock Run cap,
-and 60 second sampling interval.
+no-progress grace window for running issue Runs and Routine Firings, a 150000 output-token
+convergence budget for issue Runs, a 360 minute wall-clock issue-Run cap, and 60 second sampling
+interval.
 
 ### 8.3 Multi-Project Dispatch
 
@@ -1098,6 +1121,12 @@ row. One-shot Routines become `expired`; recurring Routines remain active and at
 `next_fire_at` before the provider executes, so successful and failed firings both leave the next
 clock event visible. Routine Firings use states `queued`, `preparing_workspace`, `running`,
 `succeeded`, `failed`, and `cancelled`.
+
+The Watchdog samples every `running` Routine Firing. A firing whose Progress Signal remains idle
+through the effective Project grace window is cancelled through its live provider adapter and
+settles as `failed` with `terminal_reason = "no_progress"`. Its lifecycle completion releases both
+the shared concurrency slot and the non-overlap gate, so a later recurring clock event can launch a
+replacement without a daemon restart.
 
 When `timeout_minutes` is effective, one absolute deadline bounds how long the dispatcher waits
 on workspace preparation, provider validation, provider streaming, and terminal outcome
@@ -1226,16 +1255,18 @@ instead of consuming it (ADR 0093). The Routine Target keeps its due `next_fire_
 leg stays `pending` recording `deferred_reason`, `deferred_since` and `deferred_attempts`, each
 retry refreshes `last_attempted_at`, no skip counter moves, and the next daemon tick retries
 admission; Routine dispatch precedes fresh issue dispatch in a tick, so an issue Run never takes a
-freed slot out from under a deferral evaluated in the same tick. PR review follow-up is admitted
-earlier than either and may still claim a freed slot ahead of a parked deferral. A recurring Target
-defers until its next clock event is due, a one-shot Target for 24 hours. A deferral that reaches
-that bound unadmitted is recorded as missed: the clock advances exactly as a skip's does, the
-reason increments its rolling 24-hour counter once, the fan-out leg settles as `missed`, the
-Routine did not run, and the fan-out counts it as a failure. The clock lands on the successor event
-that ended the wait rather than jumping past it, so one lost run never costs two; a backlog older
-than a whole period still collapses to the next future event. A deferred leg that loses its target
-mid-wait — Project disabled, Routine removed, cron edited — also settles as `missed` rather than as
-an uncounted `target_unavailable` skip. Restart schedule recompute leaves a
+freed slot out from under a deferral evaluated in the same tick. A newly due Routine remains behind
+PR review follow-up, but once a capacity refusal has parked it, later ticks retry that deferral
+before admitting another review-follow-up Run against the same slots (ADR 0094). A PR follow-up
+action that only merges consumes no slot and therefore continues into Routine dispatch in the same
+tick. A recurring Target defers until its next clock event is due, a one-shot Target for 24 hours.
+A deferral that reaches that bound unadmitted is recorded as missed: the clock advances exactly as
+a skip's does, the reason increments its rolling 24-hour counter once, the fan-out leg settles as
+`missed`, the Routine did not run, and the fan-out counts it as a failure. The clock lands on the
+successor event that ended the wait rather than jumping past it, so one lost run never costs two; a
+backlog older than a whole period still collapses to the next future event. A deferred leg that
+loses its target mid-wait — Project disabled, Routine removed, cron edited — also settles as
+`missed` rather than as an uncounted `target_unavailable` skip. Restart schedule recompute leaves a
 parked clock event alone rather than settling it as a catch-up skip. Deferring emits
 `routine.deferred` with `reason`, `project`, `routine`, `scheduled_at`, and the `deferred_until`
 bound; recording a miss emits `routine.missed` with `reason`, `project`, `routine`, `scheduled_at`,
@@ -1844,12 +1875,13 @@ own process tree (ADR 0064).
 
 ### 12.4 Watchdog
 
-The Watchdog detects active provider runs that have stopped doing observable work. It samples rows
-in `state = "running"` only — the one active state with a live Agent Provider that can wedge. Rows
-in `queued` and `preparing_workspace` have no provider executing yet, so they have no liveness
-signal to advance and must not accrue idle time; rows in `state = "waiting"` are reconciled by the
-wait-state path. A `running` Run that already carries `cancel_requested` is also skipped, so the
-Watchdog does not overwrite a more specific in-flight cancellation with `no_progress`.
+The Watchdog detects active issue Runs and Routine Firings whose providers have stopped doing
+observable work. It samples rows in `state = "running"` only — the one active state with a live
+Agent Provider that can wedge. Rows in `queued` and `preparing_workspace` have no provider
+executing yet, so they have no liveness signal to advance and must not accrue idle time; issue Runs
+in `state = "waiting"` are reconciled by the wait-state path. Running work that already carries
+`cancel_requested` is also skipped, so the Watchdog does not overwrite a more specific in-flight
+cancellation with `no_progress`.
 
 For each sampled Run, Symphonika records one durable latest `watchdog_samples` row keyed by
 `run_id` and an append-only `watchdog_sample_history` row keyed by `(run_id, sampled_at)`. Both
@@ -1871,6 +1903,16 @@ terminating the new attempt. A transient retry therefore exposes no current Prog
 workspace preparation and starts every attempt-local baseline and idle grace window fresh when
 sampling resumes. The Run-scoped Slot Deadline below is the deliberate exception: it is conditional
 on actual in-memory slot ownership rather than a durable state or attempt generation.
+
+For each sampled Routine Firing, Symphonika records the equivalent latest
+`routine_watchdog_samples` row, append-only `routine_watchdog_sample_history`, and remembered
+`routine_watchdog_turn_ids`, all keyed by `firing_id` rather than `run_id`. Routine Firings have one
+provider attempt and no retry generation. Each sample and the no-progress cancellation latch are
+conditional on the firing still being `running` with no prior cancellation request, so a provider
+completion or operator cancellation racing asynchronous log or Workspace sampling wins cleanly.
+Routine prompts have no Workflow Contract, so their Workspace sampling uses the built-in exclusion
+set and the effective Project `watchdog.mtime_ignore` / `mtime_include` policy without an
+`evidence.ignore` layer.
 
 Sampling reads the Normalized Event Log only forward of the stored byte offset and walks the
 Workspace tree once. A transient retry writes a new per-attempt log path; its first sample reads
@@ -1925,6 +1967,26 @@ observation. Once `now - idle_since >= watchdog.grace_minutes`, it transitions t
 `stale` with `terminal_reason = "no_progress"` and requests provider cancellation. `no_progress`
 is a deterministic terminal verdict for that attempt, not a transient retry reason.
 
+The same idle rule applies to a sampled Routine Firing. At expiry the Watchdog atomically latches
+`cancel_requested` with `cancel_reason = "no_progress"` and requests provider cancellation. The
+Routine dispatcher preserves that reason over the cancellation-produced provider exit, completes
+the firing as `failed / no_progress`, performs its ordinary evidence and commits-ahead inspection,
+and releases the in-memory slot in `finally`. It does not add a Routine-Firing `stale` state:
+Routine Firings have no stale operational-label recovery workflow, and a provider that failed its
+liveness contract is a terminal failed firing.
+
+Because the latch drops the firing from every later Watchdog pass, that settlement is bounded.
+Cancelling a Routine Firing starts a settlement window covering everything the running phase still
+awaits that provider cancellation cannot reach — the before/after GitHub snapshot reads,
+pull-request discovery, and the Git commits-ahead probe. Work still pending when the window closes
+is abandoned, so the firing always reaches a terminal row and always releases its overlap and
+capacity slots; a cancel that arrives while the firing is healthy sees that work finish normally
+and loses no evidence. Completion is fenced on the latch as well: a provider that finishes between
+the durable latch and the in-memory cancellation still records `failed / no_progress` rather than
+`succeeded`, so the Watchdog termination notification and the durable row cannot disagree. The
+outcome and commits-ahead evidence that completion gathered is retained either way, because
+Workspace retention depends on it.
+
 Independently of that liveness clock, the Watchdog enforces a **convergence budget**: when a
 sampled Run's cumulative `output_tokens_total` reaches `watchdog.output_token_budget` (default
 150000; `0` disables it), the Run transitions to `stale` with
@@ -1935,6 +1997,10 @@ opposite failure mode from `no_progress` — a Run doing plenty of observable wo
 finishing, which satisfies the liveness rule on every tick. The budget is checked before the idle
 clock, honours the same per-Project override scope as `grace_minutes`, and like `no_progress` is
 deterministic rather than a transient retry reason. See ADR 0086.
+
+The convergence budget is issue-Run-only. Routine Firings still sample output-token growth as one
+component of liveness, but their independent absolute bound is the optional declared
+`timeout_minutes` deadline rather than `watchdog.output_token_budget` or `max_run_minutes`.
 
 Ahead of both, the Watchdog enforces a **wall-clock cap**: once a Run's age — `now` minus its
 `runs.created_at`, the instant it claimed its Issue — reaches `watchdog.max_run_minutes` (default
@@ -2010,10 +2076,11 @@ tracked. For each tracked open PR:
 A review follow-up Run never picks its own start state. For a raw FSM this loop does not dispatch at
 all, so the only entry point is the transition the parked state itself names — a wait state that
 routes reviewer feedback (`has_unresolved_reviews: true`) into a repair state, with the observed
-thread context carried into that state's prompt. A wait state naming no such transition parks and
-raises manual attention rather than being replayed from `workflow.initial`. Markdown
-compatibility-graph workflows have no state machine and no position, so this loop remains their
-follow-up route and their single entry point is the right one.
+thread context carried into that state's prompt. Expanded-graph validation rejects a wait state
+that leaves the otherwise-green unresolved-review observation uncovered; a legacy or hand-built
+graph that bypassed validation would park rather than being replayed from `workflow.initial`.
+Markdown compatibility-graph workflows have no state machine and no position, so this loop remains
+their follow-up route and their single entry point is the right one.
 
 A successful PR Follow-up observation requires a non-empty `headRefOid` from the same GraphQL
 response that supplies mergeability, checks, and review state. GitHub declares this field as
@@ -2092,7 +2159,11 @@ Lifecycle:
    states alone is not guarded. Progress history, including claim counts, is cleared when a chain
    reaches a terminal and when a fresh claim opens a new one. See ADR 0090.
 5. If no transition matches and the wait state's `complete_when` is not violated, the wait stays
-   parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick. For a workflow
+   parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick. This is the normal
+   outcome for transient PR observations such as pending checks or unknown mergeability, and for
+   an artefact-only wait whose file is not present yet. Expanded-graph validation rejects an
+   uncovered settled PR observation before dispatch, so a validated PR-observing wait cannot park
+   forever on an actionable shape such as green checks plus unresolved feedback. For a workflow
    whose Issue is not workflow-owned, unresolved review feedback that has exhausted the PR
    Follow-up dispatch cap also leaves the Run parked, with its detail surfaces identifying the
    tracked PR and requiring manual attention.

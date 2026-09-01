@@ -1,16 +1,19 @@
 name: Release
 
+# Releases are cut by semantic-release on a weekly batch schedule (Sundays
+# 00:00 UTC): it derives the next version from Conventional Commit types
+# accumulated on main since the last release, builds symphonika's dist
+# bundle, and publishes a GitHub Release (notes + CHANGELOG + tarball +
+# checksum). No-op if nothing releasable landed that week. Use
+# workflow_dispatch to cut a release on demand between scheduled runs.
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_call: &tag_input
-    inputs:
-      tag:
-        description: Release tag to build and publish (e.g. v0.1.5)
-        required: true
-        type: string
-  workflow_dispatch: *tag_input
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -22,56 +25,30 @@ env:
 
 jobs:
   release:
-    name: Publish GitHub Release
+    name: semantic-release
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: write
-    env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      issues: write
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
 
-      - run: npm ci
-
-      - name: Verify tag matches package.json version
-        run: |
-          tag_version="${RELEASE_TAG#v}"
-          package_version="$(node -p "require('./package.json').version")"
-          if [ "$tag_version" != "$package_version" ]; then
-            echo "::error::tag ${RELEASE_TAG} (version ${tag_version}) does not match package.json version ${package_version}" >&2
-            exit 1
-          fi
-          echo "RELEASE_VERSION=${package_version}" >>"$GITHUB_ENV"
-
-      - run: npm run build
-
-      - name: Package release artifact
-        run: |
-          set -euo pipefail
-          stage_dir="$(mktemp -d)/symphonika-${RELEASE_VERSION}"
-          mkdir -p "$stage_dir"
-          cp -r dist "$stage_dir/dist"
-          cp package.json package-lock.json "$stage_dir/"
-          tarball="symphonika-${RELEASE_VERSION}.tar.gz"
-          tar -czf "$tarball" -C "$(dirname "$stage_dir")" "symphonika-${RELEASE_VERSION}"
-          sha256sum "$tarball" >SHA256SUMS.txt
-          echo "TARBALL=${tarball}" >>"$GITHUB_ENV"
-
-      - name: Publish release
+      - name: Run semantic-release
+        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
+        with:
+          extra_plugins: |
+            @semantic-release/changelog@6
+            @semantic-release/git@10
+            @semantic-release/exec@7
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${RELEASE_TAG}" \
-            --title "${RELEASE_TAG}" \
-            --generate-notes \
-            "${TARBALL}" \
-            SHA256SUMS.txt
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

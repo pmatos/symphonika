@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## Pre-automation changes
+
+_Recorded before this project adopted automated semantic-release versioning (#646). These changes
+are already included in the manually-cut v0.1.0-v0.1.11 releases; this section is kept for
+historical reference and will not be modified by future automated releases, which insert their
+generated notes above it._
 
 ### Breaking changes
 

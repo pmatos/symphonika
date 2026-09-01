@@ -1375,7 +1375,7 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
-  it("admits fan-out targets independently and includes a global-cap skip in the grouped result", async () => {
+  it("defers a capped fan-out target and completes the group once capacity frees", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
@@ -1418,86 +1418,241 @@ describe("RoutineFiringDispatcher", () => {
       sourcePath: path.join(root, "refactor-audit.md")
     };
 
+    const dispatchInput = {
+      activeRuns: new ActiveRunRegistry(),
+      agentProviders: { codex: provider },
+      configDir: root,
+      createFanoutId: () => "fanout-cap",
+      globalConcurrency: { maxInFlight: 1 },
+      notification,
+      prepareRoutineWorkspace: ({ project }: { project: { name: string } }) =>
+        Promise.resolve({
+          branchName: "",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", `${project.name}.git`),
+          reused: false,
+          workspacePath: path.join(root, "workspaces", project.name)
+        }),
+      projects: new Map([
+        [
+          "alpha",
+          {
+            ...runStoreProjectFixture(),
+            name: "alpha",
+            routines: [{ ...declaration, projectName: "alpha" }]
+          }
+        ],
+        [
+          "beta",
+          {
+            ...runStoreProjectFixture(),
+            name: "beta",
+            routines: [{ ...declaration, projectName: "beta" }]
+          }
+        ]
+      ]),
+      providersConfig: {
+        claude: { command: "claude fake" },
+        codex: { command: "codex fake" }
+      },
+      runStore,
+      stateRoot
+    };
+
     try {
       const result = await dispatchDueRoutinesAndDrain({
-        activeRuns: new ActiveRunRegistry(),
-        agentProviders: { codex: provider },
-        configDir: root,
-        createFanoutId: () => "fanout-cap",
+        ...dispatchInput,
         createFiringId: () => "fire-alpha",
-        globalConcurrency: { maxInFlight: 1 },
-        notification,
-        now: new Date("2026-05-22T10:00:01.000Z"),
-        prepareRoutineWorkspace: ({ project }) =>
-          Promise.resolve({
-            branchName: "",
-            branchRef: "refs/remotes/origin/main",
-            cachePath: path.join(root, ".cache", `${project.name}.git`),
-            reused: false,
-            workspacePath: path.join(root, "workspaces", project.name)
-          }),
-        projects: new Map([
-          [
-            "alpha",
-            {
-              ...runStoreProjectFixture(),
-              name: "alpha",
-              routines: [{ ...declaration, projectName: "alpha" }]
-            }
-          ],
-          [
-            "beta",
-            {
-              ...runStoreProjectFixture(),
-              name: "beta",
-              routines: [{ ...declaration, projectName: "beta" }]
-            }
-          ]
-        ]),
-        providersConfig: {
-          claude: { command: "claude fake" },
-          codex: { command: "codex fake" }
-        },
-        runStore,
-        stateRoot
+        now: new Date("2026-05-22T10:00:01.000Z")
       });
 
       expect(result.fired).toEqual(["fire-alpha"]);
-      expect(result.skipped).toContainEqual({
+      expect(result.deferred).toContainEqual({
         projectName: "beta",
         reason: "concurrency_cap",
         routineName: "refactor-audit"
       });
-      const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
-      );
-      expect(fanoutMessages).toHaveLength(1);
+      expect(result.skipped).toEqual([]);
+      // The group is not finished while a leg is still waiting for a slot,
+      // so no summary has been sent yet (ADR 0093).
+      expect(
+        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+      ).toHaveLength(0);
       expect(
         runStore.getRoutineFanout("fanout-cap")?.targets.map((target) => ({
+          deferredReason: target.deferredReason,
           disposition: target.disposition,
           projectName: target.projectName,
           skipReason: target.skipReason
         }))
       ).toEqual([
         {
+          deferredReason: null,
           disposition: "firing",
           projectName: "alpha",
           skipReason: null
         },
         {
-          disposition: "skipped",
+          deferredReason: "concurrency_cap",
+          disposition: "pending",
           projectName: "beta",
-          skipReason: "concurrency_cap"
+          skipReason: null
         }
       ]);
-      expect(fanoutMessages[0]?.text).toContain(
-        "- beta: skipped (concurrency_cap)"
-      );
       expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
-        lastSkipReason: "concurrency_cap",
+        deferral: { attempts: 1, reason: "concurrency_cap" },
+        lastSkipReason: null,
+        state: "active"
+      });
+
+      const retry = await dispatchDueRoutinesAndDrain({
+        ...dispatchInput,
+        createFiringId: () => "fire-beta",
+        now: new Date("2026-05-22T10:00:31.000Z")
+      });
+
+      expect(retry.fired).toEqual(["fire-beta"]);
+      expect(retry.deferred).toEqual([]);
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(fanoutMessages[0]?.subject).toContain("0 failed");
+      expect(
+        runStore.getRoutineFanout("fanout-cap")?.targets.map((target) => ({
+          disposition: target.disposition,
+          projectName: target.projectName
+        }))
+      ).toEqual([
+        { disposition: "firing", projectName: "alpha" },
+        { disposition: "firing", projectName: "beta" }
+      ]);
+      expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
+        deferral: null,
         state: "expired"
       });
     } finally {
+      runStore.close();
+    }
+  });
+
+  it("records a capped fan-out target as a failed run once its clock event lapses", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const notification = {
+      createSink: () => ({
+        deliver(message: NotificationMessage) {
+          delivered.push(message);
+          return Promise.resolve();
+        }
+      }),
+      resolveConfig: () => ({
+        from: "symphonika@example.com",
+        on: "always" as const,
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls" as const,
+        to: "operator@example.com"
+      })
+    };
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      const deferredResult = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        createFanoutId: () => "fanout-missed",
+        notification
+      });
+
+      expect(deferredResult.deferred).toHaveLength(1);
+      expect(delivered).toHaveLength(0);
+
+      // The next clock event supersedes the parked one, so the wait ends as
+      // a run that never happened rather than as a silent skip.
+      const missedResult = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        createFanoutId: () => "fanout-missed",
+        notification,
+        now: new Date("2026-05-22T10:01:00.000Z")
+      });
+
+      expect(missedResult.fired).toEqual([]);
+      expect(missedResult.missed).toEqual([
+        {
+          projectName: "alpha",
+          reason: "concurrency_cap",
+          routineName: "minute-report"
+        }
+      ]);
+      expect(runStore.listRoutineFirings()).toEqual([]);
+      const fanout = runStore.getRoutineFanout("fanout-missed");
+      expect(fanout?.failureCount).toBe(1);
+      expect(fanout?.targets[0]).toMatchObject({
+        deferredAttempts: 1,
+        disposition: "missed",
+        skipReason: "concurrency_cap"
+      });
+      const message = delivered.find((entry) =>
+        entry.subject.startsWith("[ptt]")
+      );
+      expect(message?.subject).toContain("1 failed");
+      expect(message?.text).toContain(
+        "- alpha: did not run (concurrency_cap) after 1 admission attempt"
+      );
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-22T10:01:00.000Z") })[0]
+      ).toMatchObject({
+        deferral: null,
+        lastSkipReason: "concurrency_cap",
+        // The event that ended the wait had no admission attempt of its own,
+        // so the clock lands on it rather than jumping past it — one lost
+        // run must not silently cost two (ADR 0093).
+        nextFireAt: "2026-05-22T10:01:00.000Z",
+        skipCounts24h: { concurrency_cap: 1 }
+      });
+
+      activeRuns.unregister("issue-run");
+      const successor = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        notification,
+        now: new Date("2026-05-22T10:01:30.000Z")
+      });
+
+      expect(successor.fired).toEqual(["new-fire"]);
+    } finally {
+      activeRuns.unregister("issue-run");
       runStore.close();
     }
   });
@@ -6210,7 +6365,9 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(result).toEqual({
+        deferred: [],
         fired: [],
+        missed: [],
         skipped: [
           {
             projectName: "alpha",
@@ -6297,7 +6454,12 @@ describe("RoutineFiringDispatcher", () => {
         recomputeSchedulesFromNow: true
       });
 
-      expect(result).toEqual({ fired: [], skipped: [] });
+      expect(result).toEqual({
+        deferred: [],
+        fired: [],
+        missed: [],
+        skipped: []
+      });
       expect(provider.runAttempt).not.toHaveBeenCalled();
       expect(delivered).toEqual([]);
       expect(
@@ -6445,7 +6607,9 @@ describe("RoutineFiringDispatcher", () => {
         });
 
         expect(result).toEqual({
+          deferred: [],
           fired: [],
+          missed: [],
           skipped: [
             {
               projectName: "alpha",
@@ -6586,7 +6750,9 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(held).toEqual({
+        deferred: [],
         fired: [],
+        missed: [],
         skipped: [
           {
             projectName: "alpha",
@@ -6622,7 +6788,12 @@ describe("RoutineFiringDispatcher", () => {
         now: new Date("2026-05-22T10:00:30.000Z")
       });
 
-      expect(resumed).toEqual({ fired: ["new-fire"], skipped: [] });
+      expect(resumed).toEqual({
+        deferred: [],
+        fired: ["new-fire"],
+        missed: [],
+        skipped: []
+      });
       expect(runStore.getRoutineFiring("new-fire")).toMatchObject({
         scheduledAt: "2026-05-22T10:00:00.000Z",
         state: "succeeded"
@@ -6636,7 +6807,7 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
-  it("skips a recurring tick at the concurrency cap and advances its schedule", async () => {
+  it("defers a recurring tick at the concurrency cap and fires it once a slot frees", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
@@ -6668,7 +6839,8 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(result.fired).toEqual([]);
-      expect(result.skipped).toEqual([
+      expect(result.skipped).toEqual([]);
+      expect(result.deferred).toEqual([
         {
           projectName: "alpha",
           reason: "concurrency_cap",
@@ -6676,25 +6848,249 @@ describe("RoutineFiringDispatcher", () => {
         }
       ]);
       expect(runStore.listRoutineFirings()).toEqual([]);
+      // The clock event is parked, not consumed: the next tick re-evaluates
+      // the same event instead of waiting a whole period (ADR 0093).
       expect(runStore.listRoutines()[0]?.nextFireAt).toBe(
-        "2026-05-22T10:01:00.000Z"
+        "2026-05-22T10:00:00.000Z"
       );
       expect(
         runStore.listRoutines({ now: new Date("2026-05-22T10:00:00.000Z") })[0]
       ).toMatchObject({
+        deferral: {
+          attempts: 1,
+          reason: "concurrency_cap",
+          since: "2026-05-22T10:00:00.000Z"
+        },
         lastAttemptedAt: "2026-05-22T10:00:00.000Z",
-        lastSkipAt: "2026-05-22T10:00:00.000Z",
-        lastSkipReason: "concurrency_cap",
-        skipCounts24h: { concurrency_cap: 1 }
+        lastSkipAt: null,
+        lastSkipReason: null,
+        skipCounts24h: { concurrency_cap: 0 }
       });
       expect(logInfo).toHaveBeenCalledWith(
         {
+          deferred_until: "2026-05-22T10:01:00.000Z",
+          project: "alpha",
           reason: "concurrency_cap",
           routine: "minute-report",
           scheduled_at: "2026-05-22T10:00:00.000Z"
         },
-        "routine.skipped"
+        "routine.deferred"
       );
+
+      activeRuns.unregister("issue-run");
+      const retry = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        logger,
+        now: new Date("2026-05-22T10:00:30.000Z")
+      });
+
+      expect(retry.fired).toEqual(["new-fire"]);
+      expect(retry.deferred).toEqual([]);
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-22T10:00:30.000Z") })[0]
+      ).toMatchObject({
+        deferral: null,
+        skipCounts24h: { concurrency_cap: 0 }
+      });
+    } finally {
+      activeRuns.unregister("issue-run");
+      runStore.close();
+    }
+  });
+
+  it("reports a miss with no firing when the deadline is reached with capacity free", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      await dispatchDueRoutinesAndDrain(
+        recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        })
+      );
+
+      // The slot frees before the deadline, so this tick has capacity — the
+      // parked event is still past its own clock and settles as missed.
+      activeRuns.unregister("issue-run");
+      const atDeadline = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-22T10:01:00.000Z")
+      });
+
+      // This exact shape — a miss with nothing fired — is what daemon.ts
+      // keys on to end the tick instead of letting an issue Run claim the
+      // slot the now-due successor is owed (ADR 0093).
+      expect(atDeadline.fired).toEqual([]);
+      expect(atDeadline.missed).toHaveLength(1);
+      expect(runStore.listRoutines()[0]?.nextFireAt).toBe(
+        "2026-05-22T10:01:00.000Z"
+      );
+
+      const successor = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-22T10:01:30.000Z")
+      });
+
+      expect(successor.fired).toEqual(["new-fire"]);
+    } finally {
+      activeRuns.unregister("issue-run");
+      runStore.close();
+    }
+  });
+
+  it("keeps a parked clock event through a restart schedule recompute", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      const deferredResult = await dispatchDueRoutinesAndDrain(
+        recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        })
+      );
+
+      expect(deferredResult.deferred).toHaveLength(1);
+
+      // Restart catch-up settles events the daemon slept through. A parked
+      // deferral is not one of those: the daemon is still retrying it, so
+      // recomputing it away would drop the run silently (ADR 0093).
+      activeRuns.unregister("issue-run");
+      const afterRestart = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-22T10:00:30.000Z"),
+        recomputeSchedulesFromNow: true
+      });
+
+      expect(afterRestart.fired).toEqual(["new-fire"]);
+      expect(afterRestart.skipped).toEqual([]);
+    } finally {
+      activeRuns.unregister("issue-run");
+      runStore.close();
+    }
+  });
+
+  it("records a one-shot Routine as missed once its deferral horizon passes", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = {
+      kind: "report" as const,
+      name: "one-shot",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: path.join(root, "one-shot.md")
+    };
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      const deferredResult = await dispatchDueRoutinesAndDrain(
+        recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        })
+      );
+
+      expect(deferredResult.deferred).toHaveLength(1);
+      expect(runStore.listRoutines()[0]).toMatchObject({ state: "active" });
+
+      const missedResult = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-23T10:00:00.000Z")
+      });
+
+      expect(missedResult.fired).toEqual([]);
+      expect(missedResult.missed).toEqual([
+        {
+          projectName: "alpha",
+          reason: "concurrency_cap",
+          routineName: "one-shot"
+        }
+      ]);
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-23T10:00:00.000Z") })[0]
+      ).toMatchObject({
+        deferral: null,
+        lastSkipReason: "concurrency_cap",
+        state: "expired"
+      });
     } finally {
       activeRuns.unregister("issue-run");
       runStore.close();
@@ -6965,7 +7361,9 @@ describe("RoutineFiringDispatcher", () => {
         });
 
         expect(result).toEqual({
+          deferred: [],
           fired: [],
+          missed: [],
           skipped: [
             {
               projectName: "alpha",

@@ -263,11 +263,27 @@ terminal reason `firing_timeout` after that work settles.
 _Avoid_: Watchdog timeout, no-progress grace
 
 **Routine Skip**:
-An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
-an overlapping non-terminal firing, a concurrency cap, or **Host Pressure**. It updates the Routine's latest skip
-evidence and rolling counters but creates no `routine_firings` row. A refused manual firing is not a
-Routine Skip because no clock event was attempted.
-_Avoid_: Routine Firing when no provider execution was launched
+An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window
+or an overlapping non-terminal firing. It updates the Routine's latest skip evidence and rolling
+counters but creates no `routine_firings` row. A refused manual firing is not a Routine Skip because
+no clock event was attempted.
+_Avoid_: Routine Firing when no provider execution was launched, capacity refusals
+
+**Routine Deferral**:
+A due Routine Target parked because the host has no capacity for it — a full per-Project or global
+cap, or **Host Pressure**. The clock event is not consumed: the target keeps its due schedule
+position, its Routine Fan-out leg stays pending recording the reason, since-when, and attempt count,
+and the Orchestrator retries admission on later daemon ticks. No skip evidence or counter moves.
+_Avoid_: Routine Skip, schedule advance
+
+**Missed Routine**:
+A **Routine Deferral** that reached the bound of its own clock event — the next due event for a
+recurring Target, a fixed horizon for a one-shot — without ever being admitted. It consumes the
+clock event like a skip, increments that reason's rolling counter once, and settles its Routine
+Fan-out leg as a failure: the Routine did not run. It shares the skip counters and the
+`last_skip_reason` / `last_skip_at` evidence because the reasons are shared; only the path to them
+differs. A Target that loses its Project or declaration mid-deferral is a Missed Routine too.
+_Avoid_: Routine Skip, Routine Firing
 
 **Routine Dispatch Hold**:
 A due Routine Target that cannot be admitted because its selected Agent Provider adapter or command
@@ -477,8 +493,10 @@ _Avoid_: chat session
 - A **Routine** targets one or more explicitly named **Projects** and materializes one **Routine
   Target** for each
 - A matched clock event creates one **Routine Fan-out** across the currently due Routine Targets
-- Each **Routine Target** is summarized by one **Routine Firing**, one **Routine Skip**, or one
-  non-gating **Routine Dispatch Hold**
+- Each **Routine Target** is summarized by one **Routine Firing**, one **Routine Skip**, one
+  **Missed Routine**, or one non-gating **Routine Dispatch Hold**
+- A **Routine Deferral** keeps a **Routine Target**'s clock event due and its **Routine Fan-out**
+  leg pending until the target is admitted or the event lapses into a **Missed Routine**
 - A **Routine Dispatch Hold** preserves a **Routine Target**'s original due clock event as claimable
   while making its held **Routine Fan-out** leg non-gating and visible as a summary failure
 - A **Routine Fan-out** produces one grouped notification after all target legs are terminal or held

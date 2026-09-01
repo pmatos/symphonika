@@ -1140,6 +1140,19 @@ export async function startDaemon(
           );
           return;
         }
+        // Recording a miss hands the clock to a successor event that is due
+        // right now and has had no admission attempt (ADR 0093). Falling
+        // through to issue dispatch here would let an issue Run claim the
+        // very slot that successor is owed, so this tick ends instead. PR
+        // review follow-up above still outranks the successor; #648 tracks
+        // whether it should.
+        if (routineResult.missed.length > 0) {
+          logger.info(
+            { missed: routineResult.missed.length },
+            "symphonika routine miss recorded; deferring issue dispatch"
+          );
+          return;
+        }
         const snapshot = runtimeConfig.getSnapshot();
         const dispatchableProjectNames = new Set(
           partitionProjectsForPolling(
@@ -1372,7 +1385,7 @@ export async function startDaemon(
       // an accepted firing uses the current prompt and provider declaration.
       await reloadConfigAndRecordOutcome();
       const projects = runtimeConfig.projectsByName();
-      synchronizeRoutineTargets({ projects, runStore });
+      synchronizeRoutineTargets({ logger, projects, runStore });
       // Re-sample for the same reason the snapshot is reloaded above: a
       // manual fire is its own admission boundary and must not ride the tick
       // cadence. `current()` applies no TTL, so between ticks it can hand

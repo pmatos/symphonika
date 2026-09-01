@@ -25,6 +25,8 @@ import type {
 import { nextRecurringFireAt } from "./routines/schedule.js";
 import type {
   RoutineCatchUpPolicy,
+  RoutineDeferralReason,
+  RoutineDeferralStatus,
   RoutineDisabledReason,
   RoutineFiringState,
   RoutineFiringTriggerSource,
@@ -259,8 +261,24 @@ export type RoutineFanoutHoldReason =
   | `provider_command_missing: ${AgentProviderName}`
   | `provider_not_registered: ${AgentProviderName}`;
 
+// One fan-out leg settled by the unavailable-target sweep. A leg that was
+// waiting for capacity carries its deferral, which is what makes it a Missed
+// Routine the caller must emit `routine.missed` for; a leg without one was an
+// ordinary `target_unavailable` skip (ADR 0093).
+export type SettledUnavailableRoutineTarget = {
+  deferral?: RoutineDeferralStatus;
+  projectName: string;
+  routineName: string;
+  scheduledAt: string;
+};
+
 export type RoutineFanoutTargetStatus = {
-  disposition: "pending" | "held" | "firing" | "skipped";
+  // `missed` is a capacity deferral that outlived its clock event: unlike a
+  // `skipped` policy drop it counts as a failed run (ADR 0093).
+  disposition: "pending" | "held" | "firing" | "skipped" | "missed";
+  deferredAttempts: number;
+  deferredReason: RoutineDeferralReason | null;
+  deferredSince: string | null;
   firing: RoutineFiringStatus | null;
   firingId: string | null;
   holdReason: RoutineFanoutHoldReason | null;
@@ -968,6 +986,9 @@ type RoutineFanoutRow = {
 };
 
 type RoutineFanoutTargetRow = {
+  deferred_attempts: number;
+  deferred_reason: RoutineDeferralReason | null;
+  deferred_since: string | null;
   disposition: RoutineFanoutTargetStatus["disposition"];
   fanout_id: string;
   firing_id: string | null;
@@ -975,6 +996,17 @@ type RoutineFanoutTargetRow = {
   project_name: string;
   skip_reason: RoutineSkipReason | "target_unavailable" | null;
 };
+
+// One definition of "this Routine Target's clock event is parked by a capacity
+// deferral" (ADR 0093), shared by the dispatch read and the restart-recompute
+// guard so the two can never drift apart. Callers supply their own correlation
+// of f.routine_name / f.scheduled_at / t.project_name.
+const DEFERRED_FANOUT_TARGET_SOURCE = [
+  "from routine_fanout_targets t",
+  "join routine_fanouts f on f.id = t.fanout_id"
+].join(" ");
+const DEFERRED_FANOUT_TARGET_PREDICATE =
+  "t.disposition = 'pending' and t.deferred_reason is not null";
 
 const PULL_REQUEST_DISCOVERY_LIMIT = 25;
 const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
@@ -2275,7 +2307,17 @@ export class RunStore {
         "schedule_cron = excluded.schedule_cron,",
         "schedule_tz = excluded.schedule_tz,",
         "next_fire_at = case",
-        "when @recompute_recurring = 1 and excluded.schedule_cron is not null and excluded.catch_up = 'skip' then excluded.next_fire_at",
+        // Restart catch-up moves a recurring clock forward past events the
+        // daemon slept through — but never past one it parked on purpose and
+        // is still retrying, which would drop that run with no evidence
+        // anywhere (ADR 0093). The dispatcher decides whether a parked event
+        // still fires or is recorded as missed.
+        "when @recompute_recurring = 1 and excluded.schedule_cron is not null and excluded.catch_up = 'skip' and not exists (",
+        `select 1 ${DEFERRED_FANOUT_TARGET_SOURCE}`,
+        "where f.routine_name = routines.name and f.scheduled_at = routines.next_fire_at",
+        "and t.project_name = routines.project_name and",
+        DEFERRED_FANOUT_TARGET_PREDICATE,
+        ") then excluded.next_fire_at",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then excluded.next_fire_at",
         // Un-disabling (front matter disabled: true removed, or the routine's
         // path restored after removal) always recomputes from the current
@@ -2617,13 +2659,17 @@ export class RunStore {
     const targets = this.database
       .prepare(
         [
-          "select fanout_id, project_name, disposition, firing_id, hold_reason, skip_reason",
+          "select fanout_id, project_name, disposition, firing_id, hold_reason, skip_reason,",
+          "deferred_reason, deferred_since, deferred_attempts",
           "from routine_fanout_targets where fanout_id = ?",
           "order by project_name asc"
         ].join(" ")
       )
       .all(id) as RoutineFanoutTargetRow[];
     const mappedTargets = targets.map((target) => ({
+      deferredAttempts: target.deferred_attempts,
+      deferredReason: target.deferred_reason,
+      deferredSince: target.deferred_since,
       disposition: target.disposition,
       firing:
         target.firing_id === null
@@ -2641,6 +2687,11 @@ export class RunStore {
     const failureCount = mappedTargets.filter(
       (target) =>
         target.disposition === "held" ||
+        // A capacity deferral that never found a slot before its clock
+        // event lapsed is a Routine that did not run, not a policy drop:
+        // it belongs in the failure count operators are alerted on
+        // (ADR 0093).
+        target.disposition === "missed" ||
         target.firing?.state === "failed" ||
         target.firing?.state === "cancelled"
     ).length;
@@ -2802,32 +2853,138 @@ export class RunStore {
     return result.changes > 0;
   }
 
-  settleUnavailableRoutineFanoutTargets(): number {
+  settleUnavailableRoutineFanoutTargets(): SettledUnavailableRoutineTarget[] {
     // Terminal or in-flight notifications already represent immutable
     // one-shot snapshots; only a still-pending group may be reconciled.
-    const result = this.database
-      .prepare(
+    //
+    // A leg carrying a capacity deferral is settled as `missed` rather than
+    // as an uncounted `target_unavailable` skip: the Routine was waiting for
+    // a slot and then lost its target, which is still a run that did not
+    // happen and must reach the fan-out failure count (ADR 0093). Such a leg
+    // also carries a *counted* reason, so it writes the same latest-skip and
+    // counter evidence the canonical miss path writes — otherwise the
+    // operator counters would contradict the fan-out they summarize. The
+    // clock is deliberately left alone: this sweep only ever matches a
+    // Target whose Routine is already inactive or whose clock has already
+    // moved on (a cron edit installs the replacement itself).
+    const settle = this.database.transaction(() => {
+      const now = timestamp();
+      const legs = this.database
+        .prepare(
+          [
+            "select t.fanout_id, t.project_name, t.deferred_reason,",
+            "t.deferred_since, t.deferred_attempts,",
+            "f.routine_name, f.scheduled_at",
+            "from routine_fanout_targets t",
+            "join routine_fanouts f on f.id = t.fanout_id",
+            "where t.disposition in ('pending', 'held')",
+            // A delivered summary is an immutable one-shot snapshot (ADR
+            // 0084), which is why an ordinary non-gating leg on a `sent`
+            // fan-out is left alone. A leg carrying capacity-deferral
+            // evidence is different: it is a Routine still waiting to run,
+            // and leaving it unreconciled once its target disappears strands
+            // a live deferral that no path can ever settle. Settling the leg
+            // touches no notification state, and `listReadyRoutineFanouts`
+            // still requires `pending`, so no summary is re-opened or re-sent.
+            "and (f.notification_state = 'pending'",
+            "or (t.deferred_reason is not null and f.notification_state in ('sent', 'skipped')))",
+            "and not exists (",
+            "select 1 from routines r",
+            "where r.name = f.routine_name",
+            "and r.project_name = t.project_name",
+            "and r.state = 'active'",
+            "and r.next_fire_at = f.scheduled_at",
+            ")"
+          ].join(" ")
+        )
+        .all() as Array<{
+        deferred_attempts: number;
+        deferred_reason: RoutineDeferralReason | null;
+        deferred_since: string | null;
+        fanout_id: string;
+        project_name: string;
+        routine_name: string;
+        scheduled_at: string;
+      }>;
+      const settleLeg = this.database.prepare(
         [
-          "update routine_fanout_targets",
-          "set disposition = 'skipped', hold_reason = null, skip_reason = 'target_unavailable', updated_at = ?",
-          "where disposition in ('pending', 'held')",
-          "and exists (",
-          "select 1 from routine_fanouts writable_fanout",
-          "where writable_fanout.id = routine_fanout_targets.fanout_id",
-          "and writable_fanout.notification_state = 'pending'",
-          ")",
-          "and not exists (",
-          "select 1 from routine_fanouts f",
-          "join routines r on r.name = f.routine_name",
-          "and r.project_name = routine_fanout_targets.project_name",
-          "where f.id = routine_fanout_targets.fanout_id",
-          "and r.state = 'active'",
-          "and r.next_fire_at = f.scheduled_at",
-          ")"
+          "update routine_fanout_targets set",
+          "disposition = @disposition, hold_reason = null,",
+          "skip_reason = @skip_reason, updated_at = @updated_at",
+          "where fanout_id = @fanout_id and project_name = @project_name",
+          "and disposition in ('pending', 'held')"
         ].join(" ")
-      )
-      .run(timestamp());
-    return result.changes;
+      );
+      const recordSkipEvidence = this.database.prepare(
+        [
+          "update routines set",
+          "last_attempted_at = @attempted_at,",
+          "last_skip_reason = @reason,",
+          "last_skip_at = @attempted_at,",
+          "updated_at = @updated_at",
+          "where project_name = @project_name and name = @name"
+        ].join(" ")
+      );
+      const countSkip = this.database.prepare(
+        [
+          "insert into routine_skip_counts (project_name, routine_name, reason, skipped_at, count)",
+          "select @project_name, @routine_name, @reason, @skipped_at, 1",
+          "where exists (",
+          "select 1 from routines where project_name = @project_name and name = @routine_name",
+          ")",
+          "on conflict(project_name, routine_name, reason, skipped_at)",
+          "do update set count = count + 1"
+        ].join(" ")
+      );
+      const settled: SettledUnavailableRoutineTarget[] = [];
+      for (const leg of legs) {
+        const changes = settleLeg.run({
+          disposition: leg.deferred_reason === null ? "skipped" : "missed",
+          fanout_id: leg.fanout_id,
+          project_name: leg.project_name,
+          skip_reason: leg.deferred_reason ?? "target_unavailable",
+          updated_at: now
+        }).changes;
+        if (changes === 0) {
+          continue;
+        }
+        settled.push({
+          ...(leg.deferred_reason === null
+            ? {}
+            : {
+                deferral: {
+                  attempts: leg.deferred_attempts,
+                  reason: leg.deferred_reason,
+                  since: leg.deferred_since ?? leg.scheduled_at
+                }
+              }),
+          projectName: leg.project_name,
+          routineName: leg.routine_name,
+          scheduledAt: leg.scheduled_at
+        });
+        if (leg.deferred_reason === null) {
+          continue;
+        }
+        // A Routine removed outright leaves no row to attribute evidence to;
+        // the fan-out leg is then the only record, which is why the counter
+        // insert is guarded on the row still existing.
+        recordSkipEvidence.run({
+          attempted_at: now,
+          name: leg.routine_name,
+          project_name: leg.project_name,
+          reason: leg.deferred_reason,
+          updated_at: now
+        });
+        countSkip.run({
+          project_name: leg.project_name,
+          reason: leg.deferred_reason,
+          routine_name: leg.routine_name,
+          skipped_at: now
+        });
+      }
+      return settled;
+    });
+    return settle();
   }
 
   markRoutinesInactiveForProject(
@@ -3035,6 +3192,7 @@ export class RunStore {
     const countsNow = filter.now ?? new Date();
     return rows.map((row) => ({
       ...mapRoutineRow(row),
+      deferral: this.routineDeferral(row),
       latestOutcome: this.latestRoutineOutcome(row.project_name, row.name),
       pullRequestNumbers: this.latestRoutinePullRequestNumbers(
         row.project_name,
@@ -3046,6 +3204,19 @@ export class RunStore {
         countsNow
       )
     }));
+  }
+
+  private routineDeferral(row: RoutineRow): RoutineDeferralStatus | null {
+    if (row.next_fire_at === null) {
+      return null;
+    }
+    return (
+      this.getRoutineTargetDeferral({
+        name: row.name,
+        projectName: row.project_name,
+        scheduledAt: row.next_fire_at
+      }) ?? null
+    );
   }
 
   private routineSkipCounts24h(
@@ -3096,6 +3267,7 @@ export class RunStore {
     }
     return {
       ...mapRoutineRow(row),
+      deferral: this.routineDeferral(row),
       latestOutcome: this.latestRoutineOutcome(row.project_name, row.name),
       pullRequestNumbers: this.latestRoutinePullRequestNumbers(
         row.project_name,
@@ -3160,8 +3332,126 @@ export class RunStore {
     }
   }
 
+  // A capacity refusal parks the due clock event instead of consuming it:
+  // the Routine Target keeps `next_fire_at` in the past so the next daemon
+  // tick retries admission, and the fan-out leg stays `pending` carrying the
+  // reason it is waiting. Repeated ticks refresh the reason and the attempt
+  // counter without touching the clock or skip evidence, so a deferral that
+  // eventually fires leaves no skip behind (ADR 0093).
+  deferRoutineFanoutTarget(input: {
+    deferredAt: string;
+    fanoutId: string;
+    name: string;
+    projectName: string;
+    reason: RoutineDeferralReason;
+  }): boolean {
+    const apply = this.database.transaction(() => {
+      const target = this.database
+        .prepare(
+          [
+            "update routine_fanout_targets set",
+            // A leg held for an unavailable provider whose provider is then
+            // repaired is capacity-blocked, not provider-blocked: it returns
+            // to `pending` and drops the stale hold reason, so the deferral
+            // is visible to the dispatch read and to the restart-recompute
+            // guard that keeps its clock event parked (ADR 0093).
+            "disposition = 'pending',",
+            "hold_reason = null,",
+            "deferred_reason = @reason,",
+            "deferred_since = coalesce(deferred_since, @deferred_at),",
+            "deferred_attempts = deferred_attempts + 1,",
+            "updated_at = @updated_at",
+            "where fanout_id = @fanout_id and project_name = @project_name",
+            "and disposition in ('pending', 'held')"
+          ].join(" ")
+        )
+        .run({
+          deferred_at: input.deferredAt,
+          fanout_id: input.fanoutId,
+          project_name: input.projectName,
+          reason: input.reason,
+          updated_at: timestamp()
+        });
+      if (target.changes === 0) {
+        return false;
+      }
+      this.database
+        .prepare(
+          [
+            "update routines set last_attempted_at = ?, updated_at = ?",
+            "where project_name = ? and name = ? and state = 'active'"
+          ].join(" ")
+        )
+        .run(input.deferredAt, timestamp(), input.projectName, input.name);
+      return true;
+    });
+    return this.runIfClaimable(apply) ?? false;
+  }
+
+  // The capacity deferral parking a Routine Target's due clock event, if it
+  // has one. Dispatch consults this to decide whether a parked event is
+  // still retryable or has outlived its own clock, and restart catch-up
+  // consults it so it settles genuinely missed events without discarding one
+  // the daemon is still actively retrying.
+  getRoutineTargetDeferral(input: {
+    name: string;
+    projectName: string;
+    scheduledAt: string;
+  }): RoutineDeferralStatus | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select t.deferred_reason, t.deferred_since, t.deferred_attempts",
+          DEFERRED_FANOUT_TARGET_SOURCE,
+          "where f.routine_name = ? and f.scheduled_at = ?",
+          "and t.project_name = ? and",
+          DEFERRED_FANOUT_TARGET_PREDICATE
+        ].join(" ")
+      )
+      .get(input.name, input.scheduledAt, input.projectName) as
+      | {
+          deferred_attempts: number;
+          deferred_reason: RoutineDeferralReason;
+          deferred_since: string;
+        }
+      | undefined;
+    return row === undefined
+      ? undefined
+      : {
+          attempts: row.deferred_attempts,
+          reason: row.deferred_reason,
+          since: row.deferred_since
+        };
+  }
+
+  // The terminal half of a deferral: the parked clock event lapsed before
+  // any slot freed, so it is consumed exactly like a skip while the fan-out
+  // leg records that the Routine did not run (ADR 0093).
+  missRoutineFiring(input: {
+    attemptedAt: string;
+    fanoutId: string;
+    name: string;
+    nextFireAt?: string;
+    projectName: string;
+    reason: RoutineDeferralReason;
+  }): boolean {
+    return this.settleDueRoutineEvent({ ...input, disposition: "missed" });
+  }
+
   skipRoutineFiring(input: {
     attemptedAt: string;
+    fanoutId?: string;
+    name: string;
+    nextFireAt?: string;
+    projectName: string;
+    reason: RoutineSkipReason;
+  }): boolean {
+    return this.settleDueRoutineEvent({ ...input, disposition: "skipped" });
+  }
+
+  private settleDueRoutineEvent(input: {
+    attemptedAt: string;
+    disposition: "missed" | "skipped";
     fanoutId?: string;
     name: string;
     nextFireAt?: string;
@@ -3203,11 +3493,17 @@ export class RunStore {
           .prepare(
             [
               "update routine_fanout_targets set",
-              "disposition = 'skipped', hold_reason = null, skip_reason = ?, updated_at = ?",
-              "where fanout_id = ? and project_name = ? and disposition in ('pending', 'held')"
+              "disposition = @disposition, hold_reason = null, skip_reason = @reason, updated_at = @updated_at",
+              "where fanout_id = @fanout_id and project_name = @project_name and disposition in ('pending', 'held')"
             ].join(" ")
           )
-          .run(input.reason, timestamp(), input.fanoutId, input.projectName);
+          .run({
+            disposition: input.disposition,
+            fanout_id: input.fanoutId,
+            project_name: input.projectName,
+            reason: input.reason,
+            updated_at: timestamp()
+          });
         if (target.changes === 0) {
           // The Routine Target clock update above already won inside this
           // transaction. Ordinary competing claims therefore return false
@@ -5532,6 +5828,9 @@ export class RunStore {
         firing_id text,
         hold_reason text,
         skip_reason text,
+        deferred_reason text,
+        deferred_since text,
+        deferred_attempts integer not null default 0,
         created_at text not null,
         updated_at text not null,
         primary key (fanout_id, project_name),
@@ -5621,6 +5920,13 @@ export class RunStore {
       ["routine_firings", "workspace_pruned_at", "text"],
       ["routine_firings", "fanout_id", "text"],
       ["routine_fanout_targets", "hold_reason", "text"],
+      ["routine_fanout_targets", "deferred_reason", "text"],
+      ["routine_fanout_targets", "deferred_since", "text"],
+      [
+        "routine_fanout_targets",
+        "deferred_attempts",
+        "integer not null default 0"
+      ],
       ["project_issue_snapshots", "labels", "text"],
       ["project_issue_snapshots", "blocked_by", "text"],
       [
@@ -6438,6 +6744,7 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
   return {
     allowOverlap: row.allow_overlap === 1,
     catchUp: row.catch_up,
+    deferral: null,
     disabledReason: row.disabled_reason ?? null,
     ...(row.effort === null ? {} : { effort: row.effort }),
     kind: row.kind,

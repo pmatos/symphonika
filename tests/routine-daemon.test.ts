@@ -21,6 +21,7 @@ import type {
 const tempRoots: string[] = [];
 
 type RoutineApiRow = {
+  deferral?: { attempts: number; reason: string; since: string } | null;
   lastFiredAt: string | null;
   lastSkipReason?: string | null;
   name: string;
@@ -1185,6 +1186,224 @@ describe("daemon routine firing", () => {
     }
   });
 
+  it("admits a parked Routine deferral before PR review follow-up", async () => {
+    const root = await makeTempRoot();
+    const scheduledAt = new Date(Date.now() - 1_000).toISOString();
+    await writeRoutineProject(root, scheduledAt, 60_000);
+    await writeProjectConfig(
+      root,
+      "alpha",
+      ["./daily-report.md"],
+      false,
+      60_000,
+      [
+        "global:",
+        "  max_in_flight: 1",
+        "  pressure:",
+        "    sample_interval_seconds: 0.001"
+      ]
+    );
+
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "review-workspace");
+    const seedStore = openRunStore({ stateRoot });
+    try {
+      seedStore.syncRoutines(
+        [
+          {
+            kind: "report",
+            name: "daily-report",
+            projectName: "alpha",
+            prompt: "Routine {{routine.name}} for {{project.name}}.",
+            provider: null,
+            schedule: { at: scheduledAt },
+            sourcePath: path.join(root, "daily-report.md")
+          }
+        ],
+        { now: new Date(Date.parse(scheduledAt) - 1_000) }
+      );
+      seedStore.ensureRoutineFanout({
+        id: "parked-fanout",
+        projectNames: ["alpha"],
+        routineName: "daily-report",
+        scheduledAt
+      });
+      expect(
+        seedStore.deferRoutineFanoutTarget({
+          deferredAt: scheduledAt,
+          fanoutId: "parked-fanout",
+          name: "daily-report",
+          projectName: "alpha",
+          reason: "concurrency_cap"
+        })
+      ).toBe(true);
+      seedTrackedPullRequest(seedStore, { root, workspacePath });
+    } finally {
+      seedStore.close();
+    }
+
+    let releaseProvider: (() => void) | undefined;
+    const providerCanFinish = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const providerInputs: ProviderRunInput[] = [];
+    const provider = {
+      cancel: vi.fn().mockImplementation(() => {
+        releaseProvider?.();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        providerInputs.push(input);
+        await providerCanFinish;
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(reviewIssueFixture()),
+      getPullRequestFollowupState: vi
+        .fn()
+        .mockResolvedValue(reviewFollowupFixture()),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    let hostStalled = true;
+    const wallNow = Date.now();
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(wallNow);
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRoutineFiringId: () => "parked-firing",
+      createRunId: () => "review-followup-run",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      readHostPressure: () =>
+        Promise.resolve({
+          fullAvg60: { memory: hostStalled ? 90 : 0 },
+          unavailable: {}
+        }),
+      prepareIssueWorkspace: vi.fn().mockResolvedValue({
+        branchName: "sym/alpha/54-review-followup",
+        branchRef: "refs/heads/sym/alpha/54-review-followup",
+        cachePath: path.join(root, ".cache", "repo.git"),
+        issueDirectoryName: "54-review-followup",
+        reused: true,
+        workspacePath
+      }),
+      prepareRoutineWorkspace: vi.fn().mockResolvedValue({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        cachePath: path.join(root, ".cache", "repo.git"),
+        reused: false,
+        workspacePath: path.join(root, "routine-workspace")
+      })
+    });
+
+    try {
+      await waitForRoutineDeferral(daemon.url, "daily-report");
+      hostStalled = false;
+      dateNow.mockReturnValue(wallNow + 1_001);
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+      await waitForProviderInputs(providerInputs, 1);
+
+      expect(providerInputs[0]?.prompt).toContain(
+        "Routine daily-report for alpha."
+      );
+      expect(
+        githubIssuesApi.getPullRequestFollowupState
+      ).not.toHaveBeenCalled();
+    } finally {
+      releaseProvider?.();
+      await daemon.stop();
+      dateNow.mockRestore();
+    }
+  });
+
+  it("continues Routine dispatch after a merge-only PR follow-up action", async () => {
+    const root = await makeTempRoot();
+    const scheduledAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    await writeRoutineProject(root, scheduledAt, 60_000);
+
+    const workspacePath = path.join(root, "review-workspace");
+    const seedStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    try {
+      seedTrackedPullRequest(seedStore, { root, workspacePath });
+    } finally {
+      seedStore.close();
+    }
+
+    const providerInputs: ProviderRunInput[] = [];
+    const provider = quietProvider();
+    vi.mocked(provider.runAttempt).mockImplementation(async function* (input) {
+      await Promise.resolve();
+      providerInputs.push(input);
+      yield {
+        normalized: { exitCode: 0, type: "process_exit" },
+        raw: { code: 0, kind: "exit" }
+      };
+    });
+    const githubIssuesApi = {
+      getPullRequestFollowupState: vi
+        .fn()
+        .mockResolvedValue(mergeReadyFollowupFixture()),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      mergePullRequest: vi.fn().mockResolvedValue(undefined)
+    };
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRoutineFiringId: () => "post-merge-firing",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareRoutineWorkspace: vi.fn().mockResolvedValue({
+        branchName: "main",
+        branchRef: "refs/remotes/origin/main",
+        cachePath: path.join(root, ".cache", "repo.git"),
+        reused: false,
+        workspacePath: path.join(root, "routine-workspace")
+      })
+    });
+
+    try {
+      await waitForRoutine(daemon.url, "active");
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      await writeOneShotReportDeclaration(
+        root,
+        new Date(Date.now() - 100).toISOString()
+      );
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+      await vi.waitFor(() => {
+        expect(githubIssuesApi.mergePullRequest).toHaveBeenCalledTimes(1);
+      });
+      await waitForProviderInputs(providerInputs, 1);
+
+      expect(providerInputs[0]?.prompt).toContain(
+        "Routine daily-report for alpha."
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("re-samples host pressure on a manual fire instead of riding the tick cadence", async () => {
     // A manual fire is its own admission boundary. `current()` applies no
     // TTL, so between ticks it hands back whatever the last tick sampled --
@@ -1359,6 +1578,20 @@ async function writeRoutineProject(
 ): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+  await writeOneShotReportDeclaration(root, fireAt);
+  await writeProjectConfig(
+    root,
+    "alpha",
+    ["./daily-report.md"],
+    false,
+    pollingIntervalMs
+  );
+}
+
+async function writeOneShotReportDeclaration(
+  root: string,
+  fireAt: string
+): Promise<void> {
   await writeFile(
     path.join(root, "daily-report.md"),
     [
@@ -1371,13 +1604,6 @@ async function writeRoutineProject(
       "Routine {{routine.name}} for {{project.name}}.",
       ""
     ].join("\n")
-  );
-  await writeProjectConfig(
-    root,
-    "alpha",
-    ["./daily-report.md"],
-    false,
-    pollingIntervalMs
   );
 }
 
@@ -1477,8 +1703,7 @@ async function waitForProviderInputs(
   inputs: ProviderRunInput[],
   count: number
 ): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (Date.now() < deadline) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     if (inputs.length >= count) {
       return;
     }
@@ -1505,6 +1730,27 @@ async function waitForRoutineSkip(
   throw new Error(`routine ${name} recorded no skip`);
 }
 
+async function waitForRoutineDeferral(
+  baseUrl: string,
+  name: string
+): Promise<RoutineApiRow> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const body = (await fetch(`${baseUrl}/api/routines`).then((response) =>
+      response.json()
+    )) as { routines: RoutineApiRow[] };
+    const routine = body.routines.find((entry) => entry.name === name);
+    if (routine?.deferral != null) {
+      // Let launchWork finish the same pass while the injected wall clock
+      // still keeps PR follow-up throttled; otherwise this test could advance
+      // time between the Routine pre-pass and the PR admission that follows.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return routine;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`routine ${name} recorded no deferral`);
+}
+
 async function waitForRoutine(
   baseUrl: string,
   state: string
@@ -1529,6 +1775,105 @@ type RoutineFiringApiRow = {
   triggerSource: string;
   workspacePath: string;
 };
+
+function seedTrackedPullRequest(
+  store: ReturnType<typeof openRunStore>,
+  input: { root: string; workspacePath: string }
+): void {
+  store.createRun({
+    id: "parent-run",
+    issue: {
+      body: "Original issue body",
+      created_at: "2026-05-03T10:00:00Z",
+      id: 5054,
+      labels: ["sym:claimed"],
+      number: 54,
+      priority: 99,
+      state: "open",
+      title: "Re-dispatch on PR review feedback",
+      updated_at: "2026-05-04T10:00:00Z",
+      url: "https://github.com/pmatos/alpha/issues/54"
+    },
+    projectName: "alpha",
+    providerCommand: "codex fake",
+    providerName: "codex"
+  });
+  store.updateRunEvidence("parent-run", {
+    branchName: "sym/alpha/54-review-followup",
+    branchRef: "refs/heads/sym/alpha/54-review-followup",
+    issueSnapshotPath: path.join(input.root, "issue-snapshot.json"),
+    metadataPath: path.join(input.root, "prompt-metadata.json"),
+    normalizedLogPath: path.join(input.root, "provider.normalized.jsonl"),
+    promptPath: path.join(input.root, "prompt.md"),
+    rawLogPath: path.join(input.root, "provider.raw.jsonl"),
+    workflowGraphPath: path.join(input.root, "workflow-graph.json"),
+    workspacePath: input.workspacePath
+  });
+  store.updateRunState("parent-run", "succeeded");
+  store.trackPullRequest({
+    branchName: "sym/alpha/54-review-followup",
+    headSha: "abc123",
+    issueNumber: 54,
+    prNumber: 81,
+    prUrl: "https://github.com/pmatos/alpha/pull/81",
+    projectName: "alpha",
+    runId: "parent-run"
+  });
+}
+
+function reviewIssueFixture() {
+  return {
+    body: "Original issue body",
+    created_at: "2026-05-03T10:00:00Z",
+    html_url: "https://github.com/pmatos/alpha/issues/54",
+    id: 5054,
+    labels: [{ name: "sym:claimed" }],
+    number: 54,
+    state: "open",
+    title: "Re-dispatch on PR review feedback",
+    updated_at: "2026-05-04T10:00:00Z"
+  };
+}
+
+function reviewFollowupFixture() {
+  return {
+    draft: false,
+    headSha: "abc123",
+    mergeable: "MERGEABLE" as const,
+    merged: false,
+    number: 81,
+    reviewDecision: "CHANGES_REQUESTED" as const,
+    state: "OPEN" as const,
+    statusCheckRollupState: "SUCCESS" as const,
+    unresolvedReviewThreads: [
+      {
+        comments: [
+          {
+            author: "reviewer",
+            body: "Please address this review.",
+            createdAt: "2026-05-04T10:00:00Z",
+            line: 24,
+            path: "src/daemon.ts",
+            url: "https://github.com/pmatos/alpha/pull/81#discussion_r1"
+          }
+        ],
+        id: "PRRT_review",
+        isResolved: false,
+        line: 24,
+        path: "src/daemon.ts"
+      }
+    ],
+    url: "https://github.com/pmatos/alpha/pull/81"
+  };
+}
+
+function mergeReadyFollowupFixture() {
+  return {
+    ...reviewFollowupFixture(),
+    reviewDecision: "APPROVED" as const,
+    unresolvedReviewThreads: []
+  };
+}
 
 async function waitForFiringState(
   baseUrl: string,

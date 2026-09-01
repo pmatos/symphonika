@@ -396,6 +396,78 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("settles a re-deferred leg whose fan-out summary already went out", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const routine = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit.",
+      provider: "codex" as const,
+      schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+      sourcePath: "/tmp/refactor-audit.md"
+    };
+    try {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }]);
+      const scheduledAt =
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+          ?.nextFireAt ?? "";
+      store.ensureRoutineFanout({
+        id: "fanout-sent",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt
+      });
+      // A provider-held leg is non-gating (ADR 0084), so the group's summary
+      // is delivered while the leg is still outstanding.
+      store.holdRoutineFanoutTarget({
+        fanoutId: "fanout-sent",
+        projectName: "alpha",
+        reason: "provider_not_registered: omp"
+      });
+      store.claimRoutineFanoutNotification("fanout-sent");
+      store.completeRoutineFanoutNotification({
+        id: "fanout-sent",
+        state: "sent"
+      });
+      // The provider comes back, but the caps are still full.
+      store.deferRoutineFanoutTarget({
+        deferredAt: scheduledAt,
+        fanoutId: "fanout-sent",
+        name: "refactor-audit",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+      store.syncRoutines([], { projects: ["alpha"] });
+
+      // Without reconciliation this leg is a live deferral no path can ever
+      // settle: dispatch skips the inactive target and the sweep used to
+      // skip every leg on an already-notified fan-out.
+      expect(store.settleUnavailableRoutineFanoutTargets()).toEqual([
+        {
+          deferral: {
+            attempts: 1,
+            reason: "concurrency_cap",
+            since: scheduledAt
+          },
+          projectName: "alpha",
+          routineName: "refactor-audit",
+          scheduledAt
+        }
+      ]);
+      const fanout = store.getRoutineFanout("fanout-sent");
+      expect(fanout?.targets[0]).toMatchObject({
+        deferredReason: "concurrency_cap",
+        disposition: "missed"
+      });
+      // The delivered snapshot stays delivered — no summary is re-opened.
+      expect(fanout?.notificationState).toBe("sent");
+      expect(store.listReadyRoutineFanouts()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("counts a missed clock event as a failed run once and advances the schedule", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

@@ -2800,7 +2800,16 @@ export class RunStore {
             "from routine_fanout_targets t",
             "join routine_fanouts f on f.id = t.fanout_id",
             "where t.disposition in ('pending', 'held')",
-            "and f.notification_state = 'pending'",
+            // A delivered summary is an immutable one-shot snapshot (ADR
+            // 0084), which is why an ordinary non-gating leg on a `sent`
+            // fan-out is left alone. A leg carrying capacity-deferral
+            // evidence is different: it is a Routine still waiting to run,
+            // and leaving it unreconciled once its target disappears strands
+            // a live deferral that no path can ever settle. Settling the leg
+            // touches no notification state, and `listReadyRoutineFanouts`
+            // still requires `pending`, so no summary is re-opened or re-sent.
+            "and (f.notification_state = 'pending'",
+            "or (t.deferred_reason is not null and f.notification_state in ('sent', 'skipped')))",
             "and not exists (",
             "select 1 from routines r",
             "where r.name = f.routine_name",

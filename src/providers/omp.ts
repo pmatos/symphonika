@@ -61,8 +61,11 @@ type ProcessQueuePayload =
       raw: unknown;
     };
 
-// receivedAt is stamped in push(), same rationale and ADR 0090 reference as
-// the sibling queue's ProcessQueueItem in jsonl-process-queue.ts.
+// receivedAt is stamped in push(), same mechanism as the sibling queue's
+// ProcessQueueItem in jsonl-process-queue.ts (see ADR 0090) — except while
+// this queue's own backpressure gate is holding bytes back, when the stamp
+// reflects drain time rather than transport-arrival time. See the ADR's
+// Consequences section for that bounded caveat.
 type ProcessQueueItem = ProcessQueuePayload & { receivedAt: string };
 
 export type ProcessQueue = {
@@ -285,14 +288,7 @@ export function createOmpProvider(
             // not a successful turn. Cancellation and earlier terminal
             // failures are already classified.
             if (!activeRun.terminalEventSeen && !activeRun.cancelled) {
-              yield {
-                normalized: {
-                  message:
-                    "Oh My Pi provider exited before a terminal agent_end",
-                  type: "turn_failed"
-                },
-                raw: { kind: "missing_terminal_agent_end" }
-              };
+              yield missingTerminalAgentEndEvent(item.receivedAt);
             }
             yield event;
             return;
@@ -303,10 +299,10 @@ export function createOmpProvider(
           if (isTerminalAgentEnd(event.raw)) {
             await markTerminalAgentEnd(activeRun);
             if (terminalAgentEndBeforePrompt(item)) {
-              yield {
-                ...terminalAgentEndBeforePromptEvent(event.raw),
-                receivedAt: item.receivedAt
-              };
+              yield terminalAgentEndBeforePromptEvent(
+                event.raw,
+                item.receivedAt
+              );
               yield* drainUntilExit(queue, activeRun);
               return;
             }
@@ -567,13 +563,7 @@ async function* readUntilFrame(
       // protocol failure, not a successful attempt (same lifecycle class
       // as exiting mid-turn without a terminal agent_end).
       if (!activeRun.cancelled && !activeRun.terminalEventSeen) {
-        yield {
-          normalized: {
-            message: "Oh My Pi provider exited before a terminal agent_end",
-            type: "turn_failed"
-          },
-          raw: { kind: "missing_terminal_agent_end" }
-        };
+        yield missingTerminalAgentEndEvent(item.receivedAt);
       }
       yield event;
       return { stopped: true };
@@ -582,10 +572,7 @@ async function* readUntilFrame(
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
       await markTerminalAgentEnd(activeRun);
       if (terminalAgentEndBeforePrompt(item)) {
-        yield {
-          ...terminalAgentEndBeforePromptEvent(item.raw),
-          receivedAt: item.receivedAt
-        };
+        yield terminalAgentEndBeforePromptEvent(item.raw, item.receivedAt);
         yield* drainUntilExit(queue, activeRun);
         return { stopped: true };
       }
@@ -620,13 +607,7 @@ async function* readUntilResponse(
         : providerEventFromQueueItem(item, activeRun);
     if (event.normalized?.type === "process_exit") {
       if (!activeRun.cancelled && !activeRun.terminalEventSeen) {
-        yield {
-          normalized: {
-            message: "Oh My Pi provider exited before a terminal agent_end",
-            type: "turn_failed"
-          },
-          raw: { kind: "missing_terminal_agent_end" }
-        };
+        yield missingTerminalAgentEndEvent(item.receivedAt);
       }
       yield event;
       return { stopped: true };
@@ -635,10 +616,7 @@ async function* readUntilResponse(
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
       await markTerminalAgentEnd(activeRun);
       if (terminalAgentEndBeforePrompt(item)) {
-        yield {
-          ...terminalAgentEndBeforePromptEvent(item.raw),
-          receivedAt: item.receivedAt
-        };
+        yield terminalAgentEndBeforePromptEvent(item.raw, item.receivedAt);
         yield* drainUntilExit(queue, activeRun);
         return { stopped: true };
       }
@@ -1598,7 +1576,10 @@ function terminalAgentEndBeforePrompt(item: ProcessQueueItem): boolean {
   );
 }
 
-function terminalAgentEndBeforePromptEvent(raw: unknown): ProviderEvent {
+function terminalAgentEndBeforePromptEvent(
+  raw: unknown,
+  receivedAt: string
+): ProviderEvent {
   return {
     normalized: {
       message: "Oh My Pi provider emitted terminal agent_end before prompt",
@@ -1607,7 +1588,19 @@ function terminalAgentEndBeforePromptEvent(raw: unknown): ProviderEvent {
     raw: {
       event: raw,
       kind: "terminal_agent_end_before_prompt"
-    }
+    },
+    receivedAt
+  };
+}
+
+function missingTerminalAgentEndEvent(receivedAt: string): ProviderEvent {
+  return {
+    normalized: {
+      message: "Oh My Pi provider exited before a terminal agent_end",
+      type: "turn_failed"
+    },
+    raw: { kind: "missing_terminal_agent_end" },
+    receivedAt
   };
 }
 

@@ -1204,14 +1204,14 @@ describe("Oh My Pi RPC provider", () => {
       })
     );
 
-    expect(
-      events
-        .map((event) => event.normalized)
-        .find((event) => event?.type === "turn_failed")
-    ).toMatchObject({
+    const turnFailed = events.find(
+      (event) => event.normalized?.type === "turn_failed"
+    );
+    expect(turnFailed?.normalized).toMatchObject({
       message: "Oh My Pi provider emitted terminal agent_end before prompt",
       type: "turn_failed"
     });
+    expect(turnFailed?.receivedAt).toEqual(expect.any(String));
     expect(
       readJsonl(await readFile(transcriptPath, "utf8")).map((command) =>
         objectField(command, "type")
@@ -1296,14 +1296,14 @@ describe("Oh My Pi RPC provider", () => {
     );
 
     const types = events.map((event) => event.normalized?.type);
-    expect(
-      events
-        .map((event) => event.normalized)
-        .find((event) => event?.type === "turn_failed")
-    ).toMatchObject({
+    const turnFailed = events.find(
+      (event) => event.normalized?.type === "turn_failed"
+    );
+    expect(turnFailed?.normalized).toMatchObject({
       message: "Oh My Pi provider exited before a terminal agent_end",
       type: "turn_failed"
     });
+    expect(turnFailed?.receivedAt).toEqual(expect.any(String));
     expect(events.at(-1)?.normalized).toMatchObject({
       exitCode: 0,
       type: "process_exit"
@@ -1586,14 +1586,14 @@ describe("Oh My Pi RPC provider", () => {
     );
 
     const types = events.map((event) => event.normalized?.type);
-    expect(
-      events
-        .map((event) => event.normalized)
-        .find((event) => event?.type === "turn_failed")
-    ).toMatchObject({
+    const turnFailed = events.find(
+      (event) => event.normalized?.type === "turn_failed"
+    );
+    expect(turnFailed?.normalized).toMatchObject({
       message: "Oh My Pi provider exited before a terminal agent_end",
       type: "turn_failed"
     });
+    expect(turnFailed?.receivedAt).toEqual(expect.any(String));
     expect(events.at(-1)?.normalized).toMatchObject({
       exitCode: 0,
       type: "process_exit"

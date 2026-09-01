@@ -2015,6 +2015,49 @@ describe("doctor", () => {
       ).toBe(false);
     });
 
+    it("parses an unsuffixed MemoryMax= as raw bytes, not kibibytes", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "34359738368", // 32 GiB in bytes, no K/M/G/T suffix
+        hostParallelism: 24
+      });
+
+      const warning = report.warnings.find((entry) =>
+        entry.includes("provider build memory estimate")
+      );
+      expect(warning).toContain("MemoryMax=34359738368");
+      expect(warning).toContain("(32 GiB)");
+      expect(warning).toContain("36 GiB");
+    });
+
+    it.each(["bogus", "0"])(
+      "falls back to the last valid MemoryMax= when a later drop-in is invalid (%s)",
+      async (invalidValue) => {
+        const report = await runProviderCapacityDoctor({
+          dropInMemoryMax: invalidValue,
+          hostParallelism: 24
+        });
+
+        const warning = report.warnings.find((entry) =>
+          entry.includes("provider build memory estimate")
+        );
+        expect(warning).toContain("MemoryMax=32G");
+        expect(warning).toContain("36 GiB");
+      }
+    );
+
+    it("does not fall back past a MemoryMax= form it cannot parse but systemd accepts", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "50%",
+        hostParallelism: 24
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
+    });
+
     // `service install --force` never reaches a host that doesn't re-run it,
     // so an installed providers slice still carrying the MemoryHigh= that
     // docs/adr/0089 removed keeps throttling every concurrent provider at

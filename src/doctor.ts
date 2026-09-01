@@ -935,19 +935,73 @@ async function winningSliceAssignment(
   if (baseAssignments === undefined) {
     return undefined;
   }
-  return winningAssignment(
+  return winningByteSizeAssignment(
     await effectiveSliceAssignments(slicePath, baseAssignments),
     name
   );
 }
 
+// Like winningAssignment, but falls back past a later assignment systemd
+// itself would reject (see isDefinitelyInvalidSystemdMemoryValue) to the
+// last one still in force. Treating "this parser can't use the text" the
+// same as "no directive is set" would silently swallow a real capacity
+// warning behind an operator typo in a drop-in. A value systemd accepts but
+// this narrower K/M/G/T-only grammar doesn't understand (a percentage,
+// "1024B", "2P", a compound sum) is deliberately NOT treated as skippable:
+// it IS the effective assignment, so skipping past it would warn against
+// the wrong, no-longer-effective value instead of just declining to
+// evaluate. Only used for MemoryMax=; checkSliceDrift's obsolete-directive
+// audit keeps using winningAssignment, which reports the literal last value
+// regardless of validity — correct for a drift report, not for computing
+// the value systemd is actually enforcing.
+function winningByteSizeAssignment(
+  assignments: SliceAssignment[],
+  name: string
+): SliceAssignment | undefined {
+  for (const assignment of [...assignments].reverse()) {
+    if (assignment.name !== name) {
+      continue;
+    }
+    if (
+      assignment.value.length === 0 ||
+      assignment.value.toLowerCase() === "infinity"
+    ) {
+      return undefined;
+    }
+    if (isDefinitelyInvalidSystemdMemoryValue(assignment.value)) {
+      continue;
+    }
+    return assignment;
+  }
+  return undefined;
+}
+
+const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
+
+// systemd's own memory-limit grammar (plain bytes, K/M/G/T/P/E suffixes, an
+// explicit "B" suffix, percentages, and space-separated compound sums)
+// always begins with a digit, and config_parse_memory_limit() also rejects
+// a magnitude of zero as out of range — both cases make systemd ignore the
+// assignment and keep whatever was previously in force. Everything else
+// (including a value this parser's narrower grammar merely fails to match)
+// might still be a systemd-valid form outside that narrower grammar, so it
+// is never treated as skippable here.
+function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
+  if (!/^\d/.test(value)) {
+    return true;
+  }
+  const match = SYSTEMD_BYTE_SIZE_PATTERN.exec(value);
+  return match !== null && Number(match[1]) === 0;
+}
+
 function parseSystemdByteSize(value: string): number | undefined {
-  const match = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i.exec(value.trim());
+  const match = SYSTEMD_BYTE_SIZE_PATTERN.exec(value.trim());
   if (match === null) {
     return undefined;
   }
   const amount = Number(match[1]);
-  const exponent = "KMGT".indexOf((match[2] ?? "").toUpperCase()) + 1;
+  const suffix = (match[2] ?? "").toUpperCase();
+  const exponent = suffix === "" ? 0 : "KMGT".indexOf(suffix) + 1;
   const bytes = amount * 1024 ** exponent;
   return Number.isFinite(bytes) && bytes > 0 ? bytes : undefined;
 }

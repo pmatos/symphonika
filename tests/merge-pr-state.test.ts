@@ -161,6 +161,7 @@ function buildController(input: {
     agentProviders: { codex: noopCodex() },
     configDir: input.root,
     createRunId: () => "merge-pr-rerun",
+    emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret-token" },
     githubIssuesApi: input.githubIssuesApi,
     lifecyclePolicy: {
@@ -534,6 +535,7 @@ describe("merge_pr state lifecycle", () => {
         agentProviders: { codex: provider },
         configDir: root,
         createRunId: () => "fresh-merge-pr-run",
+        emailConfigLoader: () => undefined,
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi,
         lifecyclePolicy: {

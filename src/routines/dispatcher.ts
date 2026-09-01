@@ -33,12 +33,15 @@ import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
 } from "../lifecycle/run-controller.js";
-import type { EmailNotificationConfig } from "../notifications/config.js";
+import {
+  secretsForEmailConfig,
+  type EmailNotificationConfig
+} from "../notifications/config.js";
 import type { NotificationDeliveryTracker } from "../notifications/delivery-tracker.js";
 import { deliverRoutineFanoutNotification } from "../notifications/routine-fanout.js";
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
-import { redactAll } from "../redaction.js";
+import { redactAll, redactValueDeep } from "../redaction.js";
 import type { RoutineFanoutHoldReason, RunStore } from "../run-store.js";
 import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
@@ -1325,6 +1328,7 @@ async function runRoutineFiring(input: {
             classifyRoutineOutcome(events, {
               baseBranch: input.project.workspace.git.base_branch,
               kind: input.routine.kind,
+              redactSecrets: redactSecrets(),
               stderrLogPath: evidence.stderrLogPath,
               workspacePath: prepared.workspacePath
             })
@@ -2167,6 +2171,7 @@ async function classifyRoutineOutcome(
   workspace: {
     baseBranch: string;
     kind: RoutineStatus["kind"];
+    redactSecrets: readonly string[];
     stderrLogPath?: string;
     workspacePath: string;
   }
@@ -2179,6 +2184,7 @@ async function classifyRoutineOutcome(
     const classified = await classifyFailure({
       cancelRequested: false,
       events,
+      redactSecrets: workspace.redactSecrets,
       ...(workspace.stderrLogPath === undefined
         ? {}
         : { stderrLogPath: workspace.stderrLogPath }),
@@ -2514,24 +2520,6 @@ function redactRoutineOutcomeClaim(
   };
 }
 
-function redactValueDeep(value: unknown, redactSecrets: string[]): unknown {
-  if (typeof value === "string") {
-    return redactAll(value, redactSecrets);
-  }
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactValueDeep(entry, redactSecrets));
-  }
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [
-        key,
-        redactValueDeep(entry, redactSecrets)
-      ])
-    );
-  }
-  return value;
-}
-
 // The tracker token is env-backed and resolved per call rather than stored,
 // mirroring captureRoutineGithubSnapshot. Absent tracker or unset variable
 // yields nothing to redact.
@@ -2568,17 +2556,6 @@ function resolveRedactSecrets(
     return [];
   }
   return secretsForEmailConfig(notification.resolveConfig(), env);
-}
-
-function secretsForEmailConfig(
-  config: EmailNotificationConfig | undefined,
-  env: NodeJS.ProcessEnv
-): string[] {
-  if (config === undefined || config.smtpUsername === undefined) {
-    return [];
-  }
-  const secret = env[config.smtpPasswordEnv];
-  return secret === undefined || secret.length === 0 ? [] : [secret];
 }
 
 function stringField(value: unknown, key: string): string | undefined {

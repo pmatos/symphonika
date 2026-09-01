@@ -790,9 +790,21 @@ GitHub credentials are environment-backed.
 - Token-like values must be redacted from logs
 
 SMTP passwords are also environment-backed. Service Config stores only `email.smtp_password_env`,
-never a literal password. The named variable is resolved only for SMTP authentication and its value
-must not be written to SQLite, logs, rendered notification content, or prompt evidence. SMTP
-transport errors are redacted before logging or durable failure recording.
+never a literal password. The named variable is resolved only for SMTP authentication and the
+provider-evidence redaction boundary; its value must not be written to SQLite, logs, rendered
+notification content, or prompt evidence. SMTP transport errors are redacted before logging or
+durable failure recording.
+
+The Project credential inventory is the set of credential values Symphonika resolves for the
+execution's Project: its effective tracker token and, whenever an email sink is configured, the
+value of the named password variable. The inventory does not depend on whether SMTP authentication
+is actually in use: providers inherit the daemon's environment either way, so a variable Service
+Config names and the environment sets is echoable back into evidence regardless. Both issue Runs and
+Routine Firings scrub that inventory from raw and Normalized Event Logs, provider stderr,
+provider-derived terminal reasons, and any SQLite event metadata before persistence; Routine Firings
+also scrub their structured outcome evidence. The inventory is explicit rather than inferred from
+every environment variable: provider-native credentials and unrelated operator environment values
+have no Symphonika-owned configuration or resolution boundary that can identify them reliably.
 
 Codex, Claude, and OMP use their native local authentication.
 
@@ -925,14 +937,13 @@ a Run or Firing ends without a clean provider exit, the tail of that log is appe
 terminal reason, which otherwise carries nothing but `process_exit_<code>` or `firing_timeout`.
 
 Provider stderr is redacted on the way to disk, streamed so a secret split across two reads is
-still caught. A Routine Firing scrubs the same list its raw and normalized evidence and terminal
-reason use — the configured SMTP password plus the project's resolved tracker token. An issue Run
-scrubs its project's resolved tracker token; the rest of a Run's evidence has no redaction pass at
-all, which is tracked separately. The
-provider adapter waits for that write to flush before its attempt generator returns, so the
+still caught. An issue Run or Routine Firing scrubs the same Project credential inventory from its
+raw and normalized evidence, provider stderr, and provider-derived terminal reason. The provider
+adapter waits for the stderr tee's write to flush before its attempt generator returns, so the
 terminal-reason excerpt is read after the bytes land rather than racing them; the wait is bounded,
 because evidence capture is best-effort and must never keep a Run or Firing from reaching a
-terminal state.
+terminal state. Issue Run provider-event rows in SQLite receive the already-redacted raw and
+normalized values.
 
 ## 8. Scheduling
 

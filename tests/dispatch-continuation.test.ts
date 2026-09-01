@@ -571,6 +571,7 @@ describe("dispatch continuation cap", () => {
       agentProviders: { omp: provider },
       configDir: root,
       createRunId: () => "run-cont-missing-omp",
+      emailConfigLoader: () => undefined,
       env: { GITHUB_TOKEN: "secret-token" },
       githubIssuesApi,
       prepareIssueWorkspace,

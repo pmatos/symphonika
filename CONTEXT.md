@@ -390,6 +390,13 @@ temporary directory, removed when the attempt ends. Transient, never read back â
 evidence, which is also under the state root but retained.
 _Avoid_: workspace, evidence, cache
 
+**Project credential inventory**:
+The set of credential values Symphonika itself resolves for one execution's Project â€” the effective
+tracker token, plus the value of the variable named by `email.smtp_password_env` whenever an email
+sink is configured. Scrubbed from every durable provider-evidence boundary a Run or Firing writes.
+Explicit by construction: inherited provider-native credentials are not in it.
+_Avoid_: redaction inventory, secret list
+
 **Agent Provider**:
 A normalized adapter that lets the orchestrator run a specific coding-agent implementation; v1 supports Codex, Claude, and Oh My Pi.
 _Avoid_: agent when referring to the adapter boundary

@@ -6354,6 +6354,70 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("retains commits_ahead conservatively when a cancellation settlement abandons the failure-path inspection", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process failed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    // Simulates an operator cancel landing while the failure-path
+    // commits-ahead inspection is still running: the settlement window
+    // abandons the await rather than stopping the Git subprocess, so the
+    // real answer is unknown and must not be recorded as a verified zero.
+    const inspectWorkspaceCommitsAhead = vi.fn(async () => {
+      await activeRuns.requestCancel(
+        "fire-abandoned-commits-ahead",
+        "operator"
+      );
+      return new Promise<boolean>(() => {});
+    });
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md")
+          },
+          runStore
+        }),
+        cancellationSettleMs: 25,
+        createFiringId: () => "fire-abandoned-commits-ahead",
+        inspectWorkspaceCommitsAhead
+      });
+
+      expect(
+        runStore.getRoutineFiring("fire-abandoned-commits-ahead")
+      ).toMatchObject({
+        cancelReason: "operator",
+        commitsAhead: true,
+        state: "cancelled"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fires every recurring tick and advances next_fire_at after success or failure", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

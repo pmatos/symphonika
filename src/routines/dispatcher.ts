@@ -1738,11 +1738,13 @@ async function runRoutineFiring(input: {
             .catch((inspectionError: unknown) => {
               if (inspectionError instanceof RoutineFiringTimeoutError) {
                 failureCommitsInspectionTimedOut = true;
-                // The inspection is now unknown, so preserve the workspace
-                // under Routine Workspace Retention's conservative rule.
-                return true;
               }
-              return false;
+              // A firing-deadline timeout or an abandoned cancellation
+              // settlement both leave the real answer unknown; Routine
+              // Workspace Retention's conservative rule treats unknown the
+              // same as "commits exist" (ADR 0068), so a settlement
+              // abandonment must not be recorded as a verified zero.
+              return true;
             });
     // Re-read after the Git subprocess for the same reason as the try path.
     // Any timeout signal still wins over a cancellation that arrived

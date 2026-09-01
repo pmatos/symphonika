@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { BUILTIN_WORKFLOW_TEMPLATES } from "../src/builtin-templates.js";
 import { decideNextStep } from "../src/lifecycle/state-machine-dispatch.js";
+import { projectPullRequestSignals } from "../src/workflow/pr-signal-projection.js";
 import {
   explainWorkflow,
   loadExpandedWorkflow,
@@ -1208,7 +1209,7 @@ describe("state machine workflow definitions", () => {
 
     expect(result.errors).toContainEqual(
       expect.stringContaining(
-        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals checks=success`
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals pr_open=true`
       )
     );
   });
@@ -1243,7 +1244,7 @@ describe("state machine workflow definitions", () => {
 
     expect(result.errors).toContainEqual(
       expect.stringContaining(
-        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals checks=success`
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals pr_open=true`
       )
     );
   });
@@ -2054,47 +2055,39 @@ describe("built-in workflow templates", () => {
       }
     ]);
 
-    const advance = (signals: Record<string, string | number>) => {
-      const unresolvedReviewThreads = signals.unresolved_review_threads;
-      return decideNextStep({
+    // Driving the real projection keeps has_unresolved_reviews derived the way
+    // a poll derives it, rather than restating the rule in the test.
+    const advance = (checks: "failure" | "success", unresolved: number) =>
+      decideNextStep({
         actionExecuted: true,
-        signals: {
-          ...signals,
-          ...(typeof unresolvedReviewThreads === "number"
-            ? { has_unresolved_reviews: unresolvedReviewThreads > 0 }
-            : {})
-        },
+        signals: projectPullRequestSignals({
+          checks,
+          merged: false,
+          mergeable: "mergeable",
+          open: true,
+          reviewDecision: "approved",
+          unresolvedReviewThreads: unresolved
+        }),
         state: waiting
       });
-    };
 
-    expect(
-      advance({ checks: "success", unresolved_review_threads: 0 })
-    ).toMatchObject({
+    expect(advance("success", 0)).toMatchObject({
       kind: "advance",
       to: "shipped"
     });
-    expect(
-      advance({ checks: "success", unresolved_review_threads: 1 })
-    ).toMatchObject({
+    expect(advance("success", 1)).toMatchObject({
       kind: "advance",
       to: "review.autofix"
     });
-    expect(
-      advance({ checks: "success", unresolved_review_threads: 2 })
-    ).toMatchObject({
+    expect(advance("success", 2)).toMatchObject({
       kind: "advance",
       to: "review.autofix"
     });
-    expect(
-      advance({ checks: "success", unresolved_review_threads: 7 })
-    ).toMatchObject({
+    expect(advance("success", 7)).toMatchObject({
       kind: "advance",
       to: "review.autofix"
     });
-    expect(
-      advance({ checks: "failure", unresolved_review_threads: 3 })
-    ).toMatchObject({
+    expect(advance("failure", 3)).toMatchObject({
       kind: "advance",
       to: "needs_human"
     });

@@ -1,7 +1,7 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { projectPullRequestSignals } from "../src/lifecycle/pr-signal-projection.js";
+import { projectPullRequestSignals } from "../src/workflow/pr-signal-projection.js";
 import { decideNextStep } from "../src/lifecycle/state-machine-dispatch.js";
 import type { PullRequestState } from "../src/pull-request-state.js";
 import { loadExpandedWorkflow } from "../src/workflow/fsm-expansion.js";

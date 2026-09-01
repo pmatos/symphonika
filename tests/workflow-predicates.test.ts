@@ -1,7 +1,7 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { projectPullRequestSignals } from "../src/lifecycle/pr-signal-projection.js";
+import { projectPullRequestSignals } from "../src/workflow/pr-signal-projection.js";
 import {
   artifactPredicatePaths,
   parseArtifactExistsPaths,
@@ -27,22 +27,11 @@ function everyPullRequestSignalKey(): Set<string> {
       for (const merged of [false, true]) {
         const signals = projectPullRequestSignals({
           checks,
-          draft: false,
-          headSha: "sha",
           merged,
           mergeable,
-          number: 1,
           open: !merged,
           reviewDecision: "approved",
-          reviewFollowup: {
-            checks: "SUCCESS",
-            decision: "APPROVED",
-            feedbackFingerprint: "fingerprint",
-            unresolvedThreads: []
-          },
-          trackingState: merged ? "merged" : "open",
-          unresolvedReviewThreads: 0,
-          url: "https://github.com/pmatos/symphonika/pull/1"
+          unresolvedReviewThreads: 0
         });
         for (const key of Object.keys(signals)) {
           keys.add(key);

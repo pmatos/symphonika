@@ -10,6 +10,8 @@ import {
   parseArtifactExistsPaths,
   workflowPredicateEvaluation
 } from "./predicates.js";
+import type { WorkflowPredicateEvaluation } from "./predicates.js";
+import { enumerateActionablePullRequestSignals } from "./pr-signal-projection.js";
 import {
   parseWorkflowContract,
   projectWorkflowReferences,
@@ -516,21 +518,6 @@ async function expandRawStateMachineWorkflow(
   };
 }
 
-// The poll projects settled pull request observations only: it omits the
-// `checks` and `mergeable` keys rather than giving them a value when GitHub
-// reports nothing, so a wait may legitimately park on those. What it must not
-// do is park on a combination the poll does report, which is what this
-// enumerates. `pr_merged` is left out for the same reason -- it is only ever
-// emitted post-merge, so the merged world is not a park to begin with.
-const settledChecks = ["success", "failure"] as const;
-const reviewDecisions = [
-  "none",
-  "approved",
-  "changes_requested",
-  "review_required"
-] as const;
-const bothBooleans = [true, false] as const;
-
 function validateWaitStateCoverage(
   states: ExpandedWorkflowState[],
   workflowPath: string
@@ -555,64 +542,45 @@ function validateWaitStateCoverage(
 // so a state whose every pull-request-observing transition is artifact-gated is
 // exempt. Gating one transition among several must not exempt the rest.
 function observesPullRequestSignals(state: ExpandedWorkflowState): boolean {
-  const observing = state.transitions.filter((transition) =>
-    Object.keys(transition.when).some(
-      (key) => workflowPredicateEvaluation(key) === "pr_signal"
-    )
+  return state.transitions.some(
+    (transition) =>
+      gatesOn(transition, "pr_signal") && !gatesOn(transition, "artifact")
   );
-  return (
-    observing.length > 0 &&
-    !observing.every((transition) =>
-      Object.keys(transition.when).some(
-        (key) => workflowPredicateEvaluation(key) === "artifact"
-      )
-    )
+}
+
+function gatesOn(
+  transition: WorkflowTransition,
+  evaluation: WorkflowPredicateEvaluation
+): boolean {
+  return Object.keys(transition.when).some(
+    (key) => workflowPredicateEvaluation(key) === evaluation
   );
 }
 
 function firstUncoveredPullRequestSignals(
   state: ExpandedWorkflowState
 ): WorkflowPredicateMap | undefined {
-  for (const checks of settledChecks) {
-    for (const mergeable of bothBooleans) {
-      for (const hasUnresolvedReviews of bothBooleans) {
-        for (const prOpen of bothBooleans) {
-          for (const reviewDecision of reviewDecisions) {
-            const signals: WorkflowPredicateMap = {
-              checks,
-              has_unresolved_reviews: hasUnresolvedReviews,
-              mergeable,
-              pr_open: prOpen,
-              review_decision: reviewDecision,
-              // The projection derives the boolean from this count, so an
-              // inconsistent pair would test a combination it cannot emit.
-              unresolved_review_threads: hasUnresolvedReviews ? 1 : 0
-            };
-            if (
-              !state.transitions.some((transition) =>
-                transitionMatchesSignals(transition, signals)
-              )
-            ) {
-              return signals;
-            }
-          }
-        }
-      }
-    }
-  }
-  return undefined;
+  return enumerateActionablePullRequestSignals().find(
+    (signals) =>
+      !state.transitions.some((transition) =>
+        transitionMatchesSignals(transition, signals)
+      )
+  );
 }
 
 // A parked wait is re-evaluated from projected pull request signals alone, so a
-// predicate the projection never emits -- an artifact or an agent signal --
+// predicate answered any other way -- an artifact probe, an agent signal --
 // cannot carry the state out and must not count as covering a combination.
-// Absence from `signals` is what makes those predicates fail to match here.
+// Asking for the evaluation kind says that outright, rather than leaning on
+// those keys happening to be absent from the projected map.
 function transitionMatchesSignals(
   transition: WorkflowTransition,
   signals: WorkflowPredicateMap
 ): boolean {
   return Object.entries(transition.when).every(
-    ([key, expected]) => signals[key] === expected
+    ([key, expected]) =>
+      workflowPredicateEvaluation(key) === "pr_signal" &&
+      signals[key] === expected
   );
 }
 

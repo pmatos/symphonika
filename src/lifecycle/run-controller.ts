@@ -37,7 +37,7 @@ import {
   type PullRequestState
 } from "../pull-request-state.js";
 import { evaluateRunContinuationEligibility } from "./issue-eligibility.js";
-import { projectPullRequestSignals } from "./pr-signal-projection.js";
+import { projectPullRequestSignals } from "../workflow/pr-signal-projection.js";
 import type {
   AgentProvider,
   AgentProviderName,

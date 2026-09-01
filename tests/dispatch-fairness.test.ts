@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { dispatchOneEligibleIssue } from "../src/dispatch.js";
 import type { IssuePollStatus, IssueSnapshot } from "../src/issue-polling.js";
-import type { AgentProvider, ProviderEvent } from "../src/provider.js";
+import type {
+  AgentProvider,
+  ProviderEvent,
+  ProviderRunInput
+} from "../src/provider.js";
 import { openRunStore } from "../src/run-store.js";
 import type {
   PreparedIssueWorkspace,
@@ -320,6 +324,68 @@ describe("dispatch fairness", () => {
       runStore.close();
     }
   });
+
+  it("passes global capacity to the one-shot provider attempt", async () => {
+    const root = await makeTempRoot();
+    await writeWeightedConfig(root, { globalMaxInFlight: 8 });
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    let providerInput: ProviderRunInput | undefined;
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      async *runAttempt(input): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        providerInput = input;
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+
+    try {
+      const result = await dispatchOneEligibleIssue({
+        agentProviders: { codex: provider },
+        configDir: root,
+        configPath: path.join(root, "symphonika.yml"),
+        createRunId: () => "run-capacity",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        issuePollStatus: pollStatusFor([
+          {
+            issue: issue({ number: 1, title: "Capacity issue" }),
+            project: "alpha"
+          }
+        ]),
+        prepareIssueWorkspace: async (input) => {
+          const prepared = {
+            branchName: `sym/${input.project.name}/${input.issue.number}`,
+            branchRef: `refs/heads/sym/${input.project.name}/${input.issue.number}`,
+            cachePath: path.join(root, "cache", "alpha.git"),
+            issueDirectoryName: String(input.issue.number),
+            reused: false,
+            workspacePath: path.join(root, "workspaces", "capacity")
+          };
+          await createGitWorkspaceAhead(prepared);
+          return prepared;
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(result.dispatched).toBe(true);
+      expect(providerInput).toMatchObject({ globalMaxInFlight: 8 });
+    } finally {
+      runStore.close();
+    }
+  });
 });
 
 function pollStatusFor(
@@ -354,7 +420,10 @@ function issue(overrides: Partial<IssueSnapshot> = {}): IssueSnapshot {
   };
 }
 
-async function writeWeightedConfig(root: string): Promise<void> {
+async function writeWeightedConfig(
+  root: string,
+  options: { globalMaxInFlight?: number } = {}
+): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
     path.join(root, "WORKFLOW.md"),
@@ -363,6 +432,9 @@ async function writeWeightedConfig(root: string): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
     [
+      ...(options.globalMaxInFlight === undefined
+        ? []
+        : ["global:", `  max_in_flight: ${options.globalMaxInFlight}`]),
       "providers:",
       "  codex:",
       '    command: "codex fake"',

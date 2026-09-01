@@ -64,6 +64,27 @@ describe("providerScratchPath", () => {
 });
 
 describe("providerScratchEnvironment", () => {
+  it("caps make and cmake builds to the attempt's memory share", () => {
+    expect(
+      providerScratchEnvironment("/state/scratch/run-a-attempt-1", 8, 24)
+    ).toEqual({
+      CMAKE_BUILD_PARALLEL_LEVEL: "2",
+      MAKEFLAGS: "-j2",
+      TEMP: "/state/scratch/run-a-attempt-1",
+      TMP: "/state/scratch/run-a-attempt-1",
+      TMPDIR: "/state/scratch/run-a-attempt-1"
+    });
+  });
+
+  it("does not allocate an attempt more than its share of host CPUs", () => {
+    expect(
+      providerScratchEnvironment("/state/scratch/run-a-attempt-1", 2, 4)
+    ).toMatchObject({
+      CMAKE_BUILD_PARALLEL_LEVEL: "2",
+      MAKEFLAGS: "-j2"
+    });
+  });
+
   it("points TMPDIR, TMP and TEMP at the scratch directory", () => {
     expect(
       providerScratchEnvironment("/state/scratch/run-a-attempt-1")

@@ -281,6 +281,13 @@ export type RunControllerOptions = {
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
   ) => IssueWorkspacePreparation;
+  // Optional one-shot override for provider environment sizing. Daemon
+  // callers reuse globalConcurrencyLoader; the explicit one-shot dispatch
+  // supplies this loader without turning its config value into an admission
+  // gate (ADR 0053).
+  providerBuildCapacityLoader?: () => Promise<{
+    maxInFlight: number | undefined;
+  }>;
   projectsLoader: () => Promise<Map<string, RunControllerProjectConfig>>;
   providersLoader: () => Promise<RunControllerProvidersConfig>;
   pullRequestPolicyLoader?: () => Promise<PullRequestFollowupPolicy>;
@@ -599,6 +606,9 @@ export class RunController {
   private readonly prepareIssueWorkspace: (
     input: PrepareIssueWorkspaceInput
   ) => IssueWorkspacePreparation;
+  private readonly providerBuildCapacityLoader: () => Promise<{
+    maxInFlight: number | undefined;
+  }>;
   private readonly projectsLoader: () => Promise<
     Map<string, RunControllerProjectConfig>
   >;
@@ -646,6 +656,8 @@ export class RunController {
     this.onWatchdogTerminated = options.onWatchdogTerminated;
     this.prepareIssueWorkspace =
       options.prepareIssueWorkspace ?? defaultPrepareIssueWorkspace;
+    this.providerBuildCapacityLoader =
+      options.providerBuildCapacityLoader ?? this.globalConcurrencyLoader;
     this.projectsLoader = options.projectsLoader;
     this.providersLoader = options.providersLoader;
     this.pullRequestPolicyLoader =
@@ -4117,8 +4129,11 @@ export class RunController {
     );
     let sequence = 0;
     try {
+      const { maxInFlight: globalMaxInFlight } =
+        await this.providerBuildCapacityLoader();
       for await (const event of input.provider.runAttempt({
         branchName: input.evidence.branchName,
+        ...(globalMaxInFlight === undefined ? {} : { globalMaxInFlight }),
         issue: input.issue,
         prompt: input.prompt,
         promptPath: input.promptPath,

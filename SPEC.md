@@ -929,6 +929,19 @@ memory. The directory is removed when the attempt ends, and daemon startup sweep
 crashed instance left behind. It is transient, not evidence: nothing under `scratch/` is read
 back by any operator surface. Cargo output under a Project's own `target/` is deliberately left in
 the Workspace, where `watchdog.mtime_include` can still read it as progress. See ADR 0088.
+
+When `global.max_in_flight` is configured, the same provider environment also sets
+`MAKEFLAGS=-jN` and `CMAKE_BUILD_PARALLEL_LEVEL=N`. `N` is the smaller of the attempt's share of
+`availableParallelism()` and its share of the generated providers slice's 32 GiB hard budget,
+using 1.5 GiB per compiler process (the measured incident peak), with a floor of one. Omitting the
+global cap leaves both variables unset because an unbounded fleet has no derivable per-attempt
+share. This is a make/`cmake --build` guard, not general command interposition: a bare `ninja`
+invocation does not read either variable, and an explicit command-line parallelism option may
+override the environment. The share is derived from the cap in effect when the attempt spawns and,
+like every other in-flight run under a hot-reloaded cap (ADR 0053), does not change once the
+process is running; an attempt sized under an old cap keeps that sizing until it finishes. See
+ADR 0094.
+
 When the daemon is running, `daemon.json` records the local API endpoint for that state root.
 Operator CLI commands that use the descriptor must preflight the daemon status and reject endpoints
 whose reported state root differs from the configured state root.

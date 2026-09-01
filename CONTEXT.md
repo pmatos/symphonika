@@ -109,10 +109,11 @@ A durable orchestrator claim on an issue for which no live local run exists.
 _Avoid_: failed run
 
 **Blocked Run**:
-A Run that reached a deterministic, non-actionable terminal outcome — the agent correctly declined
-the task (`no_workspace_changes`) or a raw FSM workflow reached a `blocked` terminal state — as
-opposed to a `failed` Run, which is reserved for outcomes that indicate something actually broke
-(crash, malformed event, workspace-prep error, unexpected exit code). See ADR 0058.
+A Run that reached a deterministic operator-attention terminal outcome — the agent correctly
+declined the task (`no_workspace_changes`), a raw FSM workflow reached a `blocked` terminal state,
+or a `merge_pr` action received a deterministic tracker refusal (`merge_pr_refused:*`) — as opposed
+to a `failed` Run, which is reserved for outcomes that indicate something actually broke (crash,
+malformed event, workspace-prep error, unexpected exit code). See ADRs 0048 and 0058.
 _Avoid_: failed run, error
 
 **Outcome Projection**:

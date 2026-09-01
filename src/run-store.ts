@@ -1497,6 +1497,22 @@ export class RunStore {
     return row?.retry_count ?? 0;
   }
 
+  // A dedicated column rather than a state_transition_reason-encoded token:
+  // that field is overwritten by every kind of merge_pr observation (a
+  // policy-disabled or not-yet-ready tick, a transient non-405 failure), so
+  // a park-with-count token there would parse back to zero the moment a
+  // permanently refused merge alternates with any intervening non-405
+  // observation — the exact way SPEC.md's bounded-attempt contract could be
+  // defeated (issue #635 review feedback on the first cut of this bound).
+  incrementMergeRefusalCount(runId: string): number {
+    const updated = this.database
+      .prepare(
+        "update runs set merge_refusal_count = merge_refusal_count + 1, updated_at = ? where id = ? returning merge_refusal_count"
+      )
+      .get(timestamp(), runId) as { merge_refusal_count: number } | undefined;
+    return updated?.merge_refusal_count ?? 0;
+  }
+
   isContinuationRun(runId: string): boolean {
     const row = this.database
       .prepare("select is_continuation from runs where id = ?")
@@ -5349,6 +5365,40 @@ export class RunStore {
     return { currentStateId: row.current_state_id, runId: row.id };
   }
 
+  // Scoped to the exact PR the global follow-up loop is about to merge, not
+  // just the issue: listOpenTrackedPullRequests can return more than one
+  // open tracked PR for the same issue (e.g. redispatch onto a renamed
+  // branch while an earlier PR stays open), so keying only by
+  // (project, issue) would let a Run refusing PR A's merge also gate PR B's
+  // — or, if a later unrelated Run for the same issue sorts more recently,
+  // fail to gate PR A at all. Existence, not recency, is what matters here:
+  // once a refused PR actually merges it leaves `listOpenTrackedPullRequests`
+  // entirely (state moves off "open"), and re-enabling a still-open refused
+  // PR requires an operator to clear it and redispatch — the operator-
+  // attention contract ADR 0058 already establishes — not a Run that quietly
+  // outranks this one by timestamp.
+  hasMergeRefusalForPullRequest(input: {
+    issueNumber: number;
+    prNumber: number;
+    projectName: string;
+  }): boolean {
+    const row = this.database
+      .prepare(
+        [
+          "select 1 from runs",
+          "where project_name = ? and issue_number = ?",
+          "and terminal_reason like ?",
+          "limit 1"
+        ].join(" ")
+      )
+      .get(
+        input.projectName,
+        input.issueNumber,
+        `merge_pr_refused: PR #${input.prNumber}:%`
+      );
+    return row !== undefined;
+  }
+
   // Wait re-evaluation needs to see merged/closed tracked PRs so a workflow
   // waiting on `pr_merged: true` can advance after the PR follow-up
   // dispatcher has marked the tracked row "merged". Returns the most-recent
@@ -6184,6 +6234,7 @@ export class RunStore {
       ["runs", "evidence_ignore_json", "text not null default '[]'"],
       ["runs", "continuation_parent_run_id", "text"],
       ["runs", "retry_count", "integer not null default 0"],
+      ["runs", "merge_refusal_count", "integer not null default 0"],
       ["runs", "failure_classification", "text"],
       ["runs", "terminal_reason", "text"],
       ["runs", "cancel_requested", "integer not null default 0"],

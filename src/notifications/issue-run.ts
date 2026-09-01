@@ -9,6 +9,7 @@ import {
 import type { NotificationMessage, NotificationSink } from "./types.js";
 import { deliverNotificationBestEffort } from "./delivery.js";
 import { escapeHtml, htmlShell, symphonikaSubject } from "./message.js";
+import { isMergePrRefusedReason } from "../lifecycle/terminal-reason.js";
 
 const NON_FAILURE_TERMINAL_REASONS = new Set([
   "no_workspace_changes",
@@ -146,7 +147,8 @@ export function shouldNotifyIssueRun(
   return (
     run.cancelReason === null &&
     run.terminalReason !== null &&
-    !NON_FAILURE_TERMINAL_REASONS.has(run.terminalReason)
+    !NON_FAILURE_TERMINAL_REASONS.has(run.terminalReason) &&
+    !isMergePrRefusedReason(run.terminalReason)
   );
 }
 

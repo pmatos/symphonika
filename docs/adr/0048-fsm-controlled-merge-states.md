@@ -62,3 +62,36 @@ requirement for PR-observing `wait` states. The expanded graph must cover every 
 combination of checks, mergeability, unresolved feedback, PR openness, and review decision; the
 global loop will not rescue an omitted branch. This validation applies to `wait`, not `merge_pr`,
 whose policy-driven retry behavior remains the deliberate parked-state contract described above.
+
+**Amended by issue #635.** Merge-state reconciliation now separates deferred observations from
+deterministic merge refusals. Policy-disabled and not-yet-ready pull requests remain parked, as do
+merge errors without a deterministic refusal signal. GitHub documents HTTP 405 as "merge cannot be
+performed," but gives no machine-readable signal for whether that is durable (a merge method the
+repo's branch protection forbids) or will clear on its own (required checks still running under a
+policy that does not gate on them, or a protection dimension Symphonika's policy does not model at
+all). A 405 therefore parks with a bounded, counted retry — five ticks at the default poll interval
+— rather than terminalizing on the first refusal; only once the bound is exceeded does the Run
+terminate as `blocked` with an actionable `merge_pr_refused: PR #<number>: <message>` terminal
+reason. The count lives in a dedicated `runs.merge_refusal_count` column rather than a
+`state_transition_reason`-encoded token: that field is overwritten by every other kind of merge_pr
+observation, so a token there would parse back to zero — and the bound would never trip — the
+moment a permanently refused merge alternates with any intervening non-405 tick (issue #635 review
+feedback on the first cut of this bound). A tracker adapter that exposes no `mergePullRequest`
+capability has no such ambiguity and terminates on the first observation. These terminal paths are
+handled inside merge-state
+observation before the ordinary `decideNextStep` guard; an unconditional workflow catch-all would
+be inverted because it cannot see hard failures and would match healthy readiness deferrals. The
+built-in therefore deliberately has no catch-all transition.
+
+Terminalizing releases FSM ownership (`current_state_id` goes `null`) in the same update that
+asserts operator attention via `sym:blocked`/`sym:human-needed`. For an ordinary blocked outcome
+that release is correct: the global PR follow-up loop should pick up review-followup duties.
+For a deterministic merge refusal it is not — `isIssueOwnedByWorkflow` alone cannot see the
+difference, so the follow-up loop would read the released ownership as "nothing owns this issue"
+and re-attempt the exact merge just declared refused. `RunController.isIssueMergeRefused` is a
+sibling predicate the follow-up loop consults before its own merge attempt, scoped to both the
+`merge_pr_refused:` terminal-reason prefix and the specific PR number: `listOpenTrackedPullRequests`
+can return more than one open tracked PR for the same issue (e.g. a redispatch onto a renamed
+branch while an earlier PR stays open), so keying the guard by issue alone would let one PR's
+refusal shadow — or fail to shadow — a different PR on the same issue. Every other blocked outcome
+keeps today's contract of releasing ownership to the follow-up loop.

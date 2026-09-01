@@ -408,6 +408,22 @@ async function processTrackedPullRequests(input: {
     if (!pullRequestReadyToMerge(state, input.policy)) {
       continue;
     }
+    // A deterministic merge refusal (ADR 0058, issue #635) already
+    // terminalized this issue's Run as blocked with actionable evidence.
+    // isIssueOwnedByWorkflow above no longer sees that Run (terminalizing
+    // released FSM ownership), so this loop would otherwise re-attempt the
+    // exact merge just declared refused — and could succeed while the issue
+    // still carries sym:blocked/sym:human-needed. Scoped to this tracked
+    // PR's own number: an issue can have more than one open tracked PR.
+    if (
+      input.runController.isIssueMergeRefused({
+        issueNumber: tracked.issueNumber,
+        prNumber: tracked.prNumber,
+        projectName: project.name
+      })
+    ) {
+      continue;
+    }
     // Another GitHub subsystem can engage this project's credential
     // backoff while the follow-up-state request above is in flight. Check
     // again before the second GitHub call in this tracked-PR sequence.

@@ -126,7 +126,10 @@ import {
   removeProviderScratch
 } from "./provider-scratch.js";
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
-import { buildCapReachedReason } from "./terminal-reason.js";
+import {
+  buildCapReachedReason,
+  buildMergePrRefusedReason
+} from "./terminal-reason.js";
 
 export type WorkflowSnapshot = {
   body: string;
@@ -1386,9 +1389,71 @@ export class RunController {
     );
   }
 
+  // A sibling to isIssueOwnedByWorkflow, for a case that predicate cannot
+  // see: terminalizing a Run releases FSM ownership (current_state_id goes
+  // null, state leaves "waiting") in the same update that asserts operator
+  // attention via sym:blocked/sym:human-needed. For an ordinary blocked
+  // outcome that release is correct — the global PR follow-up loop should
+  // pick up review-followup duties. For a deterministic merge refusal it is
+  // not: re-attempting the exact merge this Run just declared refused would
+  // contradict the terminalization. Scoped to the exact PR (not just the
+  // issue) so a refusal on one of an issue's tracked PRs cannot gate — or
+  // fail to gate — a different tracked PR on the same issue.
+  isIssueMergeRefused(input: {
+    issueNumber: number;
+    prNumber: number;
+    projectName: string;
+  }): boolean {
+    return this.runStore.hasMergeRefusalForPullRequest(input);
+  }
+
+  // Shared tail of every "terminalize this waiting Run as blocked" path (ADR
+  // 0058): record the actionable reason, flip RunState, and label the issue.
+  // A caller that also needs recordWorkflowTerminal runs that first, since
+  // only it knows the terminal state id and its own transition reason.
+  private async terminalizeBlocked(input: {
+    issueNumber: number;
+    reason: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    this.runStore.recordTerminalReason(
+      input.runId,
+      input.reason,
+      "deterministic"
+    );
+    this.runStore.updateRunState(input.runId, "blocked");
+    await this.markIssueBlocked({
+      issueNumber: input.issueNumber,
+      repository: input.repository
+    });
+  }
+
+  private async terminateMergePrRefusal(input: {
+    issueNumber: number;
+    message: string;
+    prNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+    stateId: string;
+    transitionReason: string;
+  }): Promise<void> {
+    this.runStore.recordWorkflowTerminal(input.runId, {
+      terminalStateId: input.stateId,
+      transitionReason: input.transitionReason
+    });
+    await this.terminalizeBlocked({
+      issueNumber: input.issueNumber,
+      reason: buildMergePrRefusedReason(input.prNumber, input.message),
+      repository: input.repository,
+      runId: input.runId
+    });
+  }
+
   // Observes the tracked pull request and projects it into the wait state's
   // signal map, performing the merge attempt for a merge_pr state along the way.
-  // undefined means "stay parked": there is nothing to decide this tick.
+  // undefined means the caller has nothing to decide this tick: observation
+  // either stayed retryably parked or terminalized a deterministic refusal here.
   //
   // Extracted from reEvaluateWaitingRun so the decision that follows it is
   // reachable without a tracked pull request. A wait state naming only artifact
@@ -1475,6 +1540,16 @@ export class RunController {
           "symphonika merge_pr re-eval: merge disabled by policy"
         );
       } else if (pullRequestReadyToMerge(pullRequestState, policy)) {
+        const terminateRefusal = (message: string, transitionReason: string) =>
+          this.terminateMergePrRefusal({
+            issueNumber: input.issueNumber,
+            message,
+            prNumber: tracked.prNumber,
+            repository,
+            runId,
+            stateId: waitState.id,
+            transitionReason
+          });
         try {
           const merged = await tryMergePullRequest(this.githubIssuesApi, {
             expectedHeadSha: pullRequestState.headSha,
@@ -1515,10 +1590,8 @@ export class RunController {
               "symphonika merge_pr merged PR"
             );
           } else {
-            this.runStore.recordWaitingActivity(
-              runId,
-              `merge_pr unavailable: GitHub tracker does not expose mergePullRequest`
-            );
+            const message = "GitHub tracker does not expose mergePullRequest";
+            await terminateRefusal(message, `merge_pr unavailable: ${message}`);
             this.logger?.warn(
               { runId },
               "symphonika merge_pr: tracker has no mergePullRequest support"
@@ -1528,6 +1601,29 @@ export class RunController {
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
+          if (isPermanentMergeRefusal(error)) {
+            const attempt = this.runStore.incrementMergeRefusalCount(runId);
+            if (attempt < MAX_MERGE_REFUSAL_ATTEMPTS) {
+              this.runStore.recordWaitingActivity(
+                runId,
+                `merge_pr refused for PR #${tracked.prNumber} (attempt ${attempt}/${MAX_MERGE_REFUSAL_ATTEMPTS}): ${message}`
+              );
+              this.logger?.warn(
+                { attempt, err: error, prNumber: tracked.prNumber, runId },
+                "symphonika merge_pr refused, parking for retry"
+              );
+              return undefined;
+            }
+            await terminateRefusal(
+              `${message} (after ${attempt} refused attempts)`,
+              `merge_pr refused for PR #${tracked.prNumber} after ${attempt} attempts: ${message}`
+            );
+            this.logger?.warn(
+              { attempt, err: error, prNumber: tracked.prNumber, runId },
+              "symphonika merge_pr permanently refused"
+            );
+            return undefined;
+          }
           this.runStore.recordWaitingActivity(
             runId,
             `merge_pr attempt failed for PR #${tracked.prNumber}: ${message}`
@@ -1691,15 +1787,11 @@ export class RunController {
         // provider-attempt path (ADR 0058) so the issue doesn't stay
         // eligible for redispatch under a stale "succeeded" verdict.
         if (next.terminal === "blocked") {
-          this.runStore.recordTerminalReason(
-            runId,
-            "workflow_terminal_blocked",
-            "deterministic"
-          );
-          this.runStore.updateRunState(runId, "blocked");
-          await this.markIssueBlocked({
+          await this.terminalizeBlocked({
             issueNumber: refreshed.number,
-            repository
+            reason: "workflow_terminal_blocked",
+            repository,
+            runId
           });
           return;
         }
@@ -1831,15 +1923,11 @@ export class RunController {
       // branch above — same ADR 0058 contract, reached via a direct
       // terminate decision instead of an advance-to-terminal one.
       if (decision.terminal === "blocked") {
-        this.runStore.recordTerminalReason(
-          runId,
-          "workflow_terminal_blocked",
-          "deterministic"
-        );
-        this.runStore.updateRunState(runId, "blocked");
-        await this.markIssueBlocked({
+        await this.terminalizeBlocked({
           issueNumber: refreshed.number,
-          repository
+          reason: "workflow_terminal_blocked",
+          repository,
+          runId
         });
         return;
       }
@@ -5017,6 +5105,33 @@ function normalizeRawIssue(
 function isParkedAction(kind: string | undefined): boolean {
   return kind === "wait" || kind === "merge_pr";
 }
+
+// GitHub documents 405 as "merge cannot be performed" — but gives no
+// machine-readable signal for whether that's durable (branch protection
+// forbids the configured merge method) or will clear on its own (required
+// checks still running under `pull_requests.merge.require_status_success:
+// false`, or a branch-protection dimension Symphonika's policy doesn't model
+// at all, e.g. required-up-to-date). A mismatched head (409),
+// validation/rate response (422), server error, or transport failure is
+// already retried without counting toward this bound.
+function isPermanentMergeRefusal(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    error.status === 405
+  );
+}
+
+// Five ticks at the default 30s poll interval (issue-polling.ts's
+// DEFAULT_POLLING_INTERVAL_MS) is a couple of minutes — enough room for
+// pending required checks to finish without parking indefinitely the way a
+// bare "retry forever" would. Counted in RunStore.merge_refusal_count, a
+// dedicated column rather than a state_transition_reason-encoded token: that
+// field is overwritten by every other kind of merge_pr observation, so a
+// count parked there would reset to zero the moment a permanently refused
+// merge alternates with any intervening non-405 tick.
+const MAX_MERGE_REFUSAL_ATTEMPTS = 5;
 
 // True when every predicate a wait state names can be answered without
 // observing a pull request: at least one artifact predicate, and nothing beyond

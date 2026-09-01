@@ -782,9 +782,10 @@ one message per firing. See ADR 0072.
 
 For terminal issue Runs, `always` includes every terminal outcome, including blocked outcomes and
 cancellation. `changes` includes succeeded Runs, whose success proves commits ahead of base.
-`failures` is keyed by `terminal_reason`, not `RunState`: `no_workspace_changes` and
-`workflow_terminal_blocked` are not failures, while `no_progress`, `cap_reached:*`, orphan
-recovery, provider failures, and infrastructure failures are. Cancellation is not a failure.
+`failures` is keyed by `terminal_reason`, not `RunState`: `no_workspace_changes`,
+`workflow_terminal_blocked`, and `merge_pr_refused:*` are not failures, while `no_progress`,
+`cap_reached:*`, orphan recovery, provider failures, and infrastructure failures are. Cancellation
+is not a failure.
 Terminal issue Runs are durably claimed into at most one digest per window. A digest renders at
 most 50 Run details and reports the omitted count, bounding both mail frequency and message size.
 Interrupted digest claims return to pending on daemon restart; delivery success, policy/source
@@ -2227,18 +2228,40 @@ Lifecycle:
    `method` override (if any) or the policy default, pinning the merge to the observed head
    SHA. On success the tracked-PR row is moved to `merged`, the signals projected for
    `decideNextStep` include `pr_merged: true`, and the workflow advances via its transitions.
-   On a merge API failure the run records the error in `state_transition_reason` and stays
-   parked; the next tick retries from the same row.
+   GitHub documents HTTP 405 as "merge cannot be performed," but gives no machine-readable signal
+   for whether that is durable or will clear once a pending condition resolves (e.g. required
+   checks still running under a policy that does not gate on them). A 405 therefore parks with a
+   bounded, counted retry (five attempts at the default poll interval) rather than terminalizing on
+   the first refusal; only once the bound is exceeded does the Run terminate as `blocked`,
+   recording `merge_pr_refused: PR #<number>: <message>` as its actionable terminal reason and
+   receiving `sym:blocked`. The count lives in a dedicated `runs.merge_refusal_count` column, not a
+   `state_transition_reason`-encoded token: that field is overwritten by every other kind of
+   merge_pr observation (a policy-disabled or not-yet-ready tick, a transient non-405 failure), so
+   a token there would parse back to zero the moment a permanently refused merge alternates with
+   any intervening non-405 tick, defeating the bound. A tracker adapter with no `mergePullRequest`
+   capability has no such ambiguity and is terminal on the first observation. Other merge API
+   failures record the error in `state_transition_reason` and stay parked so a later tick can retry
+   transient transport, service, or head-race failures.
 5. Successful merge transitions advancing into a terminal state record the terminal as
-   `succeeded`, exactly like wait-state terminals. Failed, deferred, blocked, or missing-PR
-   outcomes record deterministic `state_transition_reason` text on the merge state's Run row
-   and never delete the workspace, matching §10 (workspaces are never auto-deleted).
+   `succeeded`, exactly like wait-state terminals. Deferred or missing-PR outcomes remain parked;
+   deterministic merge refusals terminate as `blocked`; every outcome records
+   `state_transition_reason` text on the merge state's Run row and never deletes the workspace,
+   matching §10 (workspaces are never auto-deleted).
 
 The merge state is intentionally scoped to Symphonika-tracked PRs — arbitrary cross-issue or
 external PRs are out of scope. PR follow-up policy (`§12.5`) and merge-state evaluation share
 the same `pullRequestReadyToMerge` helper so the two paths cannot drift on what counts as
 mergeable. Cancellation, issue-close, and label-immunity semantics are inherited from wait
 states (§12.6).
+
+Terminalizing a merge refusal releases FSM ownership the same way any other terminalization does,
+which would otherwise let the global PR follow-up loop (`§12.5`) read the released ownership as
+license to re-attempt the exact merge just declared refused. `RunController.isIssueMergeRefused`
+is a guard the follow-up loop consults before its own merge attempt, scoped to both the
+`merge_pr_refused:` terminal-reason prefix and the specific PR number — an issue can have more
+than one open tracked PR over its lifetime, and the guard must not let one PR's refusal shadow, or
+fail to shadow, a different PR on the same issue — so every other blocked outcome keeps releasing
+ownership to the global loop unchanged.
 
 ## 13. CLI
 

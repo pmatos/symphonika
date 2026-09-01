@@ -3063,7 +3063,7 @@ export class RunController {
     );
     this.runStore.updateRunState(input.runId, state);
     this.markNotificationPendingIfNeeded(input.runId, willRetry);
-    await this.applyTerminalLabels({
+    await this.claimLabels.applyTerminal({
       fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: terminal,
@@ -3430,7 +3430,19 @@ export class RunController {
         rollbackDeadline.clear();
       }
       if (runCreated && !(error instanceof RegistryShutdownError)) {
-        await input.onPostCreateClaimFailure(error);
+        // Guarded so a throw from reconciliation itself (e.g. a busy/corrupt
+        // sqlite write right after a successful claim) can never replace the
+        // original error below — losing it would defeat the caller's
+        // `instanceof CapBreachedError | FileOverlapDetectedError | ...`
+        // classification and leave this exact Run row un-reconciled, silently.
+        try {
+          await input.onPostCreateClaimFailure(error);
+        } catch (reconcileError) {
+          this.logger?.error(
+            { err: reconcileError, runId: input.runId },
+            "symphonika post-create claim reconciliation failed"
+          );
+        }
       }
       throw error;
     } finally {

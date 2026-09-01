@@ -1337,6 +1337,68 @@ describe("Run slot deadline", () => {
     }
   });
 
+  it("still throws the original claim failure when post-create reconciliation itself throws", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const controller = makeRunController(
+      {
+        activeRuns,
+        onTerminated: vi.fn(),
+        project,
+        provider,
+        reloader,
+        root,
+        runStore
+      },
+      { createRunId: () => "run-reconcile-throws" }
+    );
+
+    vi.spyOn(activeRuns, "reserveSlot").mockImplementationOnce(() => {
+      throw new Error("temporary slot reservation failure");
+    });
+    // Simulates reconcilePostCreateClaimFailure itself throwing (e.g. a
+    // busy/corrupt sqlite write right after a successful claim): the
+    // guard in claimAndPersistRun's catch block must still surface the
+    // original claim error, not this secondary one.
+    vi.spyOn(runStore, "recordTerminalReason").mockImplementationOnce(() => {
+      throw new Error("boom: secondary reconciliation failure");
+    });
+
+    try {
+      await expect(controller.dispatchOneFresh(pollStatus())).rejects.toThrow(
+        "temporary slot reservation failure"
+      );
+
+      // Reconciliation failed before it reached updateRunState, so the row
+      // is left queued rather than silently vanishing or reporting the
+      // wrong terminal state.
+      expect(runStore.getRun("run-reconcile-throws")).toMatchObject({
+        state: "queued"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("bounds the claim rollback so a hung removeLabelsFromIssue cannot stall dispatchMutex", async () => {
     const root = await makeTempRoot();
     await writeProject(root);

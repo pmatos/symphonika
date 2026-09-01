@@ -91,6 +91,7 @@ from that normalized value so the two paths cannot drift in how they interpret a
 checks or unknown mergeability—but not because its transition table forgot an actionable case.
 Expanded-graph validation enumerates settled checks, concrete mergeability, unresolved-review,
 open/closed, and review-decision signals and rejects the state when no transition matches one of
-those combinations. Artefact-gated waits are exempt because an absent artefact intentionally keeps
-them parked. This turns an otherwise silent permanent PR-signal park into a `workflow validate`,
+those combinations. A wait whose every pull-request-observing transition is artefact-gated is exempt,
+because an absent artefact intentionally keeps it parked; gating one transition among several does
+not exempt the rest. This turns an otherwise silent permanent PR-signal park into a `workflow validate`,
 `doctor`, and reload error.

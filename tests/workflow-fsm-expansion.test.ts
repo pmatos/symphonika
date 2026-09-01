@@ -1049,7 +1049,12 @@ describe("state machine workflow definitions", () => {
         "        - to: ready",
         "          when:",
         "            review_decision: approved",
+        "        - to: autofix",
+        "          when:",
+        "            checks: failure",
         "        - to: ready",
+        "          when:",
+        "            checks: success",
         "    autofix:",
         "      action:",
         "        kind: agent",
@@ -1072,7 +1077,8 @@ describe("state machine workflow definitions", () => {
     expect(waitState?.transitions).toEqual([
       { to: "autofix", when: { has_unresolved_reviews: true } },
       { to: "ready", when: { review_decision: "approved" } },
-      { to: "ready", when: {} }
+      { to: "autofix", when: { checks: "failure" } },
+      { to: "ready", when: { checks: "success" } }
     ]);
   });
 
@@ -1125,6 +1131,8 @@ describe("state machine workflow definitions", () => {
         "          when:",
         "            checks: success",
         "        - to: done",
+        "          when:",
+        "            checks: failure",
         "    done:",
         "      terminal: success",
         ""
@@ -1167,6 +1175,77 @@ describe("state machine workflow definitions", () => {
     const result = await loadExpandedWorkflow(workflowPath);
 
     expect(result.errors).toEqual([]);
+  });
+
+  it("still checks a wait whose artifact gate covers only some transitions", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: partial_artifact_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "            artifact_exists: HANDOFF.md",
+        "        - to: done",
+        "          when:",
+        "            checks: failure",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals checks=success`
+      )
+    );
+  });
+
+  it("does not let an agent-signal transition cover a parked wait", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: agent_signal_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: failure",
+        "        - to: done",
+        "          when:",
+        "            provider_success: true",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals checks=success`
+      )
+    );
   });
 
   it("accepts Oh My Pi for an agent action provider", async () => {

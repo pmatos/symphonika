@@ -1302,7 +1302,7 @@ describe("CLI", () => {
       expect(output.stdout).toBe("");
       expect(output.stderr).toContain("workflow validate failed");
       expect(output.stderr).toContain(
-        "wait state wait_for_pr leaves actionable pull request signals uncovered: checks=success, mergeable=true, has_unresolved_reviews=true, pr_open=true"
+        `workflow state wait_for_pr at ${workflowPath} is a wait with no transition matching pull request signals checks=success, has_unresolved_reviews=true, mergeable=true, pr_open=true, review_decision=none, unresolved_review_threads=1`
       );
     } finally {
       process.exitCode = previousExitCode;

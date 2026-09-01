@@ -7,7 +7,8 @@
 - PR-observing raw-FSM `wait` states must cover every settled actionable combination of checks,
   mergeability, unresolved feedback, PR openness, and review decision. `workflow validate`,
   `doctor`, and reload now reject a transition table that can silently dead-end; pending checks,
-  unknown mergeability, and artefact-gated waits remain parkable. See issue #632.
+  unknown mergeability, and waits whose every PR-observing transition is artefact-gated remain
+  parkable. See issue #632.
 - `builtin:plan-tdd-pr` now gates `planning -> implementing` on the planning agent having written its
   plan file. A planner that returns success without producing `plan_artifact` (new input, default
   `PLAN.md`) takes the template's `blocked` exit instead of advancing to an unplanned implementation

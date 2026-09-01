@@ -173,7 +173,7 @@ describe("projectPullRequestSignals", () => {
     );
 
     expect(loaded.errors).toEqual([]);
-    expect(waitForPr.transitions.at(-1)).toEqual({
+    expect(waitForPr.transitions).toContainEqual({
       to: "autofix",
       when: { has_unresolved_reviews: true }
     });

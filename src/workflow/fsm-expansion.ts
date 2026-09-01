@@ -516,16 +516,20 @@ async function expandRawStateMachineWorkflow(
   };
 }
 
-const actionableChecks = ["success", "failure"] as const;
-const concreteMergeability = [true, false] as const;
-const unresolvedReviewStates = [false, true] as const;
-const pullRequestOpenStates = [true, false] as const;
+// The poll projects settled pull request observations only: it omits the
+// `checks` and `mergeable` keys rather than giving them a value when GitHub
+// reports nothing, so a wait may legitimately park on those. What it must not
+// do is park on a combination the poll does report, which is what this
+// enumerates. `pr_merged` is left out for the same reason -- it is only ever
+// emitted post-merge, so the merged world is not a park to begin with.
+const settledChecks = ["success", "failure"] as const;
 const reviewDecisions = [
   "none",
   "approved",
   "changes_requested",
   "review_required"
 ] as const;
+const bothBooleans = [true, false] as const;
 
 function validateWaitStateCoverage(
   states: ExpandedWorkflowState[],
@@ -533,53 +537,55 @@ function validateWaitStateCoverage(
 ): string[] {
   const errors: string[] = [];
   for (const state of states) {
-    if (
-      state.action?.kind !== "wait" ||
-      state.transitions.some((transition) =>
-        Object.keys(transition.when).some(
-          (key) => workflowPredicateEvaluation(key) === "artifact"
-        )
-      ) ||
-      !state.transitions.some((transition) =>
-        Object.keys(transition.when).some(
-          (key) => workflowPredicateEvaluation(key) === "pr_signal"
-        )
-      )
-    ) {
+    if (state.action?.kind !== "wait" || !observesPullRequestSignals(state)) {
       continue;
     }
 
     const uncovered = firstUncoveredPullRequestSignals(state);
     if (uncovered !== undefined) {
       errors.push(
-        `wait state ${state.id} leaves actionable pull request signals uncovered: checks=${uncovered.checks}, mergeable=${uncovered.mergeable}, has_unresolved_reviews=${uncovered.hasUnresolvedReviews}, pr_open=${uncovered.prOpen}, review_decision=${uncovered.reviewDecision} at ${workflowPath}; add a matching transition`
+        `workflow state ${state.id} at ${workflowPath} is a wait with no transition matching pull request signals ${formatPredicateMap(uncovered)}`
       );
     }
   }
   return errors;
 }
 
-function firstUncoveredPullRequestSignals(state: ExpandedWorkflowState):
-  | {
-      checks: (typeof actionableChecks)[number];
-      hasUnresolvedReviews: boolean;
-      mergeable: boolean;
-      prOpen: boolean;
-      reviewDecision: (typeof reviewDecisions)[number];
-    }
-  | undefined {
-  for (const checks of actionableChecks) {
-    for (const mergeable of concreteMergeability) {
-      for (const hasUnresolvedReviews of unresolvedReviewStates) {
-        for (const prOpen of pullRequestOpenStates) {
+// An artifact-gated transition parks on purpose while its artifact is absent,
+// so a state whose every pull-request-observing transition is artifact-gated is
+// exempt. Gating one transition among several must not exempt the rest.
+function observesPullRequestSignals(state: ExpandedWorkflowState): boolean {
+  const observing = state.transitions.filter((transition) =>
+    Object.keys(transition.when).some(
+      (key) => workflowPredicateEvaluation(key) === "pr_signal"
+    )
+  );
+  return (
+    observing.length > 0 &&
+    !observing.every((transition) =>
+      Object.keys(transition.when).some(
+        (key) => workflowPredicateEvaluation(key) === "artifact"
+      )
+    )
+  );
+}
+
+function firstUncoveredPullRequestSignals(
+  state: ExpandedWorkflowState
+): WorkflowPredicateMap | undefined {
+  for (const checks of settledChecks) {
+    for (const mergeable of bothBooleans) {
+      for (const hasUnresolvedReviews of bothBooleans) {
+        for (const prOpen of bothBooleans) {
           for (const reviewDecision of reviewDecisions) {
             const signals: WorkflowPredicateMap = {
               checks,
               has_unresolved_reviews: hasUnresolvedReviews,
               mergeable,
               pr_open: prOpen,
-              provider_success: true,
               review_decision: reviewDecision,
+              // The projection derives the boolean from this count, so an
+              // inconsistent pair would test a combination it cannot emit.
               unresolved_review_threads: hasUnresolvedReviews ? 1 : 0
             };
             if (
@@ -587,13 +593,7 @@ function firstUncoveredPullRequestSignals(state: ExpandedWorkflowState):
                 transitionMatchesSignals(transition, signals)
               )
             ) {
-              return {
-                checks,
-                hasUnresolvedReviews,
-                mergeable,
-                prOpen,
-                reviewDecision
-              };
+              return signals;
             }
           }
         }
@@ -603,16 +603,17 @@ function firstUncoveredPullRequestSignals(state: ExpandedWorkflowState):
   return undefined;
 }
 
+// A parked wait is re-evaluated from projected pull request signals alone, so a
+// predicate the projection never emits -- an artifact or an agent signal --
+// cannot carry the state out and must not count as covering a combination.
+// Absence from `signals` is what makes those predicates fail to match here.
 function transitionMatchesSignals(
   transition: WorkflowTransition,
   signals: WorkflowPredicateMap
 ): boolean {
-  return Object.entries(transition.when).every(([key, expected]) => {
-    if (workflowPredicateEvaluation(key) === "artifact") {
-      return false;
-    }
-    return signals[key] === expected;
-  });
+  return Object.entries(transition.when).every(
+    ([key, expected]) => signals[key] === expected
+  );
 }
 
 export function resolveWorkflowFormat(

@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { redactAll } from "../src/redaction.js";
+import { redactAll, redactValueDeep } from "../src/redaction.js";
 
 describe("redactAll", () => {
   it("returns the message untouched when there is nothing to redact", () => {
@@ -123,5 +123,52 @@ describe("redactAll invariants", () => {
         }
       )
     );
+  });
+});
+
+describe("redactValueDeep", () => {
+  it("redacts a secret that appears as an object property name", () => {
+    expect(
+      redactValueDeep({ "tracker-token": true }, ["tracker-token"])
+    ).toEqual({
+      "[REDACTED]": true
+    });
+  });
+
+  it("redacts a secret embedded inside a longer property name", () => {
+    expect(
+      redactValueDeep({ "x-tracker-token-y": 1 }, ["tracker-token"])
+    ).toEqual({
+      "x-[REDACTED]-y": 1
+    });
+  });
+
+  it("redacts a numeric leaf whose serialized form is a secret", () => {
+    expect(redactValueDeep({ password: 123456 }, ["123456"])).toEqual({
+      password: "[REDACTED]"
+    });
+  });
+
+  it("redacts a boolean leaf whose serialized form is a secret", () => {
+    expect(redactValueDeep({ flag: true }, ["true"])).toEqual({
+      flag: "[REDACTED]"
+    });
+  });
+
+  it("leaves numbers and booleans untouched when they do not match a secret", () => {
+    expect(redactValueDeep({ count: 42, ok: false }, ["unrelated"])).toEqual({
+      count: 42,
+      ok: false
+    });
+  });
+
+  it("preserves a protocol discriminator field that happens to contain a secret", () => {
+    // redactValueDeep itself has no notion of "protocol discriminator" — this
+    // documents that persistProviderEvent (run-controller.ts) must keep the
+    // unredacted event for lifecycle interpretation and redact only the
+    // persisted copy, rather than trying to carve out specific keys here.
+    expect(redactValueDeep({ type: "process_exit" }, ["process"])).toEqual({
+      type: "[REDACTED]_exit"
+    });
   });
 });

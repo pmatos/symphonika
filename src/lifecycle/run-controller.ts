@@ -46,6 +46,11 @@ import type {
   ProviderEvent
 } from "../provider.js";
 import type { WatchdogConfig } from "../reload.js";
+import {
+  secretsForEmailConfig,
+  type EmailNotificationConfig
+} from "../notifications/config.js";
+import { redactValueDeep } from "../redaction.js";
 import type { CancelReason, ProgressEdge, RunStore } from "../run-store.js";
 import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
@@ -252,6 +257,11 @@ export type RunControllerOptions = {
   // gates (reconcileWaitingRuns, stale-claims) can still consult it. See
   // ADR 0052.
   dispatchMutex?: AsyncMutex;
+  // Required, not optional: this loader supplies half the Project credential
+  // inventory, and a caller that omits it silently drops the SMTP password from
+  // every evidence boundary a Run writes. That silent-omission shape is exactly
+  // what issue #612 was. Return undefined for "no email sink configured".
+  emailConfigLoader: () => EmailNotificationConfig | undefined;
   env?: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi;
   // Returns the global concurrency cap (undefined = unbounded). Per-project
@@ -319,6 +329,11 @@ type RunRuntime = {
   attemptId: string;
   attemptNumber: number;
   events: NormalizedProviderEvent[];
+  // Resolved once at attempt start and reused for every evidence boundary
+  // (stderr tee, each event, the terminal-reason classification) so a
+  // Service Config reload mid-attempt cannot leave one boundary scrubbing a
+  // different credential set than another. See SPEC.md §6.
+  redactSecrets: readonly string[];
 };
 
 type StartedAttempt = {
@@ -568,6 +583,7 @@ export class RunController {
   private readonly configDir: string;
   private readonly createRunId: () => string;
   private readonly dispatchMutex: AsyncMutex;
+  private readonly emailConfigLoader: () => EmailNotificationConfig | undefined;
   private readonly env: NodeJS.ProcessEnv;
   private readonly fileOverlapGuard: DispatchFileOverlapGuard;
   private readonly githubIssuesApi: GitHubIssuesApi;
@@ -606,6 +622,7 @@ export class RunController {
     this.configDir = options.configDir;
     this.createRunId = options.createRunId ?? randomUUID;
     this.dispatchMutex = options.dispatchMutex ?? createAsyncMutex();
+    this.emailConfigLoader = options.emailConfigLoader;
     this.env = options.env ?? process.env;
     this.fileOverlapGuard = new DispatchFileOverlapGuard({
       activeRuns: options.activeRuns,
@@ -3246,7 +3263,8 @@ export class RunController {
     const runtime: RunRuntime = {
       attemptId,
       attemptNumber: input.attemptNumber,
-      events: []
+      events: [],
+      redactSecrets: this.redactionInventory(input.repository.token)
     };
     let attemptCreated = false;
     let started: StartedAttempt | undefined;
@@ -3504,7 +3522,6 @@ export class RunController {
         provider: input.provider,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
-        repositoryToken: input.repository.token,
         runId: input.runId,
         runtime
       });
@@ -3604,6 +3621,7 @@ export class RunController {
           cancelRequested,
           ...(caughtError === undefined ? {} : { error: caughtError }),
           events: runtime.events,
+          redactSecrets: runtime.redactSecrets,
           ...(started === undefined
             ? {}
             : {
@@ -4074,7 +4092,6 @@ export class RunController {
     provider: AgentProvider;
     providerCommand: string;
     providerName: AgentProviderName;
-    repositoryToken: string;
     runId: string;
     runtime: RunRuntime;
   }): Promise<void> {
@@ -4106,23 +4123,24 @@ export class RunController {
         // Providers run full-permission and inherit this process's env
         // (provider-process.ts spawns with `{ ...process.env }`), so an agent
         // that echoes its GitHub token would otherwise persist it verbatim
-        // into an artifact the dashboard serves. SPEC.md §6. The wider gap —
-        // this token is not scrubbed from a Run's own raw/normalized evidence
-        // either, and the Run path resolves no other secrets — is issue #612.
-        stderrRedactSecrets: [input.repositoryToken],
+        // into an artifact the dashboard serves. Use the same complete
+        // inventory as the JSONL and terminal-reason boundaries, snapshotted
+        // once for the whole attempt (runtime.redactSecrets). SPEC.md §6.
+        stderrRedactSecrets: input.runtime.redactSecrets,
         workspacePath: input.evidence.workspacePath
       })) {
         sequence += 1;
-        await this.persistProviderEvent({
+        const normalized = await this.persistProviderEvent({
           attemptId: input.attemptId,
           event,
           normalizedLogPath: input.evidence.normalizedLogPath,
           rawLogPath: input.evidence.rawLogPath,
+          redactSecrets: input.runtime.redactSecrets,
           runId: input.runId,
           sequence
         });
-        if (event.normalized !== undefined) {
-          input.runtime.events.push(event.normalized);
+        if (normalized !== undefined) {
+          input.runtime.events.push(normalized);
         }
       }
     } finally {
@@ -4144,25 +4162,55 @@ export class RunController {
     event: ProviderEvent;
     normalizedLogPath: string;
     rawLogPath: string;
+    redactSecrets: readonly string[];
     runId: string;
     sequence: number;
-  }): Promise<void> {
+  }): Promise<NormalizedProviderEvent | undefined> {
+    const raw = redactValueDeep(input.event.raw, input.redactSecrets);
+    // Redact only the copies that get persisted (JSONL + SQLite). The
+    // returned value feeds runtime.events for classifyFailure's lifecycle
+    // interpretation, which matches on protocol discriminators like
+    // `type: "process_exit"`; deep-redacting that object in place could
+    // rewrite a discriminator into something unmatchable if a configured
+    // secret happens to be a substring of it (e.g. an SMTP password of
+    // "process"). classifyFailure already redacts its derived terminal
+    // reason before that reason is persisted, so nothing unredacted reaches
+    // evidence through this path.
+    const redactedNormalized =
+      input.event.normalized === undefined
+        ? undefined
+        : redactValueDeep(input.event.normalized, input.redactSecrets);
     await Promise.all([
-      appendJsonl(input.rawLogPath, input.event.raw),
-      ...(input.event.normalized === undefined
+      appendJsonl(input.rawLogPath, raw),
+      ...(redactedNormalized === undefined
         ? []
-        : [appendJsonl(input.normalizedLogPath, input.event.normalized)])
+        : [appendJsonl(input.normalizedLogPath, redactedNormalized)])
     ]);
-    if (input.event.normalized === undefined) {
-      return;
+    if (redactedNormalized === undefined) {
+      return undefined;
     }
     this.runStore.recordProviderEvent({
       attemptId: input.attemptId,
-      normalized: input.event.normalized,
-      raw: input.event.raw,
+      normalized: redactedNormalized,
+      raw,
       runId: input.runId,
       sequence: input.sequence
     });
+    return input.event.normalized;
+  }
+
+  // The Project credential inventory for one execution: the effective tracker
+  // token plus the resolved SMTP password when an email sink is configured
+  // (SPEC.md §6). Resolved once per attempt (see RunRuntime.redactSecrets) so
+  // every evidence boundary scrubs the same execution-time credentials even
+  // if a Service Config reload changes the inventory mid-attempt.
+  private redactionInventory(repositoryToken: string): string[] {
+    // Not deduped here: every consumer funnels through secretSpans, which
+    // already collapses duplicates.
+    return [
+      repositoryToken,
+      ...secretsForEmailConfig(this.emailConfigLoader(), this.env)
+    ];
   }
 
   // Independent, best-effort add: called alongside the sym:* label in both

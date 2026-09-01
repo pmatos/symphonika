@@ -881,6 +881,7 @@ function makeRunController(
     activeRuns: deps.activeRuns,
     agentProviders: { codex: deps.provider },
     configDir: deps.root,
+    emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret-token" },
     ...(overrides.createRunId === undefined
       ? {}

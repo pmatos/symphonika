@@ -512,6 +512,7 @@ export async function startDaemon(
     // and reconcile/stale-claim gates (which consult held/tryAcquire) all
     // serialize on the same primitive. See ADR 0052.
     dispatchMutex,
+    emailConfigLoader: () => runtimeConfig.emailConfig(),
     githubIssuesApi,
     globalConcurrencyLoader,
     hostPressureGate,

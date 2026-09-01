@@ -463,6 +463,9 @@ describe("daemon dispatch", () => {
 
     try {
       await waitForRun(daemon.url, "running");
+      await vi.waitFor(() => {
+        expect(codexProvider.runAttempt).toHaveBeenCalledOnce();
+      });
 
       stopPromise = daemon.stop();
       await vi.waitFor(

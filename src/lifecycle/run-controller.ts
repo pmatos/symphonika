@@ -1270,9 +1270,10 @@ export class RunController {
       // mirroring runFreshLifecycle. Without this, runAttemptLifecycle sees
       // input.respectsIssueLabels === undefined and recomputes it from the
       // workflow kind; for a non-raw_fsm (markdown-compatible) PR follow-up
-      // retry that resolves to `true`, and attachProvider flips the reserved
-      // slot's `false` back to label-controlled — re-opening the
-      // eligibility_loss cancellation storm this change closes. See ADR 0044.
+      // retry that resolves to `true`, and the attempt's metadata handoff
+      // flips the reserved slot's `false` back to label-controlled —
+      // re-opening the eligibility_loss cancellation storm this change
+      // closes. See ADR 0044.
       ...(payload.respectsIssueLabels === undefined
         ? {}
         : { respectsIssueLabels: payload.respectsIssueLabels }),
@@ -2135,7 +2136,7 @@ export class RunController {
         // inside runAttemptLifecycle. Its fallback computes the same answer,
         // but only once the attempt is already under way — so reserveSlot
         // registers a raw-FSM advance as label-controlled, and a reconcile
-        // landing in the window before attachProvider cancels it as
+        // landing before the attempt updates the slot metadata cancels it as
         // ELIGIBILITY_LOSS. A raw FSM legitimately removes `agent-ready` as
         // it works, so that window is reachable on the expected path. The old
         // review dispatch set this flag explicitly for the same reason; the
@@ -3102,7 +3103,8 @@ export class RunController {
       // Reserve the in-flight slot BEFORE mutex release so subsequent picks
       // (per-issue reservation + Slice-2 cap counts) observe the run. The
       // provider cancel handler is bound later in runAttemptLifecycle via
-      // attachProvider once provider.validate has succeeded. See ADR 0052.
+      // attachProvider once every pre-provider await has settled. See ADR
+      // 0052 / ADR 0093.
       this.activeRuns.reserveSlot({
         cancel: deadline.abortPreparation,
         issueNumber: input.issue.number,
@@ -3389,13 +3391,14 @@ export class RunController {
       // state. Without covering the initial state, reconcileActiveRuns re-checks
       // labels while the provider is still draining, sees `agent-ready` gone,
       // and cancels the finished run as ELIGIBILITY_LOSS — orphaning its PR
-      // (issue #258). The unregister-in-finally ordering means the in-flight
-      // entry only exists while the provider is live, so gating on "provider
-      // exited" cannot close the window; label-immunity is the fix. Computed
-      // here so both activeRuns.attachProvider and scheduleNext (in finally)
-      // carry the same guarantee, including into retry scheduling. Markdown
-      // compatibility-graph workflows keep their label-driven behavior unless
-      // the caller explicitly owns continuation eligibility (PR Follow-up).
+      // (issue #258). The unregister-in-finally ordering keeps the in-flight
+      // entry through provider teardown, so gating on "provider exited"
+      // cannot close the window; label-immunity is the fix. Computed
+      // here so both the in-flight metadata update and scheduleNext (in
+      // finally) carry the same guarantee, including into retry scheduling.
+      // Markdown compatibility-graph workflows keep their label-driven
+      // behavior unless the caller explicitly owns continuation eligibility
+      // (PR Follow-up).
       // CLOSED_ISSUE cancellation still applies. See ADR 0046.
       respectsIssueLabels =
         input.respectsIssueLabels ??
@@ -3477,35 +3480,28 @@ export class RunController {
         state: "running"
       });
       attemptCreated = true;
-      // Slot was reserved upstream in claimAndPersistRun. Bind the live
-      // provider cancel handler (and update respectsIssueLabels once the
-      // workflow kind is known) onto the existing entry.
-      this.activeRuns.attachProvider(input.runId, {
-        cancel: () => input.provider.cancel(input.runId),
-        provider: input.provider,
+      // Preserve the raw-FSM label-immunity handoff at its existing point,
+      // independently of the provider cancellation handoff. A raw-FSM agent
+      // may remove agent-ready as part of its work (issue #258), while the
+      // preparation handler must remain installed through every await before
+      // provider execution begins.
+      this.activeRuns.updateRespectsIssueLabels(
+        input.runId,
         respectsIssueLabels
-      });
-
-      // A cancel (watchdog no_progress, operator, closed_issue, eligibility_loss)
-      // can land DURING the potentially long workspace prep above — after the
-      // one-shot cancelBeforeAttach check. The attachProvider hand-off just fired
-      // provider.cancel against a provider that runAttempt has not started yet, so
-      // it was a no-op, and the latched cancelRequested suppresses any later
-      // cancel. Re-check here and skip launching a provider we could no longer
-      // stop; the finally block preserves the stale/no_progress verdict (or
-      // classifies the cancellation). See ADR 0052 / ADR 0054.
-      const cancelDuringPrepare = this.activeRuns.getInFlight(input.runId);
-      if (cancelDuringPrepare?.cancelRequested === true) {
-        throw new Error(
-          `run ${input.runId} was cancelled before provider start`
-        );
-      }
-
+      );
       try {
-        headShaAtAttemptStart = await inspectWorkspaceHead({
-          workspacePath: started.evidence.workspacePath
-        });
-      } catch {
+        headShaAtAttemptStart = await input.deadline.race(
+          inspectWorkspaceHead({
+            workspacePath: started.evidence.workspacePath
+          })
+        );
+      } catch (error) {
+        // A deadline or preparation cancellation must unwind the slot. Only a
+        // settled Git inspection failure is deferred until clean provider
+        // exit for workspace_inspection_failed classification.
+        if (input.deadline.signal?.aborted === true) {
+          throw error;
+        }
         // Defer this deterministic inspection failure until a clean provider
         // exit. Cancellation, input-required, and provider failures must retain
         // their own higher-priority classification.
@@ -3515,6 +3511,7 @@ export class RunController {
       await this.iterateAttempt({
         attemptId,
         attemptNumber: input.attemptNumber,
+        deadline: input.deadline,
         evidence: started.evidence,
         issue: input.issue,
         prompt: started.prompt,
@@ -3534,7 +3531,8 @@ export class RunController {
       // unregister is unconditional here. The previous `if (registered)`
       // guard would leak the slot if a throw happened between reserveSlot
       // and attachProvider (loadWorkflow / prepareIssueWorkspace / validate /
-      // sym:running label / createAttempt). See ADR 0052.
+      // sym:running label / createAttempt / HEAD inspection / scratch
+      // creation). See ADR 0052 / ADR 0093.
       // The deadline race can reject before AbortSignal-driven Git teardown
       // and owned-path cleanup settle. Keep the slot until that teardown has
       // actually stopped, matching Routine Firing deadline semantics. Only
@@ -4085,6 +4083,7 @@ export class RunController {
   private async iterateAttempt(input: {
     attemptId: string;
     attemptNumber: number;
+    deadline: RunSlotDeadline;
     evidence: AttemptEvidence;
     issue: IssueSnapshot;
     prompt: string;
@@ -4102,12 +4101,32 @@ export class RunController {
     // Allocated per attempt and removed below, so the agent's build output
     // lands on disk instead of a RAM-backed /tmp and cannot outlive the
     // attempt that produced it. See ADR 0088.
-    const scratchPath = await createProviderScratch(
+    const scratchOperation = createProviderScratch(
       this.stateRoot,
       scratchIdentity
     );
+    let scratchPath: string | undefined;
     let sequence = 0;
     try {
+      scratchPath = await input.deadline.race(scratchOperation);
+
+      // This is the last pre-provider await. A cancellation during HEAD
+      // inspection or scratch creation fired the preparation handler and is
+      // latched on the slot; observe it before replacing that handler so a
+      // provider process is never launched after cancellation.
+      const cancelBeforeProviderStart = this.activeRuns.getInFlight(
+        input.runId
+      );
+      if (cancelBeforeProviderStart?.cancelRequested === true) {
+        throw new Error(
+          `run ${input.runId} was cancelled before provider start`
+        );
+      }
+      this.activeRuns.attachProvider(input.runId, {
+        cancel: () => input.provider.cancel(input.runId),
+        provider: input.provider
+      });
+
       for await (const event of input.provider.runAttempt({
         branchName: input.evidence.branchName,
         issue: input.issue,
@@ -4146,14 +4165,23 @@ export class RunController {
     } finally {
       // Best effort: failing to delete temporary files must never mask the
       // attempt's own outcome. The startup sweep reclaims what is left.
-      await this.bestEffort(
-        () => removeProviderScratch(this.stateRoot, scratchIdentity),
-        {
-          issueNumber: input.issue.number,
-          operation: "removeProviderScratch",
-          runId: input.runId
-        }
-      );
+      const removeScratch = (): Promise<void> =>
+        this.bestEffort(
+          () => removeProviderScratch(this.stateRoot, scratchIdentity),
+          {
+            issueNumber: input.issue.number,
+            operation: "removeProviderScratch",
+            runId: input.runId
+          }
+        );
+      if (scratchPath !== undefined) {
+        await removeScratch();
+      } else {
+        // The deadline race deliberately abandons a stalled mkdir so it
+        // cannot retain capacity. If that mkdir later settles, reclaim its
+        // directory asynchronously without extending slot ownership.
+        void scratchOperation.then(removeScratch).catch(() => undefined);
+      }
     }
   }
 

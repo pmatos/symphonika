@@ -1,6 +1,14 @@
 import { execFile } from "node:child_process";
-import { constants } from "node:fs";
-import { mkdir, mkdtemp, open, rm, unlink, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  open,
+  rm,
+  unlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -24,9 +32,35 @@ import type {
 } from "../src/workspace.js";
 import { abortSignalMatcher } from "./helpers/abort-signal.js";
 
+const fsOverrides = vi.hoisted(() => ({
+  mkdir: undefined as
+    ((target: string) => Promise<"handled" | "passthrough">) | undefined
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...original,
+    mkdir: async (...args: Parameters<typeof original.mkdir>) => {
+      const override = fsOverrides.mkdir;
+      if (
+        override !== undefined &&
+        (await override(String(args[0]))) === "handled"
+      ) {
+        return undefined;
+      }
+      const mkdirOriginal = original.mkdir as (
+        ...parameters: Parameters<typeof original.mkdir>
+      ) => ReturnType<typeof original.mkdir>;
+      return await mkdirOriginal(...args);
+    }
+  };
+});
+
 const tempRoots: string[] = [];
 
 afterEach(async () => {
+  fsOverrides.mkdir = undefined;
   vi.useRealTimers();
   await Promise.all(
     tempRoots
@@ -488,6 +522,168 @@ describe("Run slot deadline", () => {
     } finally {
       releaseRunningWrite();
       await vi.advanceTimersByTimeAsync(60_000);
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("releases the slot without launching a provider when the deadline expires during HEAD inspection", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const fifoPath = path.join(root, "head-inspection.fifo");
+    const inspectionStartedPath = path.join(root, "head-inspection.started");
+    await promisify(execFile)("mkfifo", [fifoPath]);
+    const binPath = path.join(root, "bin");
+    const gitPath = path.join(binPath, "git");
+    await mkdir(binPath, { recursive: true });
+    await writeFile(
+      gitPath,
+      [
+        "#!/bin/sh",
+        `touch '${inspectionStartedPath}'`,
+        `read -r _line < '${fifoPath}'`,
+        "printf '%s\\n' '0123456789abcdef0123456789abcdef01234567'"
+      ].join("\n")
+    );
+    await chmod(gitPath, 0o755);
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      { createRunId: () => "run-head-inspection-timeout" }
+    );
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binPath}${path.delimiter}${originalPath ?? ""}`;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T11:30:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await vi.waitFor(() => {
+        expect(existsSync(inspectionStartedPath)).toBe(true);
+      });
+      expect(activeRuns.countInFlight()).toBe(1);
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      expect(activeRuns.countInFlight()).toBe(0);
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-head-inspection-timeout"
+      });
+      expect(runStore.getRun("run-head-inspection-timeout")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(provider.cancel).not.toHaveBeenCalled();
+      expect(onTerminated).toHaveBeenCalledOnce();
+    } finally {
+      process.env.PATH = originalPath;
+      vi.useRealTimers();
+      await unblockFifo(fifoPath);
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("releases the slot without launching a provider when the deadline expires during scratch creation", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      { createRunId: () => "run-scratch-timeout" }
+    );
+
+    const expectedScratchPath = path.join(
+      root,
+      ".symphonika",
+      "scratch",
+      "run-scratch-timeout-attempt-1"
+    );
+    let scratchCreationStarted = false;
+    let releaseScratchCreation: () => void = () => undefined;
+    const scratchCreationStalled = new Promise<void>((resolve) => {
+      releaseScratchCreation = resolve;
+    });
+    fsOverrides.mkdir = async (target) => {
+      if (path.resolve(target) !== expectedScratchPath) {
+        return "passthrough";
+      }
+      scratchCreationStarted = true;
+      await scratchCreationStalled;
+      return "handled";
+    };
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T11:45:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await vi.waitFor(() => {
+        expect(scratchCreationStarted).toBe(true);
+      });
+      expect(activeRuns.countInFlight()).toBe(1);
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      expect(activeRuns.countInFlight()).toBe(0);
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-scratch-timeout"
+      });
+      expect(runStore.getRun("run-scratch-timeout")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(provider.cancel).not.toHaveBeenCalled();
+      expect(onTerminated).toHaveBeenCalledOnce();
+    } finally {
+      releaseScratchCreation();
+      fsOverrides.mkdir = undefined;
       await dispatch.catch(() => undefined);
       runStore.close();
     }

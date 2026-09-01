@@ -93,6 +93,14 @@ export const WATCHDOG_TERMINAL_REASONS = [
 
 export type WatchdogTerminalReason = (typeof WATCHDOG_TERMINAL_REASONS)[number];
 
+// Makes the Watchdog verdicts first-winner: a row that already carries one
+// refuses a competing verdict, while a transient attempt reason stays
+// replaceable. Derived from WATCHDOG_TERMINAL_REASONS so a new verdict cannot
+// be added without joining the guard.
+const UNCLAIMED_WATCHDOG_VERDICT_GUARD = `and (terminal_reason is null or terminal_reason not in (${WATCHDOG_TERMINAL_REASONS.map(
+  (reason) => `'${reason}'`
+).join(", ")}))`;
+
 // Once stop() records daemon_shutdown, later cancellation writers (an
 // in-flight reconcile or a UI cancel during the shutdown drain) must not
 // overwrite it — the shutdown contract requires the reason to stick for
@@ -1645,16 +1653,17 @@ export class RunStore {
     );
   }
 
-  markRunWatchdogStale(
-    runId: string,
-    terminalReason: WatchdogTerminalReason,
-    updatedAt = timestamp(),
-    watchdogGeneration?: number
-  ): boolean {
-    const generationGuard =
-      watchdogGeneration === undefined
-        ? ""
-        : "and watchdog_generation = @watchdog_generation";
+  // The single Watchdog stale verdict write. Both entry points share the
+  // column set and the first-winner guard; they differ only in whether the
+  // row must currently read `running` and whether an attempt generation
+  // fences the write.
+  private casRunWatchdogStale(input: {
+    requireRunningState: boolean;
+    runId: string;
+    terminalReason: WatchdogTerminalReason;
+    updatedAt: string;
+    watchdogGeneration?: number;
+  }): boolean {
     const result = this.database
       .prepare(
         [
@@ -1666,18 +1675,86 @@ export class RunStore {
           "notification_error = null,",
           "updated_at = @updated_at",
           "where id = @id",
-          "and state = 'running'",
+          input.requireRunningState ? "and state = 'running'" : "",
           "and cancel_requested = 0",
-          generationGuard
+          UNCLAIMED_WATCHDOG_VERDICT_GUARD,
+          input.watchdogGeneration === undefined
+            ? ""
+            : "and watchdog_generation = @watchdog_generation"
+        ].join(" ")
+      )
+      .run({
+        id: input.runId,
+        terminal_reason: input.terminalReason,
+        updated_at: input.updatedAt,
+        ...(input.watchdogGeneration === undefined
+          ? {}
+          : { watchdog_generation: input.watchdogGeneration })
+      });
+    if (result.changes === 0) {
+      return false;
+    }
+    this.recordRunTransition(input.runId, "stale", input.updatedAt);
+    return true;
+  }
+
+  markRunWatchdogStale(
+    runId: string,
+    terminalReason: WatchdogTerminalReason,
+    updatedAt = timestamp(),
+    watchdogGeneration?: number
+  ): boolean {
+    return this.casRunWatchdogStale({
+      requireRunningState: true,
+      runId,
+      terminalReason,
+      updatedAt,
+      ...(watchdogGeneration === undefined ? {} : { watchdogGeneration })
+    });
+  }
+
+  // The Run wall-clock cap protects the resource represented by an in-memory
+  // slot, not one fixed durable state. In particular a retry reserves a slot
+  // while its reused row still reads `failed`, so this write carries no
+  // Run-state and no generation predicate. The caller must synchronously
+  // prove slot ownership immediately before this CAS. The terminal-reason
+  // guard makes competing Watchdog verdicts first-winner, while an earlier
+  // transient attempt reason remains replaceable by the Run-scoped timeout.
+  markSlotOwnedRunTimedOut(runId: string, updatedAt = timestamp()): boolean {
+    return this.casRunWatchdogStale({
+      requireRunningState: false,
+      runId,
+      terminalReason: "run_timeout",
+      updatedAt
+    });
+  }
+
+  // Attempt setup can race a timeout CAS and overwrite only `state` (for
+  // example stale -> preparing_workspace or stale -> running). Preserve the
+  // first-winner reason while restoring the state after setup unwinds. The
+  // CAS already made notification evidence pending, so this repair must leave
+  // its current state alone: a sender may have completed it in the meantime.
+  reassertRunWatchdogStale(
+    runId: string,
+    terminalReason: WatchdogTerminalReason,
+    updatedAt = timestamp()
+  ): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update runs set",
+          "state = 'stale',",
+          "failure_classification = 'deterministic',",
+          "updated_at = @updated_at",
+          "where id = @id",
+          "and terminal_reason = @terminal_reason",
+          "and cancel_requested = 0"
         ].join(" ")
       )
       .run({
         id: runId,
         terminal_reason: terminalReason,
-        updated_at: updatedAt,
-        ...(watchdogGeneration === undefined
-          ? {}
-          : { watchdog_generation: watchdogGeneration })
+        updated_at: updatedAt
       });
     if (result.changes === 0) {
       return false;
@@ -4509,6 +4586,16 @@ export class RunStore {
       });
     }
     return result;
+  }
+
+  // The Run Slot Deadline needs only the wall-clock origin, and reads it
+  // while the dispatch mutex is held. `getRun` would additionally hydrate
+  // every attempt (each stat-ing its artifacts) and every state transition.
+  getRunCreatedAt(id: string): string | undefined {
+    const row = this.database
+      .prepare("select created_at from runs where id = ?")
+      .get(id) as { created_at: string } | undefined;
+    return row?.created_at;
   }
 
   getRun(id: string): RunDetail | undefined {

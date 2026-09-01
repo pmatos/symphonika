@@ -131,6 +131,24 @@ done
       );
       await waitForPath(startedPath);
       const fetchHelperPid = await readPid(helperPidPath);
+
+      const queuedController = new AbortController();
+      const queuedFetch = rejectionOf(
+        prepareRoutineWorkspace({
+          ...fetchInput,
+          firingId: "01MABCDEFGHJKMNPQRSTVWXYZ12",
+          signal: queuedController.signal
+        })
+      );
+      queuedController.abort();
+      const queuedError = await settleWithin(queuedFetch, 2_000);
+      expect(queuedError).toMatchObject({
+        name: "AbortError"
+      });
+      // Cancelling a waiter must not cancel or bypass the fetch that owns the
+      // serialized cache turn.
+      expect(await readPid(helperPidPath)).toBe(fetchHelperPid);
+
       fetchController.abort();
 
       const fetchError = await settleWithin(interruptedFetch, 2_000);

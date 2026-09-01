@@ -1113,8 +1113,9 @@ direct-child abort behavior. Git stdout and stderr retention remains capped at 1
 exceeding that limit stops the POSIX process group before returning the max-buffer failure. After
 escalation, Linux process groups containing only zombies count as stopped because none of their
 members can execute; delayed PID 1 reaping does not replace the original abort outcome with a
-cleanup failure. A caller queued on the shared per-cache fetch serializer checks the signal after
-reaching the head of the queue and does not begin new Git work after its deadline.
+cleanup failure. A caller queued on the shared per-cache fetch serializer stops waiting as soon as
+its signal aborts without removing its place from the serialization chain; after the preceding
+owner settles, the aborted turn exits before Git and only then exposes the cache to its successor.
 
 First-time bare-cache creation clones into a unique sibling staging directory and atomically renames
 the completed repository to the shared cache path. Failed or aborted clones remove only their owned
@@ -1462,7 +1463,9 @@ On Watchdog no-progress termination:
 
 On Watchdog convergence-budget termination, the same steps apply with
 `terminal_reason = "no_convergence"`, and on Watchdog wall-clock termination with
-`terminal_reason = "run_timeout"`.
+`terminal_reason = "run_timeout"`. Wall-clock termination may occur before provider start: the
+Run's Slot Deadline aborts cancellable preparation or label I/O, releases capacity after preparation
+settles, and then applies the same terminal labels best-effort.
 
 On stale startup state:
 
@@ -1861,11 +1864,13 @@ first idle observation rather than from process boot. It is cleared on entry to 
 unsampled wait excursion does not accrue idle time). When a Run begins any new attempt, its
 transition to `preparing_workspace` advances a per-Run Watchdog generation and atomically clears the
 latest sample and remembered turn-id set while preserving append-only sample history. Every
-Watchdog mutation is conditional on the `running` state and generation captured before sampling,
-so an old attempt's tick that finishes asynchronous log or Workspace I/O after the transition is
-discarded instead of recreating data or terminating the new attempt. A transient retry therefore
-exposes no current Progress Signal during workspace preparation and starts every attempt-local
-baseline and idle grace window fresh when sampling resumes.
+attempt-scoped sample, remembered-turn mutation, and sampled verdict is conditional on the
+`running` state and generation captured before sampling, so an old attempt's tick that finishes
+asynchronous log or Workspace I/O after the transition is discarded instead of recreating data or
+terminating the new attempt. A transient retry therefore exposes no current Progress Signal during
+workspace preparation and starts every attempt-local baseline and idle grace window fresh when
+sampling resumes. The Run-scoped Slot Deadline below is the deliberate exception: it is conditional
+on actual in-memory slot ownership rather than a durable state or attempt generation.
 
 Sampling reads the Normalized Event Log only forward of the stored byte offset and walks the
 Workspace tree once. A transient retry writes a new per-attempt log path; its first sample reads
@@ -1931,36 +1936,53 @@ finishing, which satisfies the liveness rule on every tick. The budget is checke
 clock, honours the same per-Project override scope as `grace_minutes`, and like `no_progress` is
 deterministic rather than a transient retry reason. See ADR 0086.
 
-Ahead of both, the Watchdog enforces a **wall-clock cap**: once a sampled Run's age — `now` minus
-its `runs.created_at`, the instant it claimed its Issue — reaches `watchdog.max_run_minutes`
-(default 360; `0` disables it), the Run transitions to `stale` with
-`terminal_reason = "run_timeout"` and its provider is cancelled the same way. This is the only
-bound that does not depend on what the Run is doing: a Run trickling real output indefinitely
-advances a liveness signal on every tick and can stay far below the convergence budget, so neither
-of the other two rules can ever fire, while it holds a `global.max_in_flight` slot and its share of
-the provider memory budget for as long as it lives (issue #605). Unlike the attempt-scoped
-Progress Signal the cap is Run-scoped: its origin is the Run row's claim, so it accumulates across
-workspace preparation and every retry attempt of that Run, and a transient retry does not reset it.
-Enforcement, however, is bounded by the sampling scope above: the verdict is reached on a sampled
-Run, and sampling is `running`-only. A Run wedged *before* its provider starts — a hung clone in
-workspace preparation, `provider.validate`, or the `sym:running` label write — is therefore not
-reached by the cap, even though it holds a `global.max_in_flight` slot from the moment it is
-claimed. Terminating such a Run would not release that slot either: the slot is freed only when the
-lifecycle's `finally` unregisters it, which cannot run until the wedged call returns, and a
-reserved-but-unattached slot's cancel handler is a no-op. Closing that window needs a cancellable
-preparation deadline rather than a wider Watchdog state scope, and is tracked separately. It does
-not span a Run *chain* — a continuation,
-an FSM state advance, and a shutdown resume each write their own `runs` row and so each start a
-fresh cap. A Run whose `created_at` cannot be parsed is treated as having an unknown age and is
-never terminated by the cap. Clock skew that places `created_at` in the future produces a negative
-elapsed measurement, which cannot meet a positive cap until the actual deadline. The matching
-`runRemainingMs` operator value is intentionally unclamped: it may exceed `maxRunMs` for a
-future-dated claim and becomes negative after an overrun until the next Watchdog tick, because it
-means time until `created_at + maxRunMs`, not a fraction of the configured cap remaining. The cap
-is checked before the convergence budget and the idle clock, so a Run that has overrun several
-bounds at once reports the outermost one; it honours the same per-Project override scope as
-`grace_minutes`, and like the other two verdicts is deterministic rather than a transient retry
-reason. See ADR 0089.
+Ahead of both, the Watchdog enforces a **wall-clock cap**: once a Run's age — `now` minus its
+`runs.created_at`, the instant it claimed its Issue — reaches `watchdog.max_run_minutes` (default
+360; `0` disables it), the Run transitions to `stale` with `terminal_reason = "run_timeout"` and
+its active work is cancelled. This is the only bound that does not depend on what the Run is doing:
+a Run trickling real output indefinitely advances a liveness signal on every tick and can stay far
+below the convergence budget, so neither of the other two rules can ever fire, while it holds a
+`global.max_in_flight` slot and its share of the provider memory budget for as long as it lives
+(issue #605). Unlike the attempt-scoped Progress Signal the cap is Run-scoped: its origin is the Run
+row's claim, so it accumulates across workspace preparation and every retry attempt of that Run,
+and a transient retry does not reset it.
+
+Enforcement has two cooperating paths. The sampled Watchdog checks `running` Runs first on each
+reconciliation pass. Independently, every fresh or retry slot reservation snapshots the current
+effective policy and arms a **Run Slot Deadline** for the remaining time since the original claim.
+The deadline is sourced from the in-memory slot, not a fixed state list: a fresh row can still read
+`queued`, preparation uses `preparing_workspace`, and a retry reserves capacity while its reused row
+can still read `failed`. It threads an AbortSignal through Workspace preparation and its Git process
+groups, and through retry-claim and pre-provider running-label writes. The lifecycle waits for
+aborted Workspace preparation and owned-path cleanup to settle before unregistering the slot, and
+for nothing else: the setup that follows preparation cannot observe the abort, so waiting on it
+would let a stalled filesystem retain capacity past the cap. Once a provider is attached, the same
+expiry requests provider cancellation. A bounded claim write that never confirms leaves an
+indeterminate `sym:claimed`, so the Issue's claim is best-effort rolled back rather than left for
+the stale-claim sweep to escalate to `sym:stale`.
+
+The timeout transition is a first-winner compare-and-set. Its caller must synchronously prove slot
+ownership; the database update is state-independent and generation-independent, requires
+`cancel_requested = 0`, and refuses to replace an existing Watchdog terminal reason. It writes
+deterministic `run_timeout` plus pending notification evidence immediately. A sampled verdict and a
+slot deadline can therefore race without duplicate termination notifications. If setup overwrites
+only the stale row's `state` after the CAS, lifecycle finalization reasserts `stale` while preserving
+the winning reason and the notification's current delivery state; a notification already marked
+sent is not re-enqueued by the repair.
+
+The cap does not span a Run *chain* — a continuation, an FSM state advance, and a shutdown resume
+each write their own `runs` row and so each start a fresh cap. Delayed retries own no slot and no
+timer; if the original cap expires while delayed, the next reservation expires immediately. A Run
+whose `created_at` cannot be parsed is treated as having an unknown age and is never terminated by
+the cap. Clock skew that places `created_at` in the future produces a negative elapsed measurement,
+which cannot meet a positive cap until the actual deadline. The matching `runRemainingMs` operator
+value is intentionally unclamped: it may exceed `maxRunMs` for a future-dated claim and becomes
+negative after an overrun until the next Watchdog tick, because it means time until
+`created_at + maxRunMs`, not a fraction of the configured cap remaining. The sampled cap is checked
+before the convergence budget and idle clock, so a Run that has overrun several bounds at once
+reports the outermost one; it honours the same per-Project override scope as `grace_minutes`, and
+like the other two verdicts is deterministic rather than a transient retry reason. See ADR 0089 and
+ADR 0093.
 
 ### 12.5 PR Follow-up
 

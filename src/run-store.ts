@@ -3163,12 +3163,19 @@ export class RunStore {
         .prepare(
           [
             "update routine_fanout_targets set",
+            // A leg held for an unavailable provider whose provider is then
+            // repaired is capacity-blocked, not provider-blocked: it returns
+            // to `pending` and drops the stale hold reason, so the deferral
+            // is visible to the dispatch read and to the restart-recompute
+            // guard that keeps its clock event parked (ADR 0093).
+            "disposition = 'pending',",
+            "hold_reason = null,",
             "deferred_reason = @reason,",
             "deferred_since = coalesce(deferred_since, @deferred_at),",
             "deferred_attempts = deferred_attempts + 1,",
             "updated_at = @updated_at",
             "where fanout_id = @fanout_id and project_name = @project_name",
-            "and disposition = 'pending'"
+            "and disposition in ('pending', 'held')"
           ].join(" ")
         )
         .run({

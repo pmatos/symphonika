@@ -327,6 +327,75 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("returns a provider-held leg to a capacity deferral once its provider is repaired", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "alpha"
+        }
+      ]);
+      const scheduledAt =
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+          ?.nextFireAt ?? "";
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt
+      });
+      store.deferRoutineFanoutTarget({
+        deferredAt: "2026-05-22T10:00:00.000Z",
+        fanoutId: "fanout-1",
+        name: "refactor-audit",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+      // A reload takes the provider away mid-wait, then gives it back while
+      // the caps are still full.
+      store.holdRoutineFanoutTarget({
+        fanoutId: "fanout-1",
+        projectName: "alpha",
+        reason: "provider_not_registered: omp"
+      });
+
+      expect(
+        store.deferRoutineFanoutTarget({
+          deferredAt: "2026-05-22T10:05:00.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "alpha",
+          reason: "concurrency_cap"
+        })
+      ).toBe(true);
+
+      expect(store.getRoutineFanout("fanout-1")?.targets[0]).toMatchObject({
+        deferredAttempts: 2,
+        deferredReason: "concurrency_cap",
+        disposition: "pending",
+        holdReason: null
+      });
+      // Back to `pending` means the wait is visible again to the dispatch
+      // read and to the restart-recompute guard.
+      expect(
+        store.getRoutineTargetDeferral({
+          name: "refactor-audit",
+          projectName: "alpha",
+          scheduledAt
+        })
+      ).toMatchObject({ attempts: 2, reason: "concurrency_cap" });
+    } finally {
+      store.close();
+    }
+  });
+
   it("counts a missed clock event as a failed run once and advances the schedule", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

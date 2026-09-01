@@ -78,7 +78,7 @@ export async function removeProviderScratch(
  * `scratchPath`: TMPDIR is what POSIX tooling reads, while Node's
  * `os.tmpdir()` and cross-platform tools commonly consult TMP or TEMP first.
  *
- * When global concurrency is bounded, make and `cmake --build` also get the
+ * When `globalMaxInFlight` is given, make and `cmake --build` also get the
  * smaller of this attempt's CPU share and its share of the generated provider
  * slice's hard memory budget. The 1.5 GiB per-job allowance is the measured
  * peak from the C++ build incident behind #643. With an unbounded global cap,
@@ -86,10 +86,8 @@ export async function removeProviderScratch(
  */
 export function providerScratchEnvironment(
   scratchPath: string | undefined,
-  capacity?: {
-    globalMaxInFlight: number;
-    hostParallelism?: number;
-  }
+  globalMaxInFlight?: number,
+  hostParallelism?: number
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   if (scratchPath !== undefined) {
@@ -97,11 +95,8 @@ export function providerScratchEnvironment(
     environment.TMP = scratchPath;
     environment.TMPDIR = scratchPath;
   }
-  if (capacity !== undefined) {
-    const concurrentAttempts = Math.max(
-      1,
-      Math.floor(capacity.globalMaxInFlight)
-    );
+  if (globalMaxInFlight !== undefined) {
+    const concurrentAttempts = Math.max(1, Math.floor(globalMaxInFlight));
     const memoryShare = Math.max(
       1,
       Math.floor(
@@ -112,7 +107,7 @@ export function providerScratchEnvironment(
     );
     const hostJobs = Math.max(
       1,
-      Math.floor(capacity.hostParallelism ?? availableParallelism())
+      Math.floor(hostParallelism ?? availableParallelism())
     );
     const cpuShare = Math.max(1, Math.floor(hostJobs / concurrentAttempts));
     const buildParallelism = Math.min(cpuShare, memoryShare);

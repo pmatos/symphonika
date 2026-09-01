@@ -126,9 +126,7 @@ export function createClaudeProvider(
       const child = spawnProviderProcess(command, input.workspacePath, {
         ...providerScratchEnvironment(
           input.scratchPath,
-          input.globalMaxInFlight === undefined
-            ? undefined
-            : { globalMaxInFlight: input.globalMaxInFlight }
+          input.globalMaxInFlight
         ),
         ...(input.routine === undefined
           ? {}

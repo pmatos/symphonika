@@ -150,12 +150,7 @@ export function createOmpProvider(
       const child = spawnProviderProcess(
         command,
         input.workspacePath,
-        providerScratchEnvironment(
-          input.scratchPath,
-          input.globalMaxInFlight === undefined
-            ? undefined
-            : { globalMaxInFlight: input.globalMaxInFlight }
-        )
+        providerScratchEnvironment(input.scratchPath, input.globalMaxInFlight)
       );
       activeRun.child = child;
       const stderrCapture = attachProviderStderrLog(

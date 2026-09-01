@@ -1373,6 +1373,29 @@ export class RunController {
     );
   }
 
+  // Shared tail of every "terminalize this waiting Run as blocked" path (ADR
+  // 0058): record the actionable reason, flip RunState, and label the issue.
+  // Callers that also need recordWorkflowTerminal (a raw-FSM terminal node, or
+  // this method's own merge_pr caller) run that first, since only they know
+  // the terminal state id and its own transition reason.
+  private async terminalizeBlocked(input: {
+    issueNumber: number;
+    reason: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    this.runStore.recordTerminalReason(
+      input.runId,
+      input.reason,
+      "deterministic"
+    );
+    this.runStore.updateRunState(input.runId, "blocked");
+    await this.markIssueBlocked({
+      issueNumber: input.issueNumber,
+      repository: input.repository
+    });
+  }
+
   private async terminateMergePrRefusal(input: {
     issueNumber: number;
     message: string;
@@ -1386,15 +1409,11 @@ export class RunController {
       terminalStateId: input.stateId,
       transitionReason: input.transitionReason
     });
-    this.runStore.recordTerminalReason(
-      input.runId,
-      `merge_pr_refused: PR #${input.prNumber}: ${input.message}`,
-      "deterministic"
-    );
-    this.runStore.updateRunState(input.runId, "blocked");
-    await this.markIssueBlocked({
+    await this.terminalizeBlocked({
       issueNumber: input.issueNumber,
-      repository: input.repository
+      reason: `merge_pr_refused: PR #${input.prNumber}: ${input.message}`,
+      repository: input.repository,
+      runId: input.runId
     });
   }
 
@@ -1488,6 +1507,16 @@ export class RunController {
           "symphonika merge_pr re-eval: merge disabled by policy"
         );
       } else if (pullRequestReadyToMerge(pullRequestState, policy)) {
+        const terminateRefusal = (message: string, transitionReason: string) =>
+          this.terminateMergePrRefusal({
+            issueNumber: input.issueNumber,
+            message,
+            prNumber: tracked.prNumber,
+            repository,
+            runId,
+            stateId: waitState.id,
+            transitionReason
+          });
         try {
           const merged = await tryMergePullRequest(this.githubIssuesApi, {
             expectedHeadSha: pullRequestState.headSha,
@@ -1529,15 +1558,7 @@ export class RunController {
             );
           } else {
             const message = "GitHub tracker does not expose mergePullRequest";
-            await this.terminateMergePrRefusal({
-              issueNumber: input.issueNumber,
-              message,
-              prNumber: tracked.prNumber,
-              repository,
-              runId,
-              stateId: waitState.id,
-              transitionReason: `merge_pr unavailable: ${message}`
-            });
+            await terminateRefusal(message, `merge_pr unavailable: ${message}`);
             this.logger?.warn(
               { runId },
               "symphonika merge_pr: tracker has no mergePullRequest support"
@@ -1548,15 +1569,10 @@ export class RunController {
           const message =
             error instanceof Error ? error.message : String(error);
           if (isPermanentMergeRefusal(error)) {
-            await this.terminateMergePrRefusal({
-              issueNumber: input.issueNumber,
+            await terminateRefusal(
               message,
-              prNumber: tracked.prNumber,
-              repository,
-              runId,
-              stateId: waitState.id,
-              transitionReason: `merge_pr refused for PR #${tracked.prNumber}: ${message}`
-            });
+              `merge_pr refused for PR #${tracked.prNumber}: ${message}`
+            );
             this.logger?.warn(
               { err: error, prNumber: tracked.prNumber, runId },
               "symphonika merge_pr permanently refused"
@@ -1726,15 +1742,11 @@ export class RunController {
         // provider-attempt path (ADR 0058) so the issue doesn't stay
         // eligible for redispatch under a stale "succeeded" verdict.
         if (next.terminal === "blocked") {
-          this.runStore.recordTerminalReason(
-            runId,
-            "workflow_terminal_blocked",
-            "deterministic"
-          );
-          this.runStore.updateRunState(runId, "blocked");
-          await this.markIssueBlocked({
+          await this.terminalizeBlocked({
             issueNumber: refreshed.number,
-            repository
+            reason: "workflow_terminal_blocked",
+            repository,
+            runId
           });
           return;
         }
@@ -1866,15 +1878,11 @@ export class RunController {
       // branch above — same ADR 0058 contract, reached via a direct
       // terminate decision instead of an advance-to-terminal one.
       if (decision.terminal === "blocked") {
-        this.runStore.recordTerminalReason(
-          runId,
-          "workflow_terminal_blocked",
-          "deterministic"
-        );
-        this.runStore.updateRunState(runId, "blocked");
-        await this.markIssueBlocked({
+        await this.terminalizeBlocked({
           issueNumber: refreshed.number,
-          repository
+          reason: "workflow_terminal_blocked",
+          repository,
+          runId
         });
         return;
       }

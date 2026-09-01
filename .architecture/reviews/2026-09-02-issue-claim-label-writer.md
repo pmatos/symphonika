@@ -233,4 +233,102 @@ extraction is behaviour-preserving.
 
 ## Design
 
-_Written in step 4, appended after this section is committed._
+Design-it-twice: three interfaces were produced by parallel sub-agents (each briefed to a
+different target), then a fourth sub-agent that authored none of them adjudicated against
+depth → locality → seam placement → test surface → blast radius, under a hard
+behaviour-preservation constraint.
+
+### Winner — Design C (collapsed ports-and-adapters)
+
+A `ClaimLabelWriter` class constructed once by `RunController` with the label-writing API
+narrowed at the construction seam; four public methods and a strictly behaviour-preserving
+body.
+
+```ts
+// src/lifecycle/claim-label-writer.ts — exports ONLY these two symbols
+export type ApplyLabelsInput = { /* moved verbatim from run-controller.ts:369 */ };
+
+export class ClaimLabelWriter {
+  constructor(input: {
+    api: Required<Pick<GitHubIssuesApi, "addLabelsToIssue" | "removeLabelsFromIssue">>;
+    logger?: Logger;
+  });
+  applyTerminal(input: ApplyLabelsInput): Promise<void>;               // was applyTerminalLabels (6 sites)
+  markFailed(input: { issueNumber; repository }): Promise<void>;        // direct at :3273, :4951
+  markBlocked(input: { issueNumber; repository }): Promise<void>;       // direct at :1428
+  release(input: { issueNumber; phase; repository }): Promise<void>;    // 6 sites; phase union inline
+  // private markNeedsHuman(...)  — internal fallback, never called directly
+  // private bestEffort(...)      — 5-line copy; RunController keeps its own (15 sites, ~6 move)
+}
+```
+
+`RunController` constructs it beside its `DispatchFileOverlapGuard` (the house pattern for a
+constructor-injected collaborator holding `api` + optional `logger`):
+
+```ts
+this.claimLabels = new ClaimLabelWriter({
+  api: this.githubIssuesApi as LabelWritingGitHubIssuesApi,
+  ...(this.logger === undefined ? {} : { logger: this.logger })
+});
+```
+
+**What it hides / depth** — behind four names it hides the entire `sym:*` decision matrix
+(cancelled-vs-terminal fork, `CLOSED_ISSUE`/`ELIGIBILITY_LOSS` cleanup, the `input_required`
+always-terminal special case, the `failed && !willRetry && !fsmContinuing` gate and its
+`isBlockedOutcome ? blocked : failed` dispatch), the `sym:human-needed` fallback wiring, all
+eight `sym:*` literal strings, and the best-effort-vs-throw asymmetry. **Locality** — a
+change to terminal-label ordering becomes a one-file edit. **Test surface** — the matrix is
+exercised by constructing the writer with a two-method fake and asserting the label
+sequence; no `RunController`, `RunStore`, provider, or dispatch.
+
+**Why it won.** Criterion 1 (depth): C exports 2 symbols, B exports 4 (it moves
+`LabelWritingGitHubIssuesApi` + `isLabelWritingGitHubIssuesApi` into the module and re-imports
+them into RC, where they still serve ~11 non-writer cast/guard sites) — same behaviour
+hidden, smaller interface for C. Criterion 4 (test surface) is decisive: `GitHubIssuesApi`'s
+only **required** member is `listOpenIssues`, so B's exported `LabelWritingGitHubIssuesApi`
+(`= GitHubIssuesApi & {…}`) drags `listOpenIssues` into the writer's dependency contract and
+forces every test double to stub a polling method the writer never calls; C's unexported
+`Required<Pick<…>>` alias asks for exactly the two label methods. C also relocates strictly
+less code (criterion 5) and localises the type/guard beside their real consumers
+(criterion 2). Seam placement (criterion 3) ties — both correctly refuse a hypothetical
+`LabelStore` port (one production adapter is a pure method-rename; the sibling
+`shutdown-resume.ts`/`stale-claims.ts` are out of scope and keep their own posture).
+
+### Runner-up design — Design B (optimise-for-common-caller)
+
+Same four-method surface and the same safe narrow-cast posture, but it exports
+`LabelWritingGitHubIssuesApi` + `isLabelWritingGitHubIssuesApi` from the module and re-imports
+them into RC. It loses only by leaking the availability/guard concern (an RC wiring detail,
+used at ~11 non-writer sites) into the writer's public surface, and by widening the test
+double to satisfy `listOpenIssues`. A close second — identical behaviour, larger interface.
+
+### Eliminated — Design A (minimal surface), on the behaviour gate
+
+A merged `markFailed`/`markBlocked` into `markAttention(kind)` and, crucially, swapped the
+unconditional cast for the sibling `tryAddLabelsToIssue`/`tryRemoveLabelsFromIssue` helpers.
+Those helpers return `false` **silently** on an absent method (the "…not available" warn A
+cited lives in the *caller*, `stale-claims.ts`, not the helper). So on the currently-dead
+absent-method branch, A would change observable behaviour: the `markFailed` add would fall
+through to the success `info` log and **drop the `sym:human-needed` escalation**, and the
+best-effort removes would lose their warn+context. Behaviour-preserving extraction forbids
+that, even on a dead branch — A is out.
+
+### Non-negotiable behaviour-preservation checklist (carried into step 5)
+
+1. Six literal log strings kept verbatim (the `sym:failed`/`sym:blocked` info+warn pair and
+   the `sym:human-needed` info+warn pair), no interpolation.
+2. `markNeedsHuman` fires on **both** paths of `markFailed`/`markBlocked` (after the catch
+   warn, and after the success info); it does **not** escalate further on its own failure.
+3. Adds are **not** `bestEffort`-wrapped (so their catch-driven fallback fires); only the
+   `sym:running`/`sym:failed`/`sym:blocked`/`sym:human-needed` removes and `release`'s
+   `sym:claimed` remove are, each with context `{ issueNumber, label, operation: "removeLabel", phase }`.
+4. Cancelled order: remove `sym:running` → (`CLOSED_ISSUE`|`ELIGIBILITY_LOSS`) release claim
+   → (`CLOSED_ISSUE` only) remove `sym:failed`→`sym:blocked`→`sym:human-needed`, then return.
+5. Non-cancelled: remove `sym:running` first; `input_required` → `markFailed` and return;
+   else gate on `failed && !willRetry && !fsmContinuing`, then `isBlockedOutcome ? markBlocked : markFailed`.
+6. Spread `...input.repository` verbatim (carries `signal?`); preserve await ordering.
+7. RC keeps its own `bestEffort`, its `scheduleNext` bail-out ternary, and
+   `rollbackScheduledRunClaimLabel` (delegates to `release`).
+8. The existing `githubIssuesApi.*.mock.calls` assertions (daemon-dispatch, dispatch-retry/
+   continuation/cancellation, daemon-issue-labels) stay green — the writer forwards to the
+   same injected object.

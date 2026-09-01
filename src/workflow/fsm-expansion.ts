@@ -578,10 +578,19 @@ function rejectUnboundedReviewThreadCounts(
 // regardless of what the transitions themselves name -- a state whose only
 // pr_signal predicate lives in complete_when must still be validated, or a
 // transition table that can never actually be reached (because complete_when
-// never lets a real observation past it) reads as fully covered.
+// never lets a real observation past it) reads as fully covered. The same
+// artifact exemption still applies here: a complete_when-gated state whose
+// only transition(s) are artifact-gated legitimately parks on the missing
+// artifact too, and a zero-transition state must still be flagged (it can
+// never leave once complete_when passes).
 function observesPullRequestSignals(state: ExpandedWorkflowState): boolean {
   if (gatesOn(state.completeWhen, "pr_signal")) {
-    return true;
+    return (
+      state.transitions.length === 0 ||
+      state.transitions.some(
+        (transition) => !gatesOn(transition.when, "artifact")
+      )
+    );
   }
   return state.transitions.some(
     (transition) =>

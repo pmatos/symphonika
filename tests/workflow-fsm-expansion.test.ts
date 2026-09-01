@@ -1311,6 +1311,81 @@ describe("state machine workflow definitions", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("allows an artifact-gated wait to park under a complete_when PR gate", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_artifact_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "            artifact_exists: HANDOFF.md",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("still checks a complete_when-gated wait whose artifact gate covers only some transitions", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_partial_artifact_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "            artifact_exists: HANDOFF.md",
+        "        - to: merged",
+        "          when:",
+        "            checks: success",
+        "            mergeable: true",
+        "    done:",
+        "      terminal: success",
+        "    merged:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // The artifact-gated transition never counts as coverage; the plain
+    // transition only covers mergeable: true, so mergeable: false (still
+    // reachable, since complete_when only narrows on checks) is uncovered.
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals`
+      )
+    );
+  });
+
   it("rejects a wait transition that gates on a positive unresolved_review_threads count", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

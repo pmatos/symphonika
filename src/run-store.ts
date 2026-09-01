@@ -2771,33 +2771,104 @@ export class RunStore {
     // A leg carrying a capacity deferral is settled as `missed` rather than
     // as an uncounted `target_unavailable` skip: the Routine was waiting for
     // a slot and then lost its target, which is still a run that did not
-    // happen and must reach the fan-out failure count (ADR 0093).
-    const result = this.database
-      .prepare(
+    // happen and must reach the fan-out failure count (ADR 0093). Such a leg
+    // also carries a *counted* reason, so it writes the same latest-skip and
+    // counter evidence the canonical miss path writes — otherwise the
+    // operator counters would contradict the fan-out they summarize. The
+    // clock is deliberately left alone: this sweep only ever matches a
+    // Target whose Routine is already inactive or whose clock has already
+    // moved on (a cron edit installs the replacement itself).
+    const settle = this.database.transaction(() => {
+      const now = timestamp();
+      const legs = this.database
+        .prepare(
+          [
+            "select t.fanout_id, t.project_name, t.deferred_reason, f.routine_name",
+            "from routine_fanout_targets t",
+            "join routine_fanouts f on f.id = t.fanout_id",
+            "where t.disposition in ('pending', 'held')",
+            "and f.notification_state = 'pending'",
+            "and not exists (",
+            "select 1 from routines r",
+            "where r.name = f.routine_name",
+            "and r.project_name = t.project_name",
+            "and r.state = 'active'",
+            "and r.next_fire_at = f.scheduled_at",
+            ")"
+          ].join(" ")
+        )
+        .all() as Array<{
+        deferred_reason: RoutineDeferralReason | null;
+        fanout_id: string;
+        project_name: string;
+        routine_name: string;
+      }>;
+      const settleLeg = this.database.prepare(
         [
-          "update routine_fanout_targets",
-          "set disposition = case when deferred_reason is null then 'skipped' else 'missed' end,",
-          "hold_reason = null,",
-          "skip_reason = coalesce(deferred_reason, 'target_unavailable'),",
-          "updated_at = ?",
-          "where disposition in ('pending', 'held')",
-          "and exists (",
-          "select 1 from routine_fanouts writable_fanout",
-          "where writable_fanout.id = routine_fanout_targets.fanout_id",
-          "and writable_fanout.notification_state = 'pending'",
-          ")",
-          "and not exists (",
-          "select 1 from routine_fanouts f",
-          "join routines r on r.name = f.routine_name",
-          "and r.project_name = routine_fanout_targets.project_name",
-          "where f.id = routine_fanout_targets.fanout_id",
-          "and r.state = 'active'",
-          "and r.next_fire_at = f.scheduled_at",
-          ")"
+          "update routine_fanout_targets set",
+          "disposition = @disposition, hold_reason = null,",
+          "skip_reason = @skip_reason, updated_at = @updated_at",
+          "where fanout_id = @fanout_id and project_name = @project_name",
+          "and disposition in ('pending', 'held')"
         ].join(" ")
-      )
-      .run(timestamp());
-    return result.changes;
+      );
+      const recordSkipEvidence = this.database.prepare(
+        [
+          "update routines set",
+          "last_attempted_at = @attempted_at,",
+          "last_skip_reason = @reason,",
+          "last_skip_at = @attempted_at,",
+          "updated_at = @updated_at",
+          "where project_name = @project_name and name = @name"
+        ].join(" ")
+      );
+      const countSkip = this.database.prepare(
+        [
+          "insert into routine_skip_counts (project_name, routine_name, reason, skipped_at, count)",
+          "select @project_name, @routine_name, @reason, @skipped_at, 1",
+          "where exists (",
+          "select 1 from routines where project_name = @project_name and name = @routine_name",
+          ")",
+          "on conflict(project_name, routine_name, reason, skipped_at)",
+          "do update set count = count + 1"
+        ].join(" ")
+      );
+      let settled = 0;
+      for (const leg of legs) {
+        const changes = settleLeg.run({
+          disposition: leg.deferred_reason === null ? "skipped" : "missed",
+          fanout_id: leg.fanout_id,
+          project_name: leg.project_name,
+          skip_reason: leg.deferred_reason ?? "target_unavailable",
+          updated_at: now
+        }).changes;
+        if (changes === 0) {
+          continue;
+        }
+        settled += changes;
+        if (leg.deferred_reason === null) {
+          continue;
+        }
+        // A Routine removed outright leaves no row to attribute evidence to;
+        // the fan-out leg is then the only record, which is why the counter
+        // insert is guarded on the row still existing.
+        recordSkipEvidence.run({
+          attempted_at: now,
+          name: leg.routine_name,
+          project_name: leg.project_name,
+          reason: leg.deferred_reason,
+          updated_at: now
+        });
+        countSkip.run({
+          project_name: leg.project_name,
+          reason: leg.deferred_reason,
+          routine_name: leg.routine_name,
+          skipped_at: now
+        });
+      }
+      return settled;
+    });
+    return settle();
   }
 
   markRoutinesInactiveForProject(

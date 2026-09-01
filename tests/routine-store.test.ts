@@ -1095,6 +1095,14 @@ describe("RunStore routines", () => {
       // happen; reporting it as an uncounted skip is what mailed "0 failed".
       expect(fanout?.failureCount).toBe(1);
       expect(fanout?.subject).toContain("1 failed");
+      // The leg carries a counted reason, so the operator counters must say
+      // the same thing the fan-out does.
+      const swept = store.listRoutines({ includeInactive: true })[0];
+      expect(swept).toMatchObject({
+        lastSkipReason: "concurrency_cap",
+        skipCounts24h: { concurrency_cap: 1 }
+      });
+      expect(swept?.lastSkipAt).not.toBeNull();
     } finally {
       store.close();
     }

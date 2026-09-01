@@ -45,6 +45,8 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
+import type { EmailNotificationConfig } from "../notifications/config.js";
+import { redactValueDeep, secretsForEmailConfig } from "../redaction.js";
 import type { CancelReason, ProgressEdge, RunStore } from "../run-store.js";
 import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
@@ -250,6 +252,7 @@ export type RunControllerOptions = {
   // gates (reconcileWaitingRuns, stale-claims) can still consult it. See
   // ADR 0052.
   dispatchMutex?: AsyncMutex;
+  emailConfigLoader?: () => EmailNotificationConfig | undefined;
   env?: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi;
   // Returns the global concurrency cap (undefined = unbounded). Per-project
@@ -453,6 +456,8 @@ export class RunController {
   private readonly configDir: string;
   private readonly createRunId: () => string;
   private readonly dispatchMutex: AsyncMutex;
+  private readonly emailConfigLoader:
+    (() => EmailNotificationConfig | undefined) | undefined;
   private readonly env: NodeJS.ProcessEnv;
   private readonly fileOverlapGuard: DispatchFileOverlapGuard;
   private readonly githubIssuesApi: GitHubIssuesApi;
@@ -486,6 +491,7 @@ export class RunController {
     this.configDir = options.configDir;
     this.createRunId = options.createRunId ?? randomUUID;
     this.dispatchMutex = options.dispatchMutex ?? createAsyncMutex();
+    this.emailConfigLoader = options.emailConfigLoader;
     this.env = options.env ?? process.env;
     this.fileOverlapGuard = new DispatchFileOverlapGuard({
       activeRuns: options.activeRuns,
@@ -3238,10 +3244,12 @@ export class RunController {
       // !parkedAsWaiting. The unconditional unregister above already
       // released the in-flight slot. See ADR 0052 — slot-leak fix.
       if (!parkedAsWaiting && !preservedWatchdogTerminal) {
+        const redactSecrets = this.resolveRedactSecrets(input.repository.token);
         const terminal = await classifyFailure({
           cancelRequested,
           ...(caughtError === undefined ? {} : { error: caughtError }),
           events: runtime.events,
+          redactSecrets,
           ...(started === undefined
             ? {}
             : {
@@ -3735,6 +3743,8 @@ export class RunController {
       scratchIdentity
     );
     let sequence = 0;
+    const redactSecrets = (): string[] =>
+      this.resolveRedactSecrets(input.repositoryToken);
     try {
       for await (const event of input.provider.runAttempt({
         branchName: input.evidence.branchName,
@@ -3751,23 +3761,23 @@ export class RunController {
         // Providers run full-permission and inherit this process's env
         // (provider-process.ts spawns with `{ ...process.env }`), so an agent
         // that echoes its GitHub token would otherwise persist it verbatim
-        // into an artifact the dashboard serves. SPEC.md §6. The wider gap —
-        // this token is not scrubbed from a Run's own raw/normalized evidence
-        // either, and the Run path resolves no other secrets — is issue #612.
-        stderrRedactSecrets: [input.repositoryToken],
+        // into an artifact the dashboard serves. Use the same complete
+        // inventory as the JSONL and terminal-reason boundaries. SPEC.md §6.
+        stderrRedactSecrets: redactSecrets(),
         workspacePath: input.evidence.workspacePath
       })) {
         sequence += 1;
-        await this.persistProviderEvent({
+        const normalized = await this.persistProviderEvent({
           attemptId: input.attemptId,
           event,
           normalizedLogPath: input.evidence.normalizedLogPath,
           rawLogPath: input.evidence.rawLogPath,
+          redactSecrets: redactSecrets(),
           runId: input.runId,
           sequence
         });
-        if (event.normalized !== undefined) {
-          input.runtime.events.push(event.normalized);
+        if (normalized !== undefined) {
+          input.runtime.events.push(normalized);
         }
       }
     } finally {
@@ -3789,25 +3799,44 @@ export class RunController {
     event: ProviderEvent;
     normalizedLogPath: string;
     rawLogPath: string;
+    redactSecrets: readonly string[];
     runId: string;
     sequence: number;
-  }): Promise<void> {
+  }): Promise<NormalizedProviderEvent | undefined> {
+    const raw = redactValueDeep(input.event.raw, input.redactSecrets);
+    const normalized =
+      input.event.normalized === undefined
+        ? undefined
+        : (redactValueDeep(
+            input.event.normalized,
+            input.redactSecrets
+          ) as NormalizedProviderEvent);
     await Promise.all([
-      appendJsonl(input.rawLogPath, input.event.raw),
-      ...(input.event.normalized === undefined
+      appendJsonl(input.rawLogPath, raw),
+      ...(normalized === undefined
         ? []
-        : [appendJsonl(input.normalizedLogPath, input.event.normalized)])
+        : [appendJsonl(input.normalizedLogPath, normalized)])
     ]);
-    if (input.event.normalized === undefined) {
-      return;
+    if (normalized === undefined) {
+      return undefined;
     }
     this.runStore.recordProviderEvent({
       attemptId: input.attemptId,
-      normalized: input.event.normalized,
-      raw: input.event.raw,
+      normalized,
+      raw,
       runId: input.runId,
       sequence: input.sequence
     });
+    return normalized;
+  }
+
+  private resolveRedactSecrets(repositoryToken: string): string[] {
+    return [
+      ...new Set([
+        repositoryToken,
+        ...secretsForEmailConfig(this.emailConfigLoader?.(), this.env)
+      ])
+    ];
   }
 
   // Independent, best-effort add: called alongside the sym:* label in both

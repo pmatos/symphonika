@@ -1,3 +1,5 @@
+import type { EmailNotificationConfig } from "./notifications/config.js";
+
 // A provider's own output can echo back environment values it inherited
 // (full-permission execution, see CLAUDE.md) — persisted evidence and any
 // terminal reason derived from it must never retain the raw SMTP password or
@@ -35,6 +37,38 @@ export function redactAll(
     cursor = span.end;
   }
   return redacted + message.slice(cursor);
+}
+
+export function redactValueDeep(
+  value: unknown,
+  redactSecrets: readonly string[]
+): unknown {
+  if (typeof value === "string") {
+    return redactAll(value, redactSecrets);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactValueDeep(entry, redactSecrets));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        redactValueDeep(entry, redactSecrets)
+      ])
+    );
+  }
+  return value;
+}
+
+export function secretsForEmailConfig(
+  config: EmailNotificationConfig | undefined,
+  env: NodeJS.ProcessEnv
+): string[] {
+  if (config === undefined || config.smtpUsername === undefined) {
+    return [];
+  }
+  const secret = env[config.smtpPasswordEnv];
+  return secret === undefined || secret.length === 0 ? [] : [secret];
 }
 
 export type SecretSpan = { end: number; start: number };

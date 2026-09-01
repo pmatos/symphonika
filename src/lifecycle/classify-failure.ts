@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 
 import type { NormalizedProviderEvent } from "../provider.js";
 import { withProviderStderrTail } from "../providers/provider-stderr.js";
+import { redactAll } from "../redaction.js";
 import type { FailureClassification } from "../run-store.js";
 import { WorkspacePreparationError } from "../workspace.js";
 
@@ -12,6 +13,7 @@ export type ClassifyFailureInput = {
   cancelRequested: boolean;
   error?: unknown;
   events: NormalizedProviderEvent[];
+  redactSecrets?: readonly string[];
   // Evidence path for the attempt's provider stderr tee. The unclean-exit
   // reasons below carry no explanation of their own, so the provider's last
   // words are appended to them when it wrote any.
@@ -41,6 +43,16 @@ export type WorkspaceHeadInspectionInput = {
 };
 
 export async function classifyFailure(
+  input: ClassifyFailureInput
+): Promise<ClassifiedTerminal> {
+  const terminal = await classifyFailureUnredacted(input);
+  return {
+    ...terminal,
+    reason: redactAll(terminal.reason, input.redactSecrets ?? [])
+  };
+}
+
+async function classifyFailureUnredacted(
   input: ClassifyFailureInput
 ): Promise<ClassifiedTerminal> {
   if (input.cancelRequested) {

@@ -38,7 +38,11 @@ import type { NotificationDeliveryTracker } from "../notifications/delivery-trac
 import { deliverRoutineFanoutNotification } from "../notifications/routine-fanout.js";
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
-import { redactAll } from "../redaction.js";
+import {
+  redactAll,
+  redactValueDeep,
+  secretsForEmailConfig
+} from "../redaction.js";
 import type { RoutineFanoutHoldReason, RunStore } from "../run-store.js";
 import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
@@ -2514,24 +2518,6 @@ function redactRoutineOutcomeClaim(
   };
 }
 
-function redactValueDeep(value: unknown, redactSecrets: string[]): unknown {
-  if (typeof value === "string") {
-    return redactAll(value, redactSecrets);
-  }
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactValueDeep(entry, redactSecrets));
-  }
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [
-        key,
-        redactValueDeep(entry, redactSecrets)
-      ])
-    );
-  }
-  return value;
-}
-
 // The tracker token is env-backed and resolved per call rather than stored,
 // mirroring captureRoutineGithubSnapshot. Absent tracker or unset variable
 // yields nothing to redact.
@@ -2568,17 +2554,6 @@ function resolveRedactSecrets(
     return [];
   }
   return secretsForEmailConfig(notification.resolveConfig(), env);
-}
-
-function secretsForEmailConfig(
-  config: EmailNotificationConfig | undefined,
-  env: NodeJS.ProcessEnv
-): string[] {
-  if (config === undefined || config.smtpUsername === undefined) {
-    return [];
-  }
-  const secret = env[config.smtpPasswordEnv];
-  return secret === undefined || secret.length === 0 ? [] : [secret];
 }
 
 function stringField(value: unknown, key: string): string | undefined {

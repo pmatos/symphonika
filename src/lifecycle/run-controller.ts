@@ -126,7 +126,11 @@ import {
   removeProviderScratch
 } from "./provider-scratch.js";
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
-import { buildCapReachedReason } from "./terminal-reason.js";
+import {
+  buildCapReachedReason,
+  buildMergePrRefusedReason,
+  isMergePrRefusedReason
+} from "./terminal-reason.js";
 
 export type WorkflowSnapshot = {
   body: string;
@@ -1374,6 +1378,24 @@ export class RunController {
     );
   }
 
+  // A sibling to isIssueOwnedByWorkflow, for a case that predicate cannot
+  // see: terminalizing a Run releases FSM ownership (current_state_id goes
+  // null, state leaves "waiting") in the same update that asserts operator
+  // attention via sym:blocked/sym:human-needed. For an ordinary blocked
+  // outcome that release is correct — the global PR follow-up loop should
+  // pick up review-followup duties. For a deterministic merge refusal it is
+  // not: re-attempting the exact merge this Run just declared refused would
+  // contradict the terminalization. Scoped to the `merge_pr_refused:`
+  // terminal reason so every other blocked outcome keeps today's contract.
+  isIssueMergeRefused(input: {
+    issueNumber: number;
+    projectName: string;
+  }): boolean {
+    return isMergePrRefusedReason(
+      this.runStore.mostRecentRunTerminalReason(input)
+    );
+  }
+
   // Shared tail of every "terminalize this waiting Run as blocked" path (ADR
   // 0058): record the actionable reason, flip RunState, and label the issue.
   // A caller that also needs recordWorkflowTerminal runs that first, since
@@ -1411,7 +1433,7 @@ export class RunController {
     });
     await this.terminalizeBlocked({
       issueNumber: input.issueNumber,
-      reason: `merge_pr_refused: PR #${input.prNumber}: ${input.message}`,
+      reason: buildMergePrRefusedReason(input.prNumber, input.message),
       repository: input.repository,
       runId: input.runId
     });
@@ -1435,6 +1457,7 @@ export class RunController {
     projectName: string;
     repository: GitHubIssueRepositoryInput;
     runId: string;
+    stateTransitionReason: string | null;
     waitState: ExpandedWorkflowState;
   }): Promise<WaitObservation | undefined> {
     const { isMergePr, repository, runId, waitState } = input;
@@ -1569,12 +1592,25 @@ export class RunController {
           const message =
             error instanceof Error ? error.message : String(error);
           if (isPermanentMergeRefusal(error)) {
+            const attempt =
+              parseMergeRefusalParkCount(input.stateTransitionReason) + 1;
+            if (attempt < MAX_MERGE_REFUSAL_ATTEMPTS) {
+              this.runStore.recordWaitingActivity(
+                runId,
+                buildMergeRefusalParkedReason(attempt)
+              );
+              this.logger?.warn(
+                { attempt, err: error, prNumber: tracked.prNumber, runId },
+                "symphonika merge_pr refused, parking for retry"
+              );
+              return undefined;
+            }
             await terminateRefusal(
-              message,
-              `merge_pr refused for PR #${tracked.prNumber}: ${message}`
+              `${message} (after ${attempt} refused attempts)`,
+              `merge_pr refused for PR #${tracked.prNumber} after ${attempt} attempts: ${message}`
             );
             this.logger?.warn(
-              { err: error, prNumber: tracked.prNumber, runId },
+              { attempt, err: error, prNumber: tracked.prNumber, runId },
               "symphonika merge_pr permanently refused"
             );
             return undefined;
@@ -1679,6 +1715,7 @@ export class RunController {
       projectName: row.project,
       repository,
       runId,
+      stateTransitionReason: row.stateTransitionReason,
       waitState
     });
     if (observation === undefined) {
@@ -5058,16 +5095,41 @@ function isParkedAction(kind: string | undefined): boolean {
   return kind === "wait" || kind === "merge_pr";
 }
 
+// GitHub documents 405 as "merge cannot be performed" — but gives no
+// machine-readable signal for whether that's durable (branch protection
+// forbids the configured merge method) or will clear on its own (required
+// checks still running under `pull_requests.merge.require_status_success:
+// false`, or a branch-protection dimension Symphonika's policy doesn't model
+// at all, e.g. required-up-to-date). A mismatched head (409),
+// validation/rate response (422), server error, or transport failure is
+// already retried without counting toward this bound.
 function isPermanentMergeRefusal(error: unknown): boolean {
-  // GitHub documents 405 as "merge cannot be performed". A mismatched head
-  // (409), validation/rate response (422), server error, or transport failure
-  // can change on a later tick and therefore remains a retryable park.
   return (
     typeof error === "object" &&
     error !== null &&
     "status" in error &&
     error.status === 405
   );
+}
+
+const MERGE_REFUSAL_PARK_PREFIX = "merge_pr_refusal_parked:";
+
+// Five ticks at the default 30s poll interval (issue-polling.ts's
+// DEFAULT_POLLING_INTERVAL_MS) is a couple of minutes — enough room for
+// pending required checks to finish without parking indefinitely the way a
+// bare "retry forever" would.
+const MAX_MERGE_REFUSAL_ATTEMPTS = 5;
+
+function buildMergeRefusalParkedReason(attempt: number): string {
+  return `${MERGE_REFUSAL_PARK_PREFIX}${attempt}`;
+}
+
+function parseMergeRefusalParkCount(reason: string | null): number {
+  if (reason === null || !reason.startsWith(MERGE_REFUSAL_PARK_PREFIX)) {
+    return 0;
+  }
+  const count = Number(reason.slice(MERGE_REFUSAL_PARK_PREFIX.length));
+  return Number.isInteger(count) && count > 0 ? count : 0;
 }
 
 // True when every predicate a wait state names can be answered without

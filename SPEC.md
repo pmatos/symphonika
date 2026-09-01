@@ -2215,10 +2215,15 @@ Lifecycle:
    `method` override (if any) or the policy default, pinning the merge to the observed head
    SHA. On success the tracked-PR row is moved to `merged`, the signals projected for
    `decideNextStep` include `pr_merged: true`, and the workflow advances via its transitions.
-   GitHub HTTP 405 is the documented deterministic "merge cannot be performed" refusal: the Run
-   terminates as `blocked`, records `merge_pr_refused: PR #<number>: <message>` as its actionable
-   terminal reason, and receives `sym:blocked`. A tracker adapter with no `mergePullRequest`
-   capability is terminal under the same rule. Other merge API failures record the error in
+   GitHub documents HTTP 405 as "merge cannot be performed," but gives no machine-readable signal
+   for whether that is durable or will clear once a pending condition resolves (e.g. required
+   checks still running under a policy that does not gate on them). A 405 therefore parks with a
+   bounded, counted retry (`state_transition_reason = "merge_pr_refusal_parked:<attempt>"`, five
+   attempts at the default poll interval) rather than terminalizing on the first refusal; only once
+   the bound is exceeded does the Run terminate as `blocked`, recording
+   `merge_pr_refused: PR #<number>: <message>` as its actionable terminal reason and receiving
+   `sym:blocked`. A tracker adapter with no `mergePullRequest` capability has no such ambiguity and
+   is terminal on the first observation. Other merge API failures record the error in
    `state_transition_reason` and stay parked so a later tick can retry transient transport,
    service, or head-race failures.
 5. Successful merge transitions advancing into a terminal state record the terminal as
@@ -2232,6 +2237,13 @@ external PRs are out of scope. PR follow-up policy (`§12.5`) and merge-state ev
 the same `pullRequestReadyToMerge` helper so the two paths cannot drift on what counts as
 mergeable. Cancellation, issue-close, and label-immunity semantics are inherited from wait
 states (§12.6).
+
+Terminalizing a merge refusal releases FSM ownership the same way any other terminalization does,
+which would otherwise let the global PR follow-up loop (`§12.5`) read the released ownership as
+license to re-attempt the exact merge just declared refused. `RunController.isIssueMergeRefused`
+is a guard the follow-up loop consults before its own merge attempt, scoped to the
+`merge_pr_refused:` terminal-reason prefix so every other blocked outcome keeps releasing ownership
+to the global loop unchanged.
 
 ## 13. CLI
 

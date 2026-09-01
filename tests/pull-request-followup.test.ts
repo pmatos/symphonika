@@ -1183,6 +1183,69 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("does not re-attempt a merge the FSM already terminalized as refused", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-clean-pr";
+      // The FSM's merge_pr state already terminalized this Run as blocked
+      // after a deterministic merge refusal (ADR 0058, issue #635).
+      // Terminalizing released FSM ownership (current_state_id went null),
+      // so isIssueOwnedByWorkflow alone would read this as "nothing owns
+      // this issue" and the global loop below would re-attempt the exact
+      // merge just declared refused.
+      seedMergeRefusedBlockedRun(store, { runId: "merge-refused-run" });
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        prNumber: 82,
+        prUrl: "https://github.com/pmatos/symphonika/pull/82",
+        projectName: "symphonika",
+        runId: "merge-refused-run"
+      });
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([
+          {
+            draft: false,
+            head: { ref: branchName, sha: "abc123" },
+            html_url: "https://github.com/pmatos/symphonika/pull/82",
+            number: 82,
+            state: "open"
+          }
+        ]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        workspacePath: path.join(root, "workspace")
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(githubIssuesApi.mergePullRequest).not.toHaveBeenCalled();
+      expect(result).not.toEqual({ action: "merged", prNumber: 82 });
+    } finally {
+      store.close();
+    }
+  });
+
   it("auto-merges a tracked PR when reviews are clear, checks pass, and GitHub says it is mergeable", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
@@ -1876,6 +1939,25 @@ function seedSucceededRun(
     workspacePath: input.workspacePath
   });
   store.updateRunState(input.runId, "succeeded");
+}
+
+function seedMergeRefusedBlockedRun(
+  store: RunStore,
+  input: { runId: string }
+): void {
+  store.createRun({
+    id: input.runId,
+    issue: normalizedIssue(),
+    projectName: "symphonika",
+    providerCommand: DEFAULT_CODEX_COMMAND,
+    providerName: "codex"
+  });
+  store.recordTerminalReason(
+    input.runId,
+    "merge_pr_refused: PR #82: Protected branch update failed",
+    "deterministic"
+  );
+  store.updateRunState(input.runId, "blocked");
 }
 
 function seedWaitingParentRun(

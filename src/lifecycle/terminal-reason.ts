@@ -39,3 +39,20 @@ export function formatCapReachedReason(
   const noun = continuationCount === 1 ? "continuation" : "continuations";
   return `continuation cap reached after ${continuationCount} ${noun}: ${CAP_REACHED_LABELS[kind]}`;
 }
+
+const MERGE_PR_REFUSED_PREFIX = "merge_pr_refused:";
+
+export function buildMergePrRefusedReason(
+  prNumber: number,
+  message: string
+): string {
+  return `${MERGE_PR_REFUSED_PREFIX} PR #${prNumber}: ${message}`;
+}
+
+// Shared by the writer (run-controller.ts, terminalizing a refused merge_pr
+// Run) and every reader that must not treat this specific blocked outcome
+// like an ordinary one: failure-only notification policy (issue-run.ts) and
+// the global PR follow-up loop's re-merge guard (pull-request-followup.ts).
+export function isMergePrRefusedReason(reason: string | null): boolean {
+  return reason !== null && reason.startsWith(MERGE_PR_REFUSED_PREFIX);
+}

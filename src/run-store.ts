@@ -5349,6 +5349,27 @@ export class RunStore {
     return { currentStateId: row.current_state_id, runId: row.id };
   }
 
+  // The global PR follow-up loop's merge-refusal guard needs a Run's
+  // terminal reason regardless of `state` — unlike findWaitingRunByIssue,
+  // which only ever matches a still-parked row, a terminalized Run has
+  // already left "waiting".
+  mostRecentRunTerminalReason(input: {
+    issueNumber: number;
+    projectName: string;
+  }): string | null {
+    const row = this.database
+      .prepare(
+        [
+          "select terminal_reason from runs",
+          "where project_name = ? and issue_number = ?",
+          "order by created_at desc limit 1"
+        ].join(" ")
+      )
+      .get(input.projectName, input.issueNumber) as
+      { terminal_reason: string | null } | undefined;
+    return row?.terminal_reason ?? null;
+  }
+
   // Wait re-evaluation needs to see merged/closed tracked PRs so a workflow
   // waiting on `pr_merged: true` can advance after the PR follow-up
   // dispatcher has marked the tracked row "merged". Returns the most-recent

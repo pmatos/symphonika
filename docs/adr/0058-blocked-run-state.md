@@ -82,7 +82,11 @@ the actionable terminal-reason prefix `merge_pr_refused:` and writes `RunState =
 `sym:blocked` directly from waiting-state reconciliation because no provider
 `ClassifiedTerminal` exists on that path. Failure-only notification policy treats the prefix as a
 non-failure for the same reason it excludes `no_workspace_changes` and
-`workflow_terminal_blocked`. See ADR 0048 for the refusal/defer boundary.
+`workflow_terminal_blocked`. GitHub's 405 gives no permanence signal on its own, so this outcome is
+reached only after a bounded, counted retry — not on the first refusal — and the global PR
+follow-up loop's own merge attempt is gated on the same `merge_pr_refused:` prefix so it cannot
+undo the terminalization by re-merging. See ADR 0048 for the refusal/defer boundary and both
+mechanisms.
 
 ## Numbering
 

@@ -9,12 +9,12 @@ import {
 import type { NotificationMessage, NotificationSink } from "./types.js";
 import { deliverNotificationBestEffort } from "./delivery.js";
 import { escapeHtml, htmlShell, symphonikaSubject } from "./message.js";
+import { isMergePrRefusedReason } from "../lifecycle/terminal-reason.js";
 
 const NON_FAILURE_TERMINAL_REASONS = new Set([
   "no_workspace_changes",
   "workflow_terminal_blocked"
 ]);
-const MERGE_PR_REFUSED_REASON_PREFIX = "merge_pr_refused:";
 const DEFAULT_DIGEST_WINDOW_MS = 60_000;
 const MAX_RUN_DETAILS = 50;
 
@@ -148,7 +148,7 @@ export function shouldNotifyIssueRun(
     run.cancelReason === null &&
     run.terminalReason !== null &&
     !NON_FAILURE_TERMINAL_REASONS.has(run.terminalReason) &&
-    !run.terminalReason.startsWith(MERGE_PR_REFUSED_REASON_PREFIX)
+    !isMergePrRefusedReason(run.terminalReason)
   );
 }
 

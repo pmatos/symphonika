@@ -135,7 +135,7 @@ function formatRoutines(routines: RoutineStatus[]): string[] {
     return ["│   No routines configured"];
   }
   return [
-    "│   PROJECT      ROUTINE              STATE     LATEST_OUTCOME                                                            DISABLED_REASON    NEXT_FIRE_AT              LAST_FIRED_AT             LAST_ATTEMPTED_AT         LAST_SKIP_REASON   LAST_SKIP_AT              SKIPS_24H                                                        PRS",
+    "│   PROJECT      ROUTINE              STATE     LATEST_OUTCOME                                                            DISABLED_REASON    NEXT_FIRE_AT              DEFERRED                  LAST_FIRED_AT             LAST_ATTEMPTED_AT         LAST_SKIP_REASON   LAST_SKIP_AT              SKIPS_24H                                                        PRS",
     "│   -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
     ...routines.map((routine) =>
       [
@@ -163,6 +163,8 @@ function formatRoutines(routines: RoutineStatus[]): string[] {
         " ",
         pad(truncate(routine.nextFireAt ?? "-", 25), 25),
         " ",
+        pad(truncate(formatRoutineDeferral(routine.deferral), 25), 25),
+        " ",
         pad(truncate(routine.lastFiredAt ?? "-", 25), 25),
         " ",
         pad(truncate(routine.lastAttemptedAt ?? "-", 25), 25),
@@ -183,6 +185,10 @@ function formatRoutinePullRequestNumbers(numbers: number[]): string {
   return numbers.length === 0
     ? "-"
     : numbers.map((number) => `#${number}`).join(",");
+}
+
+function formatRoutineDeferral(deferral: RoutineStatus["deferral"]): string {
+  return deferral === null ? "-" : `${deferral.reason}x${deferral.attempts}`;
 }
 
 function formatRoutineSkipCounts(

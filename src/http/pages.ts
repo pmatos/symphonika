@@ -6373,13 +6373,19 @@ function renderRoutineTargetsTable(group: RoutineGroup): string {
           ? '<span class="muted">none</span>'
           : `${escapeHtml(target.lastSkipReason)} <code>${renderTimestamp(target.lastSkipAt)}</code>`;
       const counts = `overlap ${target.skipCounts24h.overlap} · cap ${target.skipCounts24h.concurrency_cap} · pressure ${target.skipCounts24h.host_pressure} · catch-up ${target.skipCounts24h.catch_up_window}`;
-      return `<tr><td>${escapeHtml(target.projectName)}</td><td>${routineStatePill(target.state)}${reason}</td><td><code>${renderTimestamp(target.nextFireAt)}</code></td><td><code>${renderTimestamp(target.lastFiredAt)}</code></td><td class="c-detail">${skip}</td><td class="c-detail">${counts}</td></tr>`;
+      // A deferred Target is due but unadmitted, which reads as an
+      // inexplicably late Routine unless the wait is stated (ADR 0093).
+      const deferral =
+        target.deferral === null
+          ? '<span class="muted">none</span>'
+          : `${escapeHtml(target.deferral.reason)} <span class="muted">(${target.deferral.attempts} ${target.deferral.attempts === 1 ? "attempt" : "attempts"} since</span> <code>${renderTimestamp(target.deferral.since)}</code><span class="muted">)</span>`;
+      return `<tr><td>${escapeHtml(target.projectName)}</td><td>${routineStatePill(target.state)}${reason}</td><td><code>${renderTimestamp(target.nextFireAt)}</code></td><td class="c-detail">${deferral}</td><td><code>${renderTimestamp(target.lastFiredAt)}</code></td><td class="c-detail">${skip}</td><td class="c-detail">${counts}</td></tr>`;
     })
     .join("");
   return tableSection(
     "Targets",
     group.targets.length,
-    "<tr><th>Project</th><th>State</th><th>Next fire</th><th>Last fired</th><th>Last skip</th><th>Skips (24h)</th></tr>",
+    "<tr><th>Project</th><th>State</th><th>Next fire</th><th>Waiting for capacity</th><th>Last fired</th><th>Last skip</th><th>Skips (24h)</th></tr>",
     rows
   );
 }

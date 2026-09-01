@@ -287,9 +287,11 @@ terminates the provider process tree, waits for that work to settle, and records
 with `terminal_reason = "firing_timeout"`. This declared deadline is independent of Watchdog
 progress-liveness: useful progress does not extend it.
 
-A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
-no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
-`last_skip_reason`, and `last_skip_at`, together with rolling 24-hour counts for each skip reason.
+A clock event skipped for catch-up policy or overlap is not a Routine Firing: no `routine_firings`
+row is created. The Routine instead records `last_attempted_at`, `last_skip_reason`, and
+`last_skip_at`, together with rolling 24-hour counts for each skip reason. A capacity refusal
+(`concurrency_cap` or `host_pressure`) is not a skip at all: it defers the clock event and retries
+it on later ticks, and only counts once it is recorded as missed.
 
 ### 4.14 Notification Sink
 
@@ -1000,7 +1002,7 @@ Before the concurrency caps, admission consults the host itself. The orchestrato
 pressure-stall counters (`/proc/pressure/memory` and `/proc/pressure/io`) and defers claiming new
 work while a gated resource's `full avg60` percentage is at or above its configured ceiling. This
 is a separate verdict from the concurrency caps, with its own reason strings and its own
-`host_pressure` Routine skip reason, so a stalled host is never reported as a full cap. The
+`host_pressure` Routine deferral reason, so a stalled host is never reported as a full cap. The
 counters are sampled at most once per `global.pressure.sample_interval_seconds` and refreshed once
 per daemon tick, so every admission decision in a tick sees one consistent reading. Runs already
 in flight are unaffected; this gates admission only.
@@ -1195,14 +1197,24 @@ DST rules.
 
 Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs.
 Fan-out admission is per target rather than atomic: admitted siblings start concurrently, while a
-target whose cap is full records a `concurrency_cap` skip, and a target evaluated while the host
-is stalled records a `host_pressure` skip. If an earlier firing of the same Routine
-Target remains non-terminal, that target records an `overlap` skip unless `allow_overlap: true` is
-configured; overlap opt-in does not bypass concurrency caps. A partial group is therefore normal.
-Every skip atomically advances only that target's clock event, updates its latest-attempt/skip
-fields and per-Project rolling counter evidence, completes its fan-out leg, writes no Routine
-Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields. A
-skipped one-shot expires rather than remaining due.
+target whose cap is full or whose host is stalled is deferred rather than skipped (see below). If
+an earlier firing of the same Routine Target remains non-terminal, that target records an `overlap`
+skip unless `allow_overlap: true` is configured; overlap opt-in does not bypass concurrency caps. A
+partial group is therefore normal. Every skip atomically advances only that target's clock event,
+updates its latest-attempt/skip fields and per-Project rolling counter evidence, completes its
+fan-out leg, writes no Routine Firing row, and emits `routine.skipped` with `reason`, `routine`,
+and `scheduled_at` fields. A skipped one-shot expires rather than remaining due.
+
+A capacity refusal — a full per-Project or global cap, or a stalled host — defers the clock event
+instead of consuming it (ADR 0093). The Routine Target keeps its due `next_fire_at`, its fan-out
+leg stays `pending` recording `deferred_reason`, `deferred_since` and `deferred_attempts`, no skip
+counter moves, and the next daemon tick retries admission; Routine dispatch precedes issue dispatch
+in a tick, so a deferred target gets first refusal on the next freed slot. A recurring Target
+defers until its next clock event is due, a one-shot Target for 24 hours. A deferral that reaches
+that bound unadmitted is recorded as missed: the clock advances exactly as a skip's does, the
+reason increments its rolling 24-hour counter once, the fan-out leg settles as `missed`, the
+Routine did not run, and the fan-out counts it as a failure. Restart schedule recompute leaves a
+parked clock event alone rather than settling it as a catch-up skip.
 
 A skip claim returns `false` when the Routine Target's clock event is no longer due, or — for a
 recurring Target — when the caller omits the recomputed `next_fire_at`. Once that clock update

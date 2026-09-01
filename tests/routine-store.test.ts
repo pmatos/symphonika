@@ -256,6 +256,147 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("accumulates one wait across repeated deferrals of the same clock event", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "alpha"
+        }
+      ]);
+      const scheduledAt = store.getRoutine({
+        name: "refactor-audit",
+        projectName: "alpha"
+      })?.nextFireAt;
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt: scheduledAt ?? ""
+      });
+
+      expect(
+        store.deferRoutineFanoutTarget({
+          deferredAt: "2026-05-22T10:00:00.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "alpha",
+          reason: "concurrency_cap"
+        })
+      ).toBe(true);
+      expect(
+        store.deferRoutineFanoutTarget({
+          deferredAt: "2026-05-22T10:05:00.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "alpha",
+          reason: "host_pressure"
+        })
+      ).toBe(true);
+
+      // The wait is one event, so its start is stable and the reason is the
+      // most recent refusal; the clock event itself is untouched.
+      expect(
+        store.getRoutineTargetDeferral({
+          name: "refactor-audit",
+          projectName: "alpha",
+          scheduledAt: scheduledAt ?? ""
+        })
+      ).toEqual({
+        attempts: 2,
+        reason: "host_pressure",
+        since: "2026-05-22T10:00:00.000Z"
+      });
+      expect(
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+      ).toMatchObject({
+        lastAttemptedAt: "2026-05-22T10:05:00.000Z",
+        lastSkipReason: null,
+        nextFireAt: scheduledAt
+      });
+      expect(store.getRoutineFanout("fanout-1")?.failureCount).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("counts a missed clock event as a failed run once and advances the schedule", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "alpha"
+        }
+      ]);
+      const scheduledAt =
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+          ?.nextFireAt ?? "";
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt
+      });
+      store.deferRoutineFanoutTarget({
+        deferredAt: scheduledAt,
+        fanoutId: "fanout-1",
+        name: "refactor-audit",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+      const nextFireAt = new Date(
+        new Date(scheduledAt).getTime() + 60_000
+      ).toISOString();
+
+      expect(
+        store.missRoutineFiring({
+          attemptedAt: nextFireAt,
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          nextFireAt,
+          projectName: "alpha",
+          reason: "concurrency_cap"
+        })
+      ).toBe(true);
+
+      const fanout = store.getRoutineFanout("fanout-1");
+      expect(fanout?.failureCount).toBe(1);
+      expect(fanout?.subject).toContain("1 failed");
+      expect(fanout?.targets[0]).toMatchObject({
+        deferredAttempts: 1,
+        disposition: "missed",
+        skipReason: "concurrency_cap"
+      });
+      expect(
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+      ).toMatchObject({
+        deferral: null,
+        lastSkipReason: "concurrency_cap",
+        nextFireAt
+      });
+      expect(
+        store.listRoutines({ now: new Date(nextFireAt) })[0]?.skipCounts24h
+          .concurrency_cap
+      ).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
   it("rejects a skip paired with a fan-out that excludes the Routine Target", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -994,6 +1135,7 @@ describe("RunStore routines", () => {
         {
           allowOverlap: false,
           catchUp: "skip",
+          deferral: null,
           disabledReason: null,
           kind: "report",
           lastAttemptedAt: null,
@@ -1086,6 +1228,7 @@ describe("RunStore routines", () => {
         {
           allowOverlap: false,
           catchUp: "skip",
+          deferral: null,
           disabledReason: null,
           kind: "report",
           lastAttemptedAt: null,
@@ -1152,6 +1295,7 @@ describe("RunStore routines", () => {
       ).toMatchObject({
         allowOverlap: true,
         catchUp: "fire_once_if_missed",
+        deferral: null,
         lastAttemptedAt: "2026-05-23T10:00:00.000Z",
         lastSkipAt: "2026-05-23T10:00:00.000Z",
         lastSkipReason: "overlap",
@@ -3136,6 +3280,7 @@ describe("RunStore routines", () => {
       ).toMatchObject({
         allowOverlap: true,
         catchUp: "fire_once_if_missed",
+        deferral: null,
         disabledReason: "rejected_tracker_less_host",
         kind: "git",
         name: "audit-fix",

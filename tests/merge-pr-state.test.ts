@@ -384,7 +384,7 @@ describe("merge_pr state lifecycle", () => {
     }
   });
 
-  it("records a failure reason and stays parked when the merge API throws", async () => {
+  it("records a failure reason and stays parked when the merge API fails transiently", async () => {
     const root = await makeTempRoot();
     await writeMergePrWorkflow(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -408,7 +408,11 @@ describe("merge_pr state lifecycle", () => {
         }),
         getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
         listOpenIssues: vi.fn().mockResolvedValue([]),
-        mergePullRequest: vi.fn().mockRejectedValue(new Error("merge_conflict"))
+        mergePullRequest: vi
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error("service unavailable"), { status: 503 })
+          )
       };
       const controller = buildController({
         githubIssuesApi,
@@ -422,7 +426,121 @@ describe("merge_pr state lifecycle", () => {
       expect(githubIssuesApi.mergePullRequest).toHaveBeenCalledTimes(1);
       const after = store.getRun("merge-pr-run");
       expect(after?.state).toBe("waiting");
-      expect(after?.stateTransitionReason).toContain("merge_conflict");
+      expect(after?.stateTransitionReason).toContain("service unavailable");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("terminates as blocked when GitHub permanently refuses the merge", async () => {
+    const root = await makeTempRoot();
+    await writeMergePrWorkflow(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      seedWaitingMergePrRun(store, issue);
+      store.trackPullRequest({
+        branchName: "sym/symphonika/97-merge-pr-acceptance-fixture",
+        headSha: "abc123",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const refusal = Object.assign(
+        new Error("Protected branch update failed"),
+        { status: 405 }
+      );
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue,
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockRejectedValue(refusal)
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("merge-pr-run");
+
+      expect(githubIssuesApi.mergePullRequest).toHaveBeenCalledTimes(1);
+      expect(store.getRun("merge-pr-run")).toMatchObject({
+        currentStateId: null,
+        failureClassification: "deterministic",
+        state: "blocked",
+        stateTransitionReason:
+          "merge_pr refused for PR #99: Protected branch update failed",
+        terminalReason:
+          "merge_pr_refused: PR #99: Protected branch update failed",
+        terminalStateId: "merging"
+      });
+      expect(addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:blocked"] })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("terminates as blocked when the tracker cannot merge pull requests", async () => {
+    const root = await makeTempRoot();
+    await writeMergePrWorkflow(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      seedWaitingMergePrRun(store, issue);
+      store.trackPullRequest({
+        branchName: "sym/symphonika/97-merge-pr-acceptance-fixture",
+        headSha: "abc123",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue,
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("merge-pr-run");
+
+      expect(store.getRun("merge-pr-run")).toMatchObject({
+        currentStateId: null,
+        failureClassification: "deterministic",
+        state: "blocked",
+        stateTransitionReason:
+          "merge_pr unavailable: GitHub tracker does not expose mergePullRequest",
+        terminalReason:
+          "merge_pr_refused: PR #99: GitHub tracker does not expose mergePullRequest",
+        terminalStateId: "merging"
+      });
+      expect(addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:blocked"] })
+      );
     } finally {
       store.close();
     }

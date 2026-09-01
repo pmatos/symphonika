@@ -1373,9 +1373,35 @@ export class RunController {
     );
   }
 
+  private async terminateMergePrRefusal(input: {
+    issueNumber: number;
+    message: string;
+    prNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+    stateId: string;
+    transitionReason: string;
+  }): Promise<void> {
+    this.runStore.recordWorkflowTerminal(input.runId, {
+      terminalStateId: input.stateId,
+      transitionReason: input.transitionReason
+    });
+    this.runStore.recordTerminalReason(
+      input.runId,
+      `merge_pr_refused: PR #${input.prNumber}: ${input.message}`,
+      "deterministic"
+    );
+    this.runStore.updateRunState(input.runId, "blocked");
+    await this.markIssueBlocked({
+      issueNumber: input.issueNumber,
+      repository: input.repository
+    });
+  }
+
   // Observes the tracked pull request and projects it into the wait state's
   // signal map, performing the merge attempt for a merge_pr state along the way.
-  // undefined means "stay parked": there is nothing to decide this tick.
+  // undefined means the caller has nothing to decide this tick: observation
+  // either stayed retryably parked or terminalized a deterministic refusal here.
   //
   // Extracted from reEvaluateWaitingRun so the decision that follows it is
   // reachable without a tracked pull request. A wait state naming only artifact
@@ -1502,10 +1528,16 @@ export class RunController {
               "symphonika merge_pr merged PR"
             );
           } else {
-            this.runStore.recordWaitingActivity(
+            const message = "GitHub tracker does not expose mergePullRequest";
+            await this.terminateMergePrRefusal({
+              issueNumber: input.issueNumber,
+              message,
+              prNumber: tracked.prNumber,
+              repository,
               runId,
-              `merge_pr unavailable: GitHub tracker does not expose mergePullRequest`
-            );
+              stateId: waitState.id,
+              transitionReason: `merge_pr unavailable: ${message}`
+            });
             this.logger?.warn(
               { runId },
               "symphonika merge_pr: tracker has no mergePullRequest support"
@@ -1515,6 +1547,22 @@ export class RunController {
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
+          if (isPermanentMergeRefusal(error)) {
+            await this.terminateMergePrRefusal({
+              issueNumber: input.issueNumber,
+              message,
+              prNumber: tracked.prNumber,
+              repository,
+              runId,
+              stateId: waitState.id,
+              transitionReason: `merge_pr refused for PR #${tracked.prNumber}: ${message}`
+            });
+            this.logger?.warn(
+              { err: error, prNumber: tracked.prNumber, runId },
+              "symphonika merge_pr permanently refused"
+            );
+            return undefined;
+          }
           this.runStore.recordWaitingActivity(
             runId,
             `merge_pr attempt failed for PR #${tracked.prNumber}: ${message}`
@@ -4992,6 +5040,18 @@ function normalizeRawIssue(
 
 function isParkedAction(kind: string | undefined): boolean {
   return kind === "wait" || kind === "merge_pr";
+}
+
+function isPermanentMergeRefusal(error: unknown): boolean {
+  // GitHub documents 405 as "merge cannot be performed". A mismatched head
+  // (409), validation/rate response (422), server error, or transport failure
+  // can change on a later tick and therefore remains a retryable park.
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    error.status === 405
+  );
 }
 
 // True when every predicate a wait state names can be answered without

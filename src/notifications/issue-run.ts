@@ -14,6 +14,7 @@ const NON_FAILURE_TERMINAL_REASONS = new Set([
   "no_workspace_changes",
   "workflow_terminal_blocked"
 ]);
+const MERGE_PR_REFUSED_REASON_PREFIX = "merge_pr_refused:";
 const DEFAULT_DIGEST_WINDOW_MS = 60_000;
 const MAX_RUN_DETAILS = 50;
 
@@ -146,7 +147,8 @@ export function shouldNotifyIssueRun(
   return (
     run.cancelReason === null &&
     run.terminalReason !== null &&
-    !NON_FAILURE_TERMINAL_REASONS.has(run.terminalReason)
+    !NON_FAILURE_TERMINAL_REASONS.has(run.terminalReason) &&
+    !run.terminalReason.startsWith(MERGE_PR_REFUSED_REASON_PREFIX)
   );
 }
 

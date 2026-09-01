@@ -230,6 +230,8 @@ const MERGE_WHEN_GREEN = [
   "      - to: failed",
   "        when:",
   "          mergeable: false",
+  "      # Deliberately no catch-all: readiness deferrals stay parked, while",
+  "      # deterministic merge refusals are terminalized by reconciliation.",
   "  done:",
   "    exit: success",
   "    terminal: success",

@@ -77,6 +77,13 @@ is already a clean, race-free signal computed at classification time.
   `input_required` RunState (declared in the `RunState` union but never actually written by any
   code path today — a separate, older gap, out of scope for this issue).
 
+**Amended by issue #635.** A deterministic `merge_pr` refusal is a third blocked outcome. It uses
+the actionable terminal-reason prefix `merge_pr_refused:` and writes `RunState = blocked` plus
+`sym:blocked` directly from waiting-state reconciliation because no provider
+`ClassifiedTerminal` exists on that path. Failure-only notification policy treats the prefix as a
+non-failure for the same reason it excludes `no_workspace_changes` and
+`workflow_terminal_blocked`. See ADR 0048 for the refusal/defer boundary.
+
 ## Numbering
 
 ADR `0057` is the most recent number in tree; this ADR is `0058`.

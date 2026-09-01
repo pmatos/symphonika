@@ -761,9 +761,10 @@ one message per firing. See ADR 0072.
 
 For terminal issue Runs, `always` includes every terminal outcome, including blocked outcomes and
 cancellation. `changes` includes succeeded Runs, whose success proves commits ahead of base.
-`failures` is keyed by `terminal_reason`, not `RunState`: `no_workspace_changes` and
-`workflow_terminal_blocked` are not failures, while `no_progress`, `cap_reached:*`, orphan
-recovery, provider failures, and infrastructure failures are. Cancellation is not a failure.
+`failures` is keyed by `terminal_reason`, not `RunState`: `no_workspace_changes`,
+`workflow_terminal_blocked`, and `merge_pr_refused:*` are not failures, while `no_progress`,
+`cap_reached:*`, orphan recovery, provider failures, and infrastructure failures are. Cancellation
+is not a failure.
 Terminal issue Runs are durably claimed into at most one digest per window. A digest renders at
 most 50 Run details and reports the omitted count, bounding both mail frequency and message size.
 Interrupted digest claims return to pending on daemon restart; delivery success, policy/source
@@ -2138,12 +2139,17 @@ Lifecycle:
    `method` override (if any) or the policy default, pinning the merge to the observed head
    SHA. On success the tracked-PR row is moved to `merged`, the signals projected for
    `decideNextStep` include `pr_merged: true`, and the workflow advances via its transitions.
-   On a merge API failure the run records the error in `state_transition_reason` and stays
-   parked; the next tick retries from the same row.
+   GitHub HTTP 405 is the documented deterministic "merge cannot be performed" refusal: the Run
+   terminates as `blocked`, records `merge_pr_refused: PR #<number>: <message>` as its actionable
+   terminal reason, and receives `sym:blocked`. A tracker adapter with no `mergePullRequest`
+   capability is terminal under the same rule. Other merge API failures record the error in
+   `state_transition_reason` and stay parked so a later tick can retry transient transport,
+   service, or head-race failures.
 5. Successful merge transitions advancing into a terminal state record the terminal as
-   `succeeded`, exactly like wait-state terminals. Failed, deferred, blocked, or missing-PR
-   outcomes record deterministic `state_transition_reason` text on the merge state's Run row
-   and never delete the workspace, matching §10 (workspaces are never auto-deleted).
+   `succeeded`, exactly like wait-state terminals. Deferred or missing-PR outcomes remain parked;
+   deterministic merge refusals terminate as `blocked`; every outcome records
+   `state_transition_reason` text on the merge state's Run row and never deletes the workspace,
+   matching §10 (workspaces are never auto-deleted).
 
 The merge state is intentionally scoped to Symphonika-tracked PRs — arbitrary cross-issue or
 external PRs are out of scope. PR follow-up policy (`§12.5`) and merge-state evaluation share

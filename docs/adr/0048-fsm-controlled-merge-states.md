@@ -56,3 +56,13 @@ echoing ADR 0047's reasoning for sharing `projectPullRequestSignals`.
 **Widened by ADR 0090.** The deference this ADR gives the global loop was scoped to `merge_pr`
 states. It now covers any raw-FSM workflow parked at a state of its own, and covers the review
 feedback as well as the merge: `isIssueOwnedByWorkflow` replaces `isIssueParkedInMergePrState`.
+
+**Amended by issue #635.** Merge-state reconciliation now separates deferred observations from
+deterministic merge refusals. Policy-disabled and not-yet-ready pull requests remain parked, as do
+merge errors without a deterministic refusal signal. GitHub HTTP 405 is the documented "merge
+cannot be performed" response, so it terminates the waiting Run as `blocked` with an actionable
+`merge_pr_refused: PR #<number>: <message>` terminal reason. A tracker adapter that exposes no
+`mergePullRequest` capability is deterministic under the same rule. These terminal paths are
+handled inside merge-state observation before the ordinary `decideNextStep` guard; an unconditional
+workflow catch-all would be inverted because it cannot see hard failures and would match healthy
+readiness deferrals. The built-in therefore deliberately has no catch-all transition.

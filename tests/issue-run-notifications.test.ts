@@ -44,6 +44,16 @@ describe("terminal issue Run notifications", () => {
     ).toBe(false);
     expect(
       shouldNotifyIssueRun(
+        runFixture({
+          state: "blocked",
+          terminalReason:
+            "merge_pr_refused: PR #99: Protected branch update failed"
+        }),
+        "failures"
+      )
+    ).toBe(false);
+    expect(
+      shouldNotifyIssueRun(
         runFixture({ state: "stale", terminalReason: "no_progress" }),
         "failures"
       )

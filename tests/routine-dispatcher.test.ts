@@ -7646,6 +7646,100 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("does not decorate a no_progress terminal reason with a stderr tail even when the durable latch is missing", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const routine = minuteRoutine(root);
+    let releaseWedgedProvider: (() => void) | undefined;
+    const wedgedProvider = new Promise<void>((resolve) => {
+      releaseWedgedProvider = resolve;
+    });
+    const provider = {
+      cancel: vi.fn(() => {
+        releaseWedgedProvider?.();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        // Stands in for the real adapter's tee: some providers write partial
+        // diagnostics to stderr well before actually wedging.
+        await writeFile(
+          input.stderrLogPath!,
+          "codex: connection reset\n",
+          "utf8"
+        );
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        await wedgedProvider;
+        // The provider dies with an error once cancelled, landing this
+        // firing in the catch path rather than the try path's own
+        // no-progress classification (which never decorates with stderr).
+        throw new Error("provider process killed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+    const dispatch = dispatchDueRoutines({
+      ...recurringDispatchInput({
+        activeRuns,
+        provider,
+        root,
+        routine,
+        runStore
+      }),
+      createFiringId: () => "wedged-stderr-fire",
+      prepareRoutineWorkspace: () =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(runStore.getRoutineFiring("wedged-stderr-fire")?.state).toBe(
+          "running"
+        );
+      });
+
+      // Requests the cancellation directly on the in-memory registry,
+      // bypassing markRoutineFiringWatchdogNoProgress's durable latch — the
+      // same as if the latch write and the in-memory cancel raced apart.
+      // completeRoutineFiring's own latch-reread fence therefore cannot
+      // correct a decorated reason here: only the dispatcher's own
+      // catch-path logic can keep this exact, so this isolates that fix.
+      await activeRuns.requestCancel("wedged-stderr-fire", "no_progress");
+
+      await dispatch;
+      expect(runStore.getRoutineFiring("wedged-stderr-fire")).toMatchObject({
+        cancelReason: "no_progress",
+        // Deliberately false: this test bypasses the durable watchdog latch
+        // (no markRoutineFiringWatchdogNoProgress call) so completeRoutineFiring's
+        // own latch-reread fence cannot fire, isolating the dispatcher's own fix.
+        cancelRequested: false,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+    } finally {
+      releaseWedgedProvider?.();
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
   it("settles a firing whose Watchdog cancel lands while a GitHub snapshot hangs", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

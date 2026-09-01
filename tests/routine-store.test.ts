@@ -3545,6 +3545,60 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("a latched no_progress cancel reason cannot be overwritten by a later operator cancel", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched-then-operator",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringState("fire-latched-then-operator", "running");
+
+      expect(
+        store.markRoutineFiringWatchdogNoProgress("fire-latched-then-operator")
+      ).toBe(true);
+      expect(
+        store.getRoutineFiring("fire-latched-then-operator")
+      ).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "no_progress"
+      });
+
+      // An operator cancel racing in after the Watchdog already latched
+      // no_progress must not clobber it: completeRoutineFiring re-reads this
+      // column to decide whether to force the exact `no_progress` terminal
+      // reason, so a stray overwrite here would let a decorated reason slip
+      // through that fence for a firing the Watchdog already condemned.
+      store.markRoutineFiringCancelRequested(
+        "fire-latched-then-operator",
+        "operator"
+      );
+      expect(
+        store.getRoutineFiring("fire-latched-then-operator")
+      ).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "no_progress"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("completeRoutineFiring records the cancel reason for a cancelled firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

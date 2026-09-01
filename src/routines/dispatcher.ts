@@ -1760,16 +1760,24 @@ async function runRoutineFiring(input: {
           completionCancelEntry
         ]);
     const finalCancelled = finalCancelOutcome?.kind === "cancelled";
+    // A watchdog no-progress verdict outranks an ordinary cancel wherever the
+    // two overlap (see routineCancelOutcome), but it is `kind: "failed"`, not
+    // `"cancelled"` — so it needs its own exact-string exemption here too.
+    const finalNoProgress =
+      finalCancelOutcome?.reason === CANCEL_REASONS.NO_PROGRESS;
     const finalReason = timeoutWon
       ? "firing_timeout"
       : (finalCancelOutcome?.reason ?? reason);
     // A firing killed at its deadline reports `firing_timeout` and nothing
     // else; whatever the provider wrote on stderr before dying is the only
     // account of why it went quiet, so it rides along on the reason here as
-    // well as staying in the evidence directory.
-    const explainedFinalReason = finalCancelled
-      ? finalReason
-      : await withProviderStderrTail(finalReason, stderrLogPath);
+    // well as staying in the evidence directory. A watchdog no-progress
+    // verdict is exempted the same way `cancelled` is: ADR 0091 promises
+    // operators an exact matchable `no_progress`, not a decorated one.
+    const explainedFinalReason =
+      finalCancelled || finalNoProgress
+        ? finalReason
+        : await withProviderStderrTail(finalReason, stderrLogPath);
     const resolvedRedactSecrets = redactSecrets();
     const redactedFinalReason = redactAll(
       explainedFinalReason,

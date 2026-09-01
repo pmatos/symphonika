@@ -4102,11 +4102,22 @@ export class RunStore {
     firingId: string,
     reason: CancelReason
   ): void {
+    // A durable watchdog no-progress latch must survive a later operator
+    // cancel the same way `daemon_shutdown` already does: completeRoutineFiring
+    // reads this column back to decide whether to force the exact `no_progress`
+    // terminal reason, so overwriting it here would let a decorated reason
+    // slip through the fence for a firing the Watchdog already condemned.
     this.database
       .prepare(
-        "update routine_firings set cancel_requested = 1, cancel_reason = case when cancel_reason = ? then cancel_reason else ? end, updated_at = ? where id = ?"
+        "update routine_firings set cancel_requested = 1, cancel_reason = case when cancel_reason in (?, ?) then cancel_reason else ? end, updated_at = ? where id = ?"
       )
-      .run(SHUTDOWN_PREEMPTIVE_REASON, reason, timestamp(), firingId);
+      .run(
+        SHUTDOWN_PREEMPTIVE_REASON,
+        WATCHDOG_NO_PROGRESS_REASON,
+        reason,
+        timestamp(),
+        firingId
+      );
   }
 
   markRoutineFiringWatchdogNoProgress(

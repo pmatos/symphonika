@@ -1226,16 +1226,18 @@ instead of consuming it (ADR 0093). The Routine Target keeps its due `next_fire_
 leg stays `pending` recording `deferred_reason`, `deferred_since` and `deferred_attempts`, each
 retry refreshes `last_attempted_at`, no skip counter moves, and the next daemon tick retries
 admission; Routine dispatch precedes fresh issue dispatch in a tick, so an issue Run never takes a
-freed slot out from under a deferral evaluated in the same tick. PR review follow-up is admitted
-earlier than either and may still claim a freed slot ahead of a parked deferral. A recurring Target
-defers until its next clock event is due, a one-shot Target for 24 hours. A deferral that reaches
-that bound unadmitted is recorded as missed: the clock advances exactly as a skip's does, the
-reason increments its rolling 24-hour counter once, the fan-out leg settles as `missed`, the
-Routine did not run, and the fan-out counts it as a failure. The clock lands on the successor event
-that ended the wait rather than jumping past it, so one lost run never costs two; a backlog older
-than a whole period still collapses to the next future event. A deferred leg that loses its target
-mid-wait — Project disabled, Routine removed, cron edited — also settles as `missed` rather than as
-an uncounted `target_unavailable` skip. Restart schedule recompute leaves a
+freed slot out from under a deferral evaluated in the same tick. A newly due Routine remains behind
+PR review follow-up, but once a capacity refusal has parked it, later ticks retry that deferral
+before admitting another review-follow-up Run against the same slots (ADR 0094). A PR follow-up
+action that only merges consumes no slot and therefore continues into Routine dispatch in the same
+tick. A recurring Target defers until its next clock event is due, a one-shot Target for 24 hours.
+A deferral that reaches that bound unadmitted is recorded as missed: the clock advances exactly as
+a skip's does, the reason increments its rolling 24-hour counter once, the fan-out leg settles as
+`missed`, the Routine did not run, and the fan-out counts it as a failure. The clock lands on the
+successor event that ended the wait rather than jumping past it, so one lost run never costs two; a
+backlog older than a whole period still collapses to the next future event. A deferred leg that
+loses its target mid-wait — Project disabled, Routine removed, cron edited — also settles as
+`missed` rather than as an uncounted `target_unavailable` skip. Restart schedule recompute leaves a
 parked clock event alone rather than settling it as a catch-up skip. Deferring emits
 `routine.deferred` with `reason`, `project`, `routine`, `scheduled_at`, and the `deferred_until`
 bound; recording a miss emits `routine.missed` with `reason`, `project`, `routine`, `scheduled_at`,

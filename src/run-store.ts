@@ -3501,6 +3501,25 @@ export class RunStore {
         };
   }
 
+  // Admission priority needs only an existence check. Avoid listRoutines(),
+  // whose operator-facing shape enriches every target with counters, latest
+  // outcomes, and pull requests (ADR 0094).
+  hasParkedRoutineDeferral(): boolean {
+    return (
+      this.database
+        .prepare(
+          [
+            "select 1",
+            DEFERRED_FANOUT_TARGET_SOURCE,
+            "where",
+            DEFERRED_FANOUT_TARGET_PREDICATE,
+            "limit 1"
+          ].join(" ")
+        )
+        .get() !== undefined
+    );
+  }
+
   // The terminal half of a deferral: the parked clock event lapsed before
   // any slot freed, so it is consumed exactly like a skip while the fan-out
   // leg records that the Routine did not run (ADR 0093).

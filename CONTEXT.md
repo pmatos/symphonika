@@ -506,6 +506,8 @@ _Avoid_: chat session
   **Missed Routine**, or one non-gating **Routine Dispatch Hold**
 - A **Routine Deferral** keeps a **Routine Target**'s clock event due and its **Routine Fan-out**
   leg pending until the target is admitted or the event lapses into a **Missed Routine**
+- A parked **Routine Deferral** gets first refusal over **PR Follow-up** admission on later daemon
+  ticks; a newly due **Routine** does not
 - A **Routine Dispatch Hold** preserves a **Routine Target**'s original due clock event as claimable
   while making its held **Routine Fan-out** leg non-gating and visible as a summary failure
 - A **Routine Fan-out** produces one grouped notification after all target legs are terminal or held

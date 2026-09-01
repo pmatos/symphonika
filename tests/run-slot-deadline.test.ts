@@ -1118,7 +1118,7 @@ describe("Run slot deadline", () => {
     }
   });
 
-  it("keeps the claim label when a Run row exists and a non-shutdown error follows", async () => {
+  it("finalizes a Run row when a non-shutdown error follows creation", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
     const reloader = new RuntimeConfigReloader({
@@ -1168,13 +1168,170 @@ describe("Run slot deadline", () => {
         "boom: non-shutdown failure after Run row created"
       );
 
-      // The claim succeeded and the Run row was created before reserveSlot
-      // threw, so the label is the caller's only durable record of
-      // ownership; a blind rollback here would strip it while the orphaned
-      // Run row lingers, letting the issue be re-dispatched underneath it.
-      expect(removeLabelsFromIssue).not.toHaveBeenCalled();
-      expect(addLabelsToIssue).toHaveBeenCalledOnce();
-      expect(runStore.getRun("run-conflict")).toBeDefined();
+      // The claim remains the durable ownership record, while the Run follows
+      // the same exhausted-transient-failure path as a pre-provider attempt
+      // failure instead of remaining queued without a slot or Watchdog reach.
+      expect(removeLabelsFromIssue).not.toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed"] })
+      );
+      expect(addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:failed"] })
+      );
+      expect(runStore.getRun("run-conflict")).toMatchObject({
+        failureClassification: "transient",
+        state: "failed",
+        terminalReason: "boom: non-shutdown failure after Run row created"
+      });
+      expect(
+        runStore.listPendingRunNotifications().map((run) => run.id)
+      ).toContain("run-conflict");
+      expect(activeRuns.countInFlight()).toBe(0);
+      expect(provider.validate).not.toHaveBeenCalled();
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("schedules a retry when a post-creation claim failure is transient", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+    const schedule = vi.fn<RunControllerOptions["schedule"]>();
+    const controller = makeRunController(
+      {
+        activeRuns,
+        onTerminated: vi.fn(),
+        project,
+        provider,
+        reloader,
+        root,
+        runStore
+      },
+      {
+        createRunId: () => "run-retryable-conflict",
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+        },
+        lifecyclePolicy: {
+          continuation: { cap: 0, delayMs: 0 },
+          retry: { cap: 1, delaysMs: [25], maxBackoffMs: 25 }
+        },
+        schedule
+      }
+    );
+
+    vi.spyOn(activeRuns, "reserveSlot").mockImplementationOnce(() => {
+      throw new Error("temporary slot reservation failure");
+    });
+
+    try {
+      await expect(controller.dispatchOneFresh(pollStatus())).rejects.toThrow(
+        "temporary slot reservation failure"
+      );
+
+      expect(runStore.getRun("run-retryable-conflict")).toMatchObject({
+        failureClassification: "transient",
+        retryCount: 1,
+        state: "failed",
+        terminalReason: "temporary slot reservation failure"
+      });
+      expect(schedule).toHaveBeenCalledOnce();
+      expect(schedule).toHaveBeenCalledWith(
+        expect.objectContaining({
+          delayMs: 25,
+          issueNumber: 611,
+          kind: "retry",
+          projectName: "symphonika",
+          runId: "run-retryable-conflict"
+        })
+      );
+      expect(
+        runStore.listPendingRunNotifications().map((run) => run.id)
+      ).not.toContain("run-retryable-conflict");
+      expect(addLabelsToIssue).not.toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:failed"] })
+      );
+      expect(activeRuns.countInFlight()).toBe(0);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not reconcile an existing row when createRun itself fails", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    runStore.createRun({
+      evidenceIgnore: [],
+      id: "existing-run",
+      issue: pollStatus().candidateIssues[0]!.issue,
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const controller = makeRunController(
+      {
+        activeRuns,
+        onTerminated: vi.fn(),
+        project,
+        provider,
+        reloader,
+        root,
+        runStore
+      },
+      { createRunId: () => "existing-run" }
+    );
+
+    try {
+      await expect(controller.dispatchOneFresh(pollStatus())).rejects.toThrow();
+
+      expect(runStore.getRun("existing-run")).toMatchObject({
+        failureClassification: null,
+        state: "queued",
+        terminalReason: null
+      });
+      expect(runStore.listPendingRunNotifications()).toEqual([]);
+      expect(activeRuns.countInFlight()).toBe(0);
     } finally {
       runStore.close();
     }
@@ -1430,9 +1587,11 @@ function makeRunController(
   overrides: {
     createRunId?: RunControllerOptions["createRunId"];
     githubIssuesApi?: RunControllerOptions["githubIssuesApi"];
+    lifecyclePolicy?: RunControllerOptions["lifecyclePolicy"];
     logger?: RunControllerOptions["logger"];
     prepareIssueWorkspace?: RunControllerOptions["prepareIssueWorkspace"];
     providerBuildCapacityLoader?: RunControllerOptions["providerBuildCapacityLoader"];
+    schedule?: RunControllerOptions["schedule"];
     watchdogConfigLoader?: RunControllerOptions["watchdogConfigLoader"];
   } = {}
 ): RunController {
@@ -1450,7 +1609,7 @@ function makeRunController(
       listOpenIssues: vi.fn().mockResolvedValue([]),
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     },
-    lifecyclePolicy: {
+    lifecyclePolicy: overrides.lifecyclePolicy ?? {
       continuation: { cap: 0, delayMs: 0 },
       retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
     },
@@ -1466,7 +1625,7 @@ function makeRunController(
       : { providerBuildCapacityLoader: overrides.providerBuildCapacityLoader }),
     providersLoader: () => Promise.resolve(deps.reloader.providersConfig()),
     runStore: deps.runStore,
-    schedule: () => undefined,
+    schedule: overrides.schedule ?? (() => undefined),
     stateRoot: path.join(deps.root, ".symphonika"),
     watchdogConfigLoader:
       overrides.watchdogConfigLoader ??

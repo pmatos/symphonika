@@ -473,6 +473,24 @@ class FreshClaimDeferredError extends Error {
   readonly name = "FreshClaimDeferredError";
 }
 
+// Separates a failure after this claim created its Run row from a createRun
+// failure that happens to collide with a pre-existing row under the same id.
+// runFreshLifecycle must reconcile only the former; inferring ownership from
+// getRun(runId) would mutate somebody else's durable row in the latter case.
+class PostCreateRunClaimError extends Error {
+  readonly name = "PostCreateRunClaimError";
+
+  constructor(readonly claimError: unknown) {
+    super(
+      claimError instanceof Error
+        ? claimError.message
+        : typeof claimError === "string"
+          ? claimError
+          : "unknown post-create Run claim failure"
+    );
+  }
+}
+
 // The Watchdog policy slice a Run Slot Deadline needs: whether the cap is on
 // at all, and how many wall-clock minutes it allows from the Run's claim.
 type RunDeadlinePolicy = Pick<WatchdogConfig, "enabled" | "maxRunMinutes">;
@@ -2995,7 +3013,18 @@ export class RunController {
     let deadline: RunSlotDeadline;
     await this.dispatchMutex.acquire();
     try {
-      deadline = await this.claimAndPersistRun(input);
+      try {
+        deadline = await this.claimAndPersistRun(input);
+      } catch (error) {
+        if (error instanceof PostCreateRunClaimError) {
+          await this.reconcilePostCreateClaimFailure({
+            error: error.claimError,
+            ...input
+          });
+          throw error.claimError;
+        }
+        throw error;
+      }
     } finally {
       this.dispatchMutex.release();
     }
@@ -3018,6 +3047,103 @@ export class RunController {
       deadline,
       runId: input.runId
     });
+  }
+
+  private async reconcilePostCreateClaimFailure(input: {
+    attemptNumber: number;
+    error: unknown;
+    extraInstructions?: string;
+    isContinuation: boolean;
+    issue: IssueSnapshot;
+    project: DispatchProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    repository: GitHubIssueRepositoryInput;
+    respectsIssueLabels?: boolean;
+    runId: string;
+  }): Promise<void> {
+    // claimAndPersistRun owns rollback before createRun and shutdown
+    // cancellation after it. This caller owns the remaining case: a Run row
+    // exists, but claimAndPersistRun failed before handing a live slot to
+    // runAttemptLifecycle. Keep the whole repair under dispatchMutex so stale
+    // detection cannot observe a queued row between slot cleanup and its
+    // terminal state.
+    this.activeRuns.unregister(input.runId);
+    const run = this.runStore.getRun(input.runId);
+    if (run?.state !== "queued") {
+      return;
+    }
+
+    const terminal = await classifyFailure({
+      error: input.error,
+      events: [],
+      cancelRequested: false,
+      redactSecrets: this.redactionInventory(input.repository.token)
+    });
+    const state = mapOutcomeToRunState(terminal);
+    const willRetry =
+      terminal.kind === "failed" &&
+      terminal.classification === "transient" &&
+      this.runStore.runRetryCount(input.runId) < this.lifecyclePolicy.retry.cap;
+    this.runStore.recordTerminalReason(
+      input.runId,
+      terminal.reason,
+      terminal.classification
+    );
+    this.runStore.updateRunState(input.runId, state);
+    if (!willRetry) {
+      try {
+        this.runStore.markRunNotificationPending(input.runId);
+      } catch (error) {
+        this.logger?.warn(
+          { err: error, runId: input.runId },
+          "symphonika issue Run notification evidence write failed"
+        );
+      }
+    }
+    await this.applyTerminalLabels({
+      fsmContinuing: false,
+      issueNumber: input.issue.number,
+      outcome: terminal,
+      repository: input.repository,
+      willRetry
+    });
+    try {
+      await this.scheduleNext({
+        ...(input.extraInstructions === undefined
+          ? {}
+          : { extraInstructions: input.extraInstructions }),
+        issue: input.issue,
+        outcome: terminal,
+        project: input.project,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName,
+        repository: input.repository,
+        ...(input.respectsIssueLabels === undefined
+          ? {}
+          : { respectsIssueLabels: input.respectsIssueLabels }),
+        runId: input.runId,
+        runtimeAttemptNumber: input.attemptNumber,
+        willRetry
+      });
+    } catch (scheduleError) {
+      this.logger?.error(
+        { err: scheduleError, runId: input.runId },
+        "symphonika scheduleNext failed"
+      );
+    }
+    this.logger?.warn(
+      {
+        classification: terminal.classification,
+        issueNumber: input.issue.number,
+        project: input.project.name,
+        runId: input.runId,
+        state,
+        terminalReason: terminal.reason,
+        willRetry
+      },
+      "symphonika reconciled Run after claim persistence failed"
+    );
   }
 
   private async claimAndPersistRun(input: {
@@ -3299,6 +3425,9 @@ export class RunController {
         }
       } finally {
         rollbackDeadline.clear();
+      }
+      if (runCreated && !(error instanceof RegistryShutdownError)) {
+        throw new PostCreateRunClaimError(error);
       }
       throw error;
     } finally {

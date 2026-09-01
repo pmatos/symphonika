@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -179,6 +179,85 @@ describe("Git workspace preparation", () => {
     await expect(
       git(["-C", second.workspacePath, "status", "--short"])
     ).resolves.toContain("?? agent-notes.txt");
+  });
+
+  it("allows a retry after the Run deadline aborts worktree creation", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "symphonika");
+    const workspacePath = path.join(
+      workspaceRoot,
+      "issues",
+      "642-clean-up-partially-created-worktrees"
+    );
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const startedPath = path.join(root, "worktree-started");
+    const interruptNextAddPath = path.join(root, "interrupt-next-add");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(interruptNextAddPath, "interrupt\n");
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ -f "${interruptNextAddPath}" ] && [ "$3" = "worktree" ] && [ "$4" = "add" ] && [ "$5" = "${workspacePath}" ]; then
+  rm -f "${interruptNextAddPath}"
+  "${realGitOutput.trim()}" "$@"
+  touch "${startedPath}"
+  while true; do
+    sleep 1
+  done
+fi
+exec "${realGitOutput.trim()}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+    const input = {
+      issue: {
+        number: 642,
+        title: "Clean up partially-created worktrees"
+      },
+      project: {
+        name: "symphonika",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      }
+    };
+
+    try {
+      const preparation = rejectionOf(
+        prepareIssueWorkspace({
+          ...input,
+          signal: controller.signal
+        })
+      );
+      await waitForPath(startedPath);
+      controller.abort(new Error("run timeout"));
+
+      await expect(preparation).resolves.toMatchObject({
+        code: "ABORT_ERR",
+        name: "AbortError"
+      });
+      await expect(pathExists(workspacePath)).resolves.toBe(false);
+      await expect(
+        worktreePaths(path.join(workspaceRoot, ".cache", "repo.git"))
+      ).resolves.not.toContain(workspacePath);
+
+      const recovered = await prepareIssueWorkspace(input);
+      expect(recovered.reused).toBe(false);
+      expect(recovered.workspacePath).toBe(workspacePath);
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
   });
 
   it("surfaces an occupied issue workspace path as a deterministic conflict", async () => {
@@ -486,6 +565,44 @@ async function createRemoteRepository(
 async function git(args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args);
   return stdout.trim();
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function waitForPath(filePath: string): Promise<void> {
+  const expiresAt = Date.now() + 2_000;
+  while (!(await pathExists(filePath))) {
+    if (Date.now() >= expiresAt) {
+      throw new Error(`timed out waiting for ${filePath}`);
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 10);
+    });
+  }
+}
+
+async function worktreePaths(cachePath: string): Promise<string[]> {
+  const output = await git([
+    "-C",
+    cachePath,
+    "worktree",
+    "list",
+    "--porcelain"
+  ]);
+  return output
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length));
 }
 
 async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {

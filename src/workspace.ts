@@ -150,17 +150,32 @@ export async function prepareIssueWorkspace(
   }
 
   await mkdir(path.dirname(plan.workspacePath), { recursive: true });
-  await git(
-    [
-      "-C",
-      plan.cachePath,
-      "worktree",
-      "add",
-      plan.workspacePath,
-      plan.branchName
-    ],
-    input.signal
-  );
+  try {
+    await git(
+      [
+        "-C",
+        plan.cachePath,
+        "worktree",
+        "add",
+        plan.workspacePath,
+        plan.branchName
+      ],
+      input.signal
+    );
+    input.signal?.throwIfAborted();
+  } catch (error) {
+    if (isAbortError(error) || input.signal?.aborted === true) {
+      try {
+        await cleanupAbortedIssueWorktree(plan.cachePath, plan.workspacePath);
+      } catch (cleanupError) {
+        throw new WorkspacePreparationCleanupError(
+          `failed to clean aborted issue worktree ${plan.workspacePath}`,
+          new AggregateError([error, cleanupError])
+        );
+      }
+    }
+    throw error;
+  }
 
   return {
     ...plan,
@@ -231,6 +246,73 @@ async function worktreePathForBranch(
   }
 
   return undefined;
+}
+
+async function cleanupAbortedIssueWorktree(
+  cachePath: string,
+  workspacePath: string
+): Promise<void> {
+  const cleanupErrors: unknown[] = [];
+  try {
+    await git([
+      "-C",
+      cachePath,
+      "worktree",
+      "remove",
+      "--force",
+      workspacePath
+    ]);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  try {
+    await rm(workspacePath, { force: true, recursive: true });
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  try {
+    await git(["-C", cachePath, "worktree", "prune"]);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+
+  let workspaceRemains = true;
+  let registrationRemains = true;
+  try {
+    workspaceRemains = await exists(workspacePath);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  try {
+    registrationRemains = await isWorktreeRegistered(cachePath, workspacePath);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  if (workspaceRemains || registrationRemains) {
+    throw new Error("issue worktree cleanup remained incomplete", {
+      cause: new AggregateError(cleanupErrors)
+    });
+  }
+}
+
+async function isWorktreeRegistered(
+  cachePath: string,
+  workspacePath: string
+): Promise<boolean> {
+  const output = await git([
+    "-C",
+    cachePath,
+    "worktree",
+    "list",
+    "--porcelain"
+  ]);
+  const expectedPath = path.resolve(workspacePath);
+  return output.split(/\r?\n/).some((line) => {
+    return (
+      line.startsWith("worktree ") &&
+      path.resolve(line.slice("worktree ".length)) === expectedPath
+    );
+  });
 }
 
 // Per-cache-path serialization for ensureRepositoryCache. `git fetch` on the

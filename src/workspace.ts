@@ -233,26 +233,36 @@ async function worktreeListLines(
   return output.split(/\r?\n/);
 }
 
+type WorktreeEntry = { branch?: string; path: string };
+
+function parseWorktreeEntries(lines: string[]): WorktreeEntry[] {
+  const entries: WorktreeEntry[] = [];
+  let current: WorktreeEntry | undefined;
+
+  for (const line of lines) {
+    if (line.startsWith("worktree ")) {
+      current = { path: line.slice("worktree ".length) };
+      entries.push(current);
+      continue;
+    }
+
+    if (current !== undefined && line.startsWith("branch ")) {
+      current.branch = line.slice("branch ".length);
+    }
+  }
+
+  return entries;
+}
+
 async function worktreePathForBranch(
   cachePath: string,
   branchName: string,
   signal?: AbortSignal
 ): Promise<string | undefined> {
-  let currentWorktreePath: string | undefined;
-  const expectedBranchLine = `branch refs/heads/${branchName}`;
-
-  for (const line of await worktreeListLines(cachePath, signal)) {
-    if (line.startsWith("worktree ")) {
-      currentWorktreePath = line.slice("worktree ".length);
-      continue;
-    }
-
-    if (line === expectedBranchLine) {
-      return currentWorktreePath;
-    }
-  }
-
-  return undefined;
+  const expectedBranch = `refs/heads/${branchName}`;
+  return parseWorktreeEntries(await worktreeListLines(cachePath, signal)).find(
+    (entry) => entry.branch === expectedBranch
+  )?.path;
 }
 
 async function cleanupAbortedIssueWorktree(
@@ -275,15 +285,13 @@ async function cleanupAbortedIssueWorktree(
   await rm(workspacePath, { force: true, recursive: true }).catch(recordError);
   await git(["-C", cachePath, "worktree", "prune"]).catch(recordError);
 
+  const markRemainsOnError = (error: unknown): true => {
+    recordError(error);
+    return true;
+  };
   const [workspaceRemains, registrationRemains] = await Promise.all([
-    exists(workspacePath).catch((error: unknown) => {
-      recordError(error);
-      return true;
-    }),
-    isWorktreeRegistered(cachePath, workspacePath).catch((error: unknown) => {
-      recordError(error);
-      return true;
-    })
+    exists(workspacePath).catch(markRemainsOnError),
+    isWorktreeRegistered(cachePath, workspacePath).catch(markRemainsOnError)
   ]);
   if (workspaceRemains || registrationRemains) {
     throw new Error("issue worktree cleanup remained incomplete", {
@@ -297,12 +305,9 @@ async function isWorktreeRegistered(
   workspacePath: string
 ): Promise<boolean> {
   const expectedPath = path.resolve(workspacePath);
-  return (await worktreeListLines(cachePath)).some((line) => {
-    return (
-      line.startsWith("worktree ") &&
-      path.resolve(line.slice("worktree ".length)) === expectedPath
-    );
-  });
+  return parseWorktreeEntries(await worktreeListLines(cachePath)).some(
+    (entry) => path.resolve(entry.path) === expectedPath
+  );
 }
 
 // Per-cache-path serialization for ensureRepositoryCache. `git fetch` on the

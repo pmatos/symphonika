@@ -45,8 +45,11 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
-import type { EmailNotificationConfig } from "../notifications/config.js";
-import { redactValueDeep, secretsForEmailConfig } from "../redaction.js";
+import {
+  secretsForEmailConfig,
+  type EmailNotificationConfig
+} from "../notifications/config.js";
+import { redactValueDeep } from "../redaction.js";
 import type { CancelReason, ProgressEdge, RunStore } from "../run-store.js";
 import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
@@ -3244,7 +3247,7 @@ export class RunController {
       // !parkedAsWaiting. The unconditional unregister above already
       // released the in-flight slot. See ADR 0052 — slot-leak fix.
       if (!parkedAsWaiting && !preservedWatchdogTerminal) {
-        const redactSecrets = this.resolveRedactSecrets(input.repository.token);
+        const redactSecrets = this.redactionInventory(input.repository.token);
         const terminal = await classifyFailure({
           cancelRequested,
           ...(caughtError === undefined ? {} : { error: caughtError }),
@@ -3744,7 +3747,7 @@ export class RunController {
     );
     let sequence = 0;
     const redactSecrets = (): string[] =>
-      this.resolveRedactSecrets(input.repositoryToken);
+      this.redactionInventory(input.repositoryToken);
     try {
       for await (const event of input.provider.runAttempt({
         branchName: input.evidence.branchName,
@@ -3807,10 +3810,7 @@ export class RunController {
     const normalized =
       input.event.normalized === undefined
         ? undefined
-        : (redactValueDeep(
-            input.event.normalized,
-            input.redactSecrets
-          ) as NormalizedProviderEvent);
+        : redactValueDeep(input.event.normalized, input.redactSecrets);
     await Promise.all([
       appendJsonl(input.rawLogPath, raw),
       ...(normalized === undefined
@@ -3830,7 +3830,11 @@ export class RunController {
     return normalized;
   }
 
-  private resolveRedactSecrets(repositoryToken: string): string[] {
+  // The Project credential inventory for one execution: the effective tracker
+  // token plus the resolved SMTP password when an email sink is configured
+  // (SPEC.md §6). Resolved per use rather than stored, so a Service Config
+  // reload is picked up mid-Run.
+  private redactionInventory(repositoryToken: string): string[] {
     return [
       ...new Set([
         repositoryToken,

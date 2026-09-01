@@ -1,12 +1,11 @@
-import type { EmailNotificationConfig } from "./notifications/config.js";
-
 // A provider's own output can echo back environment values it inherited
 // (full-permission execution, see CLAUDE.md) — persisted evidence and any
 // terminal reason derived from it must never retain the raw SMTP password or
 // tracker token (SPEC.md §6). This lives outside the routine dispatcher
-// because the same invariant now has two enforcement points: the dispatcher's
-// JSONL evidence writer and the provider adapters' stderr tee. One definition
-// of the redaction semantics, not two that can drift.
+// because the same invariant is enforced at every durable provider-evidence
+// boundary for Runs and Firings alike: JSONL evidence, provider-event rows,
+// provider-derived terminal reasons, and the provider adapters' stderr tee.
+// One definition of the redaction semantics, not several that can drift.
 //
 // Every occurrence of every secret is located against the ORIGINAL text first,
 // then overlapping spans are merged and masked as one. The two simpler shapes
@@ -39,7 +38,16 @@ export function redactAll(
   return redacted + message.slice(cursor);
 }
 
-export function redactValueDeep(
+// Shape-preserving: only string leaves change, so the caller keeps the type
+// it handed in rather than re-asserting it back out of `unknown`.
+export function redactValueDeep<T>(
+  value: T,
+  redactSecrets: readonly string[]
+): T {
+  return redactUnknownDeep(value, redactSecrets) as T;
+}
+
+function redactUnknownDeep(
   value: unknown,
   redactSecrets: readonly string[]
 ): unknown {
@@ -47,28 +55,17 @@ export function redactValueDeep(
     return redactAll(value, redactSecrets);
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => redactValueDeep(entry, redactSecrets));
+    return value.map((entry) => redactUnknownDeep(entry, redactSecrets));
   }
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value).map(([key, entry]) => [
         key,
-        redactValueDeep(entry, redactSecrets)
+        redactUnknownDeep(entry, redactSecrets)
       ])
     );
   }
   return value;
-}
-
-export function secretsForEmailConfig(
-  config: EmailNotificationConfig | undefined,
-  env: NodeJS.ProcessEnv
-): string[] {
-  if (config === undefined || config.smtpUsername === undefined) {
-    return [];
-  }
-  const secret = env[config.smtpPasswordEnv];
-  return secret === undefined || secret.length === 0 ? [] : [secret];
 }
 
 export type SecretSpan = { end: number; start: number };

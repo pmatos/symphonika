@@ -33,16 +33,15 @@ import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
 } from "../lifecycle/run-controller.js";
-import type { EmailNotificationConfig } from "../notifications/config.js";
+import {
+  secretsForEmailConfig,
+  type EmailNotificationConfig
+} from "../notifications/config.js";
 import type { NotificationDeliveryTracker } from "../notifications/delivery-tracker.js";
 import { deliverRoutineFanoutNotification } from "../notifications/routine-fanout.js";
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
-import {
-  redactAll,
-  redactValueDeep,
-  secretsForEmailConfig
-} from "../redaction.js";
+import { redactAll, redactValueDeep } from "../redaction.js";
 import type { RoutineFanoutHoldReason, RunStore } from "../run-store.js";
 import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
@@ -1329,6 +1328,7 @@ async function runRoutineFiring(input: {
             classifyRoutineOutcome(events, {
               baseBranch: input.project.workspace.git.base_branch,
               kind: input.routine.kind,
+              redactSecrets: redactSecrets(),
               stderrLogPath: evidence.stderrLogPath,
               workspacePath: prepared.workspacePath
             })
@@ -2171,6 +2171,7 @@ async function classifyRoutineOutcome(
   workspace: {
     baseBranch: string;
     kind: RoutineStatus["kind"];
+    redactSecrets: readonly string[];
     stderrLogPath?: string;
     workspacePath: string;
   }
@@ -2183,6 +2184,7 @@ async function classifyRoutineOutcome(
     const classified = await classifyFailure({
       cancelRequested: false,
       events,
+      redactSecrets: workspace.redactSecrets,
       ...(workspace.stderrLogPath === undefined
         ? {}
         : { stderrLogPath: workspace.stderrLogPath }),

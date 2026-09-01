@@ -792,8 +792,11 @@ notification content, or prompt evidence. SMTP transport errors are redacted bef
 durable failure recording.
 
 The provider-evidence redaction inventory is the set of credential values Symphonika resolves for
-the execution's Project: its effective tracker token and, when authenticated email is configured,
-the effective SMTP password. Both issue Runs and Routine Firings scrub that inventory from raw and
+the execution's Project: its effective tracker token and, whenever an email sink is configured, the
+value of the named password variable. The inventory does not depend on whether SMTP authentication
+is actually in use: providers inherit the daemon's environment either way, so a variable Service
+Config names and the environment sets is echoable back into evidence regardless. Both issue Runs
+and Routine Firings scrub that inventory from raw and
 Normalized Event Logs, provider stderr, provider-derived terminal reasons, and any SQLite event
 metadata before persistence; Routine Firings also scrub their structured outcome evidence. The
 inventory is explicit rather than inferred from every environment variable: provider-native
@@ -932,13 +935,12 @@ terminal reason, which otherwise carries nothing but `process_exit_<code>` or `f
 
 Provider stderr is redacted on the way to disk, streamed so a secret split across two reads is
 still caught. An issue Run or Routine Firing scrubs the same Project credential inventory from its
-raw and normalized evidence, provider stderr, and provider-derived terminal reason: the configured
-SMTP password when authenticated email is enabled plus the Project's resolved tracker token. Issue
-Run provider-event rows in SQLite receive the already-redacted raw and normalized values. The
-provider adapter waits for that write to flush before its attempt generator returns, so the
+raw and normalized evidence, provider stderr, and provider-derived terminal reason. The provider
+adapter waits for the stderr tee's write to flush before its attempt generator returns, so the
 terminal-reason excerpt is read after the bytes land rather than racing them; the wait is bounded,
 because evidence capture is best-effort and must never keep a Run or Firing from reaching a
-terminal state.
+terminal state. Issue Run provider-event rows in SQLite receive the already-redacted raw and
+normalized values.
 
 ## 8. Scheduling
 

@@ -13,7 +13,10 @@ export type ClassifyFailureInput = {
   cancelRequested: boolean;
   error?: unknown;
   events: NormalizedProviderEvent[];
-  redactSecrets?: readonly string[];
+  // Required, not optional: the terminal reason lifts arbitrary provider text
+  // into SQLite, so a caller that forgets the inventory silently drops a
+  // SPEC.md §6 boundary. An empty list is the explicit "nothing to scrub".
+  redactSecrets: readonly string[];
   // Evidence path for the attempt's provider stderr tee. The unclean-exit
   // reasons below carry no explanation of their own, so the provider's last
   // words are appended to them when it wrote any.
@@ -48,7 +51,7 @@ export async function classifyFailure(
   const terminal = await classifyFailureUnredacted(input);
   return {
     ...terminal,
-    reason: redactAll(terminal.reason, input.redactSecrets ?? [])
+    reason: redactAll(terminal.reason, input.redactSecrets)
   };
 }
 

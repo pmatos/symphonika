@@ -4749,7 +4749,9 @@ async function writeValidProject(
             '  from: "symphonika@example.com"',
             '  to: "operator@example.com"',
             '  smtp_host: "smtp.example.com"',
-            '  smtp_username: "server-token"',
+            // Deliberately unauthenticated: the named password variable is
+            // still inherited by the provider, so it belongs in the
+            // redaction inventory whether or not SMTP auth uses it.
             `  smtp_password_env: "${options.smtpPasswordEnv}"`
           ]),
       "providers:",

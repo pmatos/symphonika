@@ -3842,8 +3842,9 @@ export class RunController {
           // action. In both cases the per-state ClassifiedTerminal may legitimately
           // be `failed` (e.g. a planning step that exited provider_success=true
           // without committing → no_workspace_changes) while the workflow as a
-          // whole is not failing. applyTerminalLabels uses this to suppress
-          // `sym:failed`, which subsequent successful states would otherwise leave
+          // whole is not failing. The claim-label writer's `applyTerminal` uses
+          // this to suppress `sym:failed`, which subsequent successful states
+          // would otherwise leave
           // on the issue forever.
           const fsmContinuing =
             isRawFsm &&
@@ -4424,9 +4425,9 @@ export class RunController {
     stateAdvance?: { toStateId: string } | null;
     suppressContinuation?: boolean;
     waitPark?: { waitingRunId: string } | null;
-    // Same boolean computed at the call site for applyTerminalLabels. Used
+    // Same boolean computed at the call site for the claim-label writer's applyTerminal. Used
     // by the stateAdvance bail-out path to decide between restoring
-    // `sym:failed` (failed && !willRetry — applyTerminalLabels suppressed it
+    // `sym:failed` (failed && !willRetry — the claim-label writer's applyTerminal suppressed it
     // because fsmContinuing was true) and falling through to the failed
     // branch so the retry can fire (failed && willRetry).
     willRetry: boolean;
@@ -4490,20 +4491,21 @@ export class RunController {
         return;
       }
       // Bail-out: `refreshIssue` returned `undefined` (transient API error)
-      // or the issue is closed/missing (null or non-open). `applyTerminalLabels`
+      // or the issue is closed/missing (null or non-open). The claim-label
+      // writer's `applyTerminal`
       // was called before `scheduleNext` with `fsmContinuing=true` (any
       // stateAdvance != null implies it). What it did depends on the outcome:
       //
-      // - `failed && !willRetry`: applyTerminalLabels suppressed `sym:failed`
+      // - `failed && !willRetry`: the claim-label writer's applyTerminal suppressed `sym:failed`
       //   (or `sym:blocked`, see isBlockedOutcome) on the assumption that the
       //   FSM would continue. The suppression promise is now broken; restore
       //   whichever label matches the outcome so the issue is not orphaned
       //   with only `sym:claimed`. Then return — there is no retry to fire and
       //   no continuation to schedule.
-      // - `failed && willRetry`: applyTerminalLabels did not add either label
+      // - `failed && willRetry`: the claim-label writer's applyTerminal did not add either label
       //   (it short-circuited on `willRetry`). The transient-retry branch
       //   below is the right path; fall through so it fires.
-      // - `success`: applyTerminalLabels did not add either label, and no
+      // - `success`: the claim-label writer's applyTerminal did not add either label, and no
       //   retry applies. Fall through; `suppressContinuation` (always true
       //   when `stateAdvance != null`) ends the call.
       if (input.outcome.kind === "failed" && !input.willRetry) {

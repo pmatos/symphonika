@@ -93,8 +93,9 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## issue-claim-label-writer
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 21/25 (leverage 4, locality 4, blast radius 2, heat 5)
+- **PR**: #668
 - **Files**: ~3 estimated (new `claim-label-writer.ts`, new test, `run-controller.ts`)
 - **Modules**: `src/lifecycle/run-controller.ts` — the terminal-outcome cluster only:
   `markIssueNeedsHuman` (`:4434`), `markIssueFailed` (`:4458`), `markIssueBlocked` (`:4484`),
@@ -105,6 +106,15 @@ filter holds, and never deletes entries. Statuses change; rows stay.
   ~230-line terminal region behind a `ClaimLabelWriter.markTerminal(outcome)`/`.markFailed`/`.markBlocked`/`.release(phase)` seam.
 - **First seen**: 2026-08-31
 - **Reason**: Picked by the 2026-09-02 run (top surviving candidate at 21/25; runner-up `watchdog-subject-port` at 20/25, within 1 point). **Scope corrected this run**: the dispatch-time `sym:claimed`/`sym:running` *add* sites (interleaved with the dispatch mutex/slot logic) and the standalone `shutdown-resume.ts`/`stale-claims.ts` modules are deliberately **out of scope** — they are a different concern (asserting a claim under a lock; resume/stale sweeps with their own availability posture) from resolving a terminal outcome, and the `~3-4 file` estimate only ever fit the terminal cluster. ADR 0002/0077-adjacent but behaviour-preserving, so no contradiction.
+
+### Run 2026-09-02 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M1FK9QZN` (adopted; conditions 1-4 held — non-default, 0 unique commits, no upstream, unpublished on origin). Not renamed per the adopted-branch rule; slug recorded here and in the report instead.
+- **Committed**: report + backlog reconciliation (`080c1d7`), design section (`7b0dcd9`), implementation + CONTEXT.md term (`26f358d`), this in-flight update.
+- **Evidence**: PR #668; quality gate green (lint, typecheck, format:check, knip, build; test 2501 passed). One unrelated pre-existing flake — `notification-daemon.test.ts > sends one invalid Routine alert across ten ticks and one recovery` (full-suite-load timeout; passes 4/4 in isolation; imports nothing this PR touches).
+- **Next**: human review of #668; `watchdog-subject-port` (20/25) is the natural next firing.
 
 ## live-run-ownership-registry
 

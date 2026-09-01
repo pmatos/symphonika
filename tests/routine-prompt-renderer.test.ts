@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { renderRoutinePrompt } from "../src/routines/prompt-renderer.js";
-import { renderAutonomousPrompt } from "../src/workflow/autonomous-prompt.js";
+import {
+  AUTONOMY_PREAMBLE,
+  renderAutonomousPrompt
+} from "../src/workflow/autonomous-prompt.js";
 
 const baseInput = {
   firing: {
@@ -46,14 +49,10 @@ describe("RoutinePromptRenderer", () => {
     );
   });
 
-  // A routine firing is the path that OOM-killed itself on an uncapped
-  // `ninja` build, so the budget item has to survive into routine prompts and
-  // not just issue-dispatch ones.
-  it("carries the build-budget contract item into routine firings", () => {
+  it("carries the whole autonomy contract into routine firings", () => {
     const rendered = renderRoutinePrompt(baseInput);
 
-    expect(rendered.prompt).toContain("Stay inside the run's memory budget");
-    expect(rendered.prompt).toContain("CMAKE_BUILD_PARALLEL_LEVEL=6");
+    expect(rendered.prompt).toContain(AUTONOMY_PREAMBLE);
   });
 
   it("renders routine variables and prepends the standard autonomy preamble", () => {

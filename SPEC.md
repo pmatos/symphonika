@@ -617,6 +617,7 @@ The preamble tells the agent:
 - it should preserve evidence when blocked
 - it should use the prepared workspace and issue branch
 - it should operate on the assigned issue unless the workflow says otherwise
+- it should stay inside the host's shared memory budget: cap build parallelism explicitly rather than defaulting to the host's core count, skip debug info when nothing will read a backtrace, build only the targets the task needs, and keep scratch under `$TMPDIR` rather than a hardcoded `/tmp/...` path
 
 ### 5.4 Routine Declarations
 

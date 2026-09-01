@@ -1571,6 +1571,18 @@ Workspace conflicts are deterministic failures unless explicitly resolved by an 
 Issue Workspaces are not deleted automatically. Terminal Routine Firing workspaces are the narrow
 exception governed by Routine Workspace Retention in §8.5 and ADR 0067.
 
+A second narrow exception applies when a Run Slot Deadline aborts `git worktree add` while preparing
+a new Issue Workspace: cleanup removes only the worktree proved absent before this preparation
+began; a pre-existing or reused Issue Workspace is never removed. Removal is unconditional on any
+abort-triggered failure of the `git worktree add` command, including one that only reports failure
+after its work has already completed (for example, during a `post-checkout` hook) — the admin
+registration and `HEAD` are written before checkout finishes, so a killed process cannot be trusted
+to distinguish a complete checkout from a partial one, and preserving a possibly-partial checkout
+would be worse than the deterministic branch a retry re-derives it from. Cleanup verifies that both
+the worktree directory and bare-cache registration are gone; an incomplete cleanup is surfaced as
+`WorkspacePreparationCleanupError` and logged even though the deadline still owns the terminal
+`run_timeout` classification.
+
 ## 11. Agent Providers
 
 ### 11.1 Common Provider Interface

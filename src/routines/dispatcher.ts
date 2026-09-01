@@ -402,6 +402,7 @@ export function fireRoutineNow(
     configDir: input.configDir,
     env: input.env ?? process.env,
     firingId,
+    globalMaxInFlight: input.globalConcurrency.maxInFlight,
     githubIssuesApi: input.githubIssuesApi,
     inspectWorkspaceCommitsAhead:
       input.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
@@ -1061,6 +1062,7 @@ export async function dispatchDueRoutines(
       const firingTask = runRoutineFiring({
         firingId,
         env: input.env ?? process.env,
+        globalMaxInFlight: input.globalConcurrency.maxInFlight,
         githubIssuesApi: input.githubIssuesApi,
         inspectWorkspaceCommitsAhead:
           input.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
@@ -1287,6 +1289,7 @@ async function runRoutineFiring(input: {
   configDir: string;
   env: NodeJS.ProcessEnv;
   firingId: string;
+  globalMaxInFlight: number | undefined;
   githubIssuesApi: GitHubIssuesApi | undefined;
   inspectWorkspaceCommitsAhead: typeof inspectWorkspaceCommitsAhead;
   logger: Logger | undefined;
@@ -1457,6 +1460,9 @@ async function runRoutineFiring(input: {
     providerAttempt = (async () => {
       for await (const event of input.provider.runAttempt({
         branchName: prepared.branchName,
+        ...(input.globalMaxInFlight === undefined
+          ? {}
+          : { globalMaxInFlight: input.globalMaxInFlight }),
         issue: routineIssueSnapshot(input.routine),
         outputSchema: ROUTINE_OUTCOME_JSON_SCHEMA,
         prompt: evidence.prompt,

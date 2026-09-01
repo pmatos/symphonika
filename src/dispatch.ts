@@ -102,6 +102,12 @@ const dispatchProjectSchema = z
 const dispatchServiceConfigSchema = z
   .object({
     email: emailNotificationConfigSchema.optional(),
+    global: z
+      .object({
+        max_in_flight: z.number().int().positive().optional()
+      })
+      .passthrough()
+      .optional(),
     providers: z
       .object({
         codex: providerCommandSchema,
@@ -147,6 +153,8 @@ export async function dispatchOneEligibleIssue(
     emailConfigLoader: () => config.email,
     githubIssuesApi: options.githubIssuesApi,
     lifecyclePolicy: ONE_SHOT_LIFECYCLE_POLICY,
+    providerBuildCapacityLoader: () =>
+      Promise.resolve({ maxInFlight: config.global?.max_in_flight }),
     projectsLoader,
     providersLoader,
     runStore: options.runStore,

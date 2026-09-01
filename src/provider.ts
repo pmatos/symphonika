@@ -45,6 +45,12 @@ export type ProviderEvent = {
 
 export type ProviderRunInput = {
   branchName: string;
+  // Configured daemon-wide concurrency ceiling. Real daemon attempts pass it
+  // through so provider adapters can give build tools a fair share of host
+  // CPU and the shared provider-slice memory budget. Absent means the global
+  // cap is unbounded (or this is a standalone provider probe), so no honest
+  // per-attempt build share can be derived.
+  globalMaxInFlight?: number;
   issue: IssueSnapshot;
   outputSchema?: object;
   prompt: string;

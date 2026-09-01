@@ -16,6 +16,11 @@ import type {
 const SPAWN_HALTED = "spawn halted after environment capture";
 const spawnEnvironments: Array<NodeJS.ProcessEnv> = [];
 
+vi.mock("node:os", async () => {
+  const actual = await vi.importActual<typeof import("node:os")>("node:os");
+  return { ...actual, availableParallelism: () => 24 };
+});
+
 // Each adapter assembles its own spawn environment, so the only way to know
 // all three actually thread scratchPath through is to intercept the shared
 // spawn helper and drive each adapter to it.
@@ -89,6 +94,42 @@ const SCRATCH_ENVIRONMENT = {
 };
 
 describe("provider scratch environment", () => {
+  it("caps builds spawned by the codex process", async () => {
+    const environment = await captureSpawnEnvironment(
+      createCodexProvider({ processScope: passthroughScope }),
+      runInput("codex", { globalMaxInFlight: 8 })
+    );
+
+    expect(environment).toMatchObject({
+      CMAKE_BUILD_PARALLEL_LEVEL: "2",
+      MAKEFLAGS: "-j2"
+    });
+  });
+
+  it("caps builds spawned by the claude process", async () => {
+    const environment = await captureSpawnEnvironment(
+      createClaudeProvider({ processScope: passthroughScope }),
+      runInput("claude", { globalMaxInFlight: 8 })
+    );
+
+    expect(environment).toMatchObject({
+      CMAKE_BUILD_PARALLEL_LEVEL: "2",
+      MAKEFLAGS: "-j2"
+    });
+  });
+
+  it("caps builds spawned by the omp process", async () => {
+    const environment = await captureSpawnEnvironment(
+      createOmpProvider({ processScope: passthroughScope }),
+      runInput("omp", { globalMaxInFlight: 8 })
+    );
+
+    expect(environment).toMatchObject({
+      CMAKE_BUILD_PARALLEL_LEVEL: "2",
+      MAKEFLAGS: "-j2"
+    });
+  });
+
   it("points the codex process at the run's scratch directory", async () => {
     const environment = await captureSpawnEnvironment(
       createCodexProvider({ processScope: passthroughScope }),

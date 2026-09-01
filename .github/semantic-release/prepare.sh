@@ -5,13 +5,12 @@
 # @semantic-release/github.
 set -euo pipefail
 VERSION="${1:?usage: prepare.sh <version>}"
-TAG="v${VERSION}"
 
 npm version "${VERSION}" --no-git-tag-version --allow-same-version
 npm ci
 npm run build
 
-STAGE="symphonika-${TAG}"
+STAGE="symphonika-${VERSION}"
 rm -rf release-upload
 mkdir -p "release-upload/${STAGE}"
 cp -r dist "release-upload/${STAGE}/dist"

@@ -41,6 +41,7 @@ describe("classifyFailure", () => {
         { type: "session_started" },
         { type: "process_exit", exitCode: 0 }
       ],
+      redactSecrets: [],
       successWorkspace: { baseBranch: "main", workspacePath }
     });
 
@@ -58,6 +59,7 @@ describe("classifyFailure", () => {
     const result = await classifyFailure({
       cancelRequested: false,
       events: [{ type: "process_exit", exitCode: 0 }],
+      redactSecrets: [],
       successWorkspace: { baseBranch: "main", workspacePath }
     });
 
@@ -71,6 +73,7 @@ describe("classifyFailure", () => {
     const result = await classifyFailure({
       cancelRequested: false,
       events: [{ type: "process_exit", exitCode: 0 }],
+      redactSecrets: [],
       successWorkspace: { baseBranch: "main", workspacePath: root }
     });
 
@@ -82,7 +85,8 @@ describe("classifyFailure", () => {
   it("treats cancelRequested override as cancelled regardless of event flags", async () => {
     const result = await classifyFailure({
       cancelRequested: true,
-      events: [{ type: "process_exit", exitCode: 0 }]
+      events: [{ type: "process_exit", exitCode: 0 }],
+      redactSecrets: []
     });
 
     expect(result.kind).toBe("cancelled");
@@ -91,7 +95,8 @@ describe("classifyFailure", () => {
   it("classifies input_required terminally", async () => {
     const result = await classifyFailure({
       cancelRequested: false,
-      events: [{ type: "input_required" }]
+      events: [{ type: "input_required" }],
+      redactSecrets: []
     });
 
     expect(result.kind).toBe("input_required");
@@ -104,7 +109,8 @@ describe("classifyFailure", () => {
       events: [
         { type: "malformed_event", line: "{" },
         { type: "process_exit", exitCode: 1 }
-      ]
+      ],
+      redactSecrets: []
     });
 
     expect(result.kind).toBe("failed");
@@ -117,7 +123,8 @@ describe("classifyFailure", () => {
       events: [
         { type: "turn_failed", message: "boom" },
         { type: "process_exit", exitCode: 1 }
-      ]
+      ],
+      redactSecrets: []
     });
 
     expect(result.kind).toBe("failed");
@@ -127,7 +134,8 @@ describe("classifyFailure", () => {
   it("classifies non-zero process_exit as transient failure", async () => {
     const result = await classifyFailure({
       cancelRequested: false,
-      events: [{ type: "process_exit", exitCode: 1 }]
+      events: [{ type: "process_exit", exitCode: 1 }],
+      redactSecrets: []
     });
 
     expect(result.kind).toBe("failed");
@@ -146,6 +154,7 @@ describe("classifyFailure", () => {
     const result = await classifyFailure({
       cancelRequested: false,
       events: [{ type: "process_exit", exitCode: null, signal: "SIGKILL" }],
+      redactSecrets: [],
       stderrLogPath
     });
 
@@ -163,6 +172,7 @@ describe("classifyFailure", () => {
     const result = await classifyFailure({
       cancelRequested: false,
       events: [],
+      redactSecrets: [],
       stderrLogPath
     });
 
@@ -177,6 +187,7 @@ describe("classifyFailure", () => {
     const result = await classifyFailure({
       cancelRequested: false,
       events: [{ type: "process_exit", exitCode: 137 }],
+      redactSecrets: [],
       stderrLogPath: path.join(root, "provider.stderr.log")
     });
 
@@ -187,7 +198,8 @@ describe("classifyFailure", () => {
     const result = await classifyFailure({
       cancelRequested: false,
       error: new WorkspacePreparationError("branch_conflict", "boom"),
-      events: []
+      events: [],
+      redactSecrets: []
     });
 
     expect(result.kind).toBe("failed");
@@ -199,7 +211,8 @@ describe("classifyFailure", () => {
     const result = await classifyFailure({
       cancelRequested: false,
       error: new Error("workflow template references unknown variable {{x}}"),
-      events: []
+      events: [],
+      redactSecrets: []
     });
 
     expect(result.kind).toBe("failed");
@@ -214,7 +227,8 @@ describe("classifyFailure", () => {
     const result = await classifyFailure({
       cancelRequested: false,
       error,
-      events: []
+      events: [],
+      redactSecrets: []
     });
 
     expect(result.kind).toBe("failed");
@@ -225,10 +239,36 @@ describe("classifyFailure", () => {
     const result = await classifyFailure({
       cancelRequested: false,
       error: new Error("connection reset"),
-      events: []
+      events: [],
+      redactSecrets: []
     });
 
     expect(result.kind).toBe("failed");
     expect(result.classification).toBe("transient");
+  });
+
+  it("redacts the inventory out of a provider-derived terminal reason", async () => {
+    const result = await classifyFailure({
+      cancelRequested: false,
+      events: [
+        { type: "turn_failed", message: "auth failed for hunter2" },
+        { type: "process_exit", exitCode: 1 }
+      ],
+      redactSecrets: ["hunter2"]
+    });
+
+    expect(result.reason).toBe("auth failed for [REDACTED]");
+  });
+
+  it("redacts the inventory out of an error-derived terminal reason", async () => {
+    const result = await classifyFailure({
+      cancelRequested: false,
+      error: new Error("connection reset while using hunter2"),
+      events: [],
+      redactSecrets: ["hunter2"]
+    });
+
+    expect(result.reason).toContain("[REDACTED]");
+    expect(result.reason).not.toContain("hunter2");
   });
 });

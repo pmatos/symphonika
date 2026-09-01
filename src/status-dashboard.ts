@@ -33,6 +33,7 @@ export type StatusDashboardInput = {
   runs: RunStatus[];
   stateRoot: string;
   watchdogByRun?: ReadonlyMap<string, WatchdogIdleStatus>;
+  watchdogConfigAvailable?: boolean;
 };
 
 export type StatusDashboardRedrawFrame = {
@@ -101,6 +102,11 @@ export function renderStatusDashboard(input: StatusDashboardInput): string {
     "╭─ SYMPHONIKA STATUS",
     `│ Daemon: ${input.daemon}`,
     `│ Config reload: ${input.reload}`,
+    ...(input.watchdogConfigAvailable === false
+      ? [
+          "│ Watchdog config: unavailable (no valid runtime configuration snapshot)"
+        ]
+      : []),
     `│ State root: ${input.stateRoot}`,
     `│ Projects: ${validProjects} valid / ${invalidProjects} invalid`,
     `│ Issues: candidate ${input.issueCounts.candidate} | filtered ${input.issueCounts.filtered} | running ${input.issueCounts.running} | failed ${input.issueCounts.failed} | stale ${input.issueCounts.stale}`,

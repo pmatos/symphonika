@@ -680,13 +680,28 @@ describe("daemon routine firing", () => {
 
   it("keeps a last-known-good Routine live when its declaration reload becomes invalid", async () => {
     const root = await makeTempRoot();
-    // Leave enough headroom for the daemon to publish the initial active row
-    // before the one-shot fires; under whole-suite contention a shorter
-    // window can expire before the first status observation.
-    const fireAt = new Date(Date.now() + 3_000).toISOString();
+    // Manual fire exercises the carried-forward declaration without racing a
+    // one-shot scheduled only a few seconds after daemon startup.
+    const fireAt = new Date(Date.now() + 60 * 60_000).toISOString();
     const routinePath = path.join(root, "daily-report.md");
-    await writeRoutineProject(root, fireAt);
-    const provider = quietProvider();
+    await writeRoutineProject(root, fireAt, 60_000);
+    let resolveProviderAttempt = (): void => {};
+    const providerAttempt = new Promise<void>((resolve) => {
+      resolveProviderAttempt = resolve;
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        resolveProviderAttempt();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
     const workspacePath = path.join(
       root,
       ".symphonika",
@@ -719,12 +734,24 @@ describe("daemon routine firing", () => {
     });
 
     try {
-      await waitForRoutine(daemon.url, "active");
+      const initial = (await fetch(`${daemon.url}/api/routines`).then(
+        (response) => response.json()
+      )) as { routines: RoutineApiRow[] };
+      expect(initial.routines).toEqual([
+        expect.objectContaining({
+          name: "daily-report",
+          nextFireAt: fireAt,
+          state: "active"
+        })
+      ]);
       await writeFile(
         routinePath,
         ["---", "name: ../unsafe", "kind: report", "---", "Body", ""].join("\n")
       );
-      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
 
       const status = (await fetch(`${daemon.url}/api/status`).then((response) =>
         response.json()
@@ -745,10 +772,32 @@ describe("daemon routine firing", () => {
       expect(status.reload?.errors.join("\n")).toContain(
         'name "../unsafe" is not path-safe'
       );
-      await waitForRoutine(daemon.url, "expired");
-      await vi.waitFor(() => {
-        expect(provider.runAttempt).toHaveBeenCalledTimes(1);
+      const fireResponse = await fetch(
+        `${daemon.url}/api/routines/daily-report/fire?project=alpha`,
+        { method: "POST" }
+      );
+      expect(fireResponse.status).toBe(202);
+      expect(await fireResponse.json()).toEqual({
+        firingId: "routine-fire-lkg",
+        kind: "accepted",
+        projectName: "alpha",
+        routineName: "daily-report",
+        state: "queued"
       });
+      await providerAttempt;
+
+      const afterManualFire = (await fetch(`${daemon.url}/api/routines`).then(
+        (response) => response.json()
+      )) as { routines: RoutineApiRow[] };
+      expect(afterManualFire.routines).toEqual([
+        expect.objectContaining({
+          lastFiredAt: null,
+          name: "daily-report",
+          nextFireAt: fireAt,
+          state: "active"
+        })
+      ]);
+      expect(provider.runAttempt).toHaveBeenCalledTimes(1);
     } finally {
       await daemon.stop();
     }

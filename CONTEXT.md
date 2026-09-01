@@ -32,6 +32,13 @@ runtime settings. It is the only registry that knows Project names, so it is whe
 Projects are declared.
 _Avoid_: workflow when referring to the multi-project registry
 
+**Runtime Config Snapshot**:
+The atomic, fully validated effective view built from the Service Config, referenced Workflow
+Contracts, and Routine declarations. A failed reload keeps the last-known-good snapshot; a
+first-load failure has no effective snapshot, so snapshot-derived policy is unavailable rather than
+partially salvaged or replaced with defaults (ADR 0092).
+_Avoid_: parsed config when referring to rejected candidate fields
+
 **Workflow Contract**:
 The reloadable canonical repository-owned instructions and runtime policy used to execute one issue.
 _Avoid_: service config when referring to repo-owned agent policy
@@ -171,6 +178,13 @@ _Avoid_: normalized event log
 **Normalized Event Log**:
 Provider-neutral run events used by the orchestrator, observability surfaces, and tests.
 _Avoid_: raw provider log
+
+**Provider Event Reducer**:
+The per-Run mapping that turns one Coding Agent's raw protocol messages (its Provider Event
+Log) into Normalized Event Log entries, owning any cross-message carry-forward state privately
+so it is testable without spawning the provider. One per provider adapter (`codex-events`,
+`claude-events`).
+_Avoid_: parser, event mapper
 
 **Thinking Marker**:
 A timestamped normalized event recording that provider reasoning started or completed. It may carry
@@ -377,6 +391,13 @@ A per-attempt, disk-backed directory under the state root handed to a spawned pr
 temporary directory, removed when the attempt ends. Transient, never read back — unlike Run
 evidence, which is also under the state root but retained.
 _Avoid_: workspace, evidence, cache
+
+**Project credential inventory**:
+The set of credential values Symphonika itself resolves for one execution's Project — the effective
+tracker token, plus the value of the variable named by `email.smtp_password_env` whenever an email
+sink is configured. Scrubbed from every durable provider-evidence boundary a Run or Firing writes.
+Explicit by construction: inherited provider-native credentials are not in it.
+_Avoid_: redaction inventory, secret list
 
 **Agent Provider**:
 A normalized adapter that lets the orchestrator run a specific coding-agent implementation; v1 supports Codex, Claude, and Oh My Pi.

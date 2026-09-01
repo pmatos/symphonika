@@ -2401,9 +2401,14 @@ describe("reconcileWatchdog", () => {
     // "infinitely old" — the cap is the one rule that could otherwise kill a
     // healthy Run on the strength of a bad row.
     expect(runElapsedMs("not-a-timestamp", now)).toBeUndefined();
-    // Clock skew that puts the claim in the future floors at zero rather than
-    // handing the cap a negative age.
-    expect(runElapsedMs("2026-05-22T11:00:00.000Z", now)).toBe(0);
+  });
+
+  it("reports a future-dated claim as negative elapsed time", () => {
+    const now = new Date("2026-05-22T10:00:00.000Z");
+
+    // Signed elapsed time exposes the clock skew and stays the exact complement
+    // of the operator-facing countdown to the Run's enforcement deadline.
+    expect(runElapsedMs("2026-05-22T11:00:00.000Z", now)).toBe(-3_600_000);
     expect(runElapsedMs("2026-05-22T09:00:00.000Z", now)).toBe(3_600_000);
   });
 });

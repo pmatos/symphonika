@@ -324,6 +324,10 @@ manual poll-now trigger, and manual Routine Firing request. A valid reload repla
 snapshot used for future polling, dispatch, retry, continuation, provider-command selection, PR
 follow-up policy, and manual Routine Firing admission. An invalid reload is surfaced in structured
 logs and operator status while the daemon keeps using the last known good effective snapshot.
+Defaults are applied only while building a valid candidate snapshot. On a first-load failure with
+no last-known-good snapshot, snapshot-derived policy is unavailable: Watchdog operator surfaces in
+particular must not substitute the default policy or salvage Watchdog fields from the rejected
+candidate. See ADR 0092.
 
 `symphonika init` initializes Symphonika's user Service Config independently of any repository. It
 prompts for service-level state, polling, pull-request merge policy, and Codex/Claude/OMP commands,
@@ -794,9 +798,21 @@ GitHub credentials are environment-backed.
 - Token-like values must be redacted from logs
 
 SMTP passwords are also environment-backed. Service Config stores only `email.smtp_password_env`,
-never a literal password. The named variable is resolved only for SMTP authentication and its value
-must not be written to SQLite, logs, rendered notification content, or prompt evidence. SMTP
-transport errors are redacted before logging or durable failure recording.
+never a literal password. The named variable is resolved only for SMTP authentication and the
+provider-evidence redaction boundary; its value must not be written to SQLite, logs, rendered
+notification content, or prompt evidence. SMTP transport errors are redacted before logging or
+durable failure recording.
+
+The Project credential inventory is the set of credential values Symphonika resolves for the
+execution's Project: its effective tracker token and, whenever an email sink is configured, the
+value of the named password variable. The inventory does not depend on whether SMTP authentication
+is actually in use: providers inherit the daemon's environment either way, so a variable Service
+Config names and the environment sets is echoable back into evidence regardless. Both issue Runs and
+Routine Firings scrub that inventory from raw and Normalized Event Logs, provider stderr,
+provider-derived terminal reasons, and any SQLite event metadata before persistence; Routine Firings
+also scrub their structured outcome evidence. The inventory is explicit rather than inferred from
+every environment variable: provider-native credentials and unrelated operator environment values
+have no Symphonika-owned configuration or resolution boundary that can identify them reliably.
 
 Codex, Claude, and OMP use their native local authentication.
 
@@ -930,14 +946,13 @@ a Run or Firing ends without a clean provider exit, the tail of that log is appe
 terminal reason, which otherwise carries nothing but `process_exit_<code>` or `firing_timeout`.
 
 Provider stderr is redacted on the way to disk, streamed so a secret split across two reads is
-still caught. A Routine Firing scrubs the same list its raw and normalized evidence and terminal
-reason use — the configured SMTP password plus the project's resolved tracker token. An issue Run
-scrubs its project's resolved tracker token; the rest of a Run's evidence has no redaction pass at
-all, which is tracked separately. The
-provider adapter waits for that write to flush before its attempt generator returns, so the
+still caught. An issue Run or Routine Firing scrubs the same Project credential inventory from its
+raw and normalized evidence, provider stderr, and provider-derived terminal reason. The provider
+adapter waits for the stderr tee's write to flush before its attempt generator returns, so the
 terminal-reason excerpt is read after the bytes land rather than racing them; the wait is bounded,
 because evidence capture is best-effort and must never keep a Run or Firing from reaching a
-terminal state.
+terminal state. Issue Run provider-event rows in SQLite receive the already-redacted raw and
+normalized values.
 
 ## 8. Scheduling
 
@@ -1963,10 +1978,15 @@ preparation deadline rather than a wider Watchdog state scope, and is tracked se
 not span a Run *chain* — a continuation,
 an FSM state advance, and a shutdown resume each write their own `runs` row and so each start a
 fresh cap. A Run whose `created_at` cannot be parsed is treated as having an unknown age and is
-never terminated by the cap. The cap is checked before the convergence budget and the idle clock,
-so a Run that has overrun several bounds at once reports the outermost one; it honours the same
-per-Project override scope as `grace_minutes`, and like the other two verdicts is deterministic
-rather than a transient retry reason. See ADR 0089.
+never terminated by the cap. Clock skew that places `created_at` in the future produces a negative
+elapsed measurement, which cannot meet a positive cap until the actual deadline. The matching
+`runRemainingMs` operator value is intentionally unclamped: it may exceed `maxRunMs` for a
+future-dated claim and becomes negative after an overrun until the next Watchdog tick, because it
+means time until `created_at + maxRunMs`, not a fraction of the configured cap remaining. The cap
+is checked before the convergence budget and the idle clock, so a Run that has overrun several
+bounds at once reports the outermost one; it honours the same per-Project override scope as
+`grace_minutes`, and like the other two verdicts is deterministic rather than a transient retry
+reason. See ADR 0089.
 
 ### 12.5 PR Follow-up
 
@@ -2257,6 +2277,9 @@ cache when an operator explicitly wants every frame to perform full validation.
 mtime ages, observed turn-id count, five-minute output-token growth, and `idle_since` plus effective
 grace remaining when idle. `status` and its dashboard render an idle indicator only for active Runs
 whose latest sample has `idle_since` set.
+When no valid runtime snapshot exists, `status` and its dashboard report the Watchdog configuration
+as unavailable and render no idle/grace indicator, while `show-run` reports the Progress Signal's
+Watchdog policy as unavailable. They do not calculate timing or budget fields from defaults.
 
 `routines` groups Routine Targets under their globally unique Routine name and target list, then
 shows each Project's `state`, `next_fire_at`, `last_fired_at`, `last_attempted_at`,
@@ -2544,6 +2567,9 @@ the effective `graceMs` and server-computed `graceRemainingMs`, plus the effecti
 server-computed `runRemainingMs` (omitted when the wall-clock cap is disabled). `GET /api/status` adds a `watchdog`
 object to each active Run with `idleSince` and `graceRemainingMs` when idle. When the effective
 Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }` for that object.
+When no valid runtime snapshot (including a last-known-good snapshot) exists, both endpoints return
+`watchdog: null`; `null` means unavailable and is distinct from the explicitly disabled object.
+The server-rendered Run page shows the same unavailable state and calculates no Watchdog fields.
 
 The server-rendered dashboard and `/runs` list surface the same idle/grace state as a small
 "watchdog idle since X (Y remaining)" badge next to the state pill, shown only for active

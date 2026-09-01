@@ -134,6 +134,7 @@ function controller(input: {
     activeRuns: input.activeRuns,
     agentProviders: {},
     configDir: path.join(input.root, "config"),
+    emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret" },
     githubIssuesApi: input.githubIssuesApi,
     projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),

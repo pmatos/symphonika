@@ -270,8 +270,10 @@ describe("daemon hot reload", () => {
 
   it("keeps the last good workflow snapshot when a workflow reload is invalid", async () => {
     const root = await makeTempRoot();
+    // Keep periodic work out of this test: the poll-now request below is the
+    // only tick that should discover the invalid workflow and next Issue.
     await writeProject(root, {
-      pollingIntervalMs: 1_000,
+      pollingIntervalMs: 60_000,
       workflowBody: "Stable workflow for {{issue.title}}.\n"
     });
     const firstWorkspace = preparedWorkspaceFixture(
@@ -310,6 +312,14 @@ describe("daemon hot reload", () => {
       removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
     };
     const providerInputs: ProviderRunInput[] = [];
+    let resolveFirstProviderInput = (): void => {};
+    const firstProviderInput = new Promise<void>((resolve) => {
+      resolveFirstProviderInput = resolve;
+    });
+    let resolveSecondProviderInput = (): void => {};
+    const secondProviderInput = new Promise<void>((resolve) => {
+      resolveSecondProviderInput = resolve;
+    });
     const provider: AgentProvider = {
       cancel: vi.fn().mockResolvedValue(undefined),
       name: "codex",
@@ -318,6 +328,11 @@ describe("daemon hot reload", () => {
       ): AsyncGenerator<ProviderEvent> {
         await Promise.resolve();
         providerInputs.push(input);
+        if (providerInputs.length === 1) {
+          resolveFirstProviderInput();
+        } else if (providerInputs.length === 2) {
+          resolveSecondProviderInput();
+        }
         yield {
           normalized: { exitCode: 0, type: "process_exit" },
           raw: { code: 0, kind: "exit" }
@@ -326,10 +341,16 @@ describe("daemon hot reload", () => {
       validate: vi.fn().mockResolvedValue(undefined)
     };
     const prepareIssueWorkspace = vi.fn(
-      (input: PrepareIssueWorkspaceInput): Promise<PreparedIssueWorkspace> => {
-        return Promise.resolve(
-          input.issue.number === 92 ? secondWorkspace : firstWorkspace
-        );
+      async (
+        input: PrepareIssueWorkspaceInput
+      ): Promise<PreparedIssueWorkspace> => {
+        if (input.issue.number === 92) {
+          // Deliberately exceed the old waitFor helper's one-second deadline.
+          // Provider arrival, not runner speed, is the completion signal.
+          await new Promise((resolve) => setTimeout(resolve, 1_100));
+          return secondWorkspace;
+        }
+        return firstWorkspace;
       }
     );
     let runSequence = 0;
@@ -347,7 +368,7 @@ describe("daemon hot reload", () => {
     });
 
     try {
-      await waitFor(() => Promise.resolve(providerInputs.length === 1));
+      await firstProviderInput;
 
       await writeFile(
         path.join(root, "WORKFLOW.md"),
@@ -357,7 +378,7 @@ describe("daemon hot reload", () => {
         method: "POST"
       });
       expect(response.status).toBe(200);
-      await waitFor(() => Promise.resolve(providerInputs.length === 2));
+      await secondProviderInput;
 
       expect(providerInputs[1]?.issue.number).toBe(92);
       expect(providerInputs[1]?.prompt).toContain(

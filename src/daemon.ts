@@ -506,6 +506,7 @@ export async function startDaemon(
     // and reconcile/stale-claim gates (which consult held/tryAcquire) all
     // serialize on the same primitive. See ADR 0052.
     dispatchMutex,
+    emailConfigLoader: () => runtimeConfig.emailConfig(),
     githubIssuesApi,
     globalConcurrencyLoader,
     hostPressureGate,
@@ -1714,8 +1715,12 @@ export async function startDaemon(
       }
     },
     getRuns: () => runStore.listRuns(),
-    getWatchdogConfig: (projectName) =>
-      resolveWatchdogConfig(runtimeConfig.watchdogServiceConfig(), projectName),
+    getWatchdogConfig: (projectName) => {
+      const serviceConfig = runtimeConfig.watchdogServiceConfig();
+      return serviceConfig === undefined
+        ? undefined
+        : resolveWatchdogConfig(serviceConfig, projectName);
+    },
     getScheduled: () => activeRuns.peekDelayed(),
     getStatusSnapshot: () =>
       buildStatusSnapshot({

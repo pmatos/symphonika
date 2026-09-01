@@ -358,6 +358,57 @@ describe("HTTP app", () => {
     }
   });
 
+  it("reports watchdog policy as unavailable for active runs without a runtime snapshot", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    try {
+      runStore.createRun({
+        id: "unavailable-run",
+        issue: {
+          body: "",
+          created_at: "",
+          id: 268,
+          labels: [],
+          number: 268,
+          priority: 99,
+          state: "open",
+          title: "Unavailable watchdog",
+          updated_at: "",
+          url: ""
+        },
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      runStore.updateRunState("unavailable-run", "running");
+
+      const app = createHttpApp({
+        getActiveRuns: () => [
+          {
+            cancelReason: null,
+            cancelRequested: false,
+            issueNumber: 268,
+            projectName: "alpha",
+            runId: "unavailable-run"
+          }
+        ],
+        getWatchdogConfig: () => undefined,
+        runStore,
+        stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/status");
+      const body = (await response.json()) as {
+        active: Array<{ watchdog?: unknown }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(body.active[0]?.watchdog).toBeNull();
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("POST /api/poll-now invokes the daemon trigger and returns a poll summary", async () => {
     let calls = 0;
     const app = createHttpApp({

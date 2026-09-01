@@ -481,6 +481,7 @@ async function createHarness(
     ...(options.dispatchMutex === undefined
       ? {}
       : { dispatchMutex: options.dispatchMutex }),
+    emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret" },
     githubIssuesApi: {
       addLabelsToIssue,

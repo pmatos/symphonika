@@ -140,6 +140,112 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("overrides an ordinary failed completion observed after the latch", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched-ordinary-failure",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringState(
+        "fire-latched-ordinary-failure",
+        "running"
+      );
+      expect(
+        store.markRoutineFiringWatchdogNoProgress(
+          "fire-latched-ordinary-failure"
+        )
+      ).toBe(true);
+
+      // The provider crashed on its own, unrelated to the Watchdog, in the
+      // same window between the durable latch and the in-memory cancel. This
+      // completion carries no `firingDeadlineWon` verdict, so the latch must
+      // still win over the provider's own unrelated failure reason.
+      store.completeRoutineFiring({
+        id: "fire-latched-ordinary-failure",
+        state: "failed",
+        terminalReason: "provider exited with code 1"
+      });
+
+      expect(
+        store.getRoutineFiring("fire-latched-ordinary-failure")
+      ).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a firing-deadline verdict over the Watchdog latch", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched-deadline",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringState("fire-latched-deadline", "running");
+      expect(
+        store.markRoutineFiringWatchdogNoProgress("fire-latched-deadline")
+      ).toBe(true);
+
+      // The dispatcher's own declared-deadline race won concurrently with
+      // the Watchdog latch (`timeoutWon` in runRoutineFiring's catch path).
+      // ADR 0067 ranks that deadline verdict above any cancellation reason,
+      // so `firing_timeout` must survive even though `cancel_reason` still
+      // reads `no_progress`.
+      store.completeRoutineFiring({
+        cancelReason: "no_progress",
+        firingDeadlineWon: true,
+        id: "fire-latched-deadline",
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+
+      expect(store.getRoutineFiring("fire-latched-deadline")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("claims a manual firing without consuming the pending scheduled clock event", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

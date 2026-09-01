@@ -98,8 +98,13 @@ export type WatchdogTerminalReason = (typeof WATCHDOG_TERMINAL_REASONS)[number];
 const SHUTDOWN_PREEMPTIVE_REASON: CancelReason = "daemon_shutdown";
 
 // The Watchdog's Routine Firing verdict, used as both the durable cancel
-// reason it latches and the terminal_reason the fenced completion writes, so
-// the two can never disagree about what killed the firing. See ADR 0091.
+// reason it latches and the terminal_reason the fenced completion writes for
+// any ordinary completion — succeeded, cancelled, or an unrelated failure —
+// so the two never disagree about what killed the firing. The one exception
+// is a Routine's own declared deadline: ADR 0067 ranks `firing_timeout` above
+// any cancellation reason, so `completeRoutineFiring`'s `firingDeadlineWon`
+// input keeps that verdict intact even while `cancel_reason` stays
+// `no_progress`. See ADR 0091.
 const WATCHDOG_NO_PROGRESS_REASON: CancelReason = "no_progress";
 
 // Shared by listRuns/listRoutineFirings so both accept either a single state
@@ -3509,6 +3514,12 @@ export class RunStore {
   completeRoutineFiring(input: {
     cancelReason?: CancelReason;
     commitsAhead?: boolean;
+    // True only when the dispatcher's own declared-deadline race decided this
+    // completion's terminal reason (`timeoutWon` in runRoutineFiring's catch
+    // path). ADR 0067 ranks that deadline verdict above any cancellation
+    // reason, so it is the one completion the Watchdog latch must not
+    // override even though `cancel_reason` may already read `no_progress`.
+    firingDeadlineWon?: boolean;
     id: string;
     outcome?: RoutineOutcome;
     state: Extract<RoutineFiringState, "succeeded" | "failed" | "cancelled">;
@@ -3540,12 +3551,16 @@ export class RunStore {
     );
     // The Watchdog latches its no-progress verdict durably and then cancels
     // in memory, so a provider that finishes between those two steps reaches
-    // here seeing no cancellation at all and would persist `succeeded` over a
-    // firing the Watchdog has already announced as terminated. Re-read the
-    // latch inside the write transaction — the one place the two passes
-    // serialize — and let it win. Only the lifecycle verdict is overridden:
-    // the outcome and commits-ahead evidence gathered by this call is real
-    // and retention still needs it (ADR 0068, ADR 0091).
+    // here seeing no cancellation at all and would persist its own verdict —
+    // `succeeded`, or an unrelated `failed` — over a firing the Watchdog has
+    // already announced as terminated. Re-read the latch inside the write
+    // transaction — the one place the two passes serialize — and let it win.
+    // Only the lifecycle verdict is overridden: the outcome and commits-ahead
+    // evidence gathered by this call is real and retention still needs it
+    // (ADR 0068, ADR 0091). The one completion that must NOT be overridden is
+    // one whose terminal reason is itself an authoritative deadline verdict
+    // (`firingDeadlineWon`) — ADR 0067 ranks a Routine's own declared
+    // deadline above any cancellation reason, including this latch.
     const latched = this.database.prepare(
       [
         "select 1 from routine_firings",
@@ -3554,7 +3569,7 @@ export class RunStore {
     );
     const state = this.database.transaction(() => {
       const overridden =
-        input.state !== "failed" &&
+        input.firingDeadlineWon !== true &&
         latched.get(input.id, WATCHDOG_NO_PROGRESS_REASON) !== undefined;
       const state = overridden ? ("failed" as const) : input.state;
       update.run({

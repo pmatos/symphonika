@@ -1657,6 +1657,10 @@ async function runRoutineFiring(input: {
     );
     input.runStore.completeRoutineFiring({
       commitsAhead,
+      // ADR 0067 ranks a Routine's own declared deadline above any
+      // cancellation reason, so a Watchdog latch racing in concurrently must
+      // not overwrite `firing_timeout` with `no_progress`.
+      firingDeadlineWon: timeoutWon,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
         claim: redactRoutineOutcomeClaim(

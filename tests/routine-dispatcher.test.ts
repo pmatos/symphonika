@@ -856,6 +856,95 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("keeps firing_timeout when the Watchdog latches no_progress on the same firing concurrently", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    let releaseProvider!: () => void;
+    let providerCancelled = false;
+    const providerWait = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const fallback = setTimeout(releaseProvider, 500);
+    const provider = {
+      // A real Watchdog pass would also call activeRuns.requestCancel, which
+      // re-invokes this same closure through the active-run registry — that
+      // would recurse here, so only the durable half of the race (the latch
+      // write) is simulated. It's the half completeRoutineFiring actually
+      // reads, and is enough to prove the deadline verdict still wins the
+      // terminal reason even though cancel_reason ends up "no_progress" too
+      // (ADR 0067 vs. ADR 0091).
+      cancel: vi.fn((runId: string) => {
+        expect(runId).toBe("fire-timeout-latched");
+        providerCancelled = true;
+        expect(
+          runStore.markRoutineFiringWatchdogNoProgress("fire-timeout-latched")
+        ).toBe(true);
+        releaseProvider();
+        return Promise.resolve();
+      }),
+      name: "claude",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await providerWait;
+        yield {
+          normalized: {
+            cancelled: providerCancelled,
+            exitCode: providerCancelled ? null : 0,
+            signal: providerCancelled ? "SIGTERM" : null,
+            type: "process_exit"
+          },
+          raw: { kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const project = dueRoutineProjectFixture(root, "claude");
+    project.routines = [
+      {
+        ...project.routines![0]!,
+        timeoutMinutes: 0.001
+      }
+    ];
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { claude: provider },
+        configDir: root,
+        createFiringId: () => "fire-timeout-latched",
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(provider.cancel).toHaveBeenCalledOnce();
+      expect(runStore.getRoutineFiring("fire-timeout-latched")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+    } finally {
+      clearTimeout(fallback);
+      releaseProvider();
+      runStore.close();
+    }
+  });
+
   it("hands the provider a stderr evidence path and quotes its tail in the terminal reason", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

@@ -3688,7 +3688,12 @@ export class RunStore {
 
   // Admission priority needs only an existence check. Avoid listRoutines(),
   // whose operator-facing shape enriches every target with counters, latest
-  // outcomes, and pull requests (ADR 0094).
+  // outcomes, and pull requests (ADR 0094). Despite its name, this reads the
+  // LIVE predicate, not PARKED: ADR 0094 gates the priority pre-pass on
+  // capacity having actually refused the Routine right now. A held leg is
+  // blocked on a missing provider (ADR 0084), not capacity — it cannot fire
+  // from the pre-pass either way, so including it would only let it steal
+  // PR follow-up's turn for nothing.
   hasParkedRoutineDeferral(): boolean {
     return (
       this.database
@@ -3697,7 +3702,7 @@ export class RunStore {
             "select 1",
             DEFERRED_FANOUT_TARGET_SOURCE,
             "where",
-            PARKED_ROUTINE_DEFERRAL_PREDICATE,
+            LIVE_ROUTINE_DEFERRAL_PREDICATE,
             "limit 1"
           ].join(" ")
         )

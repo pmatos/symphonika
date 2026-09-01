@@ -261,6 +261,17 @@ export type RoutineFanoutHoldReason =
   | `provider_command_missing: ${AgentProviderName}`
   | `provider_not_registered: ${AgentProviderName}`;
 
+// One fan-out leg settled by the unavailable-target sweep. A leg that was
+// waiting for capacity carries its deferral, which is what makes it a Missed
+// Routine the caller must emit `routine.missed` for; a leg without one was an
+// ordinary `target_unavailable` skip (ADR 0093).
+export type SettledUnavailableRoutineTarget = {
+  deferral?: RoutineDeferralStatus;
+  projectName: string;
+  routineName: string;
+  scheduledAt: string;
+};
+
 export type RoutineFanoutTargetStatus = {
   // `missed` is a capacity deferral that outlived its clock event: unlike a
   // `skipped` policy drop it counts as a failed run (ADR 0093).
@@ -2764,7 +2775,7 @@ export class RunStore {
     return result.changes > 0;
   }
 
-  settleUnavailableRoutineFanoutTargets(): number {
+  settleUnavailableRoutineFanoutTargets(): SettledUnavailableRoutineTarget[] {
     // Terminal or in-flight notifications already represent immutable
     // one-shot snapshots; only a still-pending group may be reconciled.
     //
@@ -2783,7 +2794,9 @@ export class RunStore {
       const legs = this.database
         .prepare(
           [
-            "select t.fanout_id, t.project_name, t.deferred_reason, f.routine_name",
+            "select t.fanout_id, t.project_name, t.deferred_reason,",
+            "t.deferred_since, t.deferred_attempts,",
+            "f.routine_name, f.scheduled_at",
             "from routine_fanout_targets t",
             "join routine_fanouts f on f.id = t.fanout_id",
             "where t.disposition in ('pending', 'held')",
@@ -2798,10 +2811,13 @@ export class RunStore {
           ].join(" ")
         )
         .all() as Array<{
+        deferred_attempts: number;
         deferred_reason: RoutineDeferralReason | null;
+        deferred_since: string | null;
         fanout_id: string;
         project_name: string;
         routine_name: string;
+        scheduled_at: string;
       }>;
       const settleLeg = this.database.prepare(
         [
@@ -2833,7 +2849,7 @@ export class RunStore {
           "do update set count = count + 1"
         ].join(" ")
       );
-      let settled = 0;
+      const settled: SettledUnavailableRoutineTarget[] = [];
       for (const leg of legs) {
         const changes = settleLeg.run({
           disposition: leg.deferred_reason === null ? "skipped" : "missed",
@@ -2845,7 +2861,20 @@ export class RunStore {
         if (changes === 0) {
           continue;
         }
-        settled += changes;
+        settled.push({
+          ...(leg.deferred_reason === null
+            ? {}
+            : {
+                deferral: {
+                  attempts: leg.deferred_attempts,
+                  reason: leg.deferred_reason,
+                  since: leg.deferred_since ?? leg.scheduled_at
+                }
+              }),
+          projectName: leg.project_name,
+          routineName: leg.routine_name,
+          scheduledAt: leg.scheduled_at
+        });
         if (leg.deferred_reason === null) {
           continue;
         }

@@ -133,6 +133,7 @@ export type SynchronizeRoutineTargetsInput = Pick<
   DispatchDueRoutinesInput,
   "projects" | "runStore"
 > & {
+  logger?: Logger;
   now?: Date;
   recomputeSchedulesFromNow?: boolean;
 };
@@ -485,7 +486,23 @@ export function synchronizeRoutineTargets(
   input.runStore.pruneRoutinesForUnknownProjects(
     projects.map((project) => project.name)
   );
-  input.runStore.settleUnavailableRoutineFanoutTargets();
+  // A swept leg that was waiting for capacity is a Routine that did not run,
+  // so it owes the same `routine.missed` event as the deadline path — an
+  // operator whose Routine stopped running mid-wait is exactly who that
+  // event is for (ADR 0093). Legs settled as ordinary `target_unavailable`
+  // skips carry no deferral and emit nothing.
+  for (const settled of input.runStore.settleUnavailableRoutineFanoutTargets()) {
+    if (settled.deferral === undefined) {
+      continue;
+    }
+    logRoutineMiss(input.logger, {
+      deferral: settled.deferral,
+      projectName: settled.projectName,
+      reason: settled.deferral.reason,
+      routine: settled.routineName,
+      scheduledAt: settled.scheduledAt
+    });
+  }
 }
 
 export async function dispatchDueRoutines(
@@ -616,6 +633,7 @@ export async function dispatchDueRoutines(
     }
   }
   synchronizeRoutineTargets({
+    ...(input.logger === undefined ? {} : { logger: input.logger }),
     now,
     projects: input.projects,
     recomputeSchedulesFromNow: input.recomputeSchedulesFromNow === true,

@@ -1031,7 +1031,7 @@ describe("RunStore routines", () => {
         projects: ["alpha", "beta"]
       });
 
-      expect(store.settleUnavailableRoutineFanoutTargets()).toBe(1);
+      expect(store.settleUnavailableRoutineFanoutTargets()).toHaveLength(1);
       expect(store.listReadyRoutineFanouts()[0]).toMatchObject({
         id: "fanout-restart-removal",
         targets: [
@@ -1085,7 +1085,21 @@ describe("RunStore routines", () => {
       // still parked, so the leg loses its target mid-wait.
       store.syncRoutines([], { projects: ["alpha"] });
 
-      expect(store.settleUnavailableRoutineFanoutTargets()).toBe(1);
+      // The swept leg carries its deferral back to the caller, which is what
+      // lets dispatch emit the same `routine.missed` event the deadline path
+      // emits.
+      expect(store.settleUnavailableRoutineFanoutTargets()).toEqual([
+        {
+          deferral: {
+            attempts: 1,
+            reason: "concurrency_cap",
+            since: scheduledAt
+          },
+          projectName: "alpha",
+          routineName: "refactor-audit",
+          scheduledAt
+        }
+      ]);
       const fanout = store.getRoutineFanout("fanout-swept");
       expect(fanout?.targets[0]).toMatchObject({
         disposition: "missed",

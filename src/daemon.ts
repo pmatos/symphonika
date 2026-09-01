@@ -1383,7 +1383,7 @@ export async function startDaemon(
       // an accepted firing uses the current prompt and provider declaration.
       await reloadConfigAndRecordOutcome();
       const projects = runtimeConfig.projectsByName();
-      synchronizeRoutineTargets({ projects, runStore });
+      synchronizeRoutineTargets({ logger, projects, runStore });
       // Re-sample for the same reason the snapshot is reloaded above: a
       // manual fire is its own admission boundary and must not ride the tick
       // cadence. `current()` applies no TTL, so between ticks it can hand

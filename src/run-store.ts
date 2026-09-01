@@ -908,6 +908,17 @@ type RoutineFanoutTargetRow = {
   skip_reason: RoutineSkipReason | "target_unavailable" | null;
 };
 
+// One definition of "this Routine Target's clock event is parked by a capacity
+// deferral" (ADR 0093), shared by the dispatch read and the restart-recompute
+// guard so the two can never drift apart. Callers supply their own correlation
+// of f.routine_name / f.scheduled_at / t.project_name.
+const DEFERRED_FANOUT_TARGET_SOURCE = [
+  "from routine_fanout_targets t",
+  "join routine_fanouts f on f.id = t.fanout_id"
+].join(" ");
+const DEFERRED_FANOUT_TARGET_PREDICATE =
+  "t.disposition = 'pending' and t.deferred_reason is not null";
+
 const PULL_REQUEST_DISCOVERY_LIMIT = 25;
 const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
 export const INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS = 60_000;
@@ -2213,11 +2224,10 @@ export class RunStore {
         // anywhere (ADR 0093). The dispatcher decides whether a parked event
         // still fires or is recorded as missed.
         "when @recompute_recurring = 1 and excluded.schedule_cron is not null and excluded.catch_up = 'skip' and not exists (",
-        "select 1 from routine_fanout_targets t",
-        "join routine_fanouts f on f.id = t.fanout_id",
+        `select 1 ${DEFERRED_FANOUT_TARGET_SOURCE}`,
         "where f.routine_name = routines.name and f.scheduled_at = routines.next_fire_at",
-        "and t.project_name = routines.project_name and t.disposition = 'pending'",
-        "and t.deferred_reason is not null",
+        "and t.project_name = routines.project_name and",
+        DEFERRED_FANOUT_TARGET_PREDICATE,
         ") then excluded.next_fire_at",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then excluded.next_fire_at",
         // Un-disabling (front matter disabled: true removed, or the routine's
@@ -3190,11 +3200,10 @@ export class RunStore {
       .prepare(
         [
           "select t.deferred_reason, t.deferred_since, t.deferred_attempts",
-          "from routine_fanout_targets t",
-          "join routine_fanouts f on f.id = t.fanout_id",
+          DEFERRED_FANOUT_TARGET_SOURCE,
           "where f.routine_name = ? and f.scheduled_at = ?",
-          "and t.project_name = ? and t.disposition = 'pending'",
-          "and t.deferred_reason is not null"
+          "and t.project_name = ? and",
+          DEFERRED_FANOUT_TARGET_PREDICATE
         ].join(" ")
       )
       .get(input.name, input.scheduledAt, input.projectName) as

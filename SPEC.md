@@ -1214,7 +1214,10 @@ defers until its next clock event is due, a one-shot Target for 24 hours. A defe
 that bound unadmitted is recorded as missed: the clock advances exactly as a skip's does, the
 reason increments its rolling 24-hour counter once, the fan-out leg settles as `missed`, the
 Routine did not run, and the fan-out counts it as a failure. Restart schedule recompute leaves a
-parked clock event alone rather than settling it as a catch-up skip.
+parked clock event alone rather than settling it as a catch-up skip. Deferring emits
+`routine.deferred` with `reason`, `project`, `routine`, `scheduled_at`, and the `deferred_until`
+bound; recording a miss emits `routine.missed` with `reason`, `project`, `routine`, `scheduled_at`,
+`deferred_since`, and `deferred_attempts`.
 
 A skip claim returns `false` when the Routine Target's clock event is no longer due, or — for a
 recurring Target — when the caller omits the recomputed `next_fire_at`. Once that clock update

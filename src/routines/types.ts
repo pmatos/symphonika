@@ -91,7 +91,7 @@ export type RoutineStatus = {
   allowOverlap: boolean;
   catchUp: RoutineCatchUpPolicy;
   // Set while this Target's due clock event is parked waiting for capacity
-  // (ADR 0093); null whenever nothing is waiting to be admitted.
+  // (ADR 0093).
   deferral: RoutineDeferralStatus | null;
   disabledReason: RoutineDisabledReason | null;
   kind: RoutineKind;

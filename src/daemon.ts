@@ -80,7 +80,10 @@ import { pollConfiguredGitHubPullRequestsFromConfig } from "./pull-request-polli
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { createSmtpNotificationSink } from "./notifications/smtp.js";
-import { DaemonHealthNotifier } from "./notifications/daemon-health.js";
+import {
+  DaemonHealthNotifier,
+  type WatchdogTermination
+} from "./notifications/daemon-health.js";
 import { NotificationDeliveryTracker } from "./notifications/delivery-tracker.js";
 import { IssueRunNotificationCoordinator } from "./notifications/issue-run.js";
 import type { NotificationSink } from "./notifications/types.js";
@@ -518,7 +521,9 @@ export async function startDaemon(
     hostPressureGate,
     logger,
     onWatchdogTerminated: (run) => {
-      daemonHealthNotifications.notifyWatchdogTerminations([run]);
+      daemonHealthNotifications.notifyWatchdogTerminations([
+        { ...run, kind: "issue_run" }
+      ]);
     },
     projectsLoader,
     providersLoader,
@@ -963,11 +968,7 @@ export async function startDaemon(
         nowMs - lastWatchdogSampleAt >= watchdog.sampleIntervalSeconds * 1_000
       ) {
         lastWatchdogSampleAt = nowMs;
-        const watchdogTerminations: Array<{
-          issueNumber: number;
-          projectName: string;
-          runId: string;
-        }> = [];
+        const watchdogTerminations: WatchdogTermination[] = [];
         await reconcileWatchdog({
           activeRuns,
           config: watchdog,
@@ -980,7 +981,13 @@ export async function startDaemon(
           logger,
           now: () => new Date(nowMs),
           onTerminated: (run) => {
-            watchdogTerminations.push(run);
+            watchdogTerminations.push({ ...run, kind: "issue_run" });
+          },
+          onRoutineTerminated: (firing) => {
+            watchdogTerminations.push({
+              ...firing,
+              kind: "routine_firing"
+            });
           },
           projects: serviceConfig.projects,
           runStore

@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+**Amendment note (ADR 0091):** one Watchdog reconciliation groups both terminated issue Runs and
+Routine Firings into its daemon-health notification. Issue-Run-only passes preserve their existing
+subject; mixed passes identify provider executions and render each subject in its own domain terms.
+
 ## Context
 
 The SMTP Notification Sink initially served terminal Routine Firings. Issue

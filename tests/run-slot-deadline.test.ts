@@ -148,11 +148,15 @@ describe("Run slot deadline", () => {
     let preparationStarted = false;
     let preparationAborted = false;
     let releasePreparation: () => void = () => undefined;
+    let releaseAbortCleanup: () => void = () => undefined;
+    const abortCleanup = new Promise<void>((resolve) => {
+      releaseAbortCleanup = resolve;
+    });
     const prepareIssueWorkspace = (
       input: PrepareIssueWorkspaceInput
     ): Promise<PreparedIssueWorkspace> => {
       preparationStarted = true;
-      return new Promise((resolve, reject) => {
+      const result = new Promise<PreparedIssueWorkspace>((resolve, reject) => {
         releasePreparation = () => resolve(prepared);
         input.signal?.addEventListener(
           "abort",
@@ -168,6 +172,7 @@ describe("Run slot deadline", () => {
           return;
         }
       });
+      return Object.assign(result, { abortCleanup });
     };
     const onTerminated = vi.fn();
     const controller = makeRunController(
@@ -193,11 +198,14 @@ describe("Run slot deadline", () => {
       await flushPromises();
 
       expect(runStore.getRun("run-preparation-timeout")?.state).toBe("stale");
+      expect(preparationAborted).toBe(true);
+      expect(activeRuns.countInFlight()).toBe(1);
+
+      releaseAbortCleanup();
       await expect(dispatch).resolves.toEqual({
         dispatched: true,
         runId: "run-preparation-timeout"
       });
-      expect(preparationAborted).toBe(true);
       expect(activeRuns.countInFlight()).toBe(0);
       expect(runStore.getRun("run-preparation-timeout")).toMatchObject({
         state: "stale",
@@ -214,6 +222,77 @@ describe("Run slot deadline", () => {
         projectName: "symphonika",
         runId: "run-preparation-timeout"
       });
+    } finally {
+      releasePreparation();
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("releases the slot when non-Git workspace I/O remains stalled after abort cleanup settles", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: successfulAttempt,
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    let preparationStarted = false;
+    let releasePreparation: () => void = () => undefined;
+    const prepareIssueWorkspace = () => {
+      preparationStarted = true;
+      const result = new Promise<PreparedIssueWorkspace>((resolve) => {
+        releasePreparation = () => resolve(preparedWorkspace(root));
+      });
+      // The unresolved result models stat/mkdir/realpath/rename stuck in the
+      // kernel. No Git process group or owned staging-path cleanup remains.
+      return Object.assign(result, { abortCleanup: Promise.resolve() });
+    };
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-non-git-preparation-stall",
+        prepareIssueWorkspace
+      }
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T14:00:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await flushPromises();
+      expect(preparationStarted).toBe(true);
+      expect(activeRuns.countInFlight()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      expect(activeRuns.countInFlight()).toBe(0);
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-non-git-preparation-stall"
+      });
+      expect(runStore.getRun("run-non-git-preparation-stall")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      expect(provider.validate).not.toHaveBeenCalled();
+      expect(onTerminated).toHaveBeenCalledOnce();
     } finally {
       releasePreparation();
       await dispatch.catch(() => undefined);

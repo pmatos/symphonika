@@ -37,7 +37,7 @@ import {
   type PullRequestState
 } from "../pull-request-state.js";
 import { evaluateRunContinuationEligibility } from "./issue-eligibility.js";
-import { projectPullRequestSignals } from "./pr-signal-projection.js";
+import { projectPullRequestSignals } from "../workflow/pr-signal-projection.js";
 import type {
   AgentProvider,
   AgentProviderName,
@@ -54,6 +54,7 @@ import { redactValueDeep } from "../redaction.js";
 import type { CancelReason, ProgressEdge, RunStore } from "../run-store.js";
 import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
+  IssueWorkspacePreparation,
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "../workspace.js";
@@ -279,7 +280,7 @@ export type RunControllerOptions = {
   onWatchdogTerminated?: WatchdogTerminationObserver;
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
-  ) => Promise<PreparedIssueWorkspace>;
+  ) => IssueWorkspacePreparation;
   projectsLoader: () => Promise<Map<string, RunControllerProjectConfig>>;
   providersLoader: () => Promise<RunControllerProvidersConfig>;
   pullRequestPolicyLoader?: () => Promise<PullRequestFollowupPolicy>;
@@ -597,7 +598,7 @@ export class RunController {
     WatchdogTerminationObserver | undefined;
   private readonly prepareIssueWorkspace: (
     input: PrepareIssueWorkspaceInput
-  ) => Promise<PreparedIssueWorkspace>;
+  ) => IssueWorkspacePreparation;
   private readonly projectsLoader: () => Promise<
     Map<string, RunControllerProjectConfig>
   >;
@@ -3269,9 +3270,11 @@ export class RunController {
     let attemptCreated = false;
     let started: StartedAttempt | undefined;
     // Workspace preparation is the only setup operation the deadline can
-    // actually stop, so it is the only one the finally may wait on after the
-    // deadline fires. See ADR 0093.
-    let workspaceOperation: Promise<PreparedIssueWorkspace> | undefined;
+    // actually stop. Its abort-cleanup channel, rather than its full result,
+    // is therefore the only operation the finally may wait on after expiry.
+    // See ADR 0093 / issue #640.
+    let workspaceOperation: IssueWorkspacePreparation | undefined;
+    let workspaceAbortCleanup: Promise<void> | undefined;
     let headShaAtAttemptStart: string | undefined;
     let headInspectionFailed = false;
     let caughtError: unknown;
@@ -3439,6 +3442,12 @@ export class RunController {
         project: projectForAttempt,
         ...input.deadline.signalOption
       });
+      workspaceAbortCleanup =
+        workspaceOperation.abortCleanup ??
+        workspaceOperation.then(
+          () => undefined,
+          () => undefined
+        );
       const prepared = await input.deadline.race(workspaceOperation);
       started = await input.deadline.race(
         this.startAttempt({
@@ -3536,14 +3545,14 @@ export class RunController {
       // and attachProvider (loadWorkflow / prepareIssueWorkspace / validate /
       // sym:running label / createAttempt). See ADR 0052.
       // The deadline race can reject before AbortSignal-driven Git teardown
-      // and owned-path cleanup settle. Keep the slot until that teardown has
-      // actually stopped, matching Routine Firing deadline semantics. Only
-      // Workspace preparation is waited on: the rest of startAttempt
-      // (loadWorkflow, evidence persistence, log-file creation) cannot observe
-      // the abort, so waiting on it would let a stalled filesystem retain
-      // capacity past max_run_minutes — the very leak this deadline closes.
+      // and owned-path cleanup settle. Keep the slot until the preparation's
+      // separate abort-cleanup channel settles, but do not await its full
+      // result: stat/mkdir/realpath/rename cannot observe the signal and may
+      // remain stalled indefinitely. The rest of startAttempt (loadWorkflow,
+      // evidence persistence, log-file creation) is abandoned for the same
+      // reason. See ADR 0093 / issue #640.
       if (input.deadline.signal?.aborted === true) {
-        await workspaceOperation?.catch(() => undefined);
+        await workspaceAbortCleanup?.catch(() => undefined);
       }
       input.deadline.clear();
       const removed = this.activeRuns.unregister(input.runId);

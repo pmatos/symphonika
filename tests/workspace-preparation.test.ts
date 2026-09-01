@@ -1,9 +1,18 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   prepareIssueWorkspace,
@@ -36,29 +45,111 @@ describe("Git workspace preparation", () => {
     const timeout = new Error("run timeout");
     controller.abort(timeout);
 
-    await expect(
-      prepareIssueWorkspace({
-        issue: {
-          number: 6,
-          title: "Prepare deterministic Git workspaces and issue branches"
-        },
-        project: {
-          name: "symphonika",
-          workspace: {
-            git: {
-              base_branch: "main",
-              remote: remotePath
-            },
-            root: workspaceRoot
-          }
-        },
-        signal: controller.signal
-      })
-    ).rejects.toBe(timeout);
+    const preparation = prepareIssueWorkspace({
+      issue: {
+        number: 6,
+        title: "Prepare deterministic Git workspaces and issue branches"
+      },
+      project: {
+        name: "symphonika",
+        workspace: {
+          git: {
+            base_branch: "main",
+            remote: remotePath
+          },
+          root: workspaceRoot
+        }
+      },
+      signal: controller.signal
+    });
+
+    expect(preparation.abortCleanup).toBeInstanceOf(Promise);
+    await expect(preparation).rejects.toBe(timeout);
+    await expect(preparation.abortCleanup).resolves.toBeUndefined();
     await expect(
       git(["-C", path.join(workspaceRoot, ".cache", "repo.git"), "status"])
     ).rejects.toThrow();
   });
+
+  it.skipIf(process.platform === "win32")(
+    "settles abort cleanup only after an active Git process group stops",
+    async () => {
+      const root = await makeTempRoot();
+      const workspaceRoot = path.join(root, "workspaces", "symphonika");
+      const fakeBin = path.join(root, "bin");
+      const gitStartedPath = path.join(root, "git-started");
+      await mkdir(fakeBin);
+      const fakeGitPath = path.join(fakeBin, "git");
+      await writeFile(
+        fakeGitPath,
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "clone" ]; then',
+          '  printf "started\\n" > "$SYMPHONIKA_TEST_GIT_STARTED"',
+          "  trap 'sleep 0.2; exit 143' TERM",
+          "  while :; do sleep 1; done",
+          "fi",
+          "exit 1",
+          ""
+        ].join("\n")
+      );
+      await chmod(fakeGitPath, 0o755);
+
+      const originalPath = process.env.PATH;
+      const originalStartedPath = process.env.SYMPHONIKA_TEST_GIT_STARTED;
+      process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+      process.env.SYMPHONIKA_TEST_GIT_STARTED = gitStartedPath;
+      const controller = new AbortController();
+      const preparation = prepareIssueWorkspace({
+        issue: { number: 640, title: "Bound non-Git workspace I/O" },
+        project: {
+          name: "symphonika",
+          workspace: {
+            git: { base_branch: "main", remote: "/unused/remote.git" },
+            root: workspaceRoot
+          }
+        },
+        signal: controller.signal
+      });
+      const preparationError = preparation.catch((error: unknown) => error);
+
+      try {
+        await vi.waitFor(async () => {
+          expect(await readFile(gitStartedPath, "utf8")).toBe("started\n");
+        });
+        let cleanupSettled = false;
+        void preparation.abortCleanup.then(() => {
+          cleanupSettled = true;
+        });
+
+        controller.abort(new Error("run timeout"));
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 25);
+        });
+        expect(cleanupSettled).toBe(false);
+
+        await expect(preparation.abortCleanup).resolves.toBeUndefined();
+        expect(cleanupSettled).toBe(true);
+        expect(
+          (await readdir(path.join(workspaceRoot, ".cache"))).some((entry) =>
+            entry.startsWith(".repo.git.clone-")
+          )
+        ).toBe(false);
+        expect(await preparationError).toBeInstanceOf(Error);
+      } finally {
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        if (originalStartedPath === undefined) {
+          delete process.env.SYMPHONIKA_TEST_GIT_STARTED;
+        } else {
+          process.env.SYMPHONIKA_TEST_GIT_STARTED = originalStartedPath;
+        }
+      }
+    }
+  );
 
   it("creates the repository cache, deterministic issue branch, and issue worktree on first preparation", async () => {
     const root = await makeTempRoot();
@@ -180,7 +271,6 @@ describe("Git workspace preparation", () => {
       git(["-C", second.workspacePath, "status", "--short"])
     ).resolves.toContain("?? agent-notes.txt");
   });
-
   it("allows a retry after the Run Slot Deadline aborts worktree creation", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

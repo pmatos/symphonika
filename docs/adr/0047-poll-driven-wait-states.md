@@ -67,11 +67,10 @@ keeps the existing fresh-dispatch guard against starting a second parallel agent
 Issue close is still honored — a waiting row whose issue transitions to `closed` is cancelled with
 `cancel_reason="closed_issue"`, matching the cancellation semantics of in-flight agent runs.
 
-Two predicates are intentionally out of scope for this slice. `timeout` stays defined in the
-predicate set but unimplemented; adding it requires tracking a wait-entered-at timestamp and a
-clock signal, which belongs in a follow-up issue. Webhook-driven wake-ups are also out of scope —
-the wait predicate set is intentionally observation-based, so the same daemon tick cadence that
-already drives PR follow-up drives wait re-evaluation, with no second event path to maintain.
+ADR 0087 later removed the unevaluated `timeout` predicate entirely: accepting a predicate that can
+never match is worse than rejecting it. Webhook-driven wake-ups remain out of scope — the wait
+predicate set is intentionally observation-based, so the same daemon tick cadence that already
+drives PR follow-up drives wait re-evaluation, with no second event path to maintain.
 
 Projection of `mergeable` deliberately omits the predicate key when GitHub reports
 `UNKNOWN` or `null`. A workflow author writing `when: { mergeable: false }` will not match on
@@ -87,3 +86,41 @@ review exists" without comparator syntax.
 Raw GitHub PR observations are first interpreted as **Pull Request State**. The PR follow-up
 verdicts in `src/pull-request-followup.ts` and the wait-handler predicate projection both derive
 from that normalized value so the two paths cannot drift in how they interpret a given GitHub state.
+
+**Amended by issue #632.** A PR-observing wait may still park on a transient observation—pending
+checks, or unknown mergeability while the PR is still open—but not because its transition table
+forgot an actionable case. Expanded-graph validation enumerates settled checks, concrete
+mergeability, unresolved-review, open/closed, merged, and review-decision signals and rejects the
+state when no transition matches one of those combinations. A wait re-evaluates against the tracked
+PR's current state regardless of which state the run parked in, so a merge or an unmerged close
+landing while a run sits in an ordinary `wait` is itself a settled observation the enumeration must
+include, not a case that has already "left" the wait; once a PR closes, merged or not, GitHub stops
+recomputing mergeability, so unknown mergeability there is enumerated as an actionable outcome
+rather than excluded as transient, for both the merged and the closed-unmerged case. A wait
+whose every pull-request-observing transition is artefact-gated is exempt, because an absent
+artefact intentionally keeps it parked; gating one transition among several does not exempt the
+rest. This turns an otherwise silent permanent PR-signal park into a `workflow validate`, `doctor`,
+and reload error.
+
+The enumeration samples exactly one positive `unresolved_review_threads` value, so a transition
+gating on a specific positive count (`unresolved_review_threads: 1`) can read as "covered" while a
+real PR sitting at a different positive count still matches nothing. That predicate is rejected
+outright wherever it appears with a positive value in a wait transition; `has_unresolved_reviews`
+is the derived boolean built for routing on "some thread is unresolved" and is exhaustive by
+construction, so it has no equivalent gap. Coverage checking also treats a bare `provider_success:
+true` transition as covering every combination, the same way an unconditional transition does —
+`observeWaitPullRequestSignals` is the only builder of a parked wait's signal map, and it
+unconditionally sets `provider_success: true` on every real observation it makes, so the transition
+is a genuine runtime catch-all whether or not it shares a transition with a pull-request predicate
+or `complete_when` narrows the enumeration first. Coverage checking also excludes any signal
+combination a state's own `complete_when` gate already keeps from ever reaching the transitions loop
+(`decideNextStep` checks `complete_when` first), so such a combination does not need a matching
+transition of its own.
+
+A wait whose only pull-request predicate lives in `complete_when` — no transition names one — is
+still classified as PR-observing and validated: `complete_when` is checked before transitions
+regardless of what the transitions themselves name, so a transition table that can never actually be
+reached would otherwise read as trivially covered. `complete_when`'s own `provider_success: true` is
+resolved the same static way transitions resolve it, for the same reason. An unconditional
+transition (no predicates at all) counts as covering every enumerated combination — `decideNextStep`
+already treats an empty `when` map as vacuously satisfied, so it is a genuine runtime catch-all.

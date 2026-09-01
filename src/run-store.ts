@@ -107,6 +107,16 @@ const UNCLAIMED_WATCHDOG_VERDICT_GUARD = `and (terminal_reason is null or termin
 // every row that was live when shutdown began. See SPEC 12.3.
 const SHUTDOWN_PREEMPTIVE_REASON: CancelReason = "daemon_shutdown";
 
+// The Watchdog's Routine Firing verdict, used as both the durable cancel
+// reason it latches and the terminal_reason the fenced completion writes for
+// any ordinary completion — succeeded, cancelled, or an unrelated failure —
+// so the two never disagree about what killed the firing. The one exception
+// is a Routine's own declared deadline: ADR 0067 ranks `firing_timeout` above
+// any cancellation reason, so `completeRoutineFiring`'s `firingDeadlineWon`
+// input keeps that verdict intact even while `cancel_reason` stays
+// `no_progress`. See ADR 0091.
+const WATCHDOG_NO_PROGRESS_REASON: CancelReason = "no_progress";
+
 // Shared by listRuns/listRoutineFirings so both accept either a single state
 // or a state set (e.g. the dashboard's active-now band, which spans several
 // non-terminal states) without each call site hand-rolling an IN clause. An
@@ -558,6 +568,16 @@ export type WatchdogSample = {
   workspaceMtimeMax: number;
 };
 
+// A Progress Signal sample with its owning key removed. Runs key samples by
+// run id and Routine Firings by firing id (ADR 0091 keeps the two tables
+// separate because `watchdog_samples.run_id` carries a real foreign key to
+// `runs`), but everything the Watchdog actually compares is this shared half.
+export type WatchdogProgressSample = Omit<WatchdogSample, "runId">;
+
+export type RoutineWatchdogSample = WatchdogProgressSample & {
+  firingId: string;
+};
+
 export type WatchdogCandidateRun = {
   // Claim time, and therefore the origin of the Run's wall-clock age. Every
   // fresh lifecycle — a first dispatch, a continuation, an FSM state advance,
@@ -571,6 +591,14 @@ export type WatchdogCandidateRun = {
   runId: string;
   state: Extract<RunState, "running">;
   watchdogGeneration: number;
+  workspacePath: string;
+};
+
+export type WatchdogCandidateRoutineFiring = {
+  firingId: string;
+  normalizedLogPath: string;
+  projectName: string;
+  routineName: string;
   workspacePath: string;
 };
 
@@ -804,6 +832,60 @@ type WatchdogSampleRow = {
   turn_id_set_size: number;
   workspace_digest: string;
   workspace_mtime_max: number;
+};
+
+type RoutineWatchdogSampleRow = Omit<WatchdogSampleRow, "run_id"> & {
+  firing_id: string;
+};
+
+// Every Progress Signal column except the owning key. The Run-keyed and
+// Firing-keyed sample tables are deliberately separate (ADR 0091), but their
+// column set is one thing: spelling it once keeps a future signal column from
+// having to be threaded through eight hand-written statement bodies.
+const WATCHDOG_SAMPLE_COLUMNS = [
+  "sampled_at",
+  "last_tool_call_at",
+  "last_message_at",
+  "last_progress_at",
+  "workspace_mtime_max",
+  "workspace_digest",
+  "turn_id_set_size",
+  "output_tokens_total",
+  "normalized_log_offset",
+  "normalized_log_path",
+  "idle_since"
+] as const;
+
+function watchdogSampleSelectSql(table: string, key: string): string {
+  return `select ${[key, ...WATCHDOG_SAMPLE_COLUMNS].join(", ")} from ${table} where ${key} = ?`;
+}
+
+function watchdogSampleUpsertSql(table: string, key: string): string {
+  const columns = [key, ...WATCHDOG_SAMPLE_COLUMNS];
+  return [
+    `insert into ${table} (${columns.join(", ")})`,
+    `values (${columns.map((column) => `@${column}`).join(", ")})`,
+    `on conflict(${key}) do update set`,
+    WATCHDOG_SAMPLE_COLUMNS.map(
+      (column) => `${column} = excluded.${column}`
+    ).join(", ")
+  ].join(" ");
+}
+
+function watchdogSampleHistorySql(table: string, key: string): string {
+  const columns = [key, ...WATCHDOG_SAMPLE_COLUMNS];
+  return [
+    `insert or replace into ${table} (${columns.join(", ")})`,
+    `values (${columns.map((column) => `@${column}`).join(", ")})`
+  ].join(" ");
+}
+
+type WatchdogCandidateRoutineFiringRow = {
+  id: string;
+  normalized_log_path: string | null;
+  project_name: string;
+  routine_name: string;
+  workspace_path: string | null;
 };
 
 type WatchdogTokenSampleRow = {
@@ -1489,19 +1571,40 @@ export class RunStore {
     }));
   }
 
-  getWatchdogSample(runId: string): WatchdogSample | undefined {
-    const row = this.database
+  listWatchdogCandidateRoutineFirings(): WatchdogCandidateRoutineFiring[] {
+    const rows = this.database
       .prepare(
         [
-          "select run_id, sampled_at, last_tool_call_at, last_message_at,",
-          "last_progress_at, workspace_mtime_max, workspace_digest,",
-          "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-          "normalized_log_path, idle_since from watchdog_samples",
-          "where run_id = ?"
+          "select id, project_name, routine_name, workspace_path, normalized_log_path",
+          "from routine_firings",
+          "where state = 'running' and cancel_requested = 0",
+          "order by created_at asc, id asc"
         ].join(" ")
       )
+      .all() as WatchdogCandidateRoutineFiringRow[];
+    return rows.map((row) => ({
+      firingId: row.id,
+      normalizedLogPath: row.normalized_log_path ?? "",
+      projectName: row.project_name,
+      routineName: row.routine_name,
+      workspacePath: row.workspace_path ?? ""
+    }));
+  }
+
+  getWatchdogSample(runId: string): WatchdogSample | undefined {
+    const row = this.database
+      .prepare(watchdogSampleSelectSql("watchdog_samples", "run_id"))
       .get(runId) as WatchdogSampleRow | undefined;
     return row === undefined ? undefined : mapWatchdogSampleRow(row);
+  }
+
+  getRoutineWatchdogSample(
+    firingId: string
+  ): RoutineWatchdogSample | undefined {
+    const row = this.database
+      .prepare(watchdogSampleSelectSql("routine_watchdog_samples", "firing_id"))
+      .get(firingId) as RoutineWatchdogSampleRow | undefined;
+    return row === undefined ? undefined : mapRoutineWatchdogSampleRow(row);
   }
 
   upsertWatchdogSample(
@@ -1523,52 +1626,47 @@ export class RunStore {
       workspace_mtime_max: sample.workspaceMtimeMax
     };
     const latest = this.database.prepare(
-      [
-        "insert into watchdog_samples (",
-        "run_id, sampled_at, last_tool_call_at, last_message_at,",
-        "last_progress_at, workspace_mtime_max, workspace_digest,",
-        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-        "normalized_log_path, idle_since",
-        ") values (",
-        "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
-        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
-        "@normalized_log_path, @idle_since",
-        ")",
-        "on conflict(run_id) do update set",
-        "sampled_at = excluded.sampled_at,",
-        "last_tool_call_at = excluded.last_tool_call_at,",
-        "last_message_at = excluded.last_message_at,",
-        "last_progress_at = excluded.last_progress_at,",
-        "workspace_mtime_max = excluded.workspace_mtime_max,",
-        "workspace_digest = excluded.workspace_digest,",
-        "turn_id_set_size = excluded.turn_id_set_size,",
-        "output_tokens_total = excluded.output_tokens_total,",
-        "normalized_log_offset = excluded.normalized_log_offset,",
-        "normalized_log_path = excluded.normalized_log_path,",
-        "idle_since = excluded.idle_since"
-      ].join(" ")
+      watchdogSampleUpsertSql("watchdog_samples", "run_id")
     );
     const history = this.database.prepare(
-      [
-        "insert or replace into watchdog_sample_history (",
-        "run_id, sampled_at, last_tool_call_at, last_message_at,",
-        "last_progress_at, workspace_mtime_max, workspace_digest,",
-        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-        "normalized_log_path, idle_since",
-        ") values (",
-        "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
-        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
-        "@normalized_log_path, @idle_since",
-        ")"
-      ].join(" ")
+      watchdogSampleHistorySql("watchdog_sample_history", "run_id")
     );
     return this.database.transaction(() => {
       if (
         watchdogGeneration !== undefined &&
         !this.isCurrentWatchdogGeneration(sample.runId, watchdogGeneration)
       ) {
+        return false;
+      }
+      latest.run(values);
+      history.run(values);
+      return true;
+    })();
+  }
+
+  upsertRoutineWatchdogSample(sample: RoutineWatchdogSample): boolean {
+    const values = {
+      firing_id: sample.firingId,
+      idle_since: sample.idleSince,
+      last_message_at: sample.lastMessageAt,
+      last_progress_at: sample.lastProgressAt,
+      last_tool_call_at: sample.lastToolCallAt,
+      normalized_log_offset: sample.normalizedLogOffset,
+      normalized_log_path: sample.normalizedLogPath,
+      output_tokens_total: sample.outputTokensTotal,
+      sampled_at: sample.sampledAt,
+      turn_id_set_size: sample.turnIdSetSize,
+      workspace_digest: sample.workspaceDigest,
+      workspace_mtime_max: sample.workspaceMtimeMax
+    };
+    const latest = this.database.prepare(
+      watchdogSampleUpsertSql("routine_watchdog_samples", "firing_id")
+    );
+    const history = this.database.prepare(
+      watchdogSampleHistorySql("routine_watchdog_sample_history", "firing_id")
+    );
+    return this.database.transaction(() => {
+      if (!this.isRoutineWatchdogCandidate(sample.firingId)) {
         return false;
       }
       latest.run(values);
@@ -1642,6 +1740,37 @@ export class RunStore {
       return count.get(runId) as { count: number };
     });
     return apply()?.count;
+  }
+
+  rememberRoutineWatchdogTurnIds(
+    firingId: string,
+    turnIds: Iterable<string>
+  ): number | undefined {
+    const insert = this.database.prepare(
+      "insert or ignore into routine_watchdog_turn_ids (firing_id, turn_id) values (?, ?)"
+    );
+    const count = this.database.prepare(
+      "select count(*) as count from routine_watchdog_turn_ids where firing_id = ?"
+    );
+    return this.database.transaction(() => {
+      if (!this.isRoutineWatchdogCandidate(firingId)) {
+        return undefined;
+      }
+      for (const turnId of turnIds) {
+        insert.run(firingId, turnId);
+      }
+      return (count.get(firingId) as { count: number }).count;
+    })();
+  }
+
+  private isRoutineWatchdogCandidate(firingId: string): boolean {
+    return (
+      this.database
+        .prepare(
+          "select 1 from routine_firings where id = ? and state = 'running' and cancel_requested = 0"
+        )
+        .get(firingId) !== undefined
+    );
   }
 
   markRunNoProgressStale(
@@ -3538,6 +3667,25 @@ export class RunStore {
         };
   }
 
+  // Admission priority needs only an existence check. Avoid listRoutines(),
+  // whose operator-facing shape enriches every target with counters, latest
+  // outcomes, and pull requests (ADR 0094).
+  hasParkedRoutineDeferral(): boolean {
+    return (
+      this.database
+        .prepare(
+          [
+            "select 1",
+            DEFERRED_FANOUT_TARGET_SOURCE,
+            "where",
+            PARKED_ROUTINE_DEFERRAL_PREDICATE,
+            "limit 1"
+          ].join(" ")
+        )
+        .get() !== undefined
+    );
+  }
+
   // The terminal half of a deferral: the parked clock event lapsed before
   // any slot freed, so it is consumed exactly like a skip while the fan-out
   // leg records that the Routine did not run (ADR 0093).
@@ -3873,6 +4021,12 @@ export class RunStore {
   completeRoutineFiring(input: {
     cancelReason?: CancelReason;
     commitsAhead?: boolean;
+    // True only when the dispatcher's own declared-deadline race decided this
+    // completion's terminal reason (`timeoutWon` in runRoutineFiring's catch
+    // path). ADR 0067 ranks that deadline verdict above any cancellation
+    // reason, so it is the one completion the Watchdog latch must not
+    // override even though `cancel_reason` may already read `no_progress`.
+    firingDeadlineWon?: boolean;
     id: string;
     outcome?: RoutineOutcome;
     state: Extract<RoutineFiringState, "succeeded" | "failed" | "cancelled">;
@@ -3880,30 +4034,52 @@ export class RunStore {
     workspacePath?: string;
   }): void {
     const now = timestamp();
-    this.database
-      .prepare(
-        [
-          "update routine_firings set",
-          "state = @state,",
-          "terminal_reason = @terminal_reason,",
-          "outcome_status = @outcome_status,",
-          "outcome_action = @outcome_action,",
-          "outcome_url = @outcome_url,",
-          "outcome_title = @outcome_title,",
-          "outcome_summary = @outcome_summary,",
-          "outcome_verified = @outcome_verified,",
-          "outcome_source = @outcome_source,",
-          "commits_ahead = case",
-          "when @commits_ahead is not null then @commits_ahead",
-          "when @outcome_action = 'commit' and @outcome_verified = 1 then 1",
-          "else commits_ahead end,",
-          "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
-          "workspace_path = coalesce(@workspace_path, workspace_path),",
-          "updated_at = @updated_at",
-          "where id = @id"
-        ].join(" ")
-      )
-      .run({
+    const update = this.database.prepare(
+      [
+        "update routine_firings set",
+        "state = @state,",
+        "terminal_reason = @terminal_reason,",
+        "outcome_status = @outcome_status,",
+        "outcome_action = @outcome_action,",
+        "outcome_url = @outcome_url,",
+        "outcome_title = @outcome_title,",
+        "outcome_summary = @outcome_summary,",
+        "outcome_verified = @outcome_verified,",
+        "outcome_source = @outcome_source,",
+        "commits_ahead = case",
+        "when @commits_ahead is not null then @commits_ahead",
+        "when @outcome_action = 'commit' and @outcome_verified = 1 then 1",
+        "else commits_ahead end,",
+        "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
+        "workspace_path = coalesce(@workspace_path, workspace_path),",
+        "updated_at = @updated_at",
+        "where id = @id"
+      ].join(" ")
+    );
+    // The Watchdog latches its no-progress verdict durably and then cancels
+    // in memory, so a provider that finishes between those two steps reaches
+    // here seeing no cancellation at all and would persist its own verdict —
+    // `succeeded`, or an unrelated `failed` — over a firing the Watchdog has
+    // already announced as terminated. Re-read the latch inside the write
+    // transaction — the one place the two passes serialize — and let it win.
+    // Only the lifecycle verdict is overridden: the outcome and commits-ahead
+    // evidence gathered by this call is real and retention still needs it
+    // (ADR 0068, ADR 0091). The one completion that must NOT be overridden is
+    // one whose terminal reason is itself an authoritative deadline verdict
+    // (`firingDeadlineWon`) — ADR 0067 ranks a Routine's own declared
+    // deadline above any cancellation reason, including this latch.
+    const latched = this.database.prepare(
+      [
+        "select 1 from routine_firings",
+        "where id = ? and cancel_requested = 1 and cancel_reason = ?"
+      ].join(" ")
+    );
+    const state = this.database.transaction(() => {
+      const overridden =
+        input.firingDeadlineWon !== true &&
+        latched.get(input.id, WATCHDOG_NO_PROGRESS_REASON) !== undefined;
+      const state = overridden ? ("failed" as const) : input.state;
+      update.run({
         cancel_reason: input.cancelReason ?? null,
         commits_ahead:
           input.commitsAhead === undefined ? null : Number(input.commitsAhead),
@@ -3917,12 +4093,16 @@ export class RunStore {
         outcome_url: input.outcome?.url ?? null,
         outcome_verified:
           input.outcome === undefined ? null : Number(input.outcome.verified),
-        state: input.state,
-        terminal_reason: input.terminalReason ?? null,
+        state,
+        terminal_reason: overridden
+          ? WATCHDOG_NO_PROGRESS_REASON
+          : (input.terminalReason ?? null),
         updated_at: now,
         workspace_path: input.workspacePath ?? null
       });
-    this.recordRoutineFiringTransition(input.id, input.state, now);
+      return state;
+    })();
+    this.recordRoutineFiringTransition(input.id, state, now);
   }
 
   getRoutineFiring(id: string): RoutineFiringStatus | undefined {
@@ -3959,11 +4139,44 @@ export class RunStore {
     firingId: string,
     reason: CancelReason
   ): void {
+    // A durable watchdog no-progress latch must survive a later operator
+    // cancel the same way `daemon_shutdown` already does: completeRoutineFiring
+    // reads this column back to decide whether to force the exact `no_progress`
+    // terminal reason, so overwriting it here would let a decorated reason
+    // slip through the fence for a firing the Watchdog already condemned.
     this.database
       .prepare(
-        "update routine_firings set cancel_requested = 1, cancel_reason = case when cancel_reason = ? then cancel_reason else ? end, updated_at = ? where id = ?"
+        "update routine_firings set cancel_requested = 1, cancel_reason = case when cancel_reason in (?, ?) then cancel_reason else ? end, updated_at = ? where id = ?"
       )
-      .run(SHUTDOWN_PREEMPTIVE_REASON, reason, timestamp(), firingId);
+      .run(
+        SHUTDOWN_PREEMPTIVE_REASON,
+        WATCHDOG_NO_PROGRESS_REASON,
+        reason,
+        timestamp(),
+        firingId
+      );
+  }
+
+  markRoutineFiringWatchdogNoProgress(
+    firingId: string,
+    updatedAt = timestamp()
+  ): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update routine_firings set",
+          "cancel_requested = 1,",
+          "cancel_reason = @reason,",
+          "updated_at = @updated_at",
+          "where id = @id and state = 'running' and cancel_requested = 0"
+        ].join(" ")
+      )
+      .run({
+        id: firingId,
+        reason: WATCHDOG_NO_PROGRESS_REASON,
+        updated_at: updatedAt
+      });
+    return result.changes > 0;
   }
 
   updateRoutineFiringWorkspace(input: {
@@ -5919,6 +6132,46 @@ export class RunStore {
         foreign key (firing_id) references routine_firings(id)
       );
 
+      create table if not exists routine_watchdog_samples (
+        firing_id text primary key,
+        sampled_at text not null,
+        last_tool_call_at text,
+        last_progress_at text,
+        workspace_mtime_max real not null,
+        workspace_digest text not null default '',
+        turn_id_set_size integer not null,
+        output_tokens_total integer not null,
+        normalized_log_offset integer not null,
+        idle_since text,
+        normalized_log_path text not null default '',
+        last_message_at text,
+        foreign key (firing_id) references routine_firings(id)
+      );
+
+      create table if not exists routine_watchdog_sample_history (
+        firing_id text not null,
+        sampled_at text not null,
+        last_tool_call_at text,
+        last_progress_at text,
+        workspace_mtime_max real not null,
+        workspace_digest text not null default '',
+        turn_id_set_size integer not null,
+        output_tokens_total integer not null,
+        normalized_log_offset integer not null,
+        idle_since text,
+        normalized_log_path text not null default '',
+        last_message_at text,
+        primary key (firing_id, sampled_at),
+        foreign key (firing_id) references routine_firings(id)
+      );
+
+      create table if not exists routine_watchdog_turn_ids (
+        firing_id text not null,
+        turn_id text not null,
+        primary key (firing_id, turn_id),
+        foreign key (firing_id) references routine_firings(id)
+      );
+
       create table if not exists routine_pull_requests (
         id integer primary key autoincrement,
         project_name text not null,
@@ -6160,6 +6413,15 @@ export class RunStore {
     this.database.exec(`
       create index if not exists routine_firing_workspace_retention_idx
       on routine_firings(workspace_pruned_at, state, updated_at);
+    `);
+
+    // listWatchdogCandidateRoutineFirings runs on every Watchdog tick against a
+    // table that grows with every Firing ever recorded and is never swept. The
+    // retention index above leads with workspace_pruned_at, so without this the
+    // candidate query is a full scan plus a temp b-tree sort.
+    this.database.exec(`
+      create index if not exists routine_firings_watchdog_idx
+      on routine_firings(state, cancel_requested, created_at, id);
     `);
 
     // run_state_transitions is append-only with no retention sweep and has no
@@ -6645,7 +6907,9 @@ function mapRunRow(row: RunRow): RunStatus {
   };
 }
 
-function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
+function mapWatchdogProgressSampleRow(
+  row: Omit<WatchdogSampleRow, "run_id">
+): WatchdogProgressSample {
   return {
     idleSince: row.idle_since,
     lastMessageAt: row.last_message_at,
@@ -6654,12 +6918,21 @@ function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
     normalizedLogOffset: row.normalized_log_offset,
     normalizedLogPath: row.normalized_log_path,
     outputTokensTotal: row.output_tokens_total,
-    runId: row.run_id,
     sampledAt: row.sampled_at,
     turnIdSetSize: row.turn_id_set_size,
     workspaceDigest: row.workspace_digest,
     workspaceMtimeMax: row.workspace_mtime_max
   };
+}
+
+function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
+  return { ...mapWatchdogProgressSampleRow(row), runId: row.run_id };
+}
+
+function mapRoutineWatchdogSampleRow(
+  row: RoutineWatchdogSampleRow
+): RoutineWatchdogSample {
+  return { ...mapWatchdogProgressSampleRow(row), firingId: row.firing_id };
 }
 
 const RUN_ARTIFACT_KINDS: readonly RunArtifactKind[] = [

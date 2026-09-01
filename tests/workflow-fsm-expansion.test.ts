@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { BUILTIN_WORKFLOW_TEMPLATES } from "../src/builtin-templates.js";
 import { decideNextStep } from "../src/lifecycle/state-machine-dispatch.js";
+import { projectPullRequestSignals } from "../src/workflow/pr-signal-projection.js";
 import {
   explainWorkflow,
   loadExpandedWorkflow,
@@ -1049,6 +1050,12 @@ describe("state machine workflow definitions", () => {
         "        - to: ready",
         "          when:",
         "            review_decision: approved",
+        "        - to: autofix",
+        "          when:",
+        "            checks: failure",
+        "        - to: ready",
+        "          when:",
+        "            checks: success",
         "    autofix:",
         "      action:",
         "        kind: agent",
@@ -1070,7 +1077,9 @@ describe("state machine workflow definitions", () => {
     );
     expect(waitState?.transitions).toEqual([
       { to: "autofix", when: { has_unresolved_reviews: true } },
-      { to: "ready", when: { review_decision: "approved" } }
+      { to: "ready", when: { review_decision: "approved" } },
+      { to: "autofix", when: { checks: "failure" } },
+      { to: "ready", when: { checks: "success" } }
     ]);
   });
 
@@ -1122,6 +1131,9 @@ describe("state machine workflow definitions", () => {
         "        - to: done",
         "          when:",
         "            checks: success",
+        "        - to: done",
+        "          when:",
+        "            checks: failure",
         "    done:",
         "      terminal: success",
         ""
@@ -1135,6 +1147,664 @@ describe("state machine workflow definitions", () => {
       (state) => state.id === "holding"
     );
     expect(holding?.action?.kind).toBe("wait");
+  });
+
+  it("allows an artifact-gated wait to park while its artifact is absent", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: artifact_handoff",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "            artifact_exists: HANDOFF.md",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("still checks a wait whose artifact gate covers only some transitions", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: partial_artifact_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "            artifact_exists: HANDOFF.md",
+        "        - to: done",
+        "          when:",
+        "            checks: failure",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals pr_open=true`
+      )
+    );
+  });
+
+  it("does not let an agent-signal transition cover a parked wait", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: agent_signal_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: failure",
+        "        - to: done",
+        "          when:",
+        "            branch_ahead_of_base: true",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // branch_ahead_of_base is never emitted into a parked wait's signal map
+    // (unlike provider_success, which observeWaitPullRequestSignals always
+    // sets true), so this transition can never actually match and must not
+    // count as coverage.
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals pr_open=true`
+      )
+    );
+  });
+
+  it("lets a bare provider_success transition cover every other combination", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: provider_success_fallback",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: failure",
+        "        - to: retry",
+        "          when:",
+        "            provider_success: true",
+        "    done:",
+        "      terminal: success",
+        "    retry:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // observeWaitPullRequestSignals always sets provider_success: true
+    // alongside every real observation, so a bare provider_success: true
+    // transition is a genuine runtime catch-all for whatever the earlier,
+    // more specific transition doesn't match -- it does not need to share a
+    // transition with a pull-request signal to be coverable.
+    expect(result.errors).toEqual([]);
+  });
+
+  it("lets provider_success: true alongside a pull request signal cover a parked wait", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: agent_success_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "            provider_success: true",
+        "        - to: done",
+        "          when:",
+        "            checks: failure",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("does not require wait transitions to cover signals complete_when already excludes", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("allows an artifact-gated wait to park under a complete_when PR gate", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_artifact_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "            artifact_exists: HANDOFF.md",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("still checks a complete_when-gated wait whose artifact gate covers only some transitions", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_partial_artifact_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "            artifact_exists: HANDOFF.md",
+        "        - to: merged",
+        "          when:",
+        "            checks: success",
+        "            mergeable: true",
+        "    done:",
+        "      terminal: success",
+        "    merged:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // The artifact-gated transition never counts as coverage; the plain
+    // transition only covers mergeable: true, so mergeable: false (still
+    // reachable, since complete_when only narrows on checks) is uncovered.
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals`
+      )
+    );
+  });
+
+  it("rejects a wait transition that gates on a positive unresolved_review_threads count", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: exact_count_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: failed",
+        "          when:",
+        "            pr_open: false",
+        "        - to: merge",
+        "          when:",
+        "            checks: success",
+        "            mergeable: true",
+        "            unresolved_review_threads: 0",
+        "        - to: repair",
+        "          when:",
+        "            mergeable: false",
+        "        - to: repair",
+        "          when:",
+        "            checks: failure",
+        "        - to: autofix",
+        "          when:",
+        "            unresolved_review_threads: 1",
+        "    merge:",
+        "      terminal: success",
+        "    repair:",
+        "      terminal: blocked",
+        "    autofix:",
+        "      terminal: blocked",
+        "    failed:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // Every enumerated signal combination is otherwise matched by some
+    // transition (pr_open: false, mergeable: false, checks: failure, or the
+    // unresolved_review_threads: 0/1 pair cover the full product), so the
+    // enumeration-based coverage check alone finds nothing wrong here -- a
+    // real PR with two or more unresolved threads would still match no
+    // transition and park forever. Only the dedicated exact-count rejection
+    // catches it.
+    expect(result.errors).toContainEqual(
+      `workflow state holding at ${workflowPath} transition to autofix gates on unresolved_review_threads: 1, which cannot cover every unresolved-thread count; use has_unresolved_reviews: true instead`
+    );
+  });
+
+  it("checks coverage for a wait whose only pull request predicate lives in complete_when", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_only_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            provider_success: false",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // No transition names a pr_signal predicate, so without also inspecting
+    // complete_when this state would be classified as not observing pull
+    // request signals at all and skipped entirely -- even though every
+    // settled successful poll reaches the transition loop (complete_when is
+    // satisfied) and matches nothing, since provider_success is always true
+    // on a real observation.
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals`
+      )
+    );
+  });
+
+  it("lets an unconditional transition cover every observation on a parked wait", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: unconditional_fallback",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "        - to: done",
+        "          when: {}",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("resolves provider_success: true inside complete_when the same way transitions do", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_provider_success",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "        provider_success: true",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("excludes only the combinations a resolvable complete_when predicate proves unmet, even alongside an unresolvable one", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: mixed_complete_when_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "        artifact_exists: DONE",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // checks: failure combinations are provably excluded on their own --
+    // complete_when is an AND, so that one resolvable predicate failing is
+    // enough regardless of whether artifact_exists can be resolved
+    // statically. checks: success combinations cannot be proven excluded
+    // (the artifact might exist), so they still need transition coverage,
+    // and the sole `checks: success` transition provides it.
+    expect(result.errors).toEqual([]);
+  });
+
+  it("lets a bare provider_success transition cover a wait whose only pull request predicate lives in complete_when", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_only_provider_success",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            provider_success: true",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // complete_when already narrows every combination this state has to
+    // cover down to checks: success, and provider_success is always true on
+    // a real observation, so the bare provider_success transition is a
+    // genuine catch-all for that narrowed set (the same holds regardless of
+    // whether complete_when or a sibling transition is what makes the state
+    // PR-observing -- see "lets a bare provider_success transition cover
+    // every other combination" above).
+    expect(result.errors).toEqual([]);
+  });
+
+  it("rejects a wait whose complete_when gates on pr_merged with no covering transition", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: merged_gate_uncovered",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        pr_merged: true",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // Before merged cases were enumerated, every generated signal map had
+    // pr_merged absent, so reachesTransitions excluded every one of them and
+    // this state read as fully covered with zero enumerated combinations
+    // ever reaching the transitions loop -- even though a wait re-evaluates
+    // against the tracked PR's live state regardless of which state the run
+    // parked in, so complete_when: { pr_merged: true } genuinely can pass at
+    // runtime once the PR merges, landing on a transition table that only
+    // names `checks`.
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals`
+      )
+    );
+  });
+
+  it("lets a pr_merged catch-all cover every merged combination", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: merged_catch_all",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: merged",
+        "          when:",
+        "            pr_merged: true",
+        "        - to: failed",
+        "          when:",
+        "            pr_open: false",
+        "        - to: merge",
+        "          when:",
+        "            checks: success",
+        "            mergeable: true",
+        "            unresolved_review_threads: 0",
+        "        - to: repair",
+        "          when:",
+        "            mergeable: false",
+        "        - to: repair",
+        "          when:",
+        "            checks: failure",
+        "        - to: repair",
+        "          when:",
+        "            has_unresolved_reviews: true",
+        "    merged:",
+        "      terminal: success",
+        "    failed:",
+        "      terminal: blocked",
+        "    merge:",
+        "      terminal: success",
+        "    repair:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // This is the shape shipped in this repo's own workflow.yml wait_for_pr
+    // state. Every merged combination (mergeable settled or permanently
+    // unknown, checks settled, any review decision or thread count) is
+    // caught by the pr_merged: true transition, ordered first so it is never
+    // shadowed by the pr_open: false escape.
+    expect(result.errors).toEqual([]);
+  });
+
+  it("rejects a wait that only covers settled mergeable values for a closed PR", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: closed_unmerged_unknown_mergeable_gap",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: merged",
+        "          when:",
+        "            pr_merged: true",
+        "        - to: merge",
+        "          when:",
+        "            mergeable: true",
+        "        - to: repair",
+        "          when:",
+        "            mergeable: false",
+        "    merged:",
+        "      terminal: success",
+        "    merge:",
+        "      terminal: success",
+        "    repair:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // GitHub stops recomputing mergeability once a PR closes, merged or not,
+    // so a closed-unmerged PR can settle at mergeable: unknown (the key
+    // omitted) permanently, not just transiently the way it can while open.
+    // None of the three transitions above name pr_open at all, so this
+    // combination -- open: false, merged: false, mergeable omitted --
+    // matches nothing and must be reported, not silently accepted the way it
+    // was before mergeable: unknown was enumerated for a closed PR.
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals`
+      )
+    );
   });
 
   it("accepts Oh My Pi for an agent action provider", async () => {
@@ -1931,37 +2601,51 @@ describe("built-in workflow templates", () => {
     if (waiting === undefined) {
       throw new Error("expected review.waiting state");
     }
+    expect(waiting.transitions).toEqual([
+      {
+        to: "shipped",
+        when: { checks: "success", unresolved_review_threads: 0 }
+      },
+      { to: "needs_human", when: { checks: "failure" } },
+      {
+        to: "review.autofix",
+        when: { has_unresolved_reviews: true }
+      }
+    ]);
 
-    const advance = (signals: Record<string, string | number>) =>
-      decideNextStep({ actionExecuted: true, signals, state: waiting });
+    // Driving the real projection keeps has_unresolved_reviews derived the way
+    // a poll derives it, rather than restating the rule in the test.
+    const advance = (checks: "failure" | "success", unresolved: number) =>
+      decideNextStep({
+        actionExecuted: true,
+        signals: projectPullRequestSignals({
+          checks,
+          merged: false,
+          mergeable: "mergeable",
+          open: true,
+          reviewDecision: "approved",
+          unresolvedReviewThreads: unresolved
+        }),
+        state: waiting
+      });
 
-    expect(
-      advance({ checks: "success", unresolved_review_threads: 0 })
-    ).toMatchObject({
+    expect(advance("success", 0)).toMatchObject({
       kind: "advance",
       to: "shipped"
     });
-    expect(
-      advance({ checks: "success", unresolved_review_threads: 1 })
-    ).toMatchObject({
+    expect(advance("success", 1)).toMatchObject({
       kind: "advance",
       to: "review.autofix"
     });
-    expect(
-      advance({ checks: "success", unresolved_review_threads: 2 })
-    ).toMatchObject({
+    expect(advance("success", 2)).toMatchObject({
       kind: "advance",
       to: "review.autofix"
     });
-    expect(
-      advance({ checks: "success", unresolved_review_threads: 7 })
-    ).toMatchObject({
+    expect(advance("success", 7)).toMatchObject({
       kind: "advance",
       to: "review.autofix"
     });
-    expect(
-      advance({ checks: "failure", unresolved_review_threads: 3 })
-    ).toMatchObject({
+    expect(advance("failure", 3)).toMatchObject({
       kind: "advance",
       to: "needs_human"
     });

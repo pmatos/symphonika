@@ -19,9 +19,9 @@ one is **deferred**: no `routine_firings` row, no clock advance, no skip counter
 leg stays `pending` carrying `deferred_reason`, `deferred_since` and `deferred_attempts`. Every
 daemon tick re-evaluates admission for that same event. Routine dispatch runs ahead of *issue*
 dispatch in a tick, so a fresh issue Run never takes a slot out from under a deferral evaluated in
-the same tick. This is not an absolute first refusal: PR review follow-up is admitted earlier still
-and can claim a freed slot ahead of a parked deferral. Changing that ordering is its own scheduling
-decision, tracked in #648.
+the same tick. **Amended by ADR 0094:** a newly due Routine still follows PR review admission, but a
+persisted capacity deferral retries before it, so review work cannot repeatedly take the slot the
+Routine is already waiting for.
 
 A deferral is bounded by the Routine's own schedule. A recurring Target defers until its next clock
 event is due; that successor supersedes the parked event, so carrying it further would double-fire.
@@ -63,9 +63,8 @@ fires it or records it as missed on the deadline it already had.
   still did not happen, so it still reaches the failure count.
 - Each deferring tick refreshes the Routine's `last_attempted_at`, so an operator can see that
   admission is being retried without reading the fan-out.
-- Routine dispatch outranks fresh issue dispatch within a tick, but not PR review follow-up, which
-  is admitted before both and can take a freed slot a parked deferral was waiting for. Whether a
-  deferral should outrank it is tracked in #648.
+- Routine dispatch outranks fresh issue dispatch within a tick. ADR 0094 also gives a parked
+  deferral priority over PR review follow-up while leaving a newly due Routine behind it.
 - `deferred` and `missed` join `fired` and `skipped` in the dispatch result, and operator surfaces
   (`symphonika routines`, the status dashboard, `/routines`) show a live deferral so a Routine that
   is due but unadmitted no longer looks inexplicably late.

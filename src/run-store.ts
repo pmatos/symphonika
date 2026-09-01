@@ -1335,26 +1335,35 @@ export class RunStore {
       parentRunId: string;
     }
   ): void {
-    this.recordRunRow({
-      ...(input.evidenceIgnore === undefined
-        ? {}
-        : { evidenceIgnore: input.evidenceIgnore }),
-      id: input.id,
-      isContinuation: true,
-      issue: input.issue,
-      parentRunId: input.parentRunId,
-      projectName: input.projectName,
-      providerCommand: input.providerCommand,
-      providerName: input.providerName,
-      state: "queued"
+    // Transactional for the same reason as createWaitingRun: callers (e.g.
+    // claimAndPersistRun's runCreated) key "did this call create a durable
+    // row" on this method returning without throwing, so the row insert and
+    // its state-inheritance lookup must commit or roll back together. See
+    // ADR 0093.
+    const apply = this.database.transaction(() => {
+      const event = this.insertRunRow({
+        ...(input.evidenceIgnore === undefined
+          ? {}
+          : { evidenceIgnore: input.evidenceIgnore }),
+        id: input.id,
+        isContinuation: true,
+        issue: input.issue,
+        parentRunId: input.parentRunId,
+        projectName: input.projectName,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName,
+        state: "queued"
+      });
+      const parent = this.database
+        .prepare("select current_state_id from runs where id = ?")
+        .get(input.parentRunId) as
+        { current_state_id: string | null } | undefined;
+      if (parent?.current_state_id != null) {
+        this.setRunCurrentState(input.id, parent.current_state_id);
+      }
+      return event;
     });
-    const parent = this.database
-      .prepare("select current_state_id from runs where id = ?")
-      .get(input.parentRunId) as
-      { current_state_id: string | null } | undefined;
-    if (parent?.current_state_id != null) {
-      this.setRunCurrentState(input.id, parent.current_state_id);
-    }
+    this.publishChange(apply());
   }
 
   createCapReachedFailureRun(input: {
@@ -2030,43 +2039,51 @@ export class RunStore {
     // when the URL is not a GitHub issue URL: unknown origin, never a
     // mismatch. See docs/adr/0089.
     const repository = parseIssueRepositoryUrl(input.issue.url);
-    this.database
-      .prepare(
-        [
-          "insert into runs (",
-          "id, project_name, issue_number, issue_title, state, issue_snapshot_json,",
-          "issue_owner, issue_repo,",
-          "evidence_ignore_json, provider_name, provider_command,",
-          "is_continuation, continuation_parent_run_id, workspace_path,",
-          "created_at, updated_at",
-          ") values (",
-          "@id, @project_name, @issue_number, @issue_title, @state, @issue_snapshot_json,",
-          "@issue_owner, @issue_repo,",
-          "@evidence_ignore_json, @provider_name, @provider_command,",
-          "@is_continuation, @continuation_parent_run_id, @workspace_path,",
-          "@created_at, @updated_at",
-          ")"
-        ].join(" ")
-      )
-      .run({
-        continuation_parent_run_id: input.parentRunId,
-        created_at: now,
-        evidence_ignore_json: JSON.stringify(input.evidenceIgnore ?? []),
-        id: input.id,
-        is_continuation: input.isContinuation ? 1 : 0,
-        issue_number: input.issue.number,
-        issue_owner: repository?.owner ?? null,
-        issue_repo: repository?.repo ?? null,
-        issue_snapshot_json: JSON.stringify(input.issue),
-        issue_title: input.issue.title,
-        project_name: input.projectName,
-        provider_command: input.providerCommand,
-        provider_name: input.providerName,
-        state: input.state,
-        updated_at: now,
-        workspace_path: input.workspacePath ?? null
-      });
-    return this.insertRunTransition(input.id, input.state, now);
+    // Transactional so a throw from the transition insert can never leave a
+    // `runs` row committed without its first transition: callers key their
+    // own "did this call create a durable row" bookkeeping (e.g.
+    // claimAndPersistRun's runCreated) on whether this method returns without
+    // throwing. See ADR 0093.
+    const apply = this.database.transaction(() => {
+      this.database
+        .prepare(
+          [
+            "insert into runs (",
+            "id, project_name, issue_number, issue_title, state, issue_snapshot_json,",
+            "issue_owner, issue_repo,",
+            "evidence_ignore_json, provider_name, provider_command,",
+            "is_continuation, continuation_parent_run_id, workspace_path,",
+            "created_at, updated_at",
+            ") values (",
+            "@id, @project_name, @issue_number, @issue_title, @state, @issue_snapshot_json,",
+            "@issue_owner, @issue_repo,",
+            "@evidence_ignore_json, @provider_name, @provider_command,",
+            "@is_continuation, @continuation_parent_run_id, @workspace_path,",
+            "@created_at, @updated_at",
+            ")"
+          ].join(" ")
+        )
+        .run({
+          continuation_parent_run_id: input.parentRunId,
+          created_at: now,
+          evidence_ignore_json: JSON.stringify(input.evidenceIgnore ?? []),
+          id: input.id,
+          is_continuation: input.isContinuation ? 1 : 0,
+          issue_number: input.issue.number,
+          issue_owner: repository?.owner ?? null,
+          issue_repo: repository?.repo ?? null,
+          issue_snapshot_json: JSON.stringify(input.issue),
+          issue_title: input.issue.title,
+          project_name: input.projectName,
+          provider_command: input.providerCommand,
+          provider_name: input.providerName,
+          state: input.state,
+          updated_at: now,
+          workspace_path: input.workspacePath ?? null
+        });
+      return this.insertRunTransition(input.id, input.state, now);
+    });
+    return apply();
   }
 
   countSucceededContinuations(

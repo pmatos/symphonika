@@ -26,6 +26,7 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "../src/workspace.js";
+import { abortSignalMatcher } from "./helpers/abort-signal.js";
 import {
   createGitWorkspaceAhead,
   createGitWorkspaceAtBase
@@ -112,6 +113,11 @@ describe("daemon dispatch", () => {
             kind: "exit"
           }
         };
+        yield {
+          raw: {
+            kind: "provider_diagnostic"
+          }
+        };
       }),
       validate: vi.fn().mockResolvedValue(undefined)
     } satisfies AgentProvider;
@@ -185,6 +191,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:claimed"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],
@@ -194,6 +201,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:running"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ]
@@ -301,6 +309,9 @@ describe("daemon dispatch", () => {
         {
           code: 0,
           kind: "exit"
+        },
+        {
+          kind: "provider_diagnostic"
         }
       ]);
       expect(
@@ -370,6 +381,13 @@ describe("daemon dispatch", () => {
           "message",
           "process_exit"
         ]);
+        expect(
+          database
+            .prepare(
+              "select last_event_sequence from provider_stream_receipts where run_id = ?"
+            )
+            .get("run-issue-8")
+        ).toMatchObject({ last_event_sequence: 4 });
       } finally {
         database.close();
       }
@@ -855,6 +873,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:claimed"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],
@@ -864,6 +883,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:running"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],
@@ -1050,6 +1070,112 @@ describe("daemon dispatch", () => {
           "running",
           "failed"
         ]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("redacts inherited credentials from issue Run evidence", async () => {
+    const root = await makeTempRoot();
+    const trackerToken = "tracker-token-that-must-never-leak";
+    const smtpPassword = "smtp-password-that-must-never-leak";
+    await writeValidProject(root, {
+      smtpPasswordEnv: "SMTP_TEST_PASSWORD"
+    });
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 8,
+          title: "Redact issue Run evidence"
+        })
+      ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    let handedStderrRedactSecrets: readonly string[] | undefined;
+    const codexProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        handedStderrRedactSecrets = input.stderrRedactSecrets;
+        await Promise.resolve();
+        const leaked = `provider leaked ${trackerToken} and ${smtpPassword}`;
+        yield {
+          normalized: {
+            message: leaked,
+            type: "turn_failed"
+          },
+          raw: {
+            kind: "turn_failed",
+            message: leaked
+          }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: codexProvider },
+      createRunId: () => "run-redacted-evidence",
+      cwd: root,
+      env: {
+        GITHUB_TOKEN: trackerToken,
+        SMTP_TEST_PASSWORD: smtpPassword
+      },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForRun(daemon.url, "failed");
+
+      expect(handedStderrRedactSecrets).toEqual(
+        expect.arrayContaining([trackerToken, smtpPassword])
+      );
+      const rawLog = await fetchRunArtifact(
+        daemon.url,
+        "run-redacted-evidence",
+        "provider_raw"
+      );
+      const normalizedLog = await fetchRunArtifact(
+        daemon.url,
+        "run-redacted-evidence",
+        "provider_normalized"
+      );
+      expect(rawLog).toContain("[REDACTED]");
+      expect(normalizedLog).toContain("[REDACTED]");
+
+      const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+      const databaseBytes = await readFile(databaseFile);
+      for (const secret of [trackerToken, smtpPassword]) {
+        expect(rawLog).not.toContain(secret);
+        expect(normalizedLog).not.toContain(secret);
+        expect(databaseBytes.includes(Buffer.from(secret))).toBe(false);
+      }
+
+      const database = new Database(databaseFile, { readonly: true });
+      try {
+        expect(
+          database
+            .prepare("select terminal_reason from runs where id = ?")
+            .get("run-redacted-evidence")
+        ).toEqual({
+          terminal_reason: "provider leaked [REDACTED] and [REDACTED]"
+        });
       } finally {
         database.close();
       }
@@ -1348,6 +1474,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:claimed"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],
@@ -1357,6 +1484,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:running"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],
@@ -1458,6 +1586,7 @@ describe("daemon dispatch", () => {
         agentProviders: { codex: codexProvider },
         configDir: root,
         createRunId: () => "run-sentinel",
+        emailConfigLoader: () => undefined,
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi: {
           addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
@@ -4623,7 +4752,7 @@ async function writeInitialStateClaudeRawFsmProject(
 
 async function writeValidProject(
   root: string,
-  options: { pollingIntervalMs?: number } = {}
+  options: { pollingIntervalMs?: number; smtpPasswordEnv?: string } = {}
 ): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
@@ -4632,6 +4761,18 @@ async function writeValidProject(
       "  root: ./.symphonika",
       "polling:",
       `  interval_ms: ${options.pollingIntervalMs ?? 30000}`,
+      ...(options.smtpPasswordEnv === undefined
+        ? []
+        : [
+            "email:",
+            '  from: "symphonika@example.com"',
+            '  to: "operator@example.com"',
+            '  smtp_host: "smtp.example.com"',
+            // Deliberately unauthenticated: the named password variable is
+            // still inherited by the provider, so it belongs in the
+            // redaction inventory whether or not SMTP auth uses it.
+            `  smtp_password_env: "${options.smtpPasswordEnv}"`
+          ]),
       "providers:",
       "  codex:",
       `    command: "codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server"`,

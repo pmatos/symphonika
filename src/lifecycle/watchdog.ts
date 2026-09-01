@@ -13,8 +13,11 @@ import {
 } from "../reload.js";
 import type {
   CancelReason,
+  RoutineWatchdogSample,
   RunStore,
+  WatchdogCandidateRoutineFiring,
   WatchdogCandidateRun,
+  WatchdogProgressSample,
   WatchdogSample,
   WatchdogTerminalReason
 } from "../run-store.js";
@@ -66,6 +69,11 @@ export type ReconcileWatchdogInput = {
     projectName: string;
     runId: string;
   }) => void;
+  onRoutineTerminated?: (firing: {
+    firingId: string;
+    projectName: string;
+    routineName: string;
+  }) => void;
   projects?: WatchdogServiceConfig["projects"];
   runStore: RunStore;
 };
@@ -94,9 +102,35 @@ export function runElapsedMs(createdAt: string, now: Date): number | undefined {
   return now.getTime() - claimedAtMs;
 }
 
+// The idle clock both Watchdog paths run on. ADR 0054: attempt start normally
+// clears the latest sample and advances the generation fence before
+// preparing_workspace. Keep path-change detection as a defensive fallback for
+// legacy or partially-upgraded state so a surviving prior-attempt row still
+// cannot carry its idle clock into the new attempt. Routine Firings have one
+// attempt, but the same reset applies if their evidence path ever changes.
+function watchdogIdleClock(
+  previous: WatchdogProgressSample | undefined,
+  next: WatchdogProgressSample,
+  sampledAt: string
+): { idleSince: string | null; progress: boolean } {
+  const progress =
+    previous === undefined ? false : watchdogProgressObserved(previous, next);
+  const attemptChanged =
+    previous !== undefined &&
+    previous.normalizedLogPath !== next.normalizedLogPath;
+  return {
+    idleSince: progress
+      ? null
+      : attemptChanged
+        ? sampledAt
+        : (previous?.idleSince ?? sampledAt),
+    progress
+  };
+}
+
 export function watchdogProgressObserved(
-  previous: WatchdogSample,
-  next: WatchdogSample
+  previous: WatchdogProgressSample,
+  next: WatchdogProgressSample
 ): boolean {
   return (
     toolCallAdvanced(previous, next) ||
@@ -116,8 +150,8 @@ export function watchdogProgressObserved(
 // literally; an empty previous digest is a pre-upgrade row rather than an
 // observation, so it is not read as a change.
 function workspaceChanged(
-  previous: WatchdogSample,
-  next: WatchdogSample
+  previous: WatchdogProgressSample,
+  next: WatchdogProgressSample
 ): boolean {
   if (previous.workspaceDigest.length === 0) {
     return false;
@@ -158,21 +192,11 @@ export async function reconcileWatchdog(
     if (next === undefined) {
       continue;
     }
-    const progress =
-      previous === undefined ? false : watchdogProgressObserved(previous, next);
-    // ADR 0054: attempt start normally clears the latest sample and advances
-    // the generation fence before preparing_workspace. Keep path-change
-    // detection as a defensive fallback for legacy or partially-upgraded state
-    // so a surviving prior-attempt row still cannot carry its idle clock into
-    // the new attempt.
-    const attemptChanged =
-      previous !== undefined &&
-      previous.normalizedLogPath !== run.normalizedLogPath;
-    const idleSince = progress
-      ? null
-      : attemptChanged
-        ? sampledAt
-        : (previous?.idleSince ?? sampledAt);
+    const { idleSince, progress } = watchdogIdleClock(
+      previous,
+      next,
+      sampledAt
+    );
     const persisted = {
       ...next,
       idleSince
@@ -248,6 +272,78 @@ export async function reconcileWatchdog(
     );
   }
 
+  for (const firing of input.runStore.listWatchdogCandidateRoutineFirings()) {
+    const config = resolveWatchdogConfig(serviceConfig, firing.projectName);
+    const previous = input.runStore.getRoutineWatchdogSample(firing.firingId);
+    const next = await sampleRoutineFiring({
+      firing,
+      mtimeIgnore: config.mtimeIgnore,
+      mtimeInclude: config.mtimeInclude,
+      previous,
+      runStore: input.runStore,
+      sampledAt
+    });
+    if (next === undefined) {
+      continue;
+    }
+    const { idleSince, progress } = watchdogIdleClock(
+      previous,
+      next,
+      sampledAt
+    );
+    const persisted = { ...next, idleSince };
+    if (!input.runStore.upsertRoutineWatchdogSample(persisted)) {
+      continue;
+    }
+    sampled += 1;
+
+    if (
+      !idleGraceExpired({
+        graceMs: config.graceMinutes * 60_000,
+        idleSince,
+        now,
+        progress
+      })
+    ) {
+      continue;
+    }
+    if (
+      !input.runStore.markRoutineFiringWatchdogNoProgress(
+        firing.firingId,
+        sampledAt
+      )
+    ) {
+      continue;
+    }
+    cancellations.push(
+      input.activeRuns.requestCancel(
+        firing.firingId,
+        CANCEL_REASONS.NO_PROGRESS
+      )
+    );
+    terminated += 1;
+    try {
+      input.onRoutineTerminated?.({
+        firingId: firing.firingId,
+        projectName: firing.projectName,
+        routineName: firing.routineName
+      });
+    } catch (error) {
+      input.logger?.warn(
+        { err: error, firingId: firing.firingId },
+        "symphonika routine watchdog termination observer failed"
+      );
+    }
+    input.logger?.warn(
+      {
+        firingId: firing.firingId,
+        project: firing.projectName,
+        terminalReason: "no_progress"
+      },
+      "symphonika watchdog terminated routine firing"
+    );
+  }
+
   await Promise.all(cancellations);
   return { sampled, terminated };
 }
@@ -284,13 +380,22 @@ function watchdogTerminalReason(input: {
   if (input.budget > 0 && input.outputTokensTotal >= input.budget) {
     return "no_convergence";
   }
+  return idleGraceExpired(input) ? "no_progress" : undefined;
+}
+
+// The liveness rule itself, shared by both Watchdog paths. ADR 0091 keeps the
+// convergence budget and the wall-clock cap Run-only, so a Routine Firing is
+// bounded by this rule alone.
+function idleGraceExpired(input: {
+  graceMs: number;
+  idleSince: string | null;
+  now: Date;
+  progress: boolean;
+}): boolean {
   if (input.progress || input.idleSince === null) {
-    return undefined;
+    return false;
   }
-  if (input.now.getTime() - Date.parse(input.idleSince) < input.graceMs) {
-    return undefined;
-  }
-  return "no_progress";
+  return input.now.getTime() - Date.parse(input.idleSince) >= input.graceMs;
 }
 
 export type WorkspaceSample = {
@@ -376,31 +481,81 @@ async function sampleRun(input: {
   runStore: RunStore;
   sampledAt: string;
 }): Promise<WatchdogSample | undefined> {
-  // A retry attempt writes a fresh normalized log path
-  // (provider.normalized.attempt-N.jsonl). Attempt start normally removes the
-  // previous latest sample; if legacy or partially-upgraded state survives,
-  // carry per-attempt baselines over only while the path remains unchanged.
-  // A path change restarts the offset and token baseline at zero.
+  const sample = await sampleProgress({
+    directoryIgnore: input.directoryIgnore,
+    mtimeIgnore: input.mtimeIgnore,
+    mtimeInclude: input.mtimeInclude,
+    normalizedLogPath: input.run.normalizedLogPath,
+    previous: input.previous,
+    rememberTurnIds: (turnIds) =>
+      input.runStore.rememberWatchdogTurnIds(
+        input.run.runId,
+        turnIds,
+        input.run.watchdogGeneration
+      ),
+    sampledAt: input.sampledAt,
+    workspacePath: input.run.workspacePath
+  });
+  return sample === undefined
+    ? undefined
+    : { ...sample, runId: input.run.runId };
+}
+
+async function sampleRoutineFiring(input: {
+  firing: WatchdogCandidateRoutineFiring;
+  mtimeIgnore: readonly string[];
+  mtimeInclude: readonly string[];
+  previous: RoutineWatchdogSample | undefined;
+  runStore: RunStore;
+  sampledAt: string;
+}): Promise<RoutineWatchdogSample | undefined> {
+  const sample = await sampleProgress({
+    directoryIgnore: [],
+    mtimeIgnore: input.mtimeIgnore,
+    mtimeInclude: input.mtimeInclude,
+    normalizedLogPath: input.firing.normalizedLogPath,
+    previous: input.previous,
+    rememberTurnIds: (turnIds) =>
+      input.runStore.rememberRoutineWatchdogTurnIds(
+        input.firing.firingId,
+        turnIds
+      ),
+    sampledAt: input.sampledAt,
+    workspacePath: input.firing.workspacePath
+  });
+  return sample === undefined
+    ? undefined
+    : { ...sample, firingId: input.firing.firingId };
+}
+
+async function sampleProgress(input: {
+  directoryIgnore: readonly string[];
+  mtimeIgnore: readonly string[];
+  mtimeInclude: readonly string[];
+  normalizedLogPath: string;
+  previous: WatchdogProgressSample | undefined;
+  rememberTurnIds: (turnIds: Iterable<string>) => number | undefined;
+  sampledAt: string;
+  workspacePath: string;
+}): Promise<WatchdogProgressSample | undefined> {
+  // A retry writes a fresh normalized log. Carry per-attempt offsets and
+  // token totals only while the path is unchanged; Routine Firings have one
+  // attempt but use the same defensive reset if their evidence path changes.
   const carryOver =
     input.previous !== undefined &&
-    input.previous.normalizedLogPath === input.run.normalizedLogPath
+    input.previous.normalizedLogPath === input.normalizedLogPath
       ? input.previous
       : undefined;
   const log = await readNormalizedEventsSince(
-    input.run.normalizedLogPath,
+    input.normalizedLogPath,
     carryOver?.normalizedLogOffset ?? 0
   );
-  const turnIds = collectTurnIds(log.events);
-  const turnIdSetSize = input.runStore.rememberWatchdogTurnIds(
-    input.run.runId,
-    turnIds,
-    input.run.watchdogGeneration
-  );
+  const turnIdSetSize = input.rememberTurnIds(collectTurnIds(log.events));
   if (turnIdSetSize === undefined) {
     return undefined;
   }
   const workspace = await sampleWorkspace(
-    input.run.workspacePath,
+    input.workspacePath,
     input.mtimeIgnore,
     input.directoryIgnore,
     input.mtimeInclude
@@ -426,12 +581,11 @@ async function sampleRun(input: {
       input.sampledAt
     ),
     normalizedLogOffset: log.offset,
-    normalizedLogPath: input.run.normalizedLogPath,
+    normalizedLogPath: input.normalizedLogPath,
     outputTokensTotal: outputTokensTotal(
       carryOver?.outputTokensTotal ?? 0,
       log.events
     ),
-    runId: input.run.runId,
     sampledAt: input.sampledAt,
     turnIdSetSize,
     workspaceDigest: workspace.digest,
@@ -699,15 +853,15 @@ function perMessageOutputTokens(
 }
 
 function toolCallAdvanced(
-  previous: WatchdogSample,
-  next: WatchdogSample
+  previous: WatchdogProgressSample,
+  next: WatchdogProgressSample
 ): boolean {
   return timestampAdvanced(previous.lastToolCallAt, next.lastToolCallAt);
 }
 
 function messageAdvanced(
-  previous: WatchdogSample,
-  next: WatchdogSample
+  previous: WatchdogProgressSample,
+  next: WatchdogProgressSample
 ): boolean {
   return timestampAdvanced(previous.lastMessageAt, next.lastMessageAt);
 }

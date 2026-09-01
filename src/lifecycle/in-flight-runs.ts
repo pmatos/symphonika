@@ -20,6 +20,11 @@ export type InFlightRunEntry = {
 };
 
 export type ReserveSlotInput = {
+  // Reserved slots have no provider yet, but preparation can still be
+  // cancellable. Run deadlines bind an AbortController here so cancellation
+  // stops workspace Git before attachProvider replaces this handler with the
+  // provider-process cancellation path.
+  cancel?: () => Promise<void>;
   issueNumber: number;
   projectName: string;
   respectsIssueLabels?: boolean;
@@ -66,10 +71,11 @@ export class InFlightRunRegistry {
     return this.shuttingDown;
   }
 
-  // Reserves an in-flight slot WITHOUT a provider/cancel handler. Used inside
-  // the narrowed dispatch critical section so subsequent picks see the
-  // (project, issue) as locked and per-project / global cap counts include
-  // the run before provider event streaming begins. See ADR 0052.
+  // Reserves an in-flight slot before a provider exists. Callers may bind a
+  // preparation cancel handler; attachProvider replaces it with the provider
+  // cancel handler after setup. Used inside the narrowed dispatch critical
+  // section so subsequent picks see the (project, issue) as locked and caps
+  // include the run before provider event streaming begins. See ADR 0052.
   reserveSlot(input: ReserveSlotInput): void {
     if (this.shuttingDown) {
       throw new RegistryShutdownError(
@@ -84,7 +90,7 @@ export class InFlightRunRegistry {
       throw new Error(`in-flight run already exists for issue ${key}`);
     }
     const entry: InFlightRunEntry = {
-      cancel: NOOP_CANCEL,
+      cancel: input.cancel ?? NOOP_CANCEL,
       cancelRequested: false,
       issueNumber: input.issueNumber,
       projectName: input.projectName,
@@ -113,12 +119,12 @@ export class InFlightRunRegistry {
     }
     // If a cancel arrived BETWEEN reserveSlot and attachProvider (e.g. during
     // prepareIssueWorkspace / provider.validate / sym:running label write),
-    // it ran against the reserveSlot noop cancel handler and left
+    // it fired the preparation handler (or the legacy noop) and left
     // cancelRequested=true on the entry. Subsequent requestCancel calls
     // return early because cancelRequested is already true, so without this
     // hand-off the real provider would never be cancelled and the run would
     // execute to natural completion. Invoke the newly-attached cancel
-    // synchronously here to close the gap. See ADR 0052.
+    // synchronously here to close the gap. See ADR 0052 / ADR 0093.
     if (entry.cancelRequested) {
       void input.cancel().catch(() => {
         // The dispatch path observes cancelRequested via the entry and
@@ -221,9 +227,9 @@ export class InFlightRunRegistry {
     }
     entry.cancelRequested = true;
     entry.cancelReason = reason;
-    // For a reserved-only slot the cancel handler is a noop; the dispatch
-    // path observes `cancelRequested` between reserveSlot and attachProvider
-    // and aborts before spawning the provider (see ADR 0052).
+    // For a reserved-only slot the handler aborts preparation when one was
+    // supplied; otherwise it remains a noop. The dispatch path also observes
+    // `cancelRequested` before spawning the provider (see ADR 0052 / 0093).
     await entry.cancel();
   }
 }

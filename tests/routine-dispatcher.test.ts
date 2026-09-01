@@ -1,12 +1,16 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { RawGitHubPullRequest } from "../src/issue-polling.js";
+import type {
+  RawGitHubIssue,
+  RawGitHubPullRequest
+} from "../src/issue-polling.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
+import { reconcileWatchdog } from "../src/lifecycle/watchdog.js";
 import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig
@@ -852,6 +856,95 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("keeps firing_timeout when the Watchdog latches no_progress on the same firing concurrently", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    let releaseProvider!: () => void;
+    let providerCancelled = false;
+    const providerWait = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const fallback = setTimeout(releaseProvider, 500);
+    const provider = {
+      // A real Watchdog pass would also call activeRuns.requestCancel, which
+      // re-invokes this same closure through the active-run registry — that
+      // would recurse here, so only the durable half of the race (the latch
+      // write) is simulated. It's the half completeRoutineFiring actually
+      // reads, and is enough to prove the deadline verdict still wins the
+      // terminal reason even though cancel_reason ends up "no_progress" too
+      // (ADR 0067 vs. ADR 0091).
+      cancel: vi.fn((runId: string) => {
+        expect(runId).toBe("fire-timeout-latched");
+        providerCancelled = true;
+        expect(
+          runStore.markRoutineFiringWatchdogNoProgress("fire-timeout-latched")
+        ).toBe(true);
+        releaseProvider();
+        return Promise.resolve();
+      }),
+      name: "claude",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await providerWait;
+        yield {
+          normalized: {
+            cancelled: providerCancelled,
+            exitCode: providerCancelled ? null : 0,
+            signal: providerCancelled ? "SIGTERM" : null,
+            type: "process_exit"
+          },
+          raw: { kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const project = dueRoutineProjectFixture(root, "claude");
+    project.routines = [
+      {
+        ...project.routines![0]!,
+        timeoutMinutes: 0.001
+      }
+    ];
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { claude: provider },
+        configDir: root,
+        createFiringId: () => "fire-timeout-latched",
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(provider.cancel).toHaveBeenCalledOnce();
+      expect(runStore.getRoutineFiring("fire-timeout-latched")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+    } finally {
+      clearTimeout(fallback);
+      releaseProvider();
+      runStore.close();
+    }
+  });
+
   it("hands the provider a stderr evidence path and quotes its tail in the terminal reason", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -1375,7 +1468,7 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
-  it("admits fan-out targets independently and includes a global-cap skip in the grouped result", async () => {
+  it("defers a capped fan-out target and completes the group once capacity frees", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
@@ -1418,86 +1511,241 @@ describe("RoutineFiringDispatcher", () => {
       sourcePath: path.join(root, "refactor-audit.md")
     };
 
+    const dispatchInput = {
+      activeRuns: new ActiveRunRegistry(),
+      agentProviders: { codex: provider },
+      configDir: root,
+      createFanoutId: () => "fanout-cap",
+      globalConcurrency: { maxInFlight: 1 },
+      notification,
+      prepareRoutineWorkspace: ({ project }: { project: { name: string } }) =>
+        Promise.resolve({
+          branchName: "",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", `${project.name}.git`),
+          reused: false,
+          workspacePath: path.join(root, "workspaces", project.name)
+        }),
+      projects: new Map([
+        [
+          "alpha",
+          {
+            ...runStoreProjectFixture(),
+            name: "alpha",
+            routines: [{ ...declaration, projectName: "alpha" }]
+          }
+        ],
+        [
+          "beta",
+          {
+            ...runStoreProjectFixture(),
+            name: "beta",
+            routines: [{ ...declaration, projectName: "beta" }]
+          }
+        ]
+      ]),
+      providersConfig: {
+        claude: { command: "claude fake" },
+        codex: { command: "codex fake" }
+      },
+      runStore,
+      stateRoot
+    };
+
     try {
       const result = await dispatchDueRoutinesAndDrain({
-        activeRuns: new ActiveRunRegistry(),
-        agentProviders: { codex: provider },
-        configDir: root,
-        createFanoutId: () => "fanout-cap",
+        ...dispatchInput,
         createFiringId: () => "fire-alpha",
-        globalConcurrency: { maxInFlight: 1 },
-        notification,
-        now: new Date("2026-05-22T10:00:01.000Z"),
-        prepareRoutineWorkspace: ({ project }) =>
-          Promise.resolve({
-            branchName: "",
-            branchRef: "refs/remotes/origin/main",
-            cachePath: path.join(root, ".cache", `${project.name}.git`),
-            reused: false,
-            workspacePath: path.join(root, "workspaces", project.name)
-          }),
-        projects: new Map([
-          [
-            "alpha",
-            {
-              ...runStoreProjectFixture(),
-              name: "alpha",
-              routines: [{ ...declaration, projectName: "alpha" }]
-            }
-          ],
-          [
-            "beta",
-            {
-              ...runStoreProjectFixture(),
-              name: "beta",
-              routines: [{ ...declaration, projectName: "beta" }]
-            }
-          ]
-        ]),
-        providersConfig: {
-          claude: { command: "claude fake" },
-          codex: { command: "codex fake" }
-        },
-        runStore,
-        stateRoot
+        now: new Date("2026-05-22T10:00:01.000Z")
       });
 
       expect(result.fired).toEqual(["fire-alpha"]);
-      expect(result.skipped).toContainEqual({
+      expect(result.deferred).toContainEqual({
         projectName: "beta",
         reason: "concurrency_cap",
         routineName: "refactor-audit"
       });
-      const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
-      );
-      expect(fanoutMessages).toHaveLength(1);
+      expect(result.skipped).toEqual([]);
+      // The group is not finished while a leg is still waiting for a slot,
+      // so no summary has been sent yet (ADR 0093).
+      expect(
+        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+      ).toHaveLength(0);
       expect(
         runStore.getRoutineFanout("fanout-cap")?.targets.map((target) => ({
+          deferredReason: target.deferredReason,
           disposition: target.disposition,
           projectName: target.projectName,
           skipReason: target.skipReason
         }))
       ).toEqual([
         {
+          deferredReason: null,
           disposition: "firing",
           projectName: "alpha",
           skipReason: null
         },
         {
-          disposition: "skipped",
+          deferredReason: "concurrency_cap",
+          disposition: "pending",
           projectName: "beta",
-          skipReason: "concurrency_cap"
+          skipReason: null
         }
       ]);
-      expect(fanoutMessages[0]?.text).toContain(
-        "- beta: skipped (concurrency_cap)"
-      );
       expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
-        lastSkipReason: "concurrency_cap",
+        deferral: { attempts: 1, reason: "concurrency_cap" },
+        lastSkipReason: null,
+        state: "active"
+      });
+
+      const retry = await dispatchDueRoutinesAndDrain({
+        ...dispatchInput,
+        createFiringId: () => "fire-beta",
+        now: new Date("2026-05-22T10:00:31.000Z")
+      });
+
+      expect(retry.fired).toEqual(["fire-beta"]);
+      expect(retry.deferred).toEqual([]);
+      const fanoutMessages = delivered.filter((message) =>
+        message.subject.startsWith("[ptt]")
+      );
+      expect(fanoutMessages).toHaveLength(1);
+      expect(fanoutMessages[0]?.subject).toContain("0 failed");
+      expect(
+        runStore.getRoutineFanout("fanout-cap")?.targets.map((target) => ({
+          disposition: target.disposition,
+          projectName: target.projectName
+        }))
+      ).toEqual([
+        { disposition: "firing", projectName: "alpha" },
+        { disposition: "firing", projectName: "beta" }
+      ]);
+      expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
+        deferral: null,
         state: "expired"
       });
     } finally {
+      runStore.close();
+    }
+  });
+
+  it("records a capped fan-out target as a failed run once its clock event lapses", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const notification = {
+      createSink: () => ({
+        deliver(message: NotificationMessage) {
+          delivered.push(message);
+          return Promise.resolve();
+        }
+      }),
+      resolveConfig: () => ({
+        from: "symphonika@example.com",
+        on: "always" as const,
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls" as const,
+        to: "operator@example.com"
+      })
+    };
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      const deferredResult = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        createFanoutId: () => "fanout-missed",
+        notification
+      });
+
+      expect(deferredResult.deferred).toHaveLength(1);
+      expect(delivered).toHaveLength(0);
+
+      // The next clock event supersedes the parked one, so the wait ends as
+      // a run that never happened rather than as a silent skip.
+      const missedResult = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        createFanoutId: () => "fanout-missed",
+        notification,
+        now: new Date("2026-05-22T10:01:00.000Z")
+      });
+
+      expect(missedResult.fired).toEqual([]);
+      expect(missedResult.missed).toEqual([
+        {
+          projectName: "alpha",
+          reason: "concurrency_cap",
+          routineName: "minute-report"
+        }
+      ]);
+      expect(runStore.listRoutineFirings()).toEqual([]);
+      const fanout = runStore.getRoutineFanout("fanout-missed");
+      expect(fanout?.failureCount).toBe(1);
+      expect(fanout?.targets[0]).toMatchObject({
+        deferredAttempts: 1,
+        disposition: "missed",
+        skipReason: "concurrency_cap"
+      });
+      const message = delivered.find((entry) =>
+        entry.subject.startsWith("[ptt]")
+      );
+      expect(message?.subject).toContain("1 failed");
+      expect(message?.text).toContain(
+        "- alpha: did not run (concurrency_cap) after 1 admission attempt"
+      );
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-22T10:01:00.000Z") })[0]
+      ).toMatchObject({
+        deferral: null,
+        lastSkipReason: "concurrency_cap",
+        // The event that ended the wait had no admission attempt of its own,
+        // so the clock lands on it rather than jumping past it — one lost
+        // run must not silently cost two (ADR 0093).
+        nextFireAt: "2026-05-22T10:01:00.000Z",
+        skipCounts24h: { concurrency_cap: 1 }
+      });
+
+      activeRuns.unregister("issue-run");
+      const successor = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        notification,
+        now: new Date("2026-05-22T10:01:30.000Z")
+      });
+
+      expect(successor.fired).toEqual(["new-fire"]);
+    } finally {
+      activeRuns.unregister("issue-run");
       runStore.close();
     }
   });
@@ -5801,6 +6049,129 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("does not record a pull request discovered after settlement already abandoned it", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JABANDONEDPR";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    let releaseLateDiscovery: (
+      pullRequests: RawGitHubPullRequest[]
+    ) => void = () => {};
+    const lateDiscoveryGate = new Promise<RawGitHubPullRequest[]>((resolve) => {
+      releaseLateDiscovery = resolve;
+    });
+    // Simulates an operator cancel landing while PR discovery (not the
+    // before/after snapshot) is still awaiting GitHub: the settlement window
+    // abandons this await rather than stopping it, so the underlying call
+    // keeps running and can only resolve later, via releaseLateDiscovery.
+    // Call 1 is the before-run snapshot, call 2 is the after-run snapshot
+    // (made to fail so `pullRequestsAvailable` is false and the dispatcher
+    // falls through to `discoverRoutinePullRequests`), call 3 is that
+    // discovery call itself.
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error("after-run PR snapshot unavailable"))
+      .mockImplementationOnce(async () => {
+        await activeRuns.requestCancel("fire-abandoned-discovery", "operator");
+        return lateDiscoveryGate;
+      });
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName,
+          branchRef: `refs/heads/${branchName}`,
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      const dispatchPromise = dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        cancellationSettleMs: 25,
+        configDir: root,
+        createFanoutId: () => "fanout-abandoned-discovery",
+        createFiringId: () => "fire-abandoned-discovery",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Commit on {{branch.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      await dispatchPromise;
+
+      expect(runStore.getRoutineFiring("fire-abandoned-discovery")).toEqual(
+        expect.objectContaining({
+          cancelReason: "operator",
+          pullRequests: [],
+          state: "cancelled"
+        })
+      );
+
+      // The abandoned discovery finally resolves after the firing already
+      // went terminal. It must not write a PR onto a firing whose outcome
+      // was already recorded and reported.
+      releaseLateDiscovery([
+        { head: { ref: branchName, sha: "late123" }, number: 99, state: "open" }
+      ]);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(
+        runStore.getRoutineFiring("fire-abandoned-discovery")?.pullRequests
+      ).toEqual([]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("reclassifies a failed firing as cancelled when an operator cancel lands during the failure-path GitHub snapshot", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -5920,6 +6291,128 @@ describe("RoutineFiringDispatcher", () => {
           terminalReason: "firing_timeout"
         })
       ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("reclassifies a failed firing as firing_timeout when the deadline expires during the failure-path commits-ahead inspection", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process failed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const inspectWorkspaceCommitsAhead = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          setTimeout(() => resolve(false), 200);
+        })
+    );
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md"),
+            timeoutMinutes: 0.001
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-timeout-during-failure-inspection",
+        inspectWorkspaceCommitsAhead
+      });
+
+      expect(
+        runStore.getRoutineFiring("fire-timeout-during-failure-inspection")
+      ).toMatchObject({
+        commitsAhead: true,
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("retains commits_ahead conservatively when a cancellation settlement abandons the failure-path inspection", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process failed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    // Simulates an operator cancel landing while the failure-path
+    // commits-ahead inspection is still running: the settlement window
+    // abandons the await rather than stopping the Git subprocess, so the
+    // real answer is unknown and must not be recorded as a verified zero.
+    const inspectWorkspaceCommitsAhead = vi.fn(async () => {
+      await activeRuns.requestCancel(
+        "fire-abandoned-commits-ahead",
+        "operator"
+      );
+      return new Promise<boolean>(() => {});
+    });
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md")
+          },
+          runStore
+        }),
+        cancellationSettleMs: 25,
+        createFiringId: () => "fire-abandoned-commits-ahead",
+        inspectWorkspaceCommitsAhead
+      });
+
+      expect(
+        runStore.getRoutineFiring("fire-abandoned-commits-ahead")
+      ).toMatchObject({
+        cancelReason: "operator",
+        commitsAhead: true,
+        state: "cancelled"
+      });
     } finally {
       runStore.close();
     }
@@ -6210,7 +6703,9 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(result).toEqual({
+        deferred: [],
         fired: [],
+        missed: [],
         skipped: [
           {
             projectName: "alpha",
@@ -6297,7 +6792,12 @@ describe("RoutineFiringDispatcher", () => {
         recomputeSchedulesFromNow: true
       });
 
-      expect(result).toEqual({ fired: [], skipped: [] });
+      expect(result).toEqual({
+        deferred: [],
+        fired: [],
+        missed: [],
+        skipped: []
+      });
       expect(provider.runAttempt).not.toHaveBeenCalled();
       expect(delivered).toEqual([]);
       expect(
@@ -6445,7 +6945,9 @@ describe("RoutineFiringDispatcher", () => {
         });
 
         expect(result).toEqual({
+          deferred: [],
           fired: [],
+          missed: [],
           skipped: [
             {
               projectName: "alpha",
@@ -6586,7 +7088,9 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(held).toEqual({
+        deferred: [],
         fired: [],
+        missed: [],
         skipped: [
           {
             projectName: "alpha",
@@ -6622,7 +7126,12 @@ describe("RoutineFiringDispatcher", () => {
         now: new Date("2026-05-22T10:00:30.000Z")
       });
 
-      expect(resumed).toEqual({ fired: ["new-fire"], skipped: [] });
+      expect(resumed).toEqual({
+        deferred: [],
+        fired: ["new-fire"],
+        missed: [],
+        skipped: []
+      });
       expect(runStore.getRoutineFiring("new-fire")).toMatchObject({
         scheduledAt: "2026-05-22T10:00:00.000Z",
         state: "succeeded"
@@ -6636,7 +7145,7 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
-  it("skips a recurring tick at the concurrency cap and advances its schedule", async () => {
+  it("defers a recurring tick at the concurrency cap and fires it once a slot frees", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
     const runStore = openRunStore({ stateRoot });
@@ -6668,7 +7177,8 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(result.fired).toEqual([]);
-      expect(result.skipped).toEqual([
+      expect(result.skipped).toEqual([]);
+      expect(result.deferred).toEqual([
         {
           projectName: "alpha",
           reason: "concurrency_cap",
@@ -6676,25 +7186,249 @@ describe("RoutineFiringDispatcher", () => {
         }
       ]);
       expect(runStore.listRoutineFirings()).toEqual([]);
+      // The clock event is parked, not consumed: the next tick re-evaluates
+      // the same event instead of waiting a whole period (ADR 0093).
       expect(runStore.listRoutines()[0]?.nextFireAt).toBe(
-        "2026-05-22T10:01:00.000Z"
+        "2026-05-22T10:00:00.000Z"
       );
       expect(
         runStore.listRoutines({ now: new Date("2026-05-22T10:00:00.000Z") })[0]
       ).toMatchObject({
+        deferral: {
+          attempts: 1,
+          reason: "concurrency_cap",
+          since: "2026-05-22T10:00:00.000Z"
+        },
         lastAttemptedAt: "2026-05-22T10:00:00.000Z",
-        lastSkipAt: "2026-05-22T10:00:00.000Z",
-        lastSkipReason: "concurrency_cap",
-        skipCounts24h: { concurrency_cap: 1 }
+        lastSkipAt: null,
+        lastSkipReason: null,
+        skipCounts24h: { concurrency_cap: 0 }
       });
       expect(logInfo).toHaveBeenCalledWith(
         {
+          deferred_until: "2026-05-22T10:01:00.000Z",
+          project: "alpha",
           reason: "concurrency_cap",
           routine: "minute-report",
           scheduled_at: "2026-05-22T10:00:00.000Z"
         },
-        "routine.skipped"
+        "routine.deferred"
       );
+
+      activeRuns.unregister("issue-run");
+      const retry = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        logger,
+        now: new Date("2026-05-22T10:00:30.000Z")
+      });
+
+      expect(retry.fired).toEqual(["new-fire"]);
+      expect(retry.deferred).toEqual([]);
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-22T10:00:30.000Z") })[0]
+      ).toMatchObject({
+        deferral: null,
+        skipCounts24h: { concurrency_cap: 0 }
+      });
+    } finally {
+      activeRuns.unregister("issue-run");
+      runStore.close();
+    }
+  });
+
+  it("reports a miss with no firing when the deadline is reached with capacity free", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      await dispatchDueRoutinesAndDrain(
+        recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        })
+      );
+
+      // The slot frees before the deadline, so this tick has capacity — the
+      // parked event is still past its own clock and settles as missed.
+      activeRuns.unregister("issue-run");
+      const atDeadline = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-22T10:01:00.000Z")
+      });
+
+      // This exact shape — a miss with nothing fired — is what daemon.ts
+      // keys on to end the tick instead of letting an issue Run claim the
+      // slot the now-due successor is owed (ADR 0093).
+      expect(atDeadline.fired).toEqual([]);
+      expect(atDeadline.missed).toHaveLength(1);
+      expect(runStore.listRoutines()[0]?.nextFireAt).toBe(
+        "2026-05-22T10:01:00.000Z"
+      );
+
+      const successor = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-22T10:01:30.000Z")
+      });
+
+      expect(successor.fired).toEqual(["new-fire"]);
+    } finally {
+      activeRuns.unregister("issue-run");
+      runStore.close();
+    }
+  });
+
+  it("keeps a parked clock event through a restart schedule recompute", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      const deferredResult = await dispatchDueRoutinesAndDrain(
+        recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        })
+      );
+
+      expect(deferredResult.deferred).toHaveLength(1);
+
+      // Restart catch-up settles events the daemon slept through. A parked
+      // deferral is not one of those: the daemon is still retrying it, so
+      // recomputing it away would drop the run silently (ADR 0093).
+      activeRuns.unregister("issue-run");
+      const afterRestart = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-22T10:00:30.000Z"),
+        recomputeSchedulesFromNow: true
+      });
+
+      expect(afterRestart.fired).toEqual(["new-fire"]);
+      expect(afterRestart.skipped).toEqual([]);
+    } finally {
+      activeRuns.unregister("issue-run");
+      runStore.close();
+    }
+  });
+
+  it("records a one-shot Routine as missed once its deferral horizon passes", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = {
+      kind: "report" as const,
+      name: "one-shot",
+      prompt: "Report.",
+      provider: null,
+      schedule: { at: "2026-05-22T10:00:00.000Z" },
+      sourcePath: path.join(root, "one-shot.md")
+    };
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      const deferredResult = await dispatchDueRoutinesAndDrain(
+        recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        })
+      );
+
+      expect(deferredResult.deferred).toHaveLength(1);
+      expect(runStore.listRoutines()[0]).toMatchObject({ state: "active" });
+
+      const missedResult = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-23T10:00:00.000Z")
+      });
+
+      expect(missedResult.fired).toEqual([]);
+      expect(missedResult.missed).toEqual([
+        {
+          projectName: "alpha",
+          reason: "concurrency_cap",
+          routineName: "one-shot"
+        }
+      ]);
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-23T10:00:00.000Z") })[0]
+      ).toMatchObject({
+        deferral: null,
+        lastSkipReason: "concurrency_cap",
+        state: "expired"
+      });
     } finally {
       activeRuns.unregister("issue-run");
       runStore.close();
@@ -6790,6 +7524,318 @@ describe("RoutineFiringDispatcher", () => {
       expect(beforeNextClock.fired).toEqual([]);
       expect(nextClock.fired).toEqual(["new-fire"]);
     } finally {
+      runStore.close();
+    }
+  });
+
+  it("terminates a wedged recurring firing and releases its overlap and capacity slots", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const onRoutineTerminated = vi.fn();
+    const routine = minuteRoutine(root);
+    const firingIds = ["wedged-fire", "replacement-fire"];
+    let releaseWedgedProvider: (() => void) | undefined;
+    const wedgedProvider = new Promise<void>((resolve) => {
+      releaseWedgedProvider = resolve;
+    });
+    let attempt = 0;
+    const provider = {
+      cancel: vi.fn(() => {
+        releaseWedgedProvider?.();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        if (attempt++ === 0) {
+          await wedgedProvider;
+        }
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+    const baseInput = {
+      ...recurringDispatchInput({
+        activeRuns,
+        provider,
+        root,
+        routine,
+        runStore
+      }),
+      createFiringId: () => firingIds.shift() ?? "unexpected-fire",
+      prepareRoutineWorkspace: () =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    };
+    const firstDispatch = dispatchDueRoutines(baseInput);
+
+    try {
+      await vi.waitFor(() => {
+        expect(runStore.getRoutineFiring("wedged-fire")?.state).toBe("running");
+      });
+      expect(activeRuns.countInFlight()).toBe(1);
+
+      const watchdogConfig = {
+        enabled: true,
+        graceMinutes: 1,
+        maxRunMinutes: 0,
+        mtimeIgnore: [],
+        mtimeInclude: [],
+        outputTokenBudget: 0,
+        sampleIntervalSeconds: 60
+      };
+      const baseline = await reconcileWatchdog({
+        activeRuns,
+        config: watchdogConfig,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore
+      });
+      const termination = await reconcileWatchdog({
+        activeRuns,
+        config: watchdogConfig,
+        now: () => new Date("2026-05-22T10:01:00.000Z"),
+        onRoutineTerminated,
+        runStore
+      });
+
+      expect(baseline).toEqual({ sampled: 1, terminated: 0 });
+      expect(termination).toEqual({ sampled: 1, terminated: 1 });
+      await firstDispatch;
+      expect(provider.cancel).toHaveBeenCalledWith("wedged-fire");
+      expect(onRoutineTerminated).toHaveBeenCalledWith({
+        firingId: "wedged-fire",
+        projectName: "alpha",
+        routineName: "minute-report"
+      });
+      expect(runStore.getRoutineFiring("wedged-fire")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(activeRuns.countInFlight()).toBe(0);
+
+      const replacement = await dispatchDueRoutines({
+        ...baseInput,
+        now: new Date("2026-05-22T10:01:00.000Z")
+      });
+      expect(replacement.fired).toEqual(["replacement-fire"]);
+      expect(provider.runAttempt).toHaveBeenCalledTimes(2);
+    } finally {
+      releaseWedgedProvider?.();
+      await firstDispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("does not decorate a no_progress terminal reason with a stderr tail even when the durable latch is missing", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const routine = minuteRoutine(root);
+    let releaseWedgedProvider: (() => void) | undefined;
+    const wedgedProvider = new Promise<void>((resolve) => {
+      releaseWedgedProvider = resolve;
+    });
+    const provider = {
+      cancel: vi.fn(() => {
+        releaseWedgedProvider?.();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        // Stands in for the real adapter's tee: some providers write partial
+        // diagnostics to stderr well before actually wedging.
+        await writeFile(
+          input.stderrLogPath!,
+          "codex: connection reset\n",
+          "utf8"
+        );
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        await wedgedProvider;
+        // The provider dies with an error once cancelled, landing this
+        // firing in the catch path rather than the try path's own
+        // no-progress classification (which never decorates with stderr).
+        throw new Error("provider process killed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+    const dispatch = dispatchDueRoutines({
+      ...recurringDispatchInput({
+        activeRuns,
+        provider,
+        root,
+        routine,
+        runStore
+      }),
+      createFiringId: () => "wedged-stderr-fire",
+      prepareRoutineWorkspace: () =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(runStore.getRoutineFiring("wedged-stderr-fire")?.state).toBe(
+          "running"
+        );
+      });
+
+      // Requests the cancellation directly on the in-memory registry,
+      // bypassing markRoutineFiringWatchdogNoProgress's durable latch — the
+      // same as if the latch write and the in-memory cancel raced apart.
+      // completeRoutineFiring's own latch-reread fence therefore cannot
+      // correct a decorated reason here: only the dispatcher's own
+      // catch-path logic can keep this exact, so this isolates that fix.
+      await activeRuns.requestCancel("wedged-stderr-fire", "no_progress");
+
+      await dispatch;
+      expect(runStore.getRoutineFiring("wedged-stderr-fire")).toMatchObject({
+        cancelReason: "no_progress",
+        // Deliberately false: this test bypasses the durable watchdog latch
+        // (no markRoutineFiringWatchdogNoProgress call) so completeRoutineFiring's
+        // own latch-reread fence cannot fire, isolating the dispatcher's own fix.
+        cancelRequested: false,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+    } finally {
+      releaseWedgedProvider?.();
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("settles a firing whose Watchdog cancel lands while a GitHub snapshot hangs", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const routine = minuteRoutine(root);
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    // The before-snapshot read is awaited after the row is already `running`
+    // but before runAttempt starts, so provider.cancel() cannot settle it.
+    const listIssues = vi.fn(() => new Promise<RawGitHubIssue[]>(() => {}));
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+    const dispatch = dispatchDueRoutines({
+      ...recurringDispatchInput({
+        activeRuns,
+        provider,
+        root,
+        routine,
+        runStore
+      }),
+      cancellationSettleMs: 25,
+      createFiringId: () => "wedged-snapshot-fire",
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: {
+        listIssues,
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([])
+      },
+      prepareRoutineWorkspace: () =>
+        Promise.resolve({
+          branchName: "main",
+          branchRef: "refs/remotes/origin/main",
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(listIssues).toHaveBeenCalled();
+      });
+      expect(runStore.getRoutineFiring("wedged-snapshot-fire")?.state).toBe(
+        "running"
+      );
+      expect(activeRuns.countInFlight()).toBe(1);
+
+      const watchdogConfig = {
+        enabled: true,
+        graceMinutes: 1,
+        maxRunMinutes: 0,
+        mtimeIgnore: [],
+        mtimeInclude: [],
+        outputTokenBudget: 0,
+        sampleIntervalSeconds: 60
+      };
+      await reconcileWatchdog({
+        activeRuns,
+        config: watchdogConfig,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore
+      });
+      expect(
+        await reconcileWatchdog({
+          activeRuns,
+          config: watchdogConfig,
+          now: () => new Date("2026-05-22T10:01:00.000Z"),
+          runStore
+        })
+      ).toEqual({ sampled: 1, terminated: 1 });
+
+      await dispatch;
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(runStore.getRoutineFiring("wedged-snapshot-fire")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(activeRuns.countInFlight()).toBe(0);
+    } finally {
+      await dispatch.catch(() => undefined);
       runStore.close();
     }
   });
@@ -6965,7 +8011,9 @@ describe("RoutineFiringDispatcher", () => {
         });
 
         expect(result).toEqual({
+          deferred: [],
           fired: [],
+          missed: [],
           skipped: [
             {
               projectName: "alpha",

@@ -287,9 +287,19 @@ terminates the provider process tree, waits for that work to settle, and records
 with `terminal_reason = "firing_timeout"`. This declared deadline is independent of Watchdog
 progress-liveness: useful progress does not extend it.
 
-A clock event skipped for catch-up policy, overlap, or a concurrency cap is not a Routine Firing:
-no `routine_firings` row is created. The Routine instead records `last_attempted_at`,
-`last_skip_reason`, and `last_skip_at`, together with rolling 24-hour counts for each skip reason.
+While a Routine Firing is `running`, the Watchdog samples the same provider and Workspace Progress
+Signal used for issue Runs. If no signal advances for the target Project's effective
+`watchdog.grace_minutes`, the Watchdog requests provider cancellation and the firing settles as
+`state = failed` with `terminal_reason = "no_progress"`; the dispatcher's `finally` then releases
+its shared in-flight slot. This liveness guard is independent of the optional declared deadline.
+The convergence budget and `max_run_minutes` remain issue-Run policies and do not apply to Routine
+Firings.
+
+A clock event skipped for catch-up policy or overlap is not a Routine Firing: no `routine_firings`
+row is created. The Routine instead records `last_attempted_at`, `last_skip_reason`, and
+`last_skip_at`, together with rolling 24-hour counts for each skip reason. A capacity refusal
+(`concurrency_cap` or `host_pressure`) is not a skip at all: it defers the clock event and retries
+it on later ticks, and only counts once it is recorded as missed.
 
 ### 4.14 Notification Sink
 
@@ -640,6 +650,8 @@ The preamble tells the agent:
 - it should preserve evidence when blocked
 - it should use the prepared workspace and issue branch
 - it should operate on the assigned issue unless the workflow says otherwise
+- it should build inside the host's shared memory budget: cap build parallelism explicitly rather than defaulting to the host's core count, skip debug info when nothing will read a backtrace, and build only the targets the task needs
+- it should keep scratch under `$TMPDIR` rather than a hardcoded `/tmp/...` path
 
 ### 5.4 Routine Declarations
 
@@ -802,9 +814,21 @@ GitHub credentials are environment-backed.
 - Token-like values must be redacted from logs
 
 SMTP passwords are also environment-backed. Service Config stores only `email.smtp_password_env`,
-never a literal password. The named variable is resolved only for SMTP authentication and its value
-must not be written to SQLite, logs, rendered notification content, or prompt evidence. SMTP
-transport errors are redacted before logging or durable failure recording.
+never a literal password. The named variable is resolved only for SMTP authentication and the
+provider-evidence redaction boundary; its value must not be written to SQLite, logs, rendered
+notification content, or prompt evidence. SMTP transport errors are redacted before logging or
+durable failure recording.
+
+The Project credential inventory is the set of credential values Symphonika resolves for the
+execution's Project: its effective tracker token and, whenever an email sink is configured, the
+value of the named password variable. The inventory does not depend on whether SMTP authentication
+is actually in use: providers inherit the daemon's environment either way, so a variable Service
+Config names and the environment sets is echoable back into evidence regardless. Both issue Runs and
+Routine Firings scrub that inventory from raw and Normalized Event Logs, provider stderr,
+provider-derived terminal reasons, and any SQLite event metadata before persistence; Routine Firings
+also scrub their structured outcome evidence. The inventory is explicit rather than inferred from
+every environment variable: provider-native credentials and unrelated operator environment values
+have no Symphonika-owned configuration or resolution boundary that can identify them reliably.
 
 Codex, Claude, and OMP use their native local authentication.
 
@@ -848,7 +872,10 @@ SQLite stores durable orchestration state:
 - workspace paths
 - per-Run Workflow Contract `evidence.ignore` snapshots
 - normalized event metadata
-- Watchdog samples for no-progress and convergence-budget detection
+- per-Attempt latest raw provider-event receipt metadata and recovered Provider Stream Stall
+  intervals
+- Watchdog samples for issue-Run no-progress and convergence-budget detection
+- per-firing Watchdog samples for Routine Firing no-progress detection
 - workflow progress fingerprints and accepted claim counts for park-edge cycle detection
 - raw log file paths
 - routines
@@ -937,14 +964,13 @@ a Run or Firing ends without a clean provider exit, the tail of that log is appe
 terminal reason, which otherwise carries nothing but `process_exit_<code>` or `firing_timeout`.
 
 Provider stderr is redacted on the way to disk, streamed so a secret split across two reads is
-still caught. A Routine Firing scrubs the same list its raw and normalized evidence and terminal
-reason use — the configured SMTP password plus the project's resolved tracker token. An issue Run
-scrubs its project's resolved tracker token; the rest of a Run's evidence has no redaction pass at
-all, which is tracked separately. The
-provider adapter waits for that write to flush before its attempt generator returns, so the
+still caught. An issue Run or Routine Firing scrubs the same Project credential inventory from its
+raw and normalized evidence, provider stderr, and provider-derived terminal reason. The provider
+adapter waits for the stderr tee's write to flush before its attempt generator returns, so the
 terminal-reason excerpt is read after the bytes land rather than racing them; the wait is bounded,
 because evidence capture is best-effort and must never keep a Run or Firing from reaching a
-terminal state.
+terminal state. Issue Run provider-event rows in SQLite receive the already-redacted raw and
+normalized values.
 
 ## 8. Scheduling
 
@@ -993,8 +1019,9 @@ pending. Validation and status commands must not dispatch work.
 
 The daemon also runs the Watchdog during reconciliation according to
 `watchdog.sample_interval_seconds`. The default Watchdog policy is enabled with a 30 minute
-no-progress grace window, a 150000 output-token convergence budget, a 360 minute wall-clock Run cap,
-and 60 second sampling interval.
+no-progress grace window for running issue Runs and Routine Firings, a 150000 output-token
+convergence budget for issue Runs, a 360 minute wall-clock issue-Run cap, and 60 second sampling
+interval.
 
 ### 8.3 Multi-Project Dispatch
 
@@ -1012,7 +1039,7 @@ Before the concurrency caps, admission consults the host itself. The orchestrato
 pressure-stall counters (`/proc/pressure/memory` and `/proc/pressure/io`) and defers claiming new
 work while a gated resource's `full avg60` percentage is at or above its configured ceiling. This
 is a separate verdict from the concurrency caps, with its own reason strings and its own
-`host_pressure` Routine skip reason, so a stalled host is never reported as a full cap. The
+`host_pressure` Routine deferral reason, so a stalled host is never reported as a full cap. The
 counters are sampled at most once per `global.pressure.sample_interval_seconds` and refreshed once
 per daemon tick, so every admission decision in a tick sees one consistent reading. Runs already
 in flight are unaffected; this gates admission only.
@@ -1094,6 +1121,12 @@ row. One-shot Routines become `expired`; recurring Routines remain active and at
 clock event visible. Routine Firings use states `queued`, `preparing_workspace`, `running`,
 `succeeded`, `failed`, and `cancelled`.
 
+The Watchdog samples every `running` Routine Firing. A firing whose Progress Signal remains idle
+through the effective Project grace window is cancelled through its live provider adapter and
+settles as `failed` with `terminal_reason = "no_progress"`. Its lifecycle completion releases both
+the shared concurrency slot and the non-overlap gate, so a later recurring clock event can launch a
+replacement without a daemon restart.
+
 When `timeout_minutes` is effective, one absolute deadline bounds how long the dispatcher waits
 on workspace preparation, provider validation, provider streaming, and terminal outcome
 classification, and completes the firing as `failed` with `terminal_reason = "firing_timeout"`
@@ -1108,8 +1141,9 @@ direct-child abort behavior. Git stdout and stderr retention remains capped at 1
 exceeding that limit stops the POSIX process group before returning the max-buffer failure. After
 escalation, Linux process groups containing only zombies count as stopped because none of their
 members can execute; delayed PID 1 reaping does not replace the original abort outcome with a
-cleanup failure. A caller queued on the shared per-cache fetch serializer checks the signal after
-reaching the head of the queue and does not begin new Git work after its deadline.
+cleanup failure. A caller queued on the shared per-cache fetch serializer stops waiting as soon as
+its signal aborts without removing its place from the serialization chain; after the preceding
+owner settles, the aborted turn exits before Git and only then exposes the cache to its successor.
 
 First-time bare-cache creation clones into a unique sibling staging directory and atomically renames
 the completed repository to the shared cache path. Failed or aborted clones remove only their owned
@@ -1207,14 +1241,35 @@ DST rules.
 
 Routine Firings consume the same per-Project and global `max_in_flight` slots as issue Runs.
 Fan-out admission is per target rather than atomic: admitted siblings start concurrently, while a
-target whose cap is full records a `concurrency_cap` skip, and a target evaluated while the host
-is stalled records a `host_pressure` skip. If an earlier firing of the same Routine
-Target remains non-terminal, that target records an `overlap` skip unless `allow_overlap: true` is
-configured; overlap opt-in does not bypass concurrency caps. A partial group is therefore normal.
-Every skip atomically advances only that target's clock event, updates its latest-attempt/skip
-fields and per-Project rolling counter evidence, completes its fan-out leg, writes no Routine
-Firing row, and emits `routine.skipped` with `reason`, `routine`, and `scheduled_at` fields. A
-skipped one-shot expires rather than remaining due.
+target whose cap is full or whose host is stalled is deferred rather than skipped (see below). If
+an earlier firing of the same Routine Target remains non-terminal, that target records an `overlap`
+skip unless `allow_overlap: true` is configured; overlap opt-in does not bypass concurrency caps. A
+partial group is therefore normal. Every skip atomically advances only that target's clock event,
+updates its latest-attempt/skip fields and per-Project rolling counter evidence, completes its
+fan-out leg, writes no Routine Firing row, and emits `routine.skipped` with `reason`, `routine`,
+and `scheduled_at` fields. A skipped one-shot expires rather than remaining due.
+
+A capacity refusal — a full per-Project or global cap, or a stalled host — defers the clock event
+instead of consuming it (ADR 0093). The Routine Target keeps its due `next_fire_at`, its fan-out
+leg stays `pending` recording `deferred_reason`, `deferred_since` and `deferred_attempts`, each
+retry refreshes `last_attempted_at`, no skip counter moves, and the next daemon tick retries
+admission; Routine dispatch precedes fresh issue dispatch in a tick, so an issue Run never takes a
+freed slot out from under a deferral evaluated in the same tick. A newly due Routine remains behind
+PR review follow-up, but once a capacity refusal has parked it, later ticks retry that deferral
+before admitting another review-follow-up Run against the same slots (ADR 0094). A PR follow-up
+action that only merges consumes no slot and therefore continues into Routine dispatch in the same
+tick. A recurring Target defers until its next clock event is due, a one-shot Target for 24 hours.
+A deferral that reaches that bound unadmitted is recorded as missed: the clock advances exactly as
+a skip's does, the reason increments its rolling 24-hour counter once, the fan-out leg settles as
+`missed`, the Routine did not run, and the fan-out counts it as a failure. The clock lands on the
+successor event that ended the wait rather than jumping past it, so one lost run never costs two; a
+backlog older than a whole period still collapses to the next future event. A deferred leg that
+loses its target mid-wait — Project disabled, Routine removed, cron edited — also settles as
+`missed` rather than as an uncounted `target_unavailable` skip. Restart schedule recompute leaves a
+parked clock event alone rather than settling it as a catch-up skip. Deferring emits
+`routine.deferred` with `reason`, `project`, `routine`, `scheduled_at`, and the `deferred_until`
+bound; recording a miss emits `routine.missed` with `reason`, `project`, `routine`, `scheduled_at`,
+`deferred_since`, and `deferred_attempts`.
 
 A skip claim returns `false` when the Routine Target's clock event is no longer due, or — for a
 recurring Target — when the caller omits the recomputed `next_fire_at`. Once that clock update
@@ -1438,7 +1493,9 @@ On Watchdog no-progress termination:
 
 On Watchdog convergence-budget termination, the same steps apply with
 `terminal_reason = "no_convergence"`, and on Watchdog wall-clock termination with
-`terminal_reason = "run_timeout"`.
+`terminal_reason = "run_timeout"`. Wall-clock termination may occur before provider start: the
+Run's Slot Deadline aborts cancellable preparation or label I/O, releases capacity after preparation
+settles, and then applies the same terminal labels best-effort.
 
 On stale startup state:
 
@@ -1817,12 +1874,13 @@ own process tree (ADR 0064).
 
 ### 12.4 Watchdog
 
-The Watchdog detects active provider runs that have stopped doing observable work. It samples rows
-in `state = "running"` only — the one active state with a live Agent Provider that can wedge. Rows
-in `queued` and `preparing_workspace` have no provider executing yet, so they have no liveness
-signal to advance and must not accrue idle time; rows in `state = "waiting"` are reconciled by the
-wait-state path. A `running` Run that already carries `cancel_requested` is also skipped, so the
-Watchdog does not overwrite a more specific in-flight cancellation with `no_progress`.
+The Watchdog detects active issue Runs and Routine Firings whose providers have stopped doing
+observable work. It samples rows in `state = "running"` only — the one active state with a live
+Agent Provider that can wedge. Rows in `queued` and `preparing_workspace` have no provider
+executing yet, so they have no liveness signal to advance and must not accrue idle time; issue Runs
+in `state = "waiting"` are reconciled by the wait-state path. Running work that already carries
+`cancel_requested` is also skipped, so the Watchdog does not overwrite a more specific in-flight
+cancellation with `no_progress`.
 
 For each sampled Run, Symphonika records one durable latest `watchdog_samples` row keyed by
 `run_id` and an append-only `watchdog_sample_history` row keyed by `(run_id, sampled_at)`. Both
@@ -1837,11 +1895,23 @@ first idle observation rather than from process boot. It is cleared on entry to 
 unsampled wait excursion does not accrue idle time). When a Run begins any new attempt, its
 transition to `preparing_workspace` advances a per-Run Watchdog generation and atomically clears the
 latest sample and remembered turn-id set while preserving append-only sample history. Every
-Watchdog mutation is conditional on the `running` state and generation captured before sampling,
-so an old attempt's tick that finishes asynchronous log or Workspace I/O after the transition is
-discarded instead of recreating data or terminating the new attempt. A transient retry therefore
-exposes no current Progress Signal during workspace preparation and starts every attempt-local
-baseline and idle grace window fresh when sampling resumes.
+attempt-scoped sample, remembered-turn mutation, and sampled verdict is conditional on the
+`running` state and generation captured before sampling, so an old attempt's tick that finishes
+asynchronous log or Workspace I/O after the transition is discarded instead of recreating data or
+terminating the new attempt. A transient retry therefore exposes no current Progress Signal during
+workspace preparation and starts every attempt-local baseline and idle grace window fresh when
+sampling resumes. The Run-scoped Slot Deadline below is the deliberate exception: it is conditional
+on actual in-memory slot ownership rather than a durable state or attempt generation.
+
+For each sampled Routine Firing, Symphonika records the equivalent latest
+`routine_watchdog_samples` row, append-only `routine_watchdog_sample_history`, and remembered
+`routine_watchdog_turn_ids`, all keyed by `firing_id` rather than `run_id`. Routine Firings have one
+provider attempt and no retry generation. Each sample and the no-progress cancellation latch are
+conditional on the firing still being `running` with no prior cancellation request, so a provider
+completion or operator cancellation racing asynchronous log or Workspace sampling wins cleanly.
+Routine prompts have no Workflow Contract, so their Workspace sampling uses the built-in exclusion
+set and the effective Project `watchdog.mtime_ignore` / `mtime_include` policy without an
+`evidence.ignore` layer.
 
 Sampling reads the Normalized Event Log only forward of the stored byte offset and walks the
 Workspace tree once. A transient retry writes a new per-attempt log path; its first sample reads
@@ -1896,6 +1966,26 @@ observation. Once `now - idle_since >= watchdog.grace_minutes`, it transitions t
 `stale` with `terminal_reason = "no_progress"` and requests provider cancellation. `no_progress`
 is a deterministic terminal verdict for that attempt, not a transient retry reason.
 
+The same idle rule applies to a sampled Routine Firing. At expiry the Watchdog atomically latches
+`cancel_requested` with `cancel_reason = "no_progress"` and requests provider cancellation. The
+Routine dispatcher preserves that reason over the cancellation-produced provider exit, completes
+the firing as `failed / no_progress`, performs its ordinary evidence and commits-ahead inspection,
+and releases the in-memory slot in `finally`. It does not add a Routine-Firing `stale` state:
+Routine Firings have no stale operational-label recovery workflow, and a provider that failed its
+liveness contract is a terminal failed firing.
+
+Because the latch drops the firing from every later Watchdog pass, that settlement is bounded.
+Cancelling a Routine Firing starts a settlement window covering everything the running phase still
+awaits that provider cancellation cannot reach — the before/after GitHub snapshot reads,
+pull-request discovery, and the Git commits-ahead probe. Work still pending when the window closes
+is abandoned, so the firing always reaches a terminal row and always releases its overlap and
+capacity slots; a cancel that arrives while the firing is healthy sees that work finish normally
+and loses no evidence. Completion is fenced on the latch as well: a provider that finishes between
+the durable latch and the in-memory cancellation still records `failed / no_progress` rather than
+`succeeded`, so the Watchdog termination notification and the durable row cannot disagree. The
+outcome and commits-ahead evidence that completion gathered is retained either way, because
+Workspace retention depends on it.
+
 Independently of that liveness clock, the Watchdog enforces a **convergence budget**: when a
 sampled Run's cumulative `output_tokens_total` reaches `watchdog.output_token_budget` (default
 150000; `0` disables it), the Run transitions to `stale` with
@@ -1907,36 +1997,62 @@ finishing, which satisfies the liveness rule on every tick. The budget is checke
 clock, honours the same per-Project override scope as `grace_minutes`, and like `no_progress` is
 deterministic rather than a transient retry reason. See ADR 0086.
 
-Ahead of both, the Watchdog enforces a **wall-clock cap**: once a sampled Run's age — `now` minus
-its `runs.created_at`, the instant it claimed its Issue — reaches `watchdog.max_run_minutes`
-(default 360; `0` disables it), the Run transitions to `stale` with
-`terminal_reason = "run_timeout"` and its provider is cancelled the same way. This is the only
-bound that does not depend on what the Run is doing: a Run trickling real output indefinitely
-advances a liveness signal on every tick and can stay far below the convergence budget, so neither
-of the other two rules can ever fire, while it holds a `global.max_in_flight` slot and its share of
-the provider memory budget for as long as it lives (issue #605). Unlike the attempt-scoped
-Progress Signal the cap is Run-scoped: its origin is the Run row's claim, so it accumulates across
-workspace preparation and every retry attempt of that Run, and a transient retry does not reset it.
-Enforcement, however, is bounded by the sampling scope above: the verdict is reached on a sampled
-Run, and sampling is `running`-only. A Run wedged *before* its provider starts — a hung clone in
-workspace preparation, `provider.validate`, or the `sym:running` label write — is therefore not
-reached by the cap, even though it holds a `global.max_in_flight` slot from the moment it is
-claimed. Terminating such a Run would not release that slot either: the slot is freed only when the
-lifecycle's `finally` unregisters it, which cannot run until the wedged call returns, and a
-reserved-but-unattached slot's cancel handler is a no-op. Closing that window needs a cancellable
-preparation deadline rather than a wider Watchdog state scope, and is tracked separately. It does
-not span a Run *chain* — a continuation,
-an FSM state advance, and a shutdown resume each write their own `runs` row and so each start a
-fresh cap. A Run whose `created_at` cannot be parsed is treated as having an unknown age and is
-never terminated by the cap. Clock skew that places `created_at` in the future produces a negative
-elapsed measurement, which cannot meet a positive cap until the actual deadline. The matching
-`runRemainingMs` operator value is intentionally unclamped: it may exceed `maxRunMs` for a
-future-dated claim and becomes negative after an overrun until the next Watchdog tick, because it
-means time until `created_at + maxRunMs`, not a fraction of the configured cap remaining. The cap
-is checked before the convergence budget and the idle clock, so a Run that has overrun several
-bounds at once reports the outermost one; it honours the same per-Project override scope as
-`grace_minutes`, and like the other two verdicts is deterministic rather than a transient retry
-reason. See ADR 0089.
+The convergence budget is issue-Run-only. Routine Firings still sample output-token growth as one
+component of liveness, but their independent absolute bound is the optional declared
+`timeout_minutes` deadline rather than `watchdog.output_token_budget` or `max_run_minutes`.
+
+Ahead of both, the Watchdog enforces a **wall-clock cap**: once a Run's age — `now` minus its
+`runs.created_at`, the instant it claimed its Issue — reaches `watchdog.max_run_minutes` (default
+360; `0` disables it), the Run transitions to `stale` with `terminal_reason = "run_timeout"` and
+its active work is cancelled. This is the only bound that does not depend on what the Run is doing:
+a Run trickling real output indefinitely advances a liveness signal on every tick and can stay far
+below the convergence budget, so neither of the other two rules can ever fire, while it holds a
+`global.max_in_flight` slot and its share of the provider memory budget for as long as it lives
+(issue #605). Unlike the attempt-scoped Progress Signal the cap is Run-scoped: its origin is the Run
+row's claim, so it accumulates across workspace preparation and every retry attempt of that Run,
+and a transient retry does not reset it.
+
+Enforcement has two cooperating paths. The sampled Watchdog checks `running` Runs first on each
+reconciliation pass. Independently, every fresh or retry slot reservation snapshots the current
+effective policy and arms a **Run Slot Deadline** for the remaining time since the original claim.
+The deadline is sourced from the in-memory slot, not a fixed state list: a fresh row can still read
+`queued`, preparation uses `preparing_workspace`, and a retry reserves capacity while its reused row
+can still read `failed`. It threads an AbortSignal through Workspace preparation and its Git process
+groups, and through retry-claim and pre-provider running-label writes. The lifecycle waits for
+the preparation operation's separate abort-cleanup channel before unregistering the slot, not for
+the full preparation result. That channel settles after active Git process-group teardown and
+preparation-owned staging-path removal; non-Git filesystem calls such as `stat`, `mkdir`,
+`realpath`, or `rename` cannot observe cancellation and are abandoned if still pending. The full
+cache-turn operation remains the shared-cache serialization tail, and signal guards prevent its
+later continuation from starting new Git work. The setup that follows preparation is likewise
+abandoned because it cannot observe the abort. Once a provider is attached, the same expiry
+requests provider cancellation. A bounded claim write that never confirms leaves an indeterminate
+`sym:claimed`, so
+the Issue's claim is best-effort rolled back rather than left for the stale-claim sweep to escalate
+to `sym:stale`.
+
+The timeout transition is a first-winner compare-and-set. Its caller must synchronously prove slot
+ownership; the database update is state-independent and generation-independent, requires
+`cancel_requested = 0`, and refuses to replace an existing Watchdog terminal reason. It writes
+deterministic `run_timeout` plus pending notification evidence immediately. A sampled verdict and a
+slot deadline can therefore race without duplicate termination notifications. If setup overwrites
+only the stale row's `state` after the CAS, lifecycle finalization reasserts `stale` while preserving
+the winning reason and the notification's current delivery state; a notification already marked
+sent is not re-enqueued by the repair.
+
+The cap does not span a Run *chain* — a continuation, an FSM state advance, and a shutdown resume
+each write their own `runs` row and so each start a fresh cap. Delayed retries own no slot and no
+timer; if the original cap expires while delayed, the next reservation expires immediately. A Run
+whose `created_at` cannot be parsed is treated as having an unknown age and is never terminated by
+the cap. Clock skew that places `created_at` in the future produces a negative elapsed measurement,
+which cannot meet a positive cap until the actual deadline. The matching `runRemainingMs` operator
+value is intentionally unclamped: it may exceed `maxRunMs` for a future-dated claim and becomes
+negative after an overrun until the next Watchdog tick, because it means time until
+`created_at + maxRunMs`, not a fraction of the configured cap remaining. The sampled cap is checked
+before the convergence budget and idle clock, so a Run that has overrun several bounds at once
+reports the outermost one; it honours the same per-Project override scope as `grace_minutes`, and
+like the other two verdicts is deterministic rather than a transient retry reason. See ADR 0089 and
+ADR 0093.
 
 ### 12.5 PR Follow-up
 
@@ -2525,6 +2641,26 @@ Watchdog policy is disabled, both endpoints return exactly `{ "enabled": false }
 When no valid runtime snapshot (including a last-known-good snapshot) exists, both endpoints return
 `watchdog: null`; `null` means unavailable and is distinct from the explicitly disabled object.
 The server-rendered Run page shows the same unavailable state and calculates no Watchdog fields.
+
+`GET /api/runs/:id` also exposes a top-level `providerStream` object independently of Watchdog
+policy. It always includes `lastEventAt` / `lastEventAgeMs` (both `null` before the current Attempt's
+first raw event), the five-minute `thresholdMs`, `stalled`, `stalledForMs`, and every durable
+`recoveredStalls` interval for the Run. Provider receipt activity is Attempt-scoped and includes raw
+events the normalizer does not project into `provider_events`; a retry therefore cannot inherit the
+prior Attempt's last-event clock. A running Attempt with no events uses its own creation time only
+to decide `stalled`, while still reporting that no last event exists.
+
+The Run-detail page renders the same Provider stream evidence unconditionally: last raw provider
+event (or `none`), time since that event, the five-minute threshold, and recovered-stall count. A
+running gap at or beyond the threshold adds `Stream stalled, provider retrying (Nm)`. This is a
+non-terminal observation, not an idle-kill timer or a Watchdog Progress Signal. The next raw event
+clears it and, when the gap fell between two receipts, durably records the gap's start, prior and
+resuming sequences, resume timestamp, and duration for distribution measurement. The wait before an
+Attempt's first receipt is workspace preparation rather than transport silence, so it is never
+recorded as a stall. Both the Run-detail page and `GET /api/runs/:id` freeze this age on a terminal
+Run rather than letting it drift, but on the terminal transition floored at the latest receipt
+rather than on the Watchdog's own last sample — sampling stops when a Run leaves `running`, so the
+Attempt's final `process_exit` normally arrives after it. See ADR 0090.
 
 The server-rendered dashboard and `/runs` list surface the same idle/grace state as a small
 "watchdog idle since X (Y remaining)" badge next to the state pill, shown only for active

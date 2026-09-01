@@ -13,6 +13,7 @@ import {
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { raceAbortSignal } from "./abort-race.js";
 import {
   planWorkspacePaths,
   type WorkspacePathPlan
@@ -43,9 +44,100 @@ export type PrepareIssueWorkspaceInput = {
   configDir?: string;
   issue: WorkspaceIssue;
   project: WorkspaceProject;
+  signal?: AbortSignal;
 };
 
 export type PreparedIssueWorkspace = WorkspacePathPlan & { reused: boolean };
+
+export type IssueWorkspacePreparation = Promise<PreparedIssueWorkspace> & {
+  // Present on the built-in preparation operation. Optional so embedders and
+  // tests that inject a plain Promise retain their existing contract.
+  readonly abortCleanup?: Promise<void>;
+};
+
+type TrackedIssueWorkspacePreparation = IssueWorkspacePreparation & {
+  readonly abortCleanup: Promise<void>;
+};
+
+// Tracks only work that must settle before a timed-out Run releases its slot:
+// an active Git command (whose promise includes process-group teardown) or an
+// owned staging-path removal. Ordinary filesystem I/O is intentionally not
+// registered because it cannot observe AbortSignal cancellation.
+class WorkspaceAbortCleanup {
+  readonly promise: Promise<void>;
+  readonly #active = new Set<Promise<unknown>>();
+  readonly #signal: AbortSignal | undefined;
+  #aborted: boolean;
+  #finished = false;
+  #settleQueued = false;
+  #settled = false;
+  #resolve: () => void = () => undefined;
+
+  constructor(signal: AbortSignal | undefined) {
+    this.#signal = signal;
+    this.#aborted = signal?.aborted ?? false;
+    this.promise = new Promise<void>((resolve) => {
+      this.#resolve = resolve;
+    });
+    signal?.addEventListener("abort", this.#onAbort, { once: true });
+    this.#queueSettle();
+  }
+
+  finish(): void {
+    this.#finished = true;
+    this.#queueSettle();
+  }
+
+  track<T>(operation: Promise<T>): Promise<T> {
+    if (this.#settled) {
+      return operation;
+    }
+    this.#active.add(operation);
+    void operation.then(
+      () => this.#complete(operation),
+      () => this.#complete(operation)
+    );
+    return operation;
+  }
+
+  readonly #onAbort = (): void => {
+    this.#aborted = true;
+    this.#queueSettle();
+  };
+
+  #complete(operation: Promise<unknown>): void {
+    this.#active.delete(operation);
+    this.#queueSettle();
+  }
+
+  #queueSettle(): void {
+    if (
+      this.#settled ||
+      this.#settleQueued ||
+      (!this.#aborted && !this.#finished) ||
+      this.#active.size > 0
+    ) {
+      return;
+    }
+    this.#settleQueued = true;
+    // A Git rejection can unwind through several async helpers before the
+    // cache owner starts staging-path cleanup. Let that promise chain drain
+    // for one event-loop turn before declaring teardown complete.
+    setImmediate(() => {
+      this.#settleQueued = false;
+      if (
+        this.#settled ||
+        (!this.#aborted && !this.#finished) ||
+        this.#active.size > 0
+      ) {
+        return;
+      }
+      this.#settled = true;
+      this.#signal?.removeEventListener("abort", this.#onAbort);
+      this.#resolve();
+    });
+  }
+}
 
 export type WorkspacePreparationErrorCode =
   "branch_conflict" | "cache_conflict" | "workspace_conflict";
@@ -75,23 +167,45 @@ export class WorkspacePreparationCleanupError extends Error {
   }
 }
 
-export async function prepareIssueWorkspace(
+export function prepareIssueWorkspace(
   input: PrepareIssueWorkspaceInput
+): TrackedIssueWorkspacePreparation {
+  const abortCleanup = new WorkspaceAbortCleanup(input.signal);
+  const operation = prepareIssueWorkspaceResult(input, abortCleanup);
+  void operation.then(
+    () => abortCleanup.finish(),
+    () => abortCleanup.finish()
+  );
+  return Object.assign(operation, { abortCleanup: abortCleanup.promise });
+}
+
+async function prepareIssueWorkspaceResult(
+  input: PrepareIssueWorkspaceInput,
+  abortCleanup: WorkspaceAbortCleanup
 ): Promise<PreparedIssueWorkspace> {
   const plan = planWorkspacePaths(input);
 
-  await ensureRepositoryCache(input.project, plan.cachePath);
-  await ensureIssueBranch(input.project, plan.cachePath, plan.branchName);
+  await ensureRepositoryCacheTracked(
+    input.project,
+    plan.cachePath,
+    input.signal,
+    abortCleanup
+  );
+  await ensureIssueBranch(
+    input.project,
+    plan.cachePath,
+    plan.branchName,
+    input.signal,
+    abortCleanup
+  );
   if (await exists(plan.workspacePath)) {
     let currentBranch: string;
     try {
-      currentBranch = await git([
-        "-C",
-        plan.workspacePath,
-        "rev-parse",
-        "--abbrev-ref",
-        "HEAD"
-      ]);
+      currentBranch = await workspaceGit(
+        ["-C", plan.workspacePath, "rev-parse", "--abbrev-ref", "HEAD"],
+        input.signal,
+        abortCleanup
+      );
     } catch (error) {
       throw new WorkspacePreparationError(
         "workspace_conflict",
@@ -101,14 +215,23 @@ export async function prepareIssueWorkspace(
     }
 
     if (currentBranch === plan.branchName) {
-      if (!(await isWorktreeRoot(plan.workspacePath))) {
+      if (
+        !(await isWorktreeRoot(plan.workspacePath, input.signal, abortCleanup))
+      ) {
         throw new WorkspacePreparationError(
           "workspace_conflict",
           `workspace path ${plan.workspacePath} is checked out on ${plan.branchName} but is not the Git worktree root`
         );
       }
 
-      if (!(await isWorktreeForCache(plan.workspacePath, plan.cachePath))) {
+      if (
+        !(await isWorktreeForCache(
+          plan.workspacePath,
+          plan.cachePath,
+          input.signal,
+          abortCleanup
+        ))
+      ) {
         throw new WorkspacePreparationError(
           "workspace_conflict",
           `workspace path ${plan.workspacePath} is checked out on ${plan.branchName} but is not linked to cache ${plan.cachePath}`
@@ -129,7 +252,9 @@ export async function prepareIssueWorkspace(
 
   const conflictingWorktreePath = await worktreePathForBranch(
     plan.cachePath,
-    plan.branchName
+    plan.branchName,
+    input.signal,
+    abortCleanup
   );
   if (conflictingWorktreePath !== undefined) {
     throw new WorkspacePreparationError(
@@ -139,14 +264,18 @@ export async function prepareIssueWorkspace(
   }
 
   await mkdir(path.dirname(plan.workspacePath), { recursive: true });
-  await git([
-    "-C",
-    plan.cachePath,
-    "worktree",
-    "add",
-    plan.workspacePath,
-    plan.branchName
-  ]);
+  await workspaceGit(
+    [
+      "-C",
+      plan.cachePath,
+      "worktree",
+      "add",
+      plan.workspacePath,
+      plan.branchName
+    ],
+    input.signal,
+    abortCleanup
+  );
 
   return {
     ...plan,
@@ -154,13 +283,16 @@ export async function prepareIssueWorkspace(
   };
 }
 
-async function isWorktreeRoot(workspacePath: string): Promise<boolean> {
-  const topLevel = await git([
-    "-C",
-    workspacePath,
-    "rev-parse",
-    "--show-toplevel"
-  ]);
+async function isWorktreeRoot(
+  workspacePath: string,
+  signal: AbortSignal | undefined,
+  abortCleanup: WorkspaceAbortCleanup
+): Promise<boolean> {
+  const topLevel = await workspaceGit(
+    ["-C", workspacePath, "rev-parse", "--show-toplevel"],
+    signal,
+    abortCleanup
+  );
   const [actualTopLevel, expectedTopLevel] = await Promise.all([
     realpath(topLevel),
     realpath(workspacePath)
@@ -171,15 +303,21 @@ async function isWorktreeRoot(workspacePath: string): Promise<boolean> {
 
 async function isWorktreeForCache(
   workspacePath: string,
-  cachePath: string
+  cachePath: string,
+  signal: AbortSignal | undefined,
+  abortCleanup: WorkspaceAbortCleanup
 ): Promise<boolean> {
-  const commonDirectory = await git([
-    "-C",
-    workspacePath,
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-common-dir"
-  ]);
+  const commonDirectory = await workspaceGit(
+    [
+      "-C",
+      workspacePath,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir"
+    ],
+    signal,
+    abortCleanup
+  );
   const [actualCommonDirectory, expectedCommonDirectory] = await Promise.all([
     realpath(commonDirectory),
     realpath(cachePath)
@@ -190,15 +328,15 @@ async function isWorktreeForCache(
 
 async function worktreePathForBranch(
   cachePath: string,
-  branchName: string
+  branchName: string,
+  signal: AbortSignal | undefined,
+  abortCleanup: WorkspaceAbortCleanup
 ): Promise<string | undefined> {
-  const output = await git([
-    "-C",
-    cachePath,
-    "worktree",
-    "list",
-    "--porcelain"
-  ]);
+  const output = await workspaceGit(
+    ["-C", cachePath, "worktree", "list", "--porcelain"],
+    signal,
+    abortCleanup
+  );
   let currentWorktreePath: string | undefined;
   const expectedBranchLine = `branch refs/heads/${branchName}`;
 
@@ -230,43 +368,71 @@ export async function ensureRepositoryCache(
   cachePath: string,
   signal?: AbortSignal
 ): Promise<void> {
+  await ensureRepositoryCacheTracked(project, cachePath, signal);
+}
+
+async function ensureRepositoryCacheTracked(
+  project: WorkspaceProject,
+  cachePath: string,
+  signal: AbortSignal | undefined,
+  abortCleanup?: WorkspaceAbortCleanup
+): Promise<void> {
   const prior = fetchLocks.get(cachePath) ?? Promise.resolve();
-  const next = prior
-    .catch(() => undefined)
-    .then(async () => {
-      signal?.throwIfAborted();
-      if (!(await exists(cachePath))) {
-        await createRepositoryCache(project, cachePath, signal);
-      } else {
-        await ensureRepositoryCacheRemote(project, cachePath, signal);
-      }
-      signal?.throwIfAborted();
-      await git(
-        [
-          "-C",
-          cachePath,
-          "fetch",
-          "origin",
-          `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
-        ],
-        signal
+  // Settling `priorSettled` IS the start of this invocation's cache turn: the
+  // callback below is registered on it first, so it runs before any
+  // continuation this function adds afterwards.
+  const priorSettled = prior.catch(() => undefined);
+  const next = priorSettled.then(async () => {
+    signal?.throwIfAborted();
+    const cacheExists = await exists(cachePath);
+    signal?.throwIfAborted();
+    if (!cacheExists) {
+      await createRepositoryCache(project, cachePath, signal, abortCleanup);
+    } else {
+      await ensureRepositoryCacheRemote(
+        project,
+        cachePath,
+        signal,
+        abortCleanup
       );
-    });
+    }
+    signal?.throwIfAborted();
+    await workspaceGit(
+      [
+        "-C",
+        cachePath,
+        "fetch",
+        "origin",
+        `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
+      ],
+      signal,
+      abortCleanup
+    );
+  });
   fetchLocks.set(cachePath, next);
-  try {
-    await next;
-  } finally {
+  const releaseLock = (): void => {
     // Only clear the slot if no later caller has overwritten it.
     if (fetchLocks.get(cachePath) === next) {
       fetchLocks.delete(cachePath);
     }
-  }
+  };
+  // Keep `next` as the serialization tail even when this caller stops
+  // waiting. Once the predecessor settles, the aborted callback exits before
+  // Git and then releases the tail. Clearing it at caller-abort time would let
+  // a third fetch bypass a predecessor that still owns the cache.
+  void next.then(releaseLock, releaseLock);
+  await raceAbortSignal(priorSettled, signal, "Workspace preparation aborted");
+  // The full operation remains the serialization tail even after this caller
+  // is aborted. Its separately tracked abortCleanup promise lets the Run slot
+  // wait for active Git/staging teardown without waiting for non-Git I/O here.
+  await next;
 }
 
 async function createRepositoryCache(
   project: WorkspaceProject,
   cachePath: string,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  abortCleanup?: WorkspaceAbortCleanup
 ): Promise<void> {
   const cacheParent = path.dirname(cachePath);
   await mkdir(cacheParent, { recursive: true });
@@ -280,22 +446,32 @@ async function createRepositoryCache(
   let operationError: unknown;
   let operationFailed = false;
   try {
+    signal?.throwIfAborted();
     // mkdtemp always creates its directory 0700, unlike a direct `git clone
     // --bare` into a not-yet-existing path, which follows the process umask.
     // Restore that parity before publishing, including group-sharing umasks.
     await chmod(stagingPath, 0o777 & ~process.umask());
-    await git(
+    await workspaceGit(
       ["clone", "--bare", project.workspace.git.remote, stagingPath],
-      signal
+      signal,
+      abortCleanup
     );
     signal?.throwIfAborted();
     try {
       await rename(stagingPath, cachePath);
+      signal?.throwIfAborted();
     } catch (error) {
-      if (!(await exists(cachePath))) {
+      const cacheExists = await exists(cachePath);
+      signal?.throwIfAborted();
+      if (!cacheExists) {
         throw error;
       }
-      await ensureRepositoryCacheRemote(project, cachePath, signal);
+      await ensureRepositoryCacheRemote(
+        project,
+        cachePath,
+        signal,
+        abortCleanup
+      );
     }
   } catch (error) {
     operationFailed = true;
@@ -304,7 +480,8 @@ async function createRepositoryCache(
   // A no-op after a successful rename: the staging path is already gone
   // and `force` swallows the resulting ENOENT.
   try {
-    await rm(stagingPath, { force: true, recursive: true });
+    const removal = rm(stagingPath, { force: true, recursive: true });
+    await (abortCleanup?.track(removal) ?? removal);
   } catch (cleanupError) {
     throw new WorkspacePreparationCleanupError(
       `failed to clean repository cache staging directory ${stagingPath}`,
@@ -321,13 +498,15 @@ async function createRepositoryCache(
 async function ensureRepositoryCacheRemote(
   project: WorkspaceProject,
   cachePath: string,
-  signal?: AbortSignal
+  signal: AbortSignal | undefined,
+  abortCleanup?: WorkspaceAbortCleanup
 ): Promise<void> {
   let originUrl: string;
   try {
-    originUrl = await git(
+    originUrl = await workspaceGit(
       ["-C", cachePath, "config", "--get", "remote.origin.url"],
-      signal
+      signal,
+      abortCleanup
     );
   } catch (error) {
     if (
@@ -354,27 +533,31 @@ async function ensureRepositoryCacheRemote(
 async function ensureIssueBranch(
   project: WorkspaceProject,
   cachePath: string,
-  branchName: string
+  branchName: string,
+  signal: AbortSignal | undefined,
+  abortCleanup: WorkspaceAbortCleanup
 ): Promise<void> {
   if (
-    await gitSucceeds([
-      "-C",
-      cachePath,
-      "show-ref",
-      "--verify",
-      `refs/heads/${branchName}`
-    ])
+    await workspaceGitSucceeds(
+      ["-C", cachePath, "show-ref", "--verify", `refs/heads/${branchName}`],
+      signal,
+      abortCleanup
+    )
   ) {
     return;
   }
 
-  await git([
-    "-C",
-    cachePath,
-    "branch",
-    branchName,
-    `origin/${project.workspace.git.base_branch}`
-  ]);
+  await workspaceGit(
+    [
+      "-C",
+      cachePath,
+      "branch",
+      branchName,
+      `origin/${project.workspace.git.base_branch}`
+    ],
+    signal,
+    abortCleanup
+  );
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -394,6 +577,7 @@ export async function git(
   args: string[],
   signal?: AbortSignal
 ): Promise<string> {
+  signal?.throwIfAborted();
   if (signal !== undefined && process.platform !== "win32") {
     return await gitInProcessGroup(args, signal);
   }
@@ -402,6 +586,15 @@ export async function git(
       ? await execFileAsync("git", args)
       : await execFileAsync("git", args, { signal });
   return stdout.trim();
+}
+
+function workspaceGit(
+  args: string[],
+  signal: AbortSignal | undefined,
+  abortCleanup?: WorkspaceAbortCleanup
+): Promise<string> {
+  const operation = git(args, signal);
+  return abortCleanup?.track(operation) ?? operation;
 }
 
 async function gitInProcessGroup(
@@ -660,11 +853,43 @@ function processGroupExists(pid: number): boolean {
   }
 }
 
-async function gitSucceeds(args: string[]): Promise<boolean> {
+// A probe: a non-zero exit is the answer, not a failure. Abort and
+// process-group cleanup failures are not answers, so they still propagate --
+// swallowing a leaked Git process group as "false" would report a missing
+// branch or worktree that was never actually checked.
+export async function gitSucceeds(
+  args: string[],
+  signal?: AbortSignal
+): Promise<boolean> {
   try {
-    await git(args);
+    await git(args, signal);
     return true;
-  } catch {
+  } catch (error) {
+    if (
+      isAbortError(error) ||
+      error instanceof WorkspacePreparationCleanupError
+    ) {
+      throw error;
+    }
+    return false;
+  }
+}
+
+async function workspaceGitSucceeds(
+  args: string[],
+  signal: AbortSignal | undefined,
+  abortCleanup: WorkspaceAbortCleanup
+): Promise<boolean> {
+  try {
+    await workspaceGit(args, signal, abortCleanup);
+    return true;
+  } catch (error) {
+    if (
+      isAbortError(error) ||
+      error instanceof WorkspacePreparationCleanupError
+    ) {
+      throw error;
+    }
     return false;
   }
 }

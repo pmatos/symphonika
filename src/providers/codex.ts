@@ -364,7 +364,10 @@ async function readUntilResponse(
     const item = await queue.next();
     if (item.kind === "message" && responseId(item.raw) === requestId) {
       if (objectField(item.raw, "error") !== undefined) {
-        events.push(jsonRpcErrorEvent(item.raw));
+        events.push({
+          ...jsonRpcErrorEvent(item.raw),
+          receivedAt: item.receivedAt
+        });
         await shutdownProviderProcess(activeRun.child);
         events.push(...(await drainUntilExit(queue, activeRun)));
         return {
@@ -373,7 +376,7 @@ async function readUntilResponse(
         };
       }
 
-      events.push(mapResponse(item.raw));
+      events.push({ ...mapResponse(item.raw), receivedAt: item.receivedAt });
       return {
         events,
         stopped: false
@@ -418,11 +421,12 @@ function providerEventFromQueueItem(
   item: ProcessQueueItem,
   activeRun: ActiveCodexRun
 ): ProviderEvent {
-  if (item.kind === "message") {
-    return activeRun.reducer.reduce(item.raw);
-  }
+  const event =
+    item.kind === "message"
+      ? activeRun.reducer.reduce(item.raw)
+      : mapProcessQueueControlEvent(item, activeRun.cancelled);
 
-  return mapProcessQueueControlEvent(item, activeRun.cancelled);
+  return { ...event, receivedAt: item.receivedAt };
 }
 
 function protocolFailure(message: string): ProviderEvent {

@@ -371,6 +371,7 @@ describe("pull request follow-up", () => {
           nextRun += 1;
           return `review-run-${nextRun}`;
         },
+        emailConfigLoader: () => undefined,
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi,
         prepareIssueWorkspace: () =>
@@ -771,6 +772,7 @@ describe("pull request follow-up", () => {
         agentProviders: { codex: provider },
         configDir: root,
         createRunId: () => "review-run-1",
+        emailConfigLoader: () => undefined,
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi,
         prepareIssueWorkspace: () =>
@@ -1647,6 +1649,7 @@ describe("pull request follow-up", () => {
           nextRun += 1;
           return `race-run-${nextRun}`;
         },
+        emailConfigLoader: () => undefined,
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi,
         prepareIssueWorkspace: () =>
@@ -1771,6 +1774,7 @@ function runController(input: {
       nextRun += 1;
       return `review-run-${nextRun}`;
     },
+    emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret-token" },
     githubIssuesApi: input.githubIssuesApi,
     prepareIssueWorkspace: () =>

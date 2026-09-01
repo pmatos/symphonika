@@ -39,3 +39,12 @@ allows an accurate rolling window without turning a skipped clock match into a R
   `GET /api/routines`.
 - Skip counter evidence grows with skipped clock attempts and can be compacted by a later retention
   policy without changing Routine Firing semantics.
+
+**Amended by ADR 0093 for capacity refusals.** This ADR made every admission refusal a skip. That
+holds for `catch_up_window` and `overlap`, which express a decision not to run the event, but not
+for `concurrency_cap` — or for the `host_pressure` reason ADR 0088 added to this same path. Those
+two mean the host has no capacity *right now*, and consuming the clock event for them lost the run
+for a whole period while reporting it as a skip the fan-out failure count ignores. A capacity
+refusal now defers: the clock event stays due and is retried, and only a deferral that outlives its
+own event is consumed — as a `missed` fan-out leg that counts as a failed run, incrementing this
+ADR's counter evidence once.

@@ -75,6 +75,177 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("keeps the Watchdog no-progress verdict when a firing completes after the latch", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringState("fire-latched", "running");
+      expect(store.markRoutineFiringWatchdogNoProgress("fire-latched")).toBe(
+        true
+      );
+
+      // The provider finished in the window between the durable latch and the
+      // Watchdog's in-memory cancel, so the dispatcher sees no cancellation
+      // and asks for `succeeded`.
+      store.completeRoutineFiring({
+        commitsAhead: true,
+        id: "fire-latched",
+        outcome: {
+          action: "commit",
+          source: "git",
+          status: "success",
+          summary: "Observed commits ahead of the configured base branch.",
+          title: "Commit retained in the Routine Firing workspace",
+          url: null,
+          verified: true
+        },
+        state: "succeeded",
+        terminalReason: null
+      });
+
+      expect(store.getRoutineFiring("fire-latched")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        // Retention evidence from the completing firing survives the override.
+        commitsAhead: true,
+        outcome: { action: "commit", verified: true },
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(
+        store
+          .listRoutineFiringTransitions("fire-latched")
+          .map((transition) => transition.state)
+      ).toContain("failed");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("overrides an ordinary failed completion observed after the latch", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched-ordinary-failure",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringState(
+        "fire-latched-ordinary-failure",
+        "running"
+      );
+      expect(
+        store.markRoutineFiringWatchdogNoProgress(
+          "fire-latched-ordinary-failure"
+        )
+      ).toBe(true);
+
+      // The provider crashed on its own, unrelated to the Watchdog, in the
+      // same window between the durable latch and the in-memory cancel. This
+      // completion carries no `firingDeadlineWon` verdict, so the latch must
+      // still win over the provider's own unrelated failure reason.
+      store.completeRoutineFiring({
+        id: "fire-latched-ordinary-failure",
+        state: "failed",
+        terminalReason: "provider exited with code 1"
+      });
+
+      expect(
+        store.getRoutineFiring("fire-latched-ordinary-failure")
+      ).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a firing-deadline verdict over the Watchdog latch", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched-deadline",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringState("fire-latched-deadline", "running");
+      expect(
+        store.markRoutineFiringWatchdogNoProgress("fire-latched-deadline")
+      ).toBe(true);
+
+      // The dispatcher's own declared-deadline race won concurrently with
+      // the Watchdog latch (`timeoutWon` in runRoutineFiring's catch path).
+      // ADR 0067 ranks that deadline verdict above any cancellation reason,
+      // so `firing_timeout` must survive even though `cancel_reason` still
+      // reads `no_progress`.
+      store.completeRoutineFiring({
+        cancelReason: "no_progress",
+        firingDeadlineWon: true,
+        id: "fire-latched-deadline",
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+
+      expect(store.getRoutineFiring("fire-latched-deadline")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("claims a manual firing without consuming the pending scheduled clock event", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -251,6 +422,288 @@ describe("RunStore routines", () => {
           scheduledAt: "2026-05-22T10:00:00.000Z"
         })
       ).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("accumulates one wait across repeated deferrals of the same clock event", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "alpha"
+        }
+      ]);
+      const scheduledAt = store.getRoutine({
+        name: "refactor-audit",
+        projectName: "alpha"
+      })?.nextFireAt;
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt: scheduledAt ?? ""
+      });
+
+      expect(
+        store.deferRoutineFanoutTarget({
+          deferredAt: "2026-05-22T10:00:00.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "alpha",
+          reason: "concurrency_cap"
+        })
+      ).toBe(true);
+      expect(
+        store.deferRoutineFanoutTarget({
+          deferredAt: "2026-05-22T10:05:00.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "alpha",
+          reason: "host_pressure"
+        })
+      ).toBe(true);
+
+      // The wait is one event, so its start is stable and the reason is the
+      // most recent refusal; the clock event itself is untouched.
+      expect(
+        store.getRoutineTargetDeferral({
+          name: "refactor-audit",
+          projectName: "alpha",
+          scheduledAt: scheduledAt ?? ""
+        })
+      ).toEqual({
+        attempts: 2,
+        reason: "host_pressure",
+        since: "2026-05-22T10:00:00.000Z"
+      });
+      expect(
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+      ).toMatchObject({
+        lastAttemptedAt: "2026-05-22T10:05:00.000Z",
+        lastSkipReason: null,
+        nextFireAt: scheduledAt
+      });
+      expect(store.getRoutineFanout("fanout-1")?.failureCount).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("returns a provider-held leg to a capacity deferral once its provider is repaired", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "alpha"
+        }
+      ]);
+      const scheduledAt =
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+          ?.nextFireAt ?? "";
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt
+      });
+      store.deferRoutineFanoutTarget({
+        deferredAt: "2026-05-22T10:00:00.000Z",
+        fanoutId: "fanout-1",
+        name: "refactor-audit",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+      // A reload takes the provider away mid-wait, then gives it back while
+      // the caps are still full.
+      store.holdRoutineFanoutTarget({
+        fanoutId: "fanout-1",
+        projectName: "alpha",
+        reason: "provider_not_registered: omp"
+      });
+
+      expect(
+        store.deferRoutineFanoutTarget({
+          deferredAt: "2026-05-22T10:05:00.000Z",
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          projectName: "alpha",
+          reason: "concurrency_cap"
+        })
+      ).toBe(true);
+
+      expect(store.getRoutineFanout("fanout-1")?.targets[0]).toMatchObject({
+        deferredAttempts: 2,
+        deferredReason: "concurrency_cap",
+        disposition: "pending",
+        holdReason: null
+      });
+      // Back to `pending` means the wait is visible again to the dispatch
+      // read and to the restart-recompute guard.
+      expect(
+        store.getRoutineTargetDeferral({
+          name: "refactor-audit",
+          projectName: "alpha",
+          scheduledAt
+        })
+      ).toMatchObject({ attempts: 2, reason: "concurrency_cap" });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("settles a re-deferred leg whose fan-out summary already went out", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const routine = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit.",
+      provider: "codex" as const,
+      schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+      sourcePath: "/tmp/refactor-audit.md"
+    };
+    try {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }]);
+      const scheduledAt =
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+          ?.nextFireAt ?? "";
+      store.ensureRoutineFanout({
+        id: "fanout-sent",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt
+      });
+      // A provider-held leg is non-gating (ADR 0084), so the group's summary
+      // is delivered while the leg is still outstanding.
+      store.holdRoutineFanoutTarget({
+        fanoutId: "fanout-sent",
+        projectName: "alpha",
+        reason: "provider_not_registered: omp"
+      });
+      store.claimRoutineFanoutNotification("fanout-sent");
+      store.completeRoutineFanoutNotification({
+        id: "fanout-sent",
+        state: "sent"
+      });
+      // The provider comes back, but the caps are still full.
+      store.deferRoutineFanoutTarget({
+        deferredAt: scheduledAt,
+        fanoutId: "fanout-sent",
+        name: "refactor-audit",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+      store.syncRoutines([], { projects: ["alpha"] });
+
+      // Without reconciliation this leg is a live deferral no path can ever
+      // settle: dispatch skips the inactive target and the sweep used to
+      // skip every leg on an already-notified fan-out.
+      expect(store.settleUnavailableRoutineFanoutTargets()).toEqual([
+        {
+          deferral: {
+            attempts: 1,
+            reason: "concurrency_cap",
+            since: scheduledAt
+          },
+          projectName: "alpha",
+          routineName: "refactor-audit",
+          scheduledAt
+        }
+      ]);
+      const fanout = store.getRoutineFanout("fanout-sent");
+      expect(fanout?.targets[0]).toMatchObject({
+        deferredReason: "concurrency_cap",
+        disposition: "missed"
+      });
+      // The delivered snapshot stays delivered — no summary is re-opened.
+      expect(fanout?.notificationState).toBe("sent");
+      expect(store.listReadyRoutineFanouts()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("counts a missed clock event as a failed run once and advances the schedule", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "alpha"
+        }
+      ]);
+      const scheduledAt =
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+          ?.nextFireAt ?? "";
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt
+      });
+      store.deferRoutineFanoutTarget({
+        deferredAt: scheduledAt,
+        fanoutId: "fanout-1",
+        name: "refactor-audit",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+      const nextFireAt = new Date(
+        new Date(scheduledAt).getTime() + 60_000
+      ).toISOString();
+
+      expect(
+        store.missRoutineFiring({
+          attemptedAt: nextFireAt,
+          fanoutId: "fanout-1",
+          name: "refactor-audit",
+          nextFireAt,
+          projectName: "alpha",
+          reason: "concurrency_cap"
+        })
+      ).toBe(true);
+
+      const fanout = store.getRoutineFanout("fanout-1");
+      expect(fanout?.failureCount).toBe(1);
+      expect(fanout?.subject).toContain("1 failed");
+      expect(fanout?.targets[0]).toMatchObject({
+        deferredAttempts: 1,
+        disposition: "missed",
+        skipReason: "concurrency_cap"
+      });
+      expect(
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+      ).toMatchObject({
+        deferral: null,
+        lastSkipReason: "concurrency_cap",
+        nextFireAt
+      });
+      expect(
+        store.listRoutines({ now: new Date(nextFireAt) })[0]?.skipCounts24h
+          .concurrency_cap
+      ).toBe(1);
     } finally {
       store.close();
     }
@@ -821,7 +1274,7 @@ describe("RunStore routines", () => {
         projects: ["alpha", "beta"]
       });
 
-      expect(store.settleUnavailableRoutineFanoutTargets()).toBe(1);
+      expect(store.settleUnavailableRoutineFanoutTargets()).toHaveLength(1);
       expect(store.listReadyRoutineFanouts()[0]).toMatchObject({
         id: "fanout-restart-removal",
         targets: [
@@ -836,6 +1289,77 @@ describe("RunStore routines", () => {
           })
         ]
       });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("settles a swept target that was waiting for capacity as a failed run", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const routine = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit.",
+      provider: "codex" as const,
+      schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+      sourcePath: "/tmp/refactor-audit.md"
+    };
+    try {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }]);
+      const scheduledAt =
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+          ?.nextFireAt ?? "";
+      store.ensureRoutineFanout({
+        id: "fanout-swept",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt
+      });
+      store.deferRoutineFanoutTarget({
+        deferredAt: scheduledAt,
+        fanoutId: "fanout-swept",
+        name: "refactor-audit",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+
+      // The Routine is removed from the config while its clock event is
+      // still parked, so the leg loses its target mid-wait.
+      store.syncRoutines([], { projects: ["alpha"] });
+
+      // The swept leg carries its deferral back to the caller, which is what
+      // lets dispatch emit the same `routine.missed` event the deadline path
+      // emits.
+      expect(store.settleUnavailableRoutineFanoutTargets()).toEqual([
+        {
+          deferral: {
+            attempts: 1,
+            reason: "concurrency_cap",
+            since: scheduledAt
+          },
+          projectName: "alpha",
+          routineName: "refactor-audit",
+          scheduledAt
+        }
+      ]);
+      const fanout = store.getRoutineFanout("fanout-swept");
+      expect(fanout?.targets[0]).toMatchObject({
+        disposition: "missed",
+        skipReason: "concurrency_cap"
+      });
+      // A run that waited for a slot and then lost its target still did not
+      // happen; reporting it as an uncounted skip is what mailed "0 failed".
+      expect(fanout?.failureCount).toBe(1);
+      expect(fanout?.subject).toContain("1 failed");
+      // The leg carries a counted reason, so the operator counters must say
+      // the same thing the fan-out does.
+      const swept = store.listRoutines({ includeInactive: true })[0];
+      expect(swept).toMatchObject({
+        lastSkipReason: "concurrency_cap",
+        skipCounts24h: { concurrency_cap: 1 }
+      });
+      expect(swept?.lastSkipAt).not.toBeNull();
     } finally {
       store.close();
     }
@@ -994,6 +1518,7 @@ describe("RunStore routines", () => {
         {
           allowOverlap: false,
           catchUp: "skip",
+          deferral: null,
           disabledReason: null,
           kind: "report",
           lastAttemptedAt: null,
@@ -1086,6 +1611,7 @@ describe("RunStore routines", () => {
         {
           allowOverlap: false,
           catchUp: "skip",
+          deferral: null,
           disabledReason: null,
           kind: "report",
           lastAttemptedAt: null,
@@ -1152,6 +1678,7 @@ describe("RunStore routines", () => {
       ).toMatchObject({
         allowOverlap: true,
         catchUp: "fire_once_if_missed",
+        deferral: null,
         lastAttemptedAt: "2026-05-23T10:00:00.000Z",
         lastSkipAt: "2026-05-23T10:00:00.000Z",
         lastSkipReason: "overlap",
@@ -3018,6 +3545,60 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("a latched no_progress cancel reason cannot be overwritten by a later operator cancel", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched-then-operator",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringState("fire-latched-then-operator", "running");
+
+      expect(
+        store.markRoutineFiringWatchdogNoProgress("fire-latched-then-operator")
+      ).toBe(true);
+      expect(
+        store.getRoutineFiring("fire-latched-then-operator")
+      ).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "no_progress"
+      });
+
+      // An operator cancel racing in after the Watchdog already latched
+      // no_progress must not clobber it: completeRoutineFiring re-reads this
+      // column to decide whether to force the exact `no_progress` terminal
+      // reason, so a stray overwrite here would let a decorated reason slip
+      // through that fence for a firing the Watchdog already condemned.
+      store.markRoutineFiringCancelRequested(
+        "fire-latched-then-operator",
+        "operator"
+      );
+      expect(
+        store.getRoutineFiring("fire-latched-then-operator")
+      ).toMatchObject({
+        cancelRequested: true,
+        cancelReason: "no_progress"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("completeRoutineFiring records the cancel reason for a cancelled firing", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -3136,6 +3717,7 @@ describe("RunStore routines", () => {
       ).toMatchObject({
         allowOverlap: true,
         catchUp: "fire_once_if_missed",
+        deferral: null,
         disabledReason: "rejected_tracker_less_host",
         kind: "git",
         name: "audit-fix",

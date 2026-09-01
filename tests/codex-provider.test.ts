@@ -351,6 +351,12 @@ describe("Codex JSON-RPC provider", () => {
         type: "process_exit"
       }
     ]);
+    // Every event traversed the real process queue (jsonl-process-queue.ts),
+    // so each one must carry the queue's own ingestion stamp rather than
+    // relying on the caller's fallback clock.
+    expect(events.every((event) => typeof event.receivedAt === "string")).toBe(
+      true
+    );
   });
 
   it("normalizes reasoning item boundaries as timestamped thinking events", async () => {

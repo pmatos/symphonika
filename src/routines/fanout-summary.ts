@@ -49,6 +49,17 @@ function targetSummary(target: RoutineFanoutTargetStatus): string {
   if (target.disposition === "skipped") {
     return `skipped (${target.skipReason ?? "unspecified"})`;
   }
+  // A missed leg never ran at all, so it reads as the failure it is rather
+  // than as one of the deliberate policy drops above (ADR 0093).
+  if (target.disposition === "missed") {
+    const attempts =
+      target.deferredAttempts === 0
+        ? ""
+        : ` after ${target.deferredAttempts} admission ${
+            target.deferredAttempts === 1 ? "attempt" : "attempts"
+          }`;
+    return `did not run (${target.skipReason ?? "unspecified"})${attempts}`;
+  }
   if (target.disposition === "held") {
     return `held (${target.holdReason ?? "provider unavailable"})`;
   }

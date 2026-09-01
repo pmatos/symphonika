@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { renderRoutinePrompt } from "../src/routines/prompt-renderer.js";
-import { renderAutonomousPrompt } from "../src/workflow/autonomous-prompt.js";
+import {
+  AUTONOMY_PREAMBLE,
+  renderAutonomousPrompt
+} from "../src/workflow/autonomous-prompt.js";
 
 const baseInput = {
   firing: {
@@ -44,6 +47,12 @@ describe("RoutinePromptRenderer", () => {
     expect(rendered.prompt).toContain(
       "Work on sym/symphonika/routine/daily-report/01JABCDEF0 at refs/heads/sym/symphonika/routine/daily-report/01JABCDEF0."
     );
+  });
+
+  it("carries the whole autonomy contract into routine firings", () => {
+    const rendered = renderRoutinePrompt(baseInput);
+
+    expect(rendered.prompt).toContain(AUTONOMY_PREAMBLE);
   });
 
   it("renders routine variables and prepends the standard autonomy preamble", () => {

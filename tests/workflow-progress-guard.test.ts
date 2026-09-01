@@ -252,6 +252,7 @@ function buildController(input: {
     },
     configDir: input.root,
     createRunId: () => `guard-run-${++nextRun}`,
+    emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret-token" },
     githubIssuesApi: input.githubIssuesApi,
     lifecyclePolicy: {

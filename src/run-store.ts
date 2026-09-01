@@ -25,6 +25,8 @@ import type {
 import { nextRecurringFireAt } from "./routines/schedule.js";
 import type {
   RoutineCatchUpPolicy,
+  RoutineDeferralReason,
+  RoutineDeferralStatus,
   RoutineDisabledReason,
   RoutineFiringState,
   RoutineFiringTriggerSource,
@@ -91,11 +93,29 @@ export const WATCHDOG_TERMINAL_REASONS = [
 
 export type WatchdogTerminalReason = (typeof WATCHDOG_TERMINAL_REASONS)[number];
 
+// Makes the Watchdog verdicts first-winner: a row that already carries one
+// refuses a competing verdict, while a transient attempt reason stays
+// replaceable. Derived from WATCHDOG_TERMINAL_REASONS so a new verdict cannot
+// be added without joining the guard.
+const UNCLAIMED_WATCHDOG_VERDICT_GUARD = `and (terminal_reason is null or terminal_reason not in (${WATCHDOG_TERMINAL_REASONS.map(
+  (reason) => `'${reason}'`
+).join(", ")}))`;
+
 // Once stop() records daemon_shutdown, later cancellation writers (an
 // in-flight reconcile or a UI cancel during the shutdown drain) must not
 // overwrite it — the shutdown contract requires the reason to stick for
 // every row that was live when shutdown began. See SPEC 12.3.
 const SHUTDOWN_PREEMPTIVE_REASON: CancelReason = "daemon_shutdown";
+
+// The Watchdog's Routine Firing verdict, used as both the durable cancel
+// reason it latches and the terminal_reason the fenced completion writes for
+// any ordinary completion — succeeded, cancelled, or an unrelated failure —
+// so the two never disagree about what killed the firing. The one exception
+// is a Routine's own declared deadline: ADR 0067 ranks `firing_timeout` above
+// any cancellation reason, so `completeRoutineFiring`'s `firingDeadlineWon`
+// input keeps that verdict intact even while `cancel_reason` stays
+// `no_progress`. See ADR 0091.
+const WATCHDOG_NO_PROGRESS_REASON: CancelReason = "no_progress";
 
 // Shared by listRuns/listRoutineFirings so both accept either a single state
 // or a state set (e.g. the dashboard's active-now band, which spans several
@@ -259,8 +279,24 @@ export type RoutineFanoutHoldReason =
   | `provider_command_missing: ${AgentProviderName}`
   | `provider_not_registered: ${AgentProviderName}`;
 
+// One fan-out leg settled by the unavailable-target sweep. A leg that was
+// waiting for capacity carries its deferral, which is what makes it a Missed
+// Routine the caller must emit `routine.missed` for; a leg without one was an
+// ordinary `target_unavailable` skip (ADR 0093).
+export type SettledUnavailableRoutineTarget = {
+  deferral?: RoutineDeferralStatus;
+  projectName: string;
+  routineName: string;
+  scheduledAt: string;
+};
+
 export type RoutineFanoutTargetStatus = {
-  disposition: "pending" | "held" | "firing" | "skipped";
+  // `missed` is a capacity deferral that outlived its clock event: unlike a
+  // `skipped` policy drop it counts as a failed run (ADR 0093).
+  disposition: "pending" | "held" | "firing" | "skipped" | "missed";
+  deferredAttempts: number;
+  deferredReason: RoutineDeferralReason | null;
+  deferredSince: string | null;
   firing: RoutineFiringStatus | null;
   firingId: string | null;
   holdReason: RoutineFanoutHoldReason | null;
@@ -492,6 +528,30 @@ export type ProviderEventRecord = {
   type: string;
 };
 
+// Matches Codex's built-in stream idle timeout. It has no control effect —
+// nothing terminates on it — so it stays a constant until recovered-gap
+// evidence justifies tuning. See ADR 0090.
+export const PROVIDER_STREAM_STALL_THRESHOLD_MS = 5 * 60_000;
+
+export type ProviderStreamStallRecord = {
+  attemptId: string;
+  durationMs: number;
+  gapStartedAt: string;
+  lastEventSequence: number;
+  resumedAt: string;
+  resumedWithSequence: number;
+  runId: string;
+};
+
+// One watermark row per Attempt, not a log: the newest raw provider-event
+// receipt the orchestrator has durably observed.
+export type ProviderStreamReceipt = {
+  attemptId: string;
+  lastEventAt: string;
+  lastEventSequence: number;
+  runId: string;
+};
+
 export type WatchdogSample = {
   idleSince: string | null;
   lastMessageAt: string | null;
@@ -508,6 +568,16 @@ export type WatchdogSample = {
   workspaceMtimeMax: number;
 };
 
+// A Progress Signal sample with its owning key removed. Runs key samples by
+// run id and Routine Firings by firing id (ADR 0091 keeps the two tables
+// separate because `watchdog_samples.run_id` carries a real foreign key to
+// `runs`), but everything the Watchdog actually compares is this shared half.
+export type WatchdogProgressSample = Omit<WatchdogSample, "runId">;
+
+export type RoutineWatchdogSample = WatchdogProgressSample & {
+  firingId: string;
+};
+
 export type WatchdogCandidateRun = {
   // Claim time, and therefore the origin of the Run's wall-clock age. Every
   // fresh lifecycle — a first dispatch, a continuation, an FSM state advance,
@@ -521,6 +591,14 @@ export type WatchdogCandidateRun = {
   runId: string;
   state: Extract<RunState, "running">;
   watchdogGeneration: number;
+  workspacePath: string;
+};
+
+export type WatchdogCandidateRoutineFiring = {
+  firingId: string;
+  normalizedLogPath: string;
+  projectName: string;
+  routineName: string;
   workspacePath: string;
 };
 
@@ -575,6 +653,18 @@ export type ProviderEventMetadataInput = {
   attemptId: string;
   normalized: NormalizedProviderEvent;
   raw: unknown;
+  receivedAt: string;
+  runId: string;
+  sequence: number;
+};
+
+// receivedAt is the caller's, not the store's: it must be captured when the
+// provider yields the event, before the evidence logs are appended. Deriving
+// it here would time the write instead of the transport, so a slow state root
+// would fabricate stalls out of its own latency. See ADR 0090.
+export type ProviderStreamReceiptInput = {
+  attemptId: string;
+  receivedAt: string;
   runId: string;
   sequence: number;
 };
@@ -663,6 +753,23 @@ type ProviderEventRow = {
   type: string;
 };
 
+type ProviderStreamStallRow = {
+  attempt_id: string;
+  duration_ms: number;
+  gap_started_at: string;
+  last_event_sequence: number;
+  resumed_at: string;
+  resumed_with_sequence: number;
+  run_id: string;
+};
+
+type ProviderStreamReceiptRow = {
+  attempt_id: string;
+  last_event_at: string;
+  last_event_sequence: number;
+  run_id: string;
+};
+
 function mapProviderEventRow(row: ProviderEventRow): ProviderEventRecord {
   return {
     attemptId: row.attempt_id,
@@ -672,6 +779,31 @@ function mapProviderEventRow(row: ProviderEventRow): ProviderEventRecord {
     runId: row.run_id,
     sequence: row.sequence,
     type: row.type
+  };
+}
+
+function mapProviderStreamStallRow(
+  row: ProviderStreamStallRow
+): ProviderStreamStallRecord {
+  return {
+    attemptId: row.attempt_id,
+    durationMs: row.duration_ms,
+    gapStartedAt: row.gap_started_at,
+    lastEventSequence: row.last_event_sequence,
+    resumedAt: row.resumed_at,
+    resumedWithSequence: row.resumed_with_sequence,
+    runId: row.run_id
+  };
+}
+
+function mapProviderStreamReceiptRow(
+  row: ProviderStreamReceiptRow
+): ProviderStreamReceipt {
+  return {
+    attemptId: row.attempt_id,
+    lastEventAt: row.last_event_at,
+    lastEventSequence: row.last_event_sequence,
+    runId: row.run_id
   };
 }
 
@@ -700,6 +832,60 @@ type WatchdogSampleRow = {
   turn_id_set_size: number;
   workspace_digest: string;
   workspace_mtime_max: number;
+};
+
+type RoutineWatchdogSampleRow = Omit<WatchdogSampleRow, "run_id"> & {
+  firing_id: string;
+};
+
+// Every Progress Signal column except the owning key. The Run-keyed and
+// Firing-keyed sample tables are deliberately separate (ADR 0091), but their
+// column set is one thing: spelling it once keeps a future signal column from
+// having to be threaded through eight hand-written statement bodies.
+const WATCHDOG_SAMPLE_COLUMNS = [
+  "sampled_at",
+  "last_tool_call_at",
+  "last_message_at",
+  "last_progress_at",
+  "workspace_mtime_max",
+  "workspace_digest",
+  "turn_id_set_size",
+  "output_tokens_total",
+  "normalized_log_offset",
+  "normalized_log_path",
+  "idle_since"
+] as const;
+
+function watchdogSampleSelectSql(table: string, key: string): string {
+  return `select ${[key, ...WATCHDOG_SAMPLE_COLUMNS].join(", ")} from ${table} where ${key} = ?`;
+}
+
+function watchdogSampleUpsertSql(table: string, key: string): string {
+  const columns = [key, ...WATCHDOG_SAMPLE_COLUMNS];
+  return [
+    `insert into ${table} (${columns.join(", ")})`,
+    `values (${columns.map((column) => `@${column}`).join(", ")})`,
+    `on conflict(${key}) do update set`,
+    WATCHDOG_SAMPLE_COLUMNS.map(
+      (column) => `${column} = excluded.${column}`
+    ).join(", ")
+  ].join(" ");
+}
+
+function watchdogSampleHistorySql(table: string, key: string): string {
+  const columns = [key, ...WATCHDOG_SAMPLE_COLUMNS];
+  return [
+    `insert or replace into ${table} (${columns.join(", ")})`,
+    `values (${columns.map((column) => `@${column}`).join(", ")})`
+  ].join(" ");
+}
+
+type WatchdogCandidateRoutineFiringRow = {
+  id: string;
+  normalized_log_path: string | null;
+  project_name: string;
+  routine_name: string;
+  workspace_path: string | null;
 };
 
 type WatchdogTokenSampleRow = {
@@ -890,6 +1076,9 @@ type RoutineFanoutRow = {
 };
 
 type RoutineFanoutTargetRow = {
+  deferred_attempts: number;
+  deferred_reason: RoutineDeferralReason | null;
+  deferred_since: string | null;
   disposition: RoutineFanoutTargetStatus["disposition"];
   fanout_id: string;
   firing_id: string | null;
@@ -897,6 +1086,17 @@ type RoutineFanoutTargetRow = {
   project_name: string;
   skip_reason: RoutineSkipReason | "target_unavailable" | null;
 };
+
+// One definition of "this Routine Target's clock event is parked by a capacity
+// deferral" (ADR 0093), shared by the dispatch read and the restart-recompute
+// guard so the two can never drift apart. Callers supply their own correlation
+// of f.routine_name / f.scheduled_at / t.project_name.
+const DEFERRED_FANOUT_TARGET_SOURCE = [
+  "from routine_fanout_targets t",
+  "join routine_fanouts f on f.id = t.fanout_id"
+].join(" ");
+const DEFERRED_FANOUT_TARGET_PREDICATE =
+  "t.disposition = 'pending' and t.deferred_reason is not null";
 
 const PULL_REQUEST_DISCOVERY_LIMIT = 25;
 const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
@@ -1367,19 +1567,40 @@ export class RunStore {
     }));
   }
 
-  getWatchdogSample(runId: string): WatchdogSample | undefined {
-    const row = this.database
+  listWatchdogCandidateRoutineFirings(): WatchdogCandidateRoutineFiring[] {
+    const rows = this.database
       .prepare(
         [
-          "select run_id, sampled_at, last_tool_call_at, last_message_at,",
-          "last_progress_at, workspace_mtime_max, workspace_digest,",
-          "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-          "normalized_log_path, idle_since from watchdog_samples",
-          "where run_id = ?"
+          "select id, project_name, routine_name, workspace_path, normalized_log_path",
+          "from routine_firings",
+          "where state = 'running' and cancel_requested = 0",
+          "order by created_at asc, id asc"
         ].join(" ")
       )
+      .all() as WatchdogCandidateRoutineFiringRow[];
+    return rows.map((row) => ({
+      firingId: row.id,
+      normalizedLogPath: row.normalized_log_path ?? "",
+      projectName: row.project_name,
+      routineName: row.routine_name,
+      workspacePath: row.workspace_path ?? ""
+    }));
+  }
+
+  getWatchdogSample(runId: string): WatchdogSample | undefined {
+    const row = this.database
+      .prepare(watchdogSampleSelectSql("watchdog_samples", "run_id"))
       .get(runId) as WatchdogSampleRow | undefined;
     return row === undefined ? undefined : mapWatchdogSampleRow(row);
+  }
+
+  getRoutineWatchdogSample(
+    firingId: string
+  ): RoutineWatchdogSample | undefined {
+    const row = this.database
+      .prepare(watchdogSampleSelectSql("routine_watchdog_samples", "firing_id"))
+      .get(firingId) as RoutineWatchdogSampleRow | undefined;
+    return row === undefined ? undefined : mapRoutineWatchdogSampleRow(row);
   }
 
   upsertWatchdogSample(
@@ -1401,52 +1622,47 @@ export class RunStore {
       workspace_mtime_max: sample.workspaceMtimeMax
     };
     const latest = this.database.prepare(
-      [
-        "insert into watchdog_samples (",
-        "run_id, sampled_at, last_tool_call_at, last_message_at,",
-        "last_progress_at, workspace_mtime_max, workspace_digest,",
-        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-        "normalized_log_path, idle_since",
-        ") values (",
-        "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
-        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
-        "@normalized_log_path, @idle_since",
-        ")",
-        "on conflict(run_id) do update set",
-        "sampled_at = excluded.sampled_at,",
-        "last_tool_call_at = excluded.last_tool_call_at,",
-        "last_message_at = excluded.last_message_at,",
-        "last_progress_at = excluded.last_progress_at,",
-        "workspace_mtime_max = excluded.workspace_mtime_max,",
-        "workspace_digest = excluded.workspace_digest,",
-        "turn_id_set_size = excluded.turn_id_set_size,",
-        "output_tokens_total = excluded.output_tokens_total,",
-        "normalized_log_offset = excluded.normalized_log_offset,",
-        "normalized_log_path = excluded.normalized_log_path,",
-        "idle_since = excluded.idle_since"
-      ].join(" ")
+      watchdogSampleUpsertSql("watchdog_samples", "run_id")
     );
     const history = this.database.prepare(
-      [
-        "insert or replace into watchdog_sample_history (",
-        "run_id, sampled_at, last_tool_call_at, last_message_at,",
-        "last_progress_at, workspace_mtime_max, workspace_digest,",
-        "turn_id_set_size, output_tokens_total, normalized_log_offset,",
-        "normalized_log_path, idle_since",
-        ") values (",
-        "@run_id, @sampled_at, @last_tool_call_at, @last_message_at,",
-        "@last_progress_at, @workspace_mtime_max, @workspace_digest,",
-        "@turn_id_set_size, @output_tokens_total, @normalized_log_offset,",
-        "@normalized_log_path, @idle_since",
-        ")"
-      ].join(" ")
+      watchdogSampleHistorySql("watchdog_sample_history", "run_id")
     );
     return this.database.transaction(() => {
       if (
         watchdogGeneration !== undefined &&
         !this.isCurrentWatchdogGeneration(sample.runId, watchdogGeneration)
       ) {
+        return false;
+      }
+      latest.run(values);
+      history.run(values);
+      return true;
+    })();
+  }
+
+  upsertRoutineWatchdogSample(sample: RoutineWatchdogSample): boolean {
+    const values = {
+      firing_id: sample.firingId,
+      idle_since: sample.idleSince,
+      last_message_at: sample.lastMessageAt,
+      last_progress_at: sample.lastProgressAt,
+      last_tool_call_at: sample.lastToolCallAt,
+      normalized_log_offset: sample.normalizedLogOffset,
+      normalized_log_path: sample.normalizedLogPath,
+      output_tokens_total: sample.outputTokensTotal,
+      sampled_at: sample.sampledAt,
+      turn_id_set_size: sample.turnIdSetSize,
+      workspace_digest: sample.workspaceDigest,
+      workspace_mtime_max: sample.workspaceMtimeMax
+    };
+    const latest = this.database.prepare(
+      watchdogSampleUpsertSql("routine_watchdog_samples", "firing_id")
+    );
+    const history = this.database.prepare(
+      watchdogSampleHistorySql("routine_watchdog_sample_history", "firing_id")
+    );
+    return this.database.transaction(() => {
+      if (!this.isRoutineWatchdogCandidate(sample.firingId)) {
         return false;
       }
       latest.run(values);
@@ -1522,6 +1738,37 @@ export class RunStore {
     return apply()?.count;
   }
 
+  rememberRoutineWatchdogTurnIds(
+    firingId: string,
+    turnIds: Iterable<string>
+  ): number | undefined {
+    const insert = this.database.prepare(
+      "insert or ignore into routine_watchdog_turn_ids (firing_id, turn_id) values (?, ?)"
+    );
+    const count = this.database.prepare(
+      "select count(*) as count from routine_watchdog_turn_ids where firing_id = ?"
+    );
+    return this.database.transaction(() => {
+      if (!this.isRoutineWatchdogCandidate(firingId)) {
+        return undefined;
+      }
+      for (const turnId of turnIds) {
+        insert.run(firingId, turnId);
+      }
+      return (count.get(firingId) as { count: number }).count;
+    })();
+  }
+
+  private isRoutineWatchdogCandidate(firingId: string): boolean {
+    return (
+      this.database
+        .prepare(
+          "select 1 from routine_firings where id = ? and state = 'running' and cancel_requested = 0"
+        )
+        .get(firingId) !== undefined
+    );
+  }
+
   markRunNoProgressStale(
     runId: string,
     updatedAt = timestamp(),
@@ -1535,16 +1782,17 @@ export class RunStore {
     );
   }
 
-  markRunWatchdogStale(
-    runId: string,
-    terminalReason: WatchdogTerminalReason,
-    updatedAt = timestamp(),
-    watchdogGeneration?: number
-  ): boolean {
-    const generationGuard =
-      watchdogGeneration === undefined
-        ? ""
-        : "and watchdog_generation = @watchdog_generation";
+  // The single Watchdog stale verdict write. Both entry points share the
+  // column set and the first-winner guard; they differ only in whether the
+  // row must currently read `running` and whether an attempt generation
+  // fences the write.
+  private casRunWatchdogStale(input: {
+    requireRunningState: boolean;
+    runId: string;
+    terminalReason: WatchdogTerminalReason;
+    updatedAt: string;
+    watchdogGeneration?: number;
+  }): boolean {
     const result = this.database
       .prepare(
         [
@@ -1556,18 +1804,86 @@ export class RunStore {
           "notification_error = null,",
           "updated_at = @updated_at",
           "where id = @id",
-          "and state = 'running'",
+          input.requireRunningState ? "and state = 'running'" : "",
           "and cancel_requested = 0",
-          generationGuard
+          UNCLAIMED_WATCHDOG_VERDICT_GUARD,
+          input.watchdogGeneration === undefined
+            ? ""
+            : "and watchdog_generation = @watchdog_generation"
+        ].join(" ")
+      )
+      .run({
+        id: input.runId,
+        terminal_reason: input.terminalReason,
+        updated_at: input.updatedAt,
+        ...(input.watchdogGeneration === undefined
+          ? {}
+          : { watchdog_generation: input.watchdogGeneration })
+      });
+    if (result.changes === 0) {
+      return false;
+    }
+    this.recordRunTransition(input.runId, "stale", input.updatedAt);
+    return true;
+  }
+
+  markRunWatchdogStale(
+    runId: string,
+    terminalReason: WatchdogTerminalReason,
+    updatedAt = timestamp(),
+    watchdogGeneration?: number
+  ): boolean {
+    return this.casRunWatchdogStale({
+      requireRunningState: true,
+      runId,
+      terminalReason,
+      updatedAt,
+      ...(watchdogGeneration === undefined ? {} : { watchdogGeneration })
+    });
+  }
+
+  // The Run wall-clock cap protects the resource represented by an in-memory
+  // slot, not one fixed durable state. In particular a retry reserves a slot
+  // while its reused row still reads `failed`, so this write carries no
+  // Run-state and no generation predicate. The caller must synchronously
+  // prove slot ownership immediately before this CAS. The terminal-reason
+  // guard makes competing Watchdog verdicts first-winner, while an earlier
+  // transient attempt reason remains replaceable by the Run-scoped timeout.
+  markSlotOwnedRunTimedOut(runId: string, updatedAt = timestamp()): boolean {
+    return this.casRunWatchdogStale({
+      requireRunningState: false,
+      runId,
+      terminalReason: "run_timeout",
+      updatedAt
+    });
+  }
+
+  // Attempt setup can race a timeout CAS and overwrite only `state` (for
+  // example stale -> preparing_workspace or stale -> running). Preserve the
+  // first-winner reason while restoring the state after setup unwinds. The
+  // CAS already made notification evidence pending, so this repair must leave
+  // its current state alone: a sender may have completed it in the meantime.
+  reassertRunWatchdogStale(
+    runId: string,
+    terminalReason: WatchdogTerminalReason,
+    updatedAt = timestamp()
+  ): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update runs set",
+          "state = 'stale',",
+          "failure_classification = 'deterministic',",
+          "updated_at = @updated_at",
+          "where id = @id",
+          "and terminal_reason = @terminal_reason",
+          "and cancel_requested = 0"
         ].join(" ")
       )
       .run({
         id: runId,
         terminal_reason: terminalReason,
-        updated_at: updatedAt,
-        ...(watchdogGeneration === undefined
-          ? {}
-          : { watchdog_generation: watchdogGeneration })
+        updated_at: updatedAt
       });
     if (result.changes === 0) {
       return false;
@@ -2197,7 +2513,17 @@ export class RunStore {
         "schedule_cron = excluded.schedule_cron,",
         "schedule_tz = excluded.schedule_tz,",
         "next_fire_at = case",
-        "when @recompute_recurring = 1 and excluded.schedule_cron is not null and excluded.catch_up = 'skip' then excluded.next_fire_at",
+        // Restart catch-up moves a recurring clock forward past events the
+        // daemon slept through — but never past one it parked on purpose and
+        // is still retrying, which would drop that run with no evidence
+        // anywhere (ADR 0093). The dispatcher decides whether a parked event
+        // still fires or is recorded as missed.
+        "when @recompute_recurring = 1 and excluded.schedule_cron is not null and excluded.catch_up = 'skip' and not exists (",
+        `select 1 ${DEFERRED_FANOUT_TARGET_SOURCE}`,
+        "where f.routine_name = routines.name and f.scheduled_at = routines.next_fire_at",
+        "and t.project_name = routines.project_name and",
+        DEFERRED_FANOUT_TARGET_PREDICATE,
+        ") then excluded.next_fire_at",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then excluded.next_fire_at",
         // Un-disabling (front matter disabled: true removed, or the routine's
         // path restored after removal) always recomputes from the current
@@ -2539,13 +2865,17 @@ export class RunStore {
     const targets = this.database
       .prepare(
         [
-          "select fanout_id, project_name, disposition, firing_id, hold_reason, skip_reason",
+          "select fanout_id, project_name, disposition, firing_id, hold_reason, skip_reason,",
+          "deferred_reason, deferred_since, deferred_attempts",
           "from routine_fanout_targets where fanout_id = ?",
           "order by project_name asc"
         ].join(" ")
       )
       .all(id) as RoutineFanoutTargetRow[];
     const mappedTargets = targets.map((target) => ({
+      deferredAttempts: target.deferred_attempts,
+      deferredReason: target.deferred_reason,
+      deferredSince: target.deferred_since,
       disposition: target.disposition,
       firing:
         target.firing_id === null
@@ -2563,6 +2893,11 @@ export class RunStore {
     const failureCount = mappedTargets.filter(
       (target) =>
         target.disposition === "held" ||
+        // A capacity deferral that never found a slot before its clock
+        // event lapsed is a Routine that did not run, not a policy drop:
+        // it belongs in the failure count operators are alerted on
+        // (ADR 0093).
+        target.disposition === "missed" ||
         target.firing?.state === "failed" ||
         target.firing?.state === "cancelled"
     ).length;
@@ -2724,32 +3059,138 @@ export class RunStore {
     return result.changes > 0;
   }
 
-  settleUnavailableRoutineFanoutTargets(): number {
+  settleUnavailableRoutineFanoutTargets(): SettledUnavailableRoutineTarget[] {
     // Terminal or in-flight notifications already represent immutable
     // one-shot snapshots; only a still-pending group may be reconciled.
-    const result = this.database
-      .prepare(
+    //
+    // A leg carrying a capacity deferral is settled as `missed` rather than
+    // as an uncounted `target_unavailable` skip: the Routine was waiting for
+    // a slot and then lost its target, which is still a run that did not
+    // happen and must reach the fan-out failure count (ADR 0093). Such a leg
+    // also carries a *counted* reason, so it writes the same latest-skip and
+    // counter evidence the canonical miss path writes — otherwise the
+    // operator counters would contradict the fan-out they summarize. The
+    // clock is deliberately left alone: this sweep only ever matches a
+    // Target whose Routine is already inactive or whose clock has already
+    // moved on (a cron edit installs the replacement itself).
+    const settle = this.database.transaction(() => {
+      const now = timestamp();
+      const legs = this.database
+        .prepare(
+          [
+            "select t.fanout_id, t.project_name, t.deferred_reason,",
+            "t.deferred_since, t.deferred_attempts,",
+            "f.routine_name, f.scheduled_at",
+            "from routine_fanout_targets t",
+            "join routine_fanouts f on f.id = t.fanout_id",
+            "where t.disposition in ('pending', 'held')",
+            // A delivered summary is an immutable one-shot snapshot (ADR
+            // 0084), which is why an ordinary non-gating leg on a `sent`
+            // fan-out is left alone. A leg carrying capacity-deferral
+            // evidence is different: it is a Routine still waiting to run,
+            // and leaving it unreconciled once its target disappears strands
+            // a live deferral that no path can ever settle. Settling the leg
+            // touches no notification state, and `listReadyRoutineFanouts`
+            // still requires `pending`, so no summary is re-opened or re-sent.
+            "and (f.notification_state = 'pending'",
+            "or (t.deferred_reason is not null and f.notification_state in ('sent', 'skipped')))",
+            "and not exists (",
+            "select 1 from routines r",
+            "where r.name = f.routine_name",
+            "and r.project_name = t.project_name",
+            "and r.state = 'active'",
+            "and r.next_fire_at = f.scheduled_at",
+            ")"
+          ].join(" ")
+        )
+        .all() as Array<{
+        deferred_attempts: number;
+        deferred_reason: RoutineDeferralReason | null;
+        deferred_since: string | null;
+        fanout_id: string;
+        project_name: string;
+        routine_name: string;
+        scheduled_at: string;
+      }>;
+      const settleLeg = this.database.prepare(
         [
-          "update routine_fanout_targets",
-          "set disposition = 'skipped', hold_reason = null, skip_reason = 'target_unavailable', updated_at = ?",
-          "where disposition in ('pending', 'held')",
-          "and exists (",
-          "select 1 from routine_fanouts writable_fanout",
-          "where writable_fanout.id = routine_fanout_targets.fanout_id",
-          "and writable_fanout.notification_state = 'pending'",
-          ")",
-          "and not exists (",
-          "select 1 from routine_fanouts f",
-          "join routines r on r.name = f.routine_name",
-          "and r.project_name = routine_fanout_targets.project_name",
-          "where f.id = routine_fanout_targets.fanout_id",
-          "and r.state = 'active'",
-          "and r.next_fire_at = f.scheduled_at",
-          ")"
+          "update routine_fanout_targets set",
+          "disposition = @disposition, hold_reason = null,",
+          "skip_reason = @skip_reason, updated_at = @updated_at",
+          "where fanout_id = @fanout_id and project_name = @project_name",
+          "and disposition in ('pending', 'held')"
         ].join(" ")
-      )
-      .run(timestamp());
-    return result.changes;
+      );
+      const recordSkipEvidence = this.database.prepare(
+        [
+          "update routines set",
+          "last_attempted_at = @attempted_at,",
+          "last_skip_reason = @reason,",
+          "last_skip_at = @attempted_at,",
+          "updated_at = @updated_at",
+          "where project_name = @project_name and name = @name"
+        ].join(" ")
+      );
+      const countSkip = this.database.prepare(
+        [
+          "insert into routine_skip_counts (project_name, routine_name, reason, skipped_at, count)",
+          "select @project_name, @routine_name, @reason, @skipped_at, 1",
+          "where exists (",
+          "select 1 from routines where project_name = @project_name and name = @routine_name",
+          ")",
+          "on conflict(project_name, routine_name, reason, skipped_at)",
+          "do update set count = count + 1"
+        ].join(" ")
+      );
+      const settled: SettledUnavailableRoutineTarget[] = [];
+      for (const leg of legs) {
+        const changes = settleLeg.run({
+          disposition: leg.deferred_reason === null ? "skipped" : "missed",
+          fanout_id: leg.fanout_id,
+          project_name: leg.project_name,
+          skip_reason: leg.deferred_reason ?? "target_unavailable",
+          updated_at: now
+        }).changes;
+        if (changes === 0) {
+          continue;
+        }
+        settled.push({
+          ...(leg.deferred_reason === null
+            ? {}
+            : {
+                deferral: {
+                  attempts: leg.deferred_attempts,
+                  reason: leg.deferred_reason,
+                  since: leg.deferred_since ?? leg.scheduled_at
+                }
+              }),
+          projectName: leg.project_name,
+          routineName: leg.routine_name,
+          scheduledAt: leg.scheduled_at
+        });
+        if (leg.deferred_reason === null) {
+          continue;
+        }
+        // A Routine removed outright leaves no row to attribute evidence to;
+        // the fan-out leg is then the only record, which is why the counter
+        // insert is guarded on the row still existing.
+        recordSkipEvidence.run({
+          attempted_at: now,
+          name: leg.routine_name,
+          project_name: leg.project_name,
+          reason: leg.deferred_reason,
+          updated_at: now
+        });
+        countSkip.run({
+          project_name: leg.project_name,
+          reason: leg.deferred_reason,
+          routine_name: leg.routine_name,
+          skipped_at: now
+        });
+      }
+      return settled;
+    });
+    return settle();
   }
 
   markRoutinesInactiveForProject(
@@ -2957,6 +3398,7 @@ export class RunStore {
     const countsNow = filter.now ?? new Date();
     return rows.map((row) => ({
       ...mapRoutineRow(row),
+      deferral: this.routineDeferral(row),
       latestOutcome: this.latestRoutineOutcome(row.project_name, row.name),
       pullRequestNumbers: this.latestRoutinePullRequestNumbers(
         row.project_name,
@@ -2968,6 +3410,19 @@ export class RunStore {
         countsNow
       )
     }));
+  }
+
+  private routineDeferral(row: RoutineRow): RoutineDeferralStatus | null {
+    if (row.next_fire_at === null) {
+      return null;
+    }
+    return (
+      this.getRoutineTargetDeferral({
+        name: row.name,
+        projectName: row.project_name,
+        scheduledAt: row.next_fire_at
+      }) ?? null
+    );
   }
 
   private routineSkipCounts24h(
@@ -3018,6 +3473,7 @@ export class RunStore {
     }
     return {
       ...mapRoutineRow(row),
+      deferral: this.routineDeferral(row),
       latestOutcome: this.latestRoutineOutcome(row.project_name, row.name),
       pullRequestNumbers: this.latestRoutinePullRequestNumbers(
         row.project_name,
@@ -3082,8 +3538,145 @@ export class RunStore {
     }
   }
 
+  // A capacity refusal parks the due clock event instead of consuming it:
+  // the Routine Target keeps `next_fire_at` in the past so the next daemon
+  // tick retries admission, and the fan-out leg stays `pending` carrying the
+  // reason it is waiting. Repeated ticks refresh the reason and the attempt
+  // counter without touching the clock or skip evidence, so a deferral that
+  // eventually fires leaves no skip behind (ADR 0093).
+  deferRoutineFanoutTarget(input: {
+    deferredAt: string;
+    fanoutId: string;
+    name: string;
+    projectName: string;
+    reason: RoutineDeferralReason;
+  }): boolean {
+    const apply = this.database.transaction(() => {
+      const target = this.database
+        .prepare(
+          [
+            "update routine_fanout_targets set",
+            // A leg held for an unavailable provider whose provider is then
+            // repaired is capacity-blocked, not provider-blocked: it returns
+            // to `pending` and drops the stale hold reason, so the deferral
+            // is visible to the dispatch read and to the restart-recompute
+            // guard that keeps its clock event parked (ADR 0093).
+            "disposition = 'pending',",
+            "hold_reason = null,",
+            "deferred_reason = @reason,",
+            "deferred_since = coalesce(deferred_since, @deferred_at),",
+            "deferred_attempts = deferred_attempts + 1,",
+            "updated_at = @updated_at",
+            "where fanout_id = @fanout_id and project_name = @project_name",
+            "and disposition in ('pending', 'held')"
+          ].join(" ")
+        )
+        .run({
+          deferred_at: input.deferredAt,
+          fanout_id: input.fanoutId,
+          project_name: input.projectName,
+          reason: input.reason,
+          updated_at: timestamp()
+        });
+      if (target.changes === 0) {
+        return false;
+      }
+      this.database
+        .prepare(
+          [
+            "update routines set last_attempted_at = ?, updated_at = ?",
+            "where project_name = ? and name = ? and state = 'active'"
+          ].join(" ")
+        )
+        .run(input.deferredAt, timestamp(), input.projectName, input.name);
+      return true;
+    });
+    return this.runIfClaimable(apply) ?? false;
+  }
+
+  // The capacity deferral parking a Routine Target's due clock event, if it
+  // has one. Dispatch consults this to decide whether a parked event is
+  // still retryable or has outlived its own clock, and restart catch-up
+  // consults it so it settles genuinely missed events without discarding one
+  // the daemon is still actively retrying.
+  getRoutineTargetDeferral(input: {
+    name: string;
+    projectName: string;
+    scheduledAt: string;
+  }): RoutineDeferralStatus | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select t.deferred_reason, t.deferred_since, t.deferred_attempts",
+          DEFERRED_FANOUT_TARGET_SOURCE,
+          "where f.routine_name = ? and f.scheduled_at = ?",
+          "and t.project_name = ? and",
+          DEFERRED_FANOUT_TARGET_PREDICATE
+        ].join(" ")
+      )
+      .get(input.name, input.scheduledAt, input.projectName) as
+      | {
+          deferred_attempts: number;
+          deferred_reason: RoutineDeferralReason;
+          deferred_since: string;
+        }
+      | undefined;
+    return row === undefined
+      ? undefined
+      : {
+          attempts: row.deferred_attempts,
+          reason: row.deferred_reason,
+          since: row.deferred_since
+        };
+  }
+
+  // Admission priority needs only an existence check. Avoid listRoutines(),
+  // whose operator-facing shape enriches every target with counters, latest
+  // outcomes, and pull requests (ADR 0094).
+  hasParkedRoutineDeferral(): boolean {
+    return (
+      this.database
+        .prepare(
+          [
+            "select 1",
+            DEFERRED_FANOUT_TARGET_SOURCE,
+            "where",
+            DEFERRED_FANOUT_TARGET_PREDICATE,
+            "limit 1"
+          ].join(" ")
+        )
+        .get() !== undefined
+    );
+  }
+
+  // The terminal half of a deferral: the parked clock event lapsed before
+  // any slot freed, so it is consumed exactly like a skip while the fan-out
+  // leg records that the Routine did not run (ADR 0093).
+  missRoutineFiring(input: {
+    attemptedAt: string;
+    fanoutId: string;
+    name: string;
+    nextFireAt?: string;
+    projectName: string;
+    reason: RoutineDeferralReason;
+  }): boolean {
+    return this.settleDueRoutineEvent({ ...input, disposition: "missed" });
+  }
+
   skipRoutineFiring(input: {
     attemptedAt: string;
+    fanoutId?: string;
+    name: string;
+    nextFireAt?: string;
+    projectName: string;
+    reason: RoutineSkipReason;
+  }): boolean {
+    return this.settleDueRoutineEvent({ ...input, disposition: "skipped" });
+  }
+
+  private settleDueRoutineEvent(input: {
+    attemptedAt: string;
+    disposition: "missed" | "skipped";
     fanoutId?: string;
     name: string;
     nextFireAt?: string;
@@ -3125,11 +3718,17 @@ export class RunStore {
           .prepare(
             [
               "update routine_fanout_targets set",
-              "disposition = 'skipped', hold_reason = null, skip_reason = ?, updated_at = ?",
-              "where fanout_id = ? and project_name = ? and disposition in ('pending', 'held')"
+              "disposition = @disposition, hold_reason = null, skip_reason = @reason, updated_at = @updated_at",
+              "where fanout_id = @fanout_id and project_name = @project_name and disposition in ('pending', 'held')"
             ].join(" ")
           )
-          .run(input.reason, timestamp(), input.fanoutId, input.projectName);
+          .run({
+            disposition: input.disposition,
+            fanout_id: input.fanoutId,
+            project_name: input.projectName,
+            reason: input.reason,
+            updated_at: timestamp()
+          });
         if (target.changes === 0) {
           // The Routine Target clock update above already won inside this
           // transaction. Ordinary competing claims therefore return false
@@ -3385,6 +3984,12 @@ export class RunStore {
   completeRoutineFiring(input: {
     cancelReason?: CancelReason;
     commitsAhead?: boolean;
+    // True only when the dispatcher's own declared-deadline race decided this
+    // completion's terminal reason (`timeoutWon` in runRoutineFiring's catch
+    // path). ADR 0067 ranks that deadline verdict above any cancellation
+    // reason, so it is the one completion the Watchdog latch must not
+    // override even though `cancel_reason` may already read `no_progress`.
+    firingDeadlineWon?: boolean;
     id: string;
     outcome?: RoutineOutcome;
     state: Extract<RoutineFiringState, "succeeded" | "failed" | "cancelled">;
@@ -3392,30 +3997,52 @@ export class RunStore {
     workspacePath?: string;
   }): void {
     const now = timestamp();
-    this.database
-      .prepare(
-        [
-          "update routine_firings set",
-          "state = @state,",
-          "terminal_reason = @terminal_reason,",
-          "outcome_status = @outcome_status,",
-          "outcome_action = @outcome_action,",
-          "outcome_url = @outcome_url,",
-          "outcome_title = @outcome_title,",
-          "outcome_summary = @outcome_summary,",
-          "outcome_verified = @outcome_verified,",
-          "outcome_source = @outcome_source,",
-          "commits_ahead = case",
-          "when @commits_ahead is not null then @commits_ahead",
-          "when @outcome_action = 'commit' and @outcome_verified = 1 then 1",
-          "else commits_ahead end,",
-          "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
-          "workspace_path = coalesce(@workspace_path, workspace_path),",
-          "updated_at = @updated_at",
-          "where id = @id"
-        ].join(" ")
-      )
-      .run({
+    const update = this.database.prepare(
+      [
+        "update routine_firings set",
+        "state = @state,",
+        "terminal_reason = @terminal_reason,",
+        "outcome_status = @outcome_status,",
+        "outcome_action = @outcome_action,",
+        "outcome_url = @outcome_url,",
+        "outcome_title = @outcome_title,",
+        "outcome_summary = @outcome_summary,",
+        "outcome_verified = @outcome_verified,",
+        "outcome_source = @outcome_source,",
+        "commits_ahead = case",
+        "when @commits_ahead is not null then @commits_ahead",
+        "when @outcome_action = 'commit' and @outcome_verified = 1 then 1",
+        "else commits_ahead end,",
+        "cancel_reason = case when cancel_reason = @shutdown_preemptive then cancel_reason else coalesce(@cancel_reason, cancel_reason) end,",
+        "workspace_path = coalesce(@workspace_path, workspace_path),",
+        "updated_at = @updated_at",
+        "where id = @id"
+      ].join(" ")
+    );
+    // The Watchdog latches its no-progress verdict durably and then cancels
+    // in memory, so a provider that finishes between those two steps reaches
+    // here seeing no cancellation at all and would persist its own verdict —
+    // `succeeded`, or an unrelated `failed` — over a firing the Watchdog has
+    // already announced as terminated. Re-read the latch inside the write
+    // transaction — the one place the two passes serialize — and let it win.
+    // Only the lifecycle verdict is overridden: the outcome and commits-ahead
+    // evidence gathered by this call is real and retention still needs it
+    // (ADR 0068, ADR 0091). The one completion that must NOT be overridden is
+    // one whose terminal reason is itself an authoritative deadline verdict
+    // (`firingDeadlineWon`) — ADR 0067 ranks a Routine's own declared
+    // deadline above any cancellation reason, including this latch.
+    const latched = this.database.prepare(
+      [
+        "select 1 from routine_firings",
+        "where id = ? and cancel_requested = 1 and cancel_reason = ?"
+      ].join(" ")
+    );
+    const state = this.database.transaction(() => {
+      const overridden =
+        input.firingDeadlineWon !== true &&
+        latched.get(input.id, WATCHDOG_NO_PROGRESS_REASON) !== undefined;
+      const state = overridden ? ("failed" as const) : input.state;
+      update.run({
         cancel_reason: input.cancelReason ?? null,
         commits_ahead:
           input.commitsAhead === undefined ? null : Number(input.commitsAhead),
@@ -3429,12 +4056,16 @@ export class RunStore {
         outcome_url: input.outcome?.url ?? null,
         outcome_verified:
           input.outcome === undefined ? null : Number(input.outcome.verified),
-        state: input.state,
-        terminal_reason: input.terminalReason ?? null,
+        state,
+        terminal_reason: overridden
+          ? WATCHDOG_NO_PROGRESS_REASON
+          : (input.terminalReason ?? null),
         updated_at: now,
         workspace_path: input.workspacePath ?? null
       });
-    this.recordRoutineFiringTransition(input.id, input.state, now);
+      return state;
+    })();
+    this.recordRoutineFiringTransition(input.id, state, now);
   }
 
   getRoutineFiring(id: string): RoutineFiringStatus | undefined {
@@ -3471,11 +4102,44 @@ export class RunStore {
     firingId: string,
     reason: CancelReason
   ): void {
+    // A durable watchdog no-progress latch must survive a later operator
+    // cancel the same way `daemon_shutdown` already does: completeRoutineFiring
+    // reads this column back to decide whether to force the exact `no_progress`
+    // terminal reason, so overwriting it here would let a decorated reason
+    // slip through the fence for a firing the Watchdog already condemned.
     this.database
       .prepare(
-        "update routine_firings set cancel_requested = 1, cancel_reason = case when cancel_reason = ? then cancel_reason else ? end, updated_at = ? where id = ?"
+        "update routine_firings set cancel_requested = 1, cancel_reason = case when cancel_reason in (?, ?) then cancel_reason else ? end, updated_at = ? where id = ?"
       )
-      .run(SHUTDOWN_PREEMPTIVE_REASON, reason, timestamp(), firingId);
+      .run(
+        SHUTDOWN_PREEMPTIVE_REASON,
+        WATCHDOG_NO_PROGRESS_REASON,
+        reason,
+        timestamp(),
+        firingId
+      );
+  }
+
+  markRoutineFiringWatchdogNoProgress(
+    firingId: string,
+    updatedAt = timestamp()
+  ): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update routine_firings set",
+          "cancel_requested = 1,",
+          "cancel_reason = @reason,",
+          "updated_at = @updated_at",
+          "where id = @id and state = 'running' and cancel_requested = 0"
+        ].join(" ")
+      )
+      .run({
+        id: firingId,
+        reason: WATCHDOG_NO_PROGRESS_REASON,
+        updated_at: updatedAt
+      });
+    return result.changes > 0;
   }
 
   updateRoutineFiringWorkspace(input: {
@@ -3925,24 +4589,93 @@ export class RunStore {
   }
 
   recordProviderEvent(input: ProviderEventMetadataInput): void {
+    const createdAt = input.receivedAt;
+    const apply = this.database.transaction(() => {
+      this.database
+        .prepare(
+          [
+            "insert into provider_events (",
+            "run_id, attempt_id, sequence, type, raw_json, normalized_json, created_at",
+            ") values (",
+            "@run_id, @attempt_id, @sequence, @type, @raw_json, @normalized_json, @created_at",
+            ")"
+          ].join(" ")
+        )
+        .run({
+          attempt_id: input.attemptId,
+          created_at: createdAt,
+          normalized_json: JSON.stringify(input.normalized),
+          raw_json: JSON.stringify(input.raw),
+          run_id: input.runId,
+          sequence: input.sequence,
+          type: input.normalized.type
+        });
+      this.insertProviderStreamReceipt(input);
+    });
+    apply();
+  }
+
+  recordProviderStreamReceipt(input: ProviderStreamReceiptInput): void {
+    const apply = this.database.transaction(() => {
+      this.insertProviderStreamReceipt(input);
+    });
+    apply();
+  }
+
+  private insertProviderStreamReceipt(input: ProviderStreamReceiptInput): void {
+    const receivedAt = input.receivedAt;
+    const previous = this.getProviderStreamReceipt(input.attemptId);
+    // Only a gap between two receipts is transport silence. The wait before an
+    // Attempt's first event is workspace preparation and provider startup, so
+    // recording it here would corrupt the very duration distribution this
+    // evidence exists to measure. The page still labels that quiet window as
+    // stalled from the Attempt's creation time; it just is not durable
+    // stall evidence. See ADR 0090.
+    if (previous !== undefined) {
+      const durationMs =
+        Date.parse(receivedAt) - Date.parse(previous.lastEventAt);
+      if (durationMs >= PROVIDER_STREAM_STALL_THRESHOLD_MS) {
+        this.database
+          .prepare(
+            [
+              "insert or ignore into provider_stream_stalls (",
+              "run_id, attempt_id, last_event_sequence, resumed_with_sequence,",
+              "gap_started_at, resumed_at, duration_ms",
+              ") values (",
+              "@run_id, @attempt_id, @last_event_sequence, @resumed_with_sequence,",
+              "@gap_started_at, @resumed_at, @duration_ms",
+              ")"
+            ].join(" ")
+          )
+          .run({
+            attempt_id: input.attemptId,
+            duration_ms: Math.floor(durationMs),
+            gap_started_at: previous.lastEventAt,
+            last_event_sequence: previous.lastEventSequence,
+            resumed_at: receivedAt,
+            resumed_with_sequence: input.sequence,
+            run_id: input.runId
+          });
+      }
+    }
+
     this.database
       .prepare(
         [
-          "insert into provider_events (",
-          "run_id, attempt_id, sequence, type, raw_json, normalized_json, created_at",
-          ") values (",
-          "@run_id, @attempt_id, @sequence, @type, @raw_json, @normalized_json, @created_at",
-          ")"
+          "insert into provider_stream_receipts (",
+          "run_id, attempt_id, last_event_sequence, last_event_at",
+          ") values (@run_id, @attempt_id, @last_event_sequence, @last_event_at)",
+          "on conflict(attempt_id) do update set",
+          "run_id = excluded.run_id,",
+          "last_event_sequence = excluded.last_event_sequence,",
+          "last_event_at = excluded.last_event_at"
         ].join(" ")
       )
       .run({
         attempt_id: input.attemptId,
-        created_at: timestamp(),
-        normalized_json: JSON.stringify(input.normalized),
-        raw_json: JSON.stringify(input.raw),
-        run_id: input.runId,
-        sequence: input.sequence,
-        type: input.normalized.type
+        last_event_at: receivedAt,
+        last_event_sequence: input.sequence,
+        run_id: input.runId
       });
   }
 
@@ -4066,6 +4799,16 @@ export class RunStore {
       });
     }
     return result;
+  }
+
+  // The Run Slot Deadline needs only the wall-clock origin, and reads it
+  // while the dispatch mutex is held. `getRun` would additionally hydrate
+  // every attempt (each stat-ing its artifacts) and every state transition.
+  getRunCreatedAt(id: string): string | undefined {
+    const row = this.database
+      .prepare("select created_at from runs where id = ?")
+      .get(id) as { created_at: string } | undefined;
+    return row?.created_at;
   }
 
   getRun(id: string): RunDetail | undefined {
@@ -4209,6 +4952,34 @@ export class RunStore {
       .all(params) as ProviderEventRow[];
 
     return rows.map((row) => mapProviderEventRow(row));
+  }
+
+  listProviderStreamStalls(runId: string): ProviderStreamStallRecord[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select run_id, attempt_id, last_event_sequence, resumed_with_sequence,",
+          "gap_started_at, resumed_at, duration_ms",
+          "from provider_stream_stalls where run_id = ?",
+          "order by resumed_at asc, id asc"
+        ].join(" ")
+      )
+      .all(runId) as ProviderStreamStallRow[];
+    return rows.map((row) => mapProviderStreamStallRow(row));
+  }
+
+  getProviderStreamReceipt(
+    attemptId: string
+  ): ProviderStreamReceipt | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select run_id, attempt_id, last_event_sequence, last_event_at",
+          "from provider_stream_receipts where attempt_id = ?"
+        ].join(" ")
+      )
+      .get(attemptId) as ProviderStreamReceiptRow | undefined;
+    return row === undefined ? undefined : mapProviderStreamReceiptRow(row);
   }
 
   // Provider event `sequence` resets to 1 on every attempt, so an unscoped
@@ -5060,6 +5831,32 @@ export class RunStore {
         foreign key (attempt_id) references attempts(id)
       );
 
+      create table if not exists provider_stream_receipts (
+        attempt_id text primary key,
+        run_id text not null,
+        last_event_sequence integer not null,
+        last_event_at text not null,
+        foreign key (run_id) references runs(id),
+        foreign key (attempt_id) references attempts(id)
+      );
+
+      create table if not exists provider_stream_stalls (
+        id integer primary key autoincrement,
+        run_id text not null,
+        attempt_id text not null,
+        last_event_sequence integer not null,
+        resumed_with_sequence integer not null,
+        gap_started_at text not null,
+        resumed_at text not null,
+        duration_ms integer not null,
+        unique(attempt_id, resumed_with_sequence),
+        foreign key (run_id) references runs(id),
+        foreign key (attempt_id) references attempts(id)
+      );
+
+      create index if not exists provider_stream_stalls_run_resumed_idx
+        on provider_stream_stalls(run_id, resumed_at);
+
       create table if not exists tracked_pull_requests (
         id integer primary key autoincrement,
         project_name text not null,
@@ -5298,6 +6095,46 @@ export class RunStore {
         foreign key (firing_id) references routine_firings(id)
       );
 
+      create table if not exists routine_watchdog_samples (
+        firing_id text primary key,
+        sampled_at text not null,
+        last_tool_call_at text,
+        last_progress_at text,
+        workspace_mtime_max real not null,
+        workspace_digest text not null default '',
+        turn_id_set_size integer not null,
+        output_tokens_total integer not null,
+        normalized_log_offset integer not null,
+        idle_since text,
+        normalized_log_path text not null default '',
+        last_message_at text,
+        foreign key (firing_id) references routine_firings(id)
+      );
+
+      create table if not exists routine_watchdog_sample_history (
+        firing_id text not null,
+        sampled_at text not null,
+        last_tool_call_at text,
+        last_progress_at text,
+        workspace_mtime_max real not null,
+        workspace_digest text not null default '',
+        turn_id_set_size integer not null,
+        output_tokens_total integer not null,
+        normalized_log_offset integer not null,
+        idle_since text,
+        normalized_log_path text not null default '',
+        last_message_at text,
+        primary key (firing_id, sampled_at),
+        foreign key (firing_id) references routine_firings(id)
+      );
+
+      create table if not exists routine_watchdog_turn_ids (
+        firing_id text not null,
+        turn_id text not null,
+        primary key (firing_id, turn_id),
+        foreign key (firing_id) references routine_firings(id)
+      );
+
       create table if not exists routine_pull_requests (
         id integer primary key autoincrement,
         project_name text not null,
@@ -5331,6 +6168,9 @@ export class RunStore {
         firing_id text,
         hold_reason text,
         skip_reason text,
+        deferred_reason text,
+        deferred_since text,
+        deferred_attempts integer not null default 0,
         created_at text not null,
         updated_at text not null,
         primary key (fanout_id, project_name),
@@ -5420,6 +6260,13 @@ export class RunStore {
       ["routine_firings", "workspace_pruned_at", "text"],
       ["routine_firings", "fanout_id", "text"],
       ["routine_fanout_targets", "hold_reason", "text"],
+      ["routine_fanout_targets", "deferred_reason", "text"],
+      ["routine_fanout_targets", "deferred_since", "text"],
+      [
+        "routine_fanout_targets",
+        "deferred_attempts",
+        "integer not null default 0"
+      ],
       ["project_issue_snapshots", "labels", "text"],
       ["project_issue_snapshots", "blocked_by", "text"],
       [
@@ -5531,6 +6378,15 @@ export class RunStore {
       on routine_firings(workspace_pruned_at, state, updated_at);
     `);
 
+    // listWatchdogCandidateRoutineFirings runs on every Watchdog tick against a
+    // table that grows with every Firing ever recorded and is never swept. The
+    // retention index above leads with workspace_pruned_at, so without this the
+    // candidate query is a full scan plus a temp b-tree sort.
+    this.database.exec(`
+      create index if not exists routine_firings_watchdog_idx
+      on routine_firings(state, cancel_requested, created_at, id);
+    `);
+
     // run_state_transitions is append-only with no retention sweep and has no
     // other index. nextTransitionSequence's max(sequence) lookup runs on every
     // transition write, and both listRunStateTransitions and
@@ -5566,7 +6422,47 @@ export class RunStore {
       from watchdog_samples;
     `);
 
+    // provider_events is the largest append-only table in the schema — one row
+    // per normalized stream event, with no retention sweep and no index beyond
+    // its rowid. backfillProviderStreamReceipts' newest-per-attempt lookup,
+    // listProviderEvents and getLastFailureEvent all filter or group by
+    // attempt_id, so without this they scan the whole table and build a temp
+    // b-tree. Created before the backfill below so the one-shot migration
+    // reads it.
+    this.database.exec(`
+      create index if not exists provider_events_attempt_idx
+      on provider_events(attempt_id, id);
+    `);
+
+    this.backfillProviderStreamReceipts();
     this.backfillAttemptMetadataPaths();
+  }
+
+  // Seeds one receipt per Attempt from the newest normalized event a database
+  // recorded before raw receipts became durable. Raw-only activity from before
+  // this evidence existed cannot be reconstructed, so this is a floor, not a
+  // replay. Guarded because it scans all of provider_events: once any receipt
+  // exists the table is authoritative and re-running it on every open would
+  // buy nothing. See ADR 0090.
+  private backfillProviderStreamReceipts(): void {
+    const seeded = this.database
+      .prepare("select 1 from provider_stream_receipts limit 1")
+      .get();
+    if (seeded !== undefined) {
+      return;
+    }
+    this.database.exec(`
+      insert or ignore into provider_stream_receipts (
+        run_id, attempt_id, last_event_sequence, last_event_at
+      )
+      select event.run_id, event.attempt_id, event.sequence, event.created_at
+      from provider_events event
+      inner join (
+        select attempt_id, max(id) as id
+        from provider_events
+        group by attempt_id
+      ) latest on latest.id = event.id;
+    `);
   }
 
   private backfillRunIssueRepositories(): void {
@@ -5974,7 +6870,9 @@ function mapRunRow(row: RunRow): RunStatus {
   };
 }
 
-function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
+function mapWatchdogProgressSampleRow(
+  row: Omit<WatchdogSampleRow, "run_id">
+): WatchdogProgressSample {
   return {
     idleSince: row.idle_since,
     lastMessageAt: row.last_message_at,
@@ -5983,12 +6881,21 @@ function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
     normalizedLogOffset: row.normalized_log_offset,
     normalizedLogPath: row.normalized_log_path,
     outputTokensTotal: row.output_tokens_total,
-    runId: row.run_id,
     sampledAt: row.sampled_at,
     turnIdSetSize: row.turn_id_set_size,
     workspaceDigest: row.workspace_digest,
     workspaceMtimeMax: row.workspace_mtime_max
   };
+}
+
+function mapWatchdogSampleRow(row: WatchdogSampleRow): WatchdogSample {
+  return { ...mapWatchdogProgressSampleRow(row), runId: row.run_id };
+}
+
+function mapRoutineWatchdogSampleRow(
+  row: RoutineWatchdogSampleRow
+): RoutineWatchdogSample {
+  return { ...mapWatchdogProgressSampleRow(row), firingId: row.firing_id };
 }
 
 const RUN_ARTIFACT_KINDS: readonly RunArtifactKind[] = [
@@ -6197,6 +7104,7 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
   return {
     allowOverlap: row.allow_overlap === 1,
     catchUp: row.catch_up,
+    deferral: null,
     disabledReason: row.disabled_reason ?? null,
     ...(row.effort === null ? {} : { effort: row.effort }),
     kind: row.kind,

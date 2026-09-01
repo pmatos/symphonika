@@ -862,10 +862,10 @@ describe("routine operator surfaces", () => {
 
     expect(output.stdout).toContain("daily-report  targets=[alpha]");
     expect(output.stdout).toContain(
-      "  project  state  latest_outcome  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests"
+      "  project  state  latest_outcome  disabled_reason  next_fire_at  deferred  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests"
     );
     expect(output.stdout).toContain(
-      '  alpha  active  ✅ alpha — pr: "Extract retry policy" https://github.com/pmatos/alpha/pull/42 (unverified)  -  2026-05-22T10:00:00.000Z  -  -  -  -  overlap=0,concurrency_cap=0,host_pressure=0,catch_up_window=0  #42'
+      '  alpha  active  ✅ alpha — pr: "Extract retry policy" https://github.com/pmatos/alpha/pull/42 (unverified)  -  2026-05-22T10:00:00.000Z  -  -  -  -  -  overlap=0,concurrency_cap=0,host_pressure=0,catch_up_window=0  #42'
     );
   });
 

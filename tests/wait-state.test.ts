@@ -638,6 +638,7 @@ function buildController(input: {
     },
     configDir: input.root,
     createRunId: () => `wait-rerun-${++nextRun}`,
+    emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret-token" },
     githubIssuesApi: input.githubIssuesApi,
     lifecyclePolicy: {

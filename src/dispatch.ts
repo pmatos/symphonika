@@ -8,6 +8,7 @@ import {
   workflowReferenceSchema
 } from "./config-schemas.js";
 import type { GitHubIssuesApi, IssuePollStatus } from "./issue-polling.js";
+import { emailNotificationConfigSchema } from "./notifications/config.js";
 import {
   ActiveRunRegistry,
   type LifecyclePolicy
@@ -100,6 +101,7 @@ const dispatchProjectSchema = z
 
 const dispatchServiceConfigSchema = z
   .object({
+    email: emailNotificationConfigSchema.optional(),
     providers: z
       .object({
         codex: providerCommandSchema,
@@ -142,6 +144,7 @@ export async function dispatchOneEligibleIssue(
     activeRuns,
     agentProviders: options.agentProviders,
     configDir: options.configDir,
+    emailConfigLoader: () => config.email,
     githubIssuesApi: options.githubIssuesApi,
     lifecyclePolicy: ONE_SHOT_LIFECYCLE_POLICY,
     projectsLoader,

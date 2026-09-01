@@ -1,5 +1,13 @@
 # Watchdog: progress-based liveness for active runs
 
+**Amendment note (ADR 0091):** the same Progress Signal and Project grace policy now sample
+`running` Routine Firings through firing-keyed tables. A no-progress firing settles as
+`failed / no_progress`; the Run-only convergence budget, wall-clock cap, retry generation, and
+stale-label workflow do not extend to firings.
+
+**Amended by ADR-0093**, which scopes the wall-clock verdict to slot ownership rather than to
+`state = 'running'` and the attempt-scoped `watchdog_generation`.
+
 Symphonika treats a Run as alive whenever its Agent Provider keeps emitting events. In practice
 that is a heartbeat, not a progress signal. A real incident exposed the gap: a provider streamed
 `usage_updated` and `rate_limit_updated` for over five hours while looping on a `write_stdin`

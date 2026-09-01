@@ -1,6 +1,6 @@
 # Watchdog: progress-based liveness for active runs
 
-**Amended by ADR-0092**, which scopes the wall-clock verdict to slot ownership rather than to
+**Amended by ADR-0093**, which scopes the wall-clock verdict to slot ownership rather than to
 `state = 'running'` and the attempt-scoped `watchdog_generation`.
 
 Symphonika treats a Run as alive whenever its Agent Provider keeps emitting events. In practice

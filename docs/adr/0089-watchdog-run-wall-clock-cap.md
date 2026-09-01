@@ -72,7 +72,7 @@ a hung retry claim, for instance, holds a slot while its row reads `failed`. Tha
 with its own race surface, and it amends ADR 0054's "every Watchdog mutation is conditional on the
 `running` state" invariant, so it is tracked separately rather than folded in here.
 
-**Amended by ADR 0092.** That slice has since landed: the Run Slot Deadline closes this window.
+**Amended by ADR 0093.** That slice has since landed: the Run Slot Deadline closes this window.
 
 It does not span a Run *chain*. A continuation (ADR 0019), an FSM state advance, and a shutdown
 resume (ADR 0088) each write their own `runs` row through `claimAndPersistRun`, so each starts a
@@ -178,7 +178,7 @@ looks at it.
   `AbortController` the dispatcher races against every await, so it actually aborts workspace
   preparation. A Run's cap is Watchdog policy resolved per Project and reached by sampling, so it
   bounds a Run only once its provider is running. A Run that is *executing* is no longer unbounded;
-  one wedged in preparation still is, per the section above. **Amended by ADR 0092**, which arms an
+  one wedged in preparation still is, per the section above. **Amended by ADR 0093**, which arms an
   `AbortController` at claim and closes that remaining window.
 - **ADR 0020 (retry transient only):** `run_timeout` is deterministic. The stopped Run is the
   terminal verdict, and a retry cannot hand the work a fresh cap.

@@ -1543,16 +1543,17 @@ export class RunStore {
     );
   }
 
-  markRunWatchdogStale(
-    runId: string,
-    terminalReason: WatchdogTerminalReason,
-    updatedAt = timestamp(),
-    watchdogGeneration?: number
-  ): boolean {
-    const generationGuard =
-      watchdogGeneration === undefined
-        ? ""
-        : "and watchdog_generation = @watchdog_generation";
+  // The single Watchdog stale verdict write. Both entry points share the
+  // column set and the first-winner guard; they differ only in whether the
+  // row must currently read `running` and whether an attempt generation
+  // fences the write.
+  private casRunWatchdogStale(input: {
+    requireRunningState: boolean;
+    runId: string;
+    terminalReason: WatchdogTerminalReason;
+    updatedAt: string;
+    watchdogGeneration?: number;
+  }): boolean {
     const result = this.database
       .prepare(
         [
@@ -1564,55 +1565,58 @@ export class RunStore {
           "notification_error = null,",
           "updated_at = @updated_at",
           "where id = @id",
-          "and state = 'running'",
+          input.requireRunningState ? "and state = 'running'" : "",
           "and cancel_requested = 0",
           UNCLAIMED_WATCHDOG_VERDICT_GUARD,
-          generationGuard
+          input.watchdogGeneration === undefined
+            ? ""
+            : "and watchdog_generation = @watchdog_generation"
         ].join(" ")
       )
       .run({
-        id: runId,
-        terminal_reason: terminalReason,
-        updated_at: updatedAt,
-        ...(watchdogGeneration === undefined
+        id: input.runId,
+        terminal_reason: input.terminalReason,
+        updated_at: input.updatedAt,
+        ...(input.watchdogGeneration === undefined
           ? {}
-          : { watchdog_generation: watchdogGeneration })
+          : { watchdog_generation: input.watchdogGeneration })
       });
     if (result.changes === 0) {
       return false;
     }
-    this.recordRunTransition(runId, "stale", updatedAt);
+    this.recordRunTransition(input.runId, "stale", input.updatedAt);
     return true;
+  }
+
+  markRunWatchdogStale(
+    runId: string,
+    terminalReason: WatchdogTerminalReason,
+    updatedAt = timestamp(),
+    watchdogGeneration?: number
+  ): boolean {
+    return this.casRunWatchdogStale({
+      requireRunningState: true,
+      runId,
+      terminalReason,
+      updatedAt,
+      ...(watchdogGeneration === undefined ? {} : { watchdogGeneration })
+    });
   }
 
   // The Run wall-clock cap protects the resource represented by an in-memory
   // slot, not one fixed durable state. In particular a retry reserves a slot
-  // while its reused row still reads `failed`. The caller must synchronously
+  // while its reused row still reads `failed`, so this write carries no
+  // Run-state and no generation predicate. The caller must synchronously
   // prove slot ownership immediately before this CAS. The terminal-reason
   // guard makes competing Watchdog verdicts first-winner, while an earlier
   // transient attempt reason remains replaceable by the Run-scoped timeout.
   markSlotOwnedRunTimedOut(runId: string, updatedAt = timestamp()): boolean {
-    const result = this.database
-      .prepare(
-        [
-          "update runs set",
-          "state = 'stale',",
-          "terminal_reason = 'run_timeout',",
-          "failure_classification = 'deterministic',",
-          "notification_state = 'pending',",
-          "notification_error = null,",
-          "updated_at = @updated_at",
-          "where id = @id",
-          "and cancel_requested = 0",
-          UNCLAIMED_WATCHDOG_VERDICT_GUARD
-        ].join(" ")
-      )
-      .run({ id: runId, updated_at: updatedAt });
-    if (result.changes === 0) {
-      return false;
-    }
-    this.recordRunTransition(runId, "stale", updatedAt);
-    return true;
+    return this.casRunWatchdogStale({
+      requireRunningState: false,
+      runId,
+      terminalReason: "run_timeout",
+      updatedAt
+    });
   }
 
   // Attempt setup can race a timeout CAS and overwrite only `state` (for
@@ -4139,6 +4143,16 @@ export class RunStore {
       });
     }
     return result;
+  }
+
+  // The Run Slot Deadline needs only the wall-clock origin, and reads it
+  // while the dispatch mutex is held. `getRun` would additionally hydrate
+  // every attempt (each stat-ing its artifacts) and every state transition.
+  getRunCreatedAt(id: string): string | undefined {
+    const row = this.database
+      .prepare("select created_at from runs where id = ?")
+      .get(id) as { created_at: string } | undefined;
+    return row?.created_at;
   }
 
   getRun(id: string): RunDetail | undefined {

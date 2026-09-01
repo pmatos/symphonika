@@ -248,32 +248,29 @@ export async function ensureRepositoryCache(
   signal?: AbortSignal
 ): Promise<void> {
   const prior = fetchLocks.get(cachePath) ?? Promise.resolve();
-  let markTurnStarted = (): void => undefined;
-  const turnStarted = new Promise<void>((resolve) => {
-    markTurnStarted = resolve;
+  // Settling `priorSettled` IS the start of this invocation's cache turn: the
+  // callback below is registered on it first, so it runs before any
+  // continuation this function adds afterwards.
+  const priorSettled = prior.catch(() => undefined);
+  const next = priorSettled.then(async () => {
+    signal?.throwIfAborted();
+    if (!(await exists(cachePath))) {
+      await createRepositoryCache(project, cachePath, signal);
+    } else {
+      await ensureRepositoryCacheRemote(project, cachePath, signal);
+    }
+    signal?.throwIfAborted();
+    await git(
+      [
+        "-C",
+        cachePath,
+        "fetch",
+        "origin",
+        `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
+      ],
+      signal
+    );
   });
-  const next = prior
-    .catch(() => undefined)
-    .then(async () => {
-      markTurnStarted();
-      signal?.throwIfAborted();
-      if (!(await exists(cachePath))) {
-        await createRepositoryCache(project, cachePath, signal);
-      } else {
-        await ensureRepositoryCacheRemote(project, cachePath, signal);
-      }
-      signal?.throwIfAborted();
-      await git(
-        [
-          "-C",
-          cachePath,
-          "fetch",
-          "origin",
-          `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
-        ],
-        signal
-      );
-    });
   fetchLocks.set(cachePath, next);
   const releaseLock = (): void => {
     // Only clear the slot if no later caller has overwritten it.
@@ -286,7 +283,7 @@ export async function ensureRepositoryCache(
   // Git and then releases the tail. Clearing it at caller-abort time would let
   // a third fetch bypass a predecessor that still owns the cache.
   void next.then(releaseLock, releaseLock);
-  await raceAbortSignal(turnStarted, signal, "Workspace preparation aborted");
+  await raceAbortSignal(priorSettled, signal, "Workspace preparation aborted");
   // Once this invocation owns the cache turn, await its Git process-group
   // teardown and staging-path cleanup rather than returning on signal alone.
   await next;
@@ -690,7 +687,11 @@ function processGroupExists(pid: number): boolean {
   }
 }
 
-async function gitSucceeds(
+// A probe: a non-zero exit is the answer, not a failure. Abort and
+// process-group cleanup failures are not answers, so they still propagate --
+// swallowing a leaked Git process group as "false" would report a missing
+// branch or worktree that was never actually checked.
+export async function gitSucceeds(
   args: string[],
   signal?: AbortSignal
 ): Promise<boolean> {
@@ -698,7 +699,10 @@ async function gitSucceeds(
     await git(args, signal);
     return true;
   } catch (error) {
-    if (isAbortError(error)) {
+    if (
+      isAbortError(error) ||
+      error instanceof WorkspacePreparationCleanupError
+    ) {
       throw error;
     }
     return false;

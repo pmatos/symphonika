@@ -552,10 +552,10 @@ export async function startDaemon(
       });
     },
     stateRoot: state.stateRoot,
+    // An unavailable policy (no valid runtime snapshot ever loaded) arms no
+    // deadline rather than falling back to the default cap. See ADR 0092.
     watchdogConfigLoader: (projectName) =>
-      Promise.resolve(
-        watchdogConfigFor(projectName) ?? { enabled: false, maxRunMinutes: 0 }
-      ),
+      watchdogConfigFor(projectName) ?? { enabled: false, maxRunMinutes: 0 },
     ...(options.createRunId === undefined
       ? {}
       : { createRunId: options.createRunId }),

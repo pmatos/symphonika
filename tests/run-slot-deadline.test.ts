@@ -517,7 +517,7 @@ describe("Run slot deadline", () => {
       { activeRuns, onTerminated, project, provider, reloader, root, runStore },
       {
         createRunId: () => "run-uncapped",
-        watchdogConfigLoader: () => Promise.resolve(config)
+        watchdogConfigLoader: () => config
       }
     );
 
@@ -621,7 +621,7 @@ function makeRunController(
     stateRoot: path.join(deps.root, ".symphonika"),
     watchdogConfigLoader:
       overrides.watchdogConfigLoader ??
-      (() => Promise.resolve({ enabled: true, maxRunMinutes: 1 }))
+      (() => ({ enabled: true, maxRunMinutes: 1 }))
   });
 }
 

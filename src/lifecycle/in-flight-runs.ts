@@ -124,7 +124,7 @@ export class InFlightRunRegistry {
     // return early because cancelRequested is already true, so without this
     // hand-off the real provider would never be cancelled and the run would
     // execute to natural completion. Invoke the newly-attached cancel
-    // synchronously here to close the gap. See ADR 0052 / ADR 0092.
+    // synchronously here to close the gap. See ADR 0052 / ADR 0093.
     if (entry.cancelRequested) {
       void input.cancel().catch(() => {
         // The dispatch path observes cancelRequested via the entry and
@@ -229,7 +229,7 @@ export class InFlightRunRegistry {
     entry.cancelReason = reason;
     // For a reserved-only slot the handler aborts preparation when one was
     // supplied; otherwise it remains a noop. The dispatch path also observes
-    // `cancelRequested` before spawning the provider (see ADR 0052 / 0092).
+    // `cancelRequested` before spawning the provider (see ADR 0052 / 0093).
     await entry.cancel();
   }
 }

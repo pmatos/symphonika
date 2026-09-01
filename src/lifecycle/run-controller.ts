@@ -266,11 +266,7 @@ export type RunControllerOptions = {
   // Receives the same lifecycle event as the sampled Watchdog observer when
   // the slot-owned Run deadline wins. The daemon uses it for health
   // notifications; the Run Store CAS guarantees exactly-once delivery.
-  onWatchdogTerminated?: (run: {
-    issueNumber: number;
-    projectName: string;
-    runId: string;
-  }) => void;
+  onWatchdogTerminated?: WatchdogTerminationObserver;
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
@@ -281,8 +277,10 @@ export type RunControllerOptions = {
   schedule: ScheduleHandler;
   stateRoot: string;
   // Resolves the effective daemon + Project Watchdog policy at slot claim.
-  // Omitted by one-shot/unit callers that do not run the daemon Watchdog.
-  watchdogConfigLoader?: (projectName: string) => Promise<RunDeadlinePolicy>;
+  // Synchronous: it reads an in-memory config snapshot, and both call sites
+  // are inside the dispatch mutex. Omitted by one-shot/unit callers that do
+  // not run the daemon Watchdog.
+  watchdogConfigLoader?: (projectName: string) => RunDeadlinePolicy;
 };
 
 export type DispatchOneFreshResult =
@@ -464,6 +462,12 @@ class FreshClaimDeferredError extends Error {
 // at all, and how many wall-clock minutes it allows from the Run's claim.
 type RunDeadlinePolicy = Pick<WatchdogConfig, "enabled" | "maxRunMinutes">;
 
+type WatchdogTerminationObserver = (run: {
+  issueNumber: number;
+  projectName: string;
+  runId: string;
+}) => void;
+
 class RunTimeoutError extends Error {
   constructor() {
     super(
@@ -478,6 +482,9 @@ type RunSlotDeadline = {
   arm: () => void;
   clear: () => void;
   race: <T>(operation: Promise<T>) => Promise<T>;
+  // Spreadable so bounded call sites read `...deadline.signalOption` instead
+  // of re-deriving "is there a deadline" at each one.
+  signalOption: { signal?: AbortSignal };
   signal: AbortSignal | undefined;
 };
 
@@ -486,24 +493,27 @@ const NO_RUN_SLOT_DEADLINE: RunSlotDeadline = {
   arm: () => undefined,
   clear: () => undefined,
   race: (operation) => operation,
+  signalOption: {},
   signal: undefined
 };
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const RUN_SLOT_DEADLINE_ABORT_MESSAGE = "Run slot deadline aborted";
 
+// The single reading of "is the Run wall-clock cap active", in milliseconds.
+// Every deadline in this module derives its expiry from this one predicate.
+function runCapMs(config: RunDeadlinePolicy): number | undefined {
+  return config.enabled && config.maxRunMinutes > 0
+    ? config.maxRunMinutes * 60_000
+    : undefined;
+}
+
 function runSlotDeadline(input: {
-  createdAt: string;
-  maxRunMinutes: number;
+  expiresAtMs: number;
   onExpire: () => void;
 }): RunSlotDeadline {
-  const createdAtMs = Date.parse(input.createdAt);
-  if (input.maxRunMinutes <= 0 || Number.isNaN(createdAtMs)) {
-    return NO_RUN_SLOT_DEADLINE;
-  }
-
   const controller = new AbortController();
-  const expiresAtMs = createdAtMs + input.maxRunMinutes * 60_000;
+  const { expiresAtMs } = input;
   let timer: NodeJS.Timeout | undefined;
   let cleared = false;
   const clear = (): void => {
@@ -548,6 +558,7 @@ function runSlotDeadline(input: {
         controller.signal,
         RUN_SLOT_DEADLINE_ABORT_MESSAGE
       ),
+    signalOption: { signal: controller.signal },
     signal: controller.signal
   };
 }
@@ -568,12 +579,7 @@ export class RunController {
   private readonly lifecyclePolicy: LifecyclePolicy;
   private readonly logger?: Logger;
   private readonly onWatchdogTerminated:
-    | ((run: {
-        issueNumber: number;
-        projectName: string;
-        runId: string;
-      }) => void)
-    | undefined;
+    WatchdogTerminationObserver | undefined;
   private readonly prepareIssueWorkspace: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
@@ -593,7 +599,7 @@ export class RunController {
   private readonly stateRoot: string;
   private readonly watchdogConfigLoader: (
     projectName: string
-  ) => Promise<RunDeadlinePolicy>;
+  ) => RunDeadlinePolicy;
 
   constructor(options: RunControllerOptions) {
     this.activeRuns = options.activeRuns;
@@ -634,23 +640,31 @@ export class RunController {
     this.stateRoot = options.stateRoot;
     this.watchdogConfigLoader =
       options.watchdogConfigLoader ??
-      ((): Promise<RunDeadlinePolicy> =>
-        Promise.resolve({ enabled: false, maxRunMinutes: 0 }));
+      ((): RunDeadlinePolicy => ({ enabled: false, maxRunMinutes: 0 }));
   }
 
+  // Run-scoped: expiry is measured from the Run row's original `created_at`,
+  // so a retry inherits the remaining time rather than restarting the cap.
   private createRunSlotDeadline(input: {
     config: RunDeadlinePolicy;
     issueNumber: number;
     projectName: string;
     runId: string;
   }): RunSlotDeadline {
-    const run = this.runStore.getRun(input.runId);
-    if (!input.config.enabled || run === undefined) {
+    const capMs = runCapMs(input.config);
+    if (capMs === undefined) {
+      return NO_RUN_SLOT_DEADLINE;
+    }
+    // Narrow read: this runs while the dispatch mutex is held, and only the
+    // wall-clock origin is needed.
+    const createdAtMs = Date.parse(
+      this.runStore.getRunCreatedAt(input.runId) ?? ""
+    );
+    if (Number.isNaN(createdAtMs)) {
       return NO_RUN_SLOT_DEADLINE;
     }
     return runSlotDeadline({
-      createdAt: run.createdAt,
-      maxRunMinutes: input.config.maxRunMinutes,
+      expiresAtMs: createdAtMs + capMs,
       onExpire: () => {
         // Slot ownership is the enforcement scope. This read and the
         // synchronous SQLite CAS below share one event-loop turn, so an
@@ -1107,7 +1121,7 @@ export class RunController {
         // reschedules the retry rather than breaching it. See ADR 0088.
         const pressure = await this.refreshHostPressure();
         const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
-        const watchdogConfig = await this.watchdogConfigLoader(project.name);
+        const watchdogConfig = this.watchdogConfigLoader(project.name);
         const capacity = evaluateConcurrencyCapacity({
           configuredProjectMax: project.max_in_flight,
           globalInFlight: this.activeRuns.countInFlight(),
@@ -1139,9 +1153,7 @@ export class RunController {
               runId: payload.runId
             });
             this.activeRuns.reserveSlot({
-              ...(deadline.signal === undefined
-                ? {}
-                : { cancel: deadline.abortPreparation }),
+              cancel: deadline.abortPreparation,
               issueNumber: refreshed.number,
               projectName: project.name,
               ...(payload.respectsIssueLabels === undefined
@@ -1163,13 +1175,11 @@ export class RunController {
               await deadline.race(
                 this.bestEffort(
                   () =>
-                    this.githubIssuesApi.addLabelsToIssue!({
-                      ...repository,
+                    this.addLabelsBounded({
+                      deadline,
                       issueNumber: refreshed.number,
                       labels: ["sym:claimed"],
-                      ...(deadline.signal === undefined
-                        ? {}
-                        : { signal: deadline.signal })
+                      repository
                     }),
                   {
                     issueNumber: refreshed.number,
@@ -1193,7 +1203,6 @@ export class RunController {
     }
 
     if (shuttingDown) {
-      deadline.clear();
       this.logger?.debug(
         {
           issueNumber: refreshed.number,
@@ -1206,7 +1215,6 @@ export class RunController {
     }
 
     if (contention !== undefined) {
-      deadline.clear();
       // Reschedule the retry with the configured continuation delay; the
       // next fire will re-check caps and proceed when contention clears.
       this.logger?.warn(
@@ -2949,7 +2957,7 @@ export class RunController {
     // have filled the cap. Scheduled callers catch CapBreachedError and
     // reschedule. See ADR 0053.
     const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
-    const watchdogConfig = await this.watchdogConfigLoader(input.project.name);
+    const watchdogConfig = this.watchdogConfigLoader(input.project.name);
     const capacity = evaluateConcurrencyCapacity({
       configuredProjectMax: input.project.max_in_flight,
       globalInFlight: this.activeRuns.countInFlight(),
@@ -3002,24 +3010,25 @@ export class RunController {
     // This write predates the Run row, so it cannot use the Run-scoped
     // deadline armed further down, and it runs while dispatchMutex is held --
     // a hung request would stall every other dispatch, not merely this slot.
-    // Bound it under the same policy, measured from now because the Run's
-    // origin is recorded moments later. See ADR 0092.
-    const claimSignal =
-      watchdogConfig.enabled && watchdogConfig.maxRunMinutes > 0
-        ? AbortSignal.timeout(
-            Math.min(watchdogConfig.maxRunMinutes * 60_000, MAX_TIMER_DELAY_MS)
-          )
-        : undefined;
+    // Same mechanism and same policy, but measured from now because the Run's
+    // origin is only recorded moments later. See ADR 0093.
+    const claimCapMs = runCapMs(watchdogConfig);
+    const claimDeadline =
+      claimCapMs === undefined
+        ? NO_RUN_SLOT_DEADLINE
+        : runSlotDeadline({
+            expiresAtMs: Date.now() + claimCapMs,
+            onExpire: () => undefined
+          });
+    claimDeadline.arm();
     try {
-      await raceAbortSignal(
-        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
-          ...input.repository,
+      await claimDeadline.race(
+        this.addLabelsBounded({
+          deadline: claimDeadline,
           issueNumber: input.issue.number,
           labels: ["sym:claimed"],
-          ...(claimSignal === undefined ? {} : { signal: claimSignal })
-        }),
-        claimSignal,
-        RUN_SLOT_DEADLINE_ABORT_MESSAGE
+          repository: input.repository
+        })
       );
       claimed = true;
       this.logger?.info(
@@ -3079,9 +3088,7 @@ export class RunController {
       // provider cancel handler is bound later in runAttemptLifecycle via
       // attachProvider once provider.validate has succeeded. See ADR 0052.
       this.activeRuns.reserveSlot({
-        ...(deadline.signal === undefined
-          ? {}
-          : { cancel: deadline.abortPreparation }),
+        cancel: deadline.abortPreparation,
         issueNumber: input.issue.number,
         projectName: input.project.name,
         ...(input.respectsIssueLabels === undefined
@@ -3133,8 +3140,30 @@ export class RunController {
         });
       }
       throw error;
+    } finally {
+      // The claim write has settled either way by here; release its timer
+      // rather than leaving it armed for the whole cap.
+      claimDeadline.clear();
     }
     return deadline;
+  }
+
+  // The signal must reach both the HTTP request and the await around it: a
+  // provider that ignores `request.signal` would otherwise keep the slot.
+  private async addLabelsBounded(input: {
+    deadline: RunSlotDeadline;
+    issueNumber: number;
+    labels: string[];
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    await (
+      this.githubIssuesApi as LabelWritingGitHubIssuesApi
+    ).addLabelsToIssue({
+      ...input.repository,
+      issueNumber: input.issueNumber,
+      labels: input.labels,
+      ...input.deadline.signalOption
+    });
   }
 
   private async runAttemptLifecycle(input: {
@@ -3330,21 +3359,17 @@ export class RunController {
         providerCommand: input.providerCommand,
         providerName: input.providerName,
         ...(promptTemplate === undefined ? {} : { promptTemplate }),
-        ...(input.deadline.signal === undefined
-          ? {}
-          : { signal: input.deadline.signal }),
+        ...input.deadline.signalOption,
         runId: input.runId
       });
       started = await input.deadline.race(startOperation);
       await input.deadline.race(input.provider.validate(input.providerCommand));
       await input.deadline.race(
-        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
-          ...input.repository,
+        this.addLabelsBounded({
+          deadline: input.deadline,
           issueNumber: input.issue.number,
           labels: ["sym:running"],
-          ...(input.deadline.signal === undefined
-            ? {}
-            : { signal: input.deadline.signal })
+          repository: input.repository
         })
       );
       this.runStore.updateRunState(input.runId, "running");

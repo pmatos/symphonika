@@ -1942,7 +1942,7 @@ negative after an overrun until the next Watchdog tick, because it means time un
 before the convergence budget and idle clock, so a Run that has overrun several bounds at once
 reports the outermost one; it honours the same per-Project override scope as `grace_minutes`, and
 like the other two verdicts is deterministic rather than a transient retry reason. See ADR 0089 and
-ADR 0092.
+ADR 0093.
 
 ### 12.5 PR Follow-up
 

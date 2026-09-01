@@ -23,7 +23,10 @@ The current effective Watchdog policy is snapshotted at each reservation. A relo
 affect a later retry reservation, while it does not replace a timer already protecting preparation.
 The sampled `running`-state Watchdog continues to resolve current policy on every pass. This keeps
 the preparation mechanism independent of reconciliation without allowing a new attempt to reset
-the Run's age.
+the Run's age. When no valid runtime snapshot has ever loaded, the policy is unavailable rather
+than defaulted (ADR 0092), and an unavailable policy arms no deadline: substituting the default cap
+would fabricate an expiry from configuration the operator never supplied. That state cannot admit a
+Run in the first place, since a daemon without a snapshot has no Projects to dispatch.
 
 Before provider attachment, the in-flight registry binds cancellation to the deadline's abort
 handler instead of a no-op. The same signal is threaded through issue Workspace preparation and
@@ -106,8 +109,9 @@ Accepted.
 - ADR 0067: Routine Firing deadlines
 - ADR 0071: durable issue-Run notification delivery
 - ADR 0089: Watchdog Run wall-clock cap
+- ADR 0092: Watchdog policy unavailable without a runtime snapshot
 - Issues #605, #608, and #611
 
 ## Numbering
 
-ADR `0091` is the most recent number in tree; this ADR is `0092`.
+ADR `0092` is the most recent number in tree; this ADR is `0093`.

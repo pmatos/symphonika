@@ -263,11 +263,27 @@ terminal reason `firing_timeout` after that work settles.
 _Avoid_: Watchdog timeout, no-progress grace
 
 **Routine Skip**:
-An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
-an overlapping non-terminal firing, a concurrency cap, or **Host Pressure**. It updates the Routine's latest skip
-evidence and rolling counters but creates no `routine_firings` row. A refused manual firing is not a
-Routine Skip because no clock event was attempted.
-_Avoid_: Routine Firing when no provider execution was launched
+An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window
+or an overlapping non-terminal firing. It updates the Routine's latest skip evidence and rolling
+counters but creates no `routine_firings` row. A refused manual firing is not a Routine Skip because
+no clock event was attempted.
+_Avoid_: Routine Firing when no provider execution was launched, capacity refusals
+
+**Routine Deferral**:
+A due Routine Target parked because the host has no capacity for it — a full per-Project or global
+cap, or **Host Pressure**. The clock event is not consumed: the target keeps its due schedule
+position, its Routine Fan-out leg stays pending recording the reason, since-when, and attempt count,
+and the Orchestrator retries admission on later daemon ticks. No skip evidence or counter moves.
+_Avoid_: Routine Skip, schedule advance
+
+**Missed Routine**:
+A **Routine Deferral** that reached the bound of its own clock event — the next due event for a
+recurring Target, a fixed horizon for a one-shot — without ever being admitted. It consumes the
+clock event like a skip, increments that reason's rolling counter once, and settles its Routine
+Fan-out leg as a failure: the Routine did not run. It shares the skip counters and the
+`last_skip_reason` / `last_skip_at` evidence because the reasons are shared; only the path to them
+differs. A Target that loses its Project or declaration mid-deferral is a Missed Routine too.
+_Avoid_: Routine Skip, Routine Firing
 
 **Routine Dispatch Hold**:
 A due Routine Target that cannot be admitted because its selected Agent Provider adapter or command
@@ -313,11 +329,19 @@ The stateful progression of one Run from dispatch selection through provider exe
 waiting, cancellation, or terminal labels.
 _Avoid_: daemon loop when referring to Run-local progression
 
+**Run Slot Deadline**:
+The Run-scoped absolute wall-clock enforcement of `watchdog.max_run_minutes` while an issue Run owns
+in-flight capacity. It begins at the original Run claim, aborts pre-provider preparation or active
+provider work, persists `run_timeout` independently of the Run row's current lifecycle state, and
+holds capacity after expiry only while abort-triggered process and owned-path cleanup settles.
+_Avoid_: attempt timeout, Watchdog sample
+
 **Watchdog**:
 A daemon reconciliation component that samples running issue Runs and Routine Firings for
 observable progress. It marks a wedged Run `stale` or a wedged Routine Firing `failed`, both with
 `terminal_reason = "no_progress"`; issue Runs are also stopped with `no_convergence` once they
-exceed their Convergence Budget.
+exceed their Convergence Budget. A Run's wall-clock policy is also enforced by a Run Slot Deadline
+before provider execution begins.
 _Avoid_: retry, timeout when referring to no-progress termination
 
 **Lifecycle Event**:
@@ -334,7 +358,8 @@ _Avoid_: callback when referring to lifecycle policy
 The orchestrator subsystem that samples a Progress Signal for each `running` issue Run and Routine
 Firing on the reconciliation tick. When no signal advances within the configured grace window, an
 issue Run becomes `stale / no_progress` and a Routine Firing becomes `failed / no_progress`; only
-issue Runs additionally use the Convergence Budget and wall-clock Run cap.
+issue Runs additionally use the Convergence Budget and wall-clock Run cap, whose `run_timeout`
+verdict can also be won by a Run Slot Deadline while the Run owns capacity outside `running`.
 _Avoid_: heartbeat checker, liveness probe
 
 **Progress Signal**:
@@ -479,8 +504,12 @@ _Avoid_: chat session
 - A **Routine** targets one or more explicitly named **Projects** and materializes one **Routine
   Target** for each
 - A matched clock event creates one **Routine Fan-out** across the currently due Routine Targets
-- Each **Routine Target** is summarized by one **Routine Firing**, one **Routine Skip**, or one
-  non-gating **Routine Dispatch Hold**
+- Each **Routine Target** is summarized by one **Routine Firing**, one **Routine Skip**, one
+  **Missed Routine**, or one non-gating **Routine Dispatch Hold**
+- A **Routine Deferral** keeps a **Routine Target**'s clock event due and its **Routine Fan-out**
+  leg pending until the target is admitted or the event lapses into a **Missed Routine**
+- A parked **Routine Deferral** gets first refusal over **PR Follow-up** admission on later daemon
+  ticks; a newly due **Routine** does not
 - A **Routine Dispatch Hold** preserves a **Routine Target**'s original due clock event as claimable
   while making its held **Routine Fan-out** leg non-gating and visible as a summary failure
 - A **Routine Fan-out** produces one grouped notification after all target legs are terminal or held
@@ -492,6 +521,9 @@ _Avoid_: chat session
   persisted commits-ahead evidence
 - A **Routine Firing Deadline** terminates an over-time **Routine Firing** independently of the
   **Watchdog**'s progress-liveness decision
+- A **Run Slot Deadline** bounds an issue **Run** while it owns in-flight capacity, including before
+  a provider starts and during a retry reservation; expired preparation releases that capacity
+  after its abort cleanup settles even when unrelated Workspace I/O remains pending
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A terminal **Routine Firing** may produce one best-effort **Routine Notification Delivery**
 - A **Routine Fan-out** notification and a **Routine Notification Delivery** run outside Routine
@@ -502,7 +534,8 @@ _Avoid_: chat session
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
 - A **Watchdog** samples a **Progress Signal** for each running **Run** and **Routine Firing** during
   daemon reconciliation; no-progress Runs become `stale`, no-progress Firings become `failed`, and
-  only Runs are additionally stopped by the **Convergence Budget** or wall-clock Run cap
+  only Runs are additionally stopped by the **Convergence Budget** or enforce their outer wall-clock
+  policy through a **Run Slot Deadline**, preserving **Workspace** contents in every case
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete

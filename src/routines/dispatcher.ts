@@ -74,6 +74,7 @@ import {
   routineEvidencePaths
 } from "./evidence.js";
 import type {
+  RoutineDeferralReason,
   RoutineSchedule,
   RoutineSkipReason,
   RoutineState,
@@ -126,15 +127,28 @@ type RoutineNotificationDelivery = {
   timeoutMs?: number;
 };
 
+type RoutineDispatchOutcome = {
+  reason: string;
+  routineName: string;
+  projectName: string;
+};
+
 export type DispatchDueRoutinesResult = {
+  // Due targets parked by a capacity refusal: no firing yet, no clock event
+  // consumed, retried on the next tick (ADR 0093).
+  deferred: RoutineDispatchOutcome[];
   fired: string[];
-  skipped: Array<{ reason: string; routineName: string; projectName: string }>;
+  // Deferrals whose clock event lapsed before a slot freed. These are
+  // failures to run, not policy drops.
+  missed: RoutineDispatchOutcome[];
+  skipped: RoutineDispatchOutcome[];
 };
 
 export type SynchronizeRoutineTargetsInput = Pick<
   DispatchDueRoutinesInput,
   "projects" | "runStore"
 > & {
+  logger?: Logger;
   now?: Date;
   recomputeSchedulesFromNow?: boolean;
 };
@@ -214,6 +228,12 @@ function routineCancelOutcome(
 const ISSUE_SNAPSHOT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const EPOCH_ISO = new Date(0).toISOString();
+
+// A one-shot Routine has no next clock event to bound a capacity deferral,
+// so it retries for a day before being recorded as missed — long enough to
+// outlast an overnight backlog, short enough that its fan-out summary is
+// never withheld indefinitely.
+const ONE_SHOT_DEFERRAL_HORIZON_MS = 24 * 60 * 60 * 1000;
 
 type CapturedRoutineGithubSnapshot = {
   issuesAvailable: boolean;
@@ -530,13 +550,31 @@ export function synchronizeRoutineTargets(
   input.runStore.pruneRoutinesForUnknownProjects(
     projects.map((project) => project.name)
   );
-  input.runStore.settleUnavailableRoutineFanoutTargets();
+  // A swept leg that was waiting for capacity is a Routine that did not run,
+  // so it owes the same `routine.missed` event as the deadline path — an
+  // operator whose Routine stopped running mid-wait is exactly who that
+  // event is for (ADR 0093). Legs settled as ordinary `target_unavailable`
+  // skips carry no deferral and emit nothing.
+  for (const settled of input.runStore.settleUnavailableRoutineFanoutTargets()) {
+    if (settled.deferral === undefined) {
+      continue;
+    }
+    logRoutineMiss(input.logger, {
+      deferral: settled.deferral,
+      projectName: settled.projectName,
+      reason: settled.deferral.reason,
+      routine: settled.routineName,
+      scheduledAt: settled.scheduledAt
+    });
+  }
 }
 
 export async function dispatchDueRoutines(
   input: DispatchDueRoutinesInput
 ): Promise<DispatchDueRoutinesResult> {
+  const deferred: DispatchDueRoutinesResult["deferred"] = [];
   const fired: string[] = [];
+  const missed: DispatchDueRoutinesResult["missed"] = [];
   const skipped: DispatchDueRoutinesResult["skipped"] = [];
   const now = input.now ?? new Date();
   const prepareRoutineWorkspace =
@@ -578,7 +616,15 @@ export async function dispatchDueRoutines(
           persisted.nextFireAt === null ||
           new Date(persisted.nextFireAt).getTime() > now.getTime() ||
           persisted.scheduleCron !== declaration.schedule.cron ||
-          persisted.scheduleTz !== declaration.schedule.tz
+          persisted.scheduleTz !== declaration.schedule.tz ||
+          // A parked capacity deferral is not a clock event the daemon
+          // missed while it was down — it is one it is still retrying, so
+          // the due-event loop below owns it (ADR 0093).
+          input.runStore.getRoutineTargetDeferral({
+            name: persisted.name,
+            projectName: project.name,
+            scheduledAt: persisted.nextFireAt
+          }) !== undefined
         ) {
           continue;
         }
@@ -651,6 +697,7 @@ export async function dispatchDueRoutines(
     }
   }
   synchronizeRoutineTargets({
+    ...(input.logger === undefined ? {} : { logger: input.logger }),
     now,
     projects: input.projects,
     recomputeSchedulesFromNow: input.recomputeSchedulesFromNow === true,
@@ -738,6 +785,45 @@ export async function dispatchDueRoutines(
         }
         continue;
       }
+      // A parked event that outlived its own clock never fires late: the
+      // successor event supersedes it, so it settles as a missed run
+      // whatever the current capacity looks like (ADR 0093).
+      const deferral = input.runStore.getRoutineTargetDeferral({
+        name: routine.name,
+        projectName: project.name,
+        scheduledAt
+      });
+      if (
+        deferral !== undefined &&
+        now.getTime() >=
+          new Date(deferralDeadline(routine, scheduledAt)).getTime()
+      ) {
+        if (
+          recordMissedRoutineFiring(input.runStore, {
+            evaluation,
+            fanoutId,
+            now,
+            projectName: project.name,
+            reason: deferral.reason,
+            routine,
+            scheduledAt
+          })
+        ) {
+          logRoutineMiss(input.logger, {
+            deferral,
+            projectName: project.name,
+            reason: deferral.reason,
+            routine: routine.name,
+            scheduledAt
+          });
+          missed.push({
+            projectName: project.name,
+            reason: deferral.reason,
+            routineName: routine.name
+          });
+        }
+        continue;
+      }
       if (
         !routine.allowOverlap &&
         input.runStore.hasActiveRoutineFiring({
@@ -819,55 +905,71 @@ export async function dispatchDueRoutines(
         });
         continue;
       }
-      const pressureReason = hostPressureSkipReason(input.hostPressure);
-      if (pressureReason !== null) {
-        if (
-          recordDueRoutineSkip(input.runStore, {
-            evaluation,
-            fanoutId,
-            now,
-            projectName: project.name,
-            reason: "host_pressure",
-            routine
-          })
-        ) {
-          logRoutineSkip(input.logger, {
-            reason: "host_pressure",
-            routine: routine.name,
-            scheduledAt: routine.nextFireAt ?? now.toISOString()
-          });
-          skipped.push({
-            projectName: project.name,
-            reason: "host_pressure",
-            routineName: routine.name
-          });
-        }
-        continue;
-      }
-      const capReason = capSkipReason(
-        input.activeRuns,
-        input.globalConcurrency,
+      // A capacity refusal is transient, so it parks the clock event rather
+      // than consuming it: the target keeps retrying every tick until a slot
+      // frees or its own event lapses. Routine dispatch runs ahead of fresh
+      // issue dispatch in the daemon tick, and a persisted deferral also gets
+      // a pre-pass ahead of PR review follow-up, so neither can take the slot
+      // it is already waiting for (ADRs 0093 and 0094).
+      const capacityReason = capacityRefusalReason({
+        activeRuns: input.activeRuns,
+        globalConcurrency: input.globalConcurrency,
+        ...(input.hostPressure === undefined
+          ? {}
+          : { hostPressure: input.hostPressure }),
         project
-      );
-      if (capReason !== null) {
+      });
+      if (capacityReason !== null) {
+        const deadline = deferralDeadline(routine, scheduledAt);
+        if (now.getTime() < new Date(deadline).getTime()) {
+          if (
+            input.runStore.deferRoutineFanoutTarget({
+              deferredAt: now.toISOString(),
+              fanoutId,
+              name: routine.name,
+              projectName: project.name,
+              reason: capacityReason
+            })
+          ) {
+            input.logger?.info(
+              {
+                deferred_until: deadline,
+                project: project.name,
+                reason: capacityReason,
+                routine: routine.name,
+                scheduled_at: scheduledAt
+              },
+              "routine.deferred"
+            );
+            deferred.push({
+              projectName: project.name,
+              reason: capacityReason,
+              routineName: routine.name
+            });
+          }
+          continue;
+        }
         if (
-          recordDueRoutineSkip(input.runStore, {
+          recordMissedRoutineFiring(input.runStore, {
             evaluation,
             fanoutId,
             now,
             projectName: project.name,
-            reason: "concurrency_cap",
-            routine
+            reason: capacityReason,
+            routine,
+            scheduledAt
           })
         ) {
-          logRoutineSkip(input.logger, {
-            reason: "concurrency_cap",
-            routine: routine.name,
-            scheduledAt: routine.nextFireAt ?? now.toISOString()
-          });
-          skipped.push({
+          logRoutineMiss(input.logger, {
+            ...(deferral === undefined ? {} : { deferral }),
             projectName: project.name,
-            reason: "concurrency_cap",
+            reason: capacityReason,
+            routine: routine.name,
+            scheduledAt
+          });
+          missed.push({
+            projectName: project.name,
+            reason: capacityReason,
             routineName: routine.name
           });
         }
@@ -1004,7 +1106,7 @@ export async function dispatchDueRoutines(
     () => deliverReadyRoutineFanouts(input),
     { scope: "routine_fanout" }
   );
-  return { fired, skipped };
+  return { deferred, fired, missed, skipped };
 }
 
 type RoutineFiringResult = {
@@ -1615,27 +1717,39 @@ async function runRoutineFiring(input: {
       input.routine.kind,
       githubSnapshotSince
     );
+    let failureCommitsInspectionTimedOut = false;
     const commitsAhead =
       prepared === undefined
         ? false
         : await cancellation
             .race(
-              inspectRoutineCommitsAhead({
-                baseBranch: input.project.workspace.git.base_branch,
-                kind: input.routine.kind,
-                logger: input.logger,
-                routineName: input.routine.name,
-                inspectWorkspaceCommitsAhead:
-                  input.inspectWorkspaceCommitsAhead,
-                workspacePath: prepared.workspacePath
-              })
+              deadline.race(
+                inspectRoutineCommitsAhead({
+                  baseBranch: input.project.workspace.git.base_branch,
+                  kind: input.routine.kind,
+                  logger: input.logger,
+                  routineName: input.routine.name,
+                  inspectWorkspaceCommitsAhead:
+                    input.inspectWorkspaceCommitsAhead,
+                  workspacePath: prepared.workspacePath
+                })
+              )
             )
-            .catch(() => false);
+            .catch((inspectionError: unknown) => {
+              if (inspectionError instanceof RoutineFiringTimeoutError) {
+                failureCommitsInspectionTimedOut = true;
+                // The inspection is now unknown, so preserve the workspace
+                // under Routine Workspace Retention's conservative rule.
+                return true;
+              }
+              return false;
+            });
     // Re-read after the Git subprocess for the same reason as the try path.
-    // Either timeout signal still wins over a cancellation that arrived
+    // Any timeout signal still wins over a cancellation that arrived
     // during snapshot capture or commit inspection.
     const completionCancelEntry = input.activeRuns.get(input.firingId);
-    const timeoutWon = timedOut || failureSnapshotTimedOut;
+    const timeoutWon =
+      timedOut || failureSnapshotTimedOut || failureCommitsInspectionTimedOut;
     const finalCancelOutcome = timeoutWon
       ? undefined
       : routineCancelOutcome([
@@ -2505,6 +2619,40 @@ function hostPressureSkipReason(
   return hostPressure.reason;
 }
 
+// Host pressure outranks the count caps: a stalled host has no capacity to
+// give even when the caps leave headroom (ADR 0088).
+function capacityRefusalReason(input: {
+  activeRuns: ActiveRunRegistry;
+  globalConcurrency: { maxInFlight: number | undefined };
+  hostPressure?: HostPressureVerdict;
+  project: RunControllerProjectConfig;
+}): RoutineDeferralReason | null {
+  if (hostPressureSkipReason(input.hostPressure) !== null) {
+    return "host_pressure";
+  }
+  return capSkipReason(
+    input.activeRuns,
+    input.globalConcurrency,
+    input.project
+  ) === null
+    ? null
+    : "concurrency_cap";
+}
+
+// How long a parked clock event stays retryable. A recurring Routine defers
+// until its own next event is due — that event supersedes the parked one, so
+// carrying the old one further would double-fire. A one-shot Routine has no
+// successor to bound it, so it gets an explicit horizon instead.
+function deferralDeadline(routine: RoutineStatus, scheduledAt: string): string {
+  const schedule = routineSchedule(routine);
+  if ("cron" in schedule) {
+    return nextRecurringFireAt(schedule, new Date(scheduledAt));
+  }
+  return new Date(
+    new Date(scheduledAt).getTime() + ONE_SHOT_DEFERRAL_HORIZON_MS
+  ).toISOString();
+}
+
 function capSkipReason(
   activeRuns: ActiveRunRegistry,
   globalConcurrency: { maxInFlight: number | undefined },
@@ -2587,6 +2735,78 @@ function recordDueRoutineSkip(
     projectName: input.projectName,
     reason: input.reason
   });
+}
+
+function recordMissedRoutineFiring(
+  runStore: RunStore,
+  input: {
+    evaluation: Extract<RoutineScheduleEvaluation, { kind: "fire_now" }>;
+    fanoutId: string;
+    now: Date;
+    projectName: string;
+    reason: RoutineDeferralReason;
+    routine: RoutineStatus;
+    scheduledAt: string;
+  }
+): boolean {
+  const nextFireAt = missedClockAdvance(input);
+  return runStore.missRoutineFiring({
+    attemptedAt: input.now.toISOString(),
+    fanoutId: input.fanoutId,
+    name: input.routine.name,
+    ...(nextFireAt === undefined ? {} : { nextFireAt }),
+    projectName: input.projectName,
+    reason: input.reason
+  });
+}
+
+// Where the clock lands once a parked event is recorded as missed. The event
+// that ended the wait is the successor of the parked one, and it has had no
+// admission attempt of its own — handing the clock to it, rather than to the
+// next event after `now`, is what stops one lost run from silently costing
+// two. A backlog older than a whole period still collapses to the next future
+// event, exactly as a skip's advance does (ADR 0058).
+function missedClockAdvance(input: {
+  evaluation: Extract<RoutineScheduleEvaluation, { kind: "fire_now" }>;
+  now: Date;
+  routine: RoutineStatus;
+  scheduledAt: string;
+}): string | undefined {
+  if (input.evaluation.nextAt === undefined) {
+    return undefined;
+  }
+  const schedule = routineSchedule(input.routine);
+  if (!("cron" in schedule)) {
+    return input.evaluation.nextAt;
+  }
+  const successor = nextRecurringFireAt(schedule, new Date(input.scheduledAt));
+  const afterSuccessor = nextRecurringFireAt(schedule, new Date(successor));
+  return input.now.getTime() < new Date(afterSuccessor).getTime()
+    ? successor
+    : input.evaluation.nextAt;
+}
+
+function logRoutineMiss(
+  logger: Logger | undefined,
+  input: {
+    deferral?: { attempts: number; since: string };
+    projectName: string;
+    reason: RoutineDeferralReason;
+    routine: string;
+    scheduledAt: string;
+  }
+): void {
+  logger?.warn(
+    {
+      deferred_attempts: input.deferral?.attempts ?? 0,
+      deferred_since: input.deferral?.since ?? input.scheduledAt,
+      project: input.projectName,
+      reason: input.reason,
+      routine: input.routine,
+      scheduled_at: input.scheduledAt
+    },
+    "routine.missed"
+  );
 }
 
 function logRoutineSkip(

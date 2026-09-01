@@ -26,6 +26,7 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "../src/workspace.js";
+import { abortSignalMatcher } from "./helpers/abort-signal.js";
 import {
   createGitWorkspaceAhead,
   createGitWorkspaceAtBase
@@ -190,6 +191,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:claimed"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],
@@ -199,6 +201,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:running"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ]
@@ -870,6 +873,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:claimed"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],
@@ -879,6 +883,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:running"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],
@@ -1469,6 +1474,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:claimed"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],
@@ -1478,6 +1484,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:running"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],

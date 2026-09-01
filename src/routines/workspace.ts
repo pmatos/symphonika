@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   ensureRepositoryCache,
   git,
+  gitSucceeds,
   isAbortError,
   WorkspacePreparationCleanupError,
   type WorkspaceProject
@@ -286,24 +287,6 @@ async function isRoutineWorktreeRegistered(
       path.resolve(line.slice("worktree ".length)) === expectedPath
     );
   });
-}
-
-async function gitSucceeds(
-  args: string[],
-  signal?: AbortSignal
-): Promise<boolean> {
-  try {
-    await git(args, signal);
-    return true;
-  } catch (error) {
-    if (
-      isAbortError(error) ||
-      error instanceof WorkspacePreparationCleanupError
-    ) {
-      throw error;
-    }
-    return false;
-  }
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

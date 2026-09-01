@@ -95,6 +95,7 @@ import {
   computeReferencedRealPaths,
   resolveConfinedWritePath
 } from "./path-safety.js";
+import type { WatchdogConfig } from "./reload.js";
 import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
@@ -494,6 +495,14 @@ export async function startDaemon(
       ? {}
       : { readPressure: options.readHostPressure })
   });
+  const watchdogConfigFor = (
+    projectName: string
+  ): WatchdogConfig | undefined => {
+    const serviceConfig = runtimeConfig.watchdogServiceConfig();
+    return serviceConfig === undefined
+      ? undefined
+      : resolveWatchdogConfig(serviceConfig, projectName);
+  };
   const enqueueScheduledWork = (work: () => Promise<void>): void => {
     scheduledWork = scheduledWork.then(work, work);
     void scheduledWork;
@@ -511,6 +520,11 @@ export async function startDaemon(
     globalConcurrencyLoader,
     hostPressureGate,
     logger,
+    onWatchdogTerminated: (run) => {
+      daemonHealthNotifications.notifyWatchdogTerminations([
+        { ...run, kind: "issue_run" }
+      ]);
+    },
     projectsLoader,
     providersLoader,
     pullRequestPolicyLoader,
@@ -544,6 +558,10 @@ export async function startDaemon(
       });
     },
     stateRoot: state.stateRoot,
+    // An unavailable policy (no valid runtime snapshot ever loaded) arms no
+    // deadline rather than falling back to the default cap. See ADR 0092.
+    watchdogConfigLoader: (projectName) =>
+      watchdogConfigFor(projectName) ?? { enabled: false, maxRunMinutes: 0 },
     ...(options.createRunId === undefined
       ? {}
       : { createRunId: options.createRunId }),
@@ -1031,6 +1049,78 @@ export async function startDaemon(
             retentionMutex.release();
           }
         }
+        const dispatchRoutines = async (): Promise<
+          Awaited<ReturnType<typeof dispatchDueRoutines>>
+        > => {
+          const recomputeSchedulesFromNow = recomputeRoutineSchedulesFromNow;
+          recomputeRoutineSchedulesFromNow = false;
+          return dispatchDueRoutines({
+            activeRuns,
+            agentProviders,
+            configDir: state.configDir,
+            ...(options.createRoutineFanoutId === undefined
+              ? {}
+              : { createFanoutId: options.createRoutineFanoutId }),
+            ...(options.createRoutineFiringId === undefined
+              ? {}
+              : { createFiringId: options.createRoutineFiringId }),
+            env,
+            globalConcurrency: runtimeConfig.globalConcurrency(),
+            githubIssuesApi,
+            hostPressure: hostPressureGate.current(),
+            logger,
+            notification: {
+              createSink: (config) =>
+                options.notificationSink ??
+                createSmtpNotificationSink(config, { env }),
+              deliveries: routineNotificationDeliveries,
+              // Resolved at delivery time so a reload mid-firing is honored
+              // for that firing's own notification (ADR 0067).
+              resolveConfig: () => runtimeConfig.emailConfig()
+            },
+            ...(options.prepareRoutineWorkspace === undefined
+              ? {}
+              : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),
+            projects: runtimeConfig.projectsByName(),
+            providersConfig: runtimeConfig.providersConfig(),
+            recomputeSchedulesFromNow,
+            runStore,
+            stateRoot: state.stateRoot
+          });
+        };
+        const routineActionEndsTick = (
+          result: Awaited<ReturnType<typeof dispatchDueRoutines>>
+        ): boolean => {
+          if (result.fired.length > 0) {
+            logger.info(
+              { fired: result.fired.length },
+              "symphonika routine firing action completed"
+            );
+            return true;
+          }
+          // Recording a miss hands the clock to a successor event that is
+          // due right now and has had no admission attempt (ADR 0093).
+          // Ending the tick preserves that successor's first refusal.
+          if (result.missed.length > 0) {
+            logger.info(
+              { missed: result.missed.length },
+              "symphonika routine miss recorded; deferring issue dispatch"
+            );
+            return true;
+          }
+          return false;
+        };
+        let routineResult:
+          Awaited<ReturnType<typeof dispatchDueRoutines>> | undefined;
+        // A newly due Routine still yields to PR review follow-up. Once a
+        // capacity refusal has parked its clock event, however, retry it
+        // before admitting another review Run against the same shared slots.
+        if (runStore.hasParkedRoutineDeferral()) {
+          routineResult = await dispatchRoutines();
+          if (routineActionEndsTick(routineResult)) {
+            return;
+          }
+        }
         const now = Date.now();
         let prResult: Awaited<ReturnType<typeof runPullRequestFollowup>>;
         if (
@@ -1101,48 +1191,12 @@ export async function startDaemon(
           prResult.action === "merged"
         ) {
           logger.info(prResult, "symphonika PR follow-up action completed");
+        }
+        if (prResult.action === "review_dispatch") {
           return;
         }
-        const recomputeSchedulesFromNow = recomputeRoutineSchedulesFromNow;
-        recomputeRoutineSchedulesFromNow = false;
-        const routineResult = await dispatchDueRoutines({
-          activeRuns,
-          agentProviders,
-          configDir: state.configDir,
-          ...(options.createRoutineFanoutId === undefined
-            ? {}
-            : { createFanoutId: options.createRoutineFanoutId }),
-          ...(options.createRoutineFiringId === undefined
-            ? {}
-            : { createFiringId: options.createRoutineFiringId }),
-          env,
-          globalConcurrency: runtimeConfig.globalConcurrency(),
-          githubIssuesApi,
-          hostPressure: hostPressureGate.current(),
-          logger,
-          notification: {
-            createSink: (config) =>
-              options.notificationSink ??
-              createSmtpNotificationSink(config, { env }),
-            deliveries: routineNotificationDeliveries,
-            // Resolved at delivery time so a reload mid-firing is honored
-            // for that firing's own notification (ADR 0067).
-            resolveConfig: () => runtimeConfig.emailConfig()
-          },
-          ...(options.prepareRoutineWorkspace === undefined
-            ? {}
-            : { prepareRoutineWorkspace: options.prepareRoutineWorkspace }),
-          projects: runtimeConfig.projectsByName(),
-          providersConfig: runtimeConfig.providersConfig(),
-          recomputeSchedulesFromNow,
-          runStore,
-          stateRoot: state.stateRoot
-        });
-        if (routineResult.fired.length > 0) {
-          logger.info(
-            { fired: routineResult.fired.length },
-            "symphonika routine firing action completed"
-          );
+        routineResult ??= await dispatchRoutines();
+        if (routineActionEndsTick(routineResult)) {
           return;
         }
         const snapshot = runtimeConfig.getSnapshot();
@@ -1377,7 +1431,7 @@ export async function startDaemon(
       // an accepted firing uses the current prompt and provider declaration.
       await reloadConfigAndRecordOutcome();
       const projects = runtimeConfig.projectsByName();
-      synchronizeRoutineTargets({ projects, runStore });
+      synchronizeRoutineTargets({ logger, projects, runStore });
       // Re-sample for the same reason the snapshot is reloaded above: a
       // manual fire is its own admission boundary and must not ride the tick
       // cadence. `current()` applies no TTL, so between ticks it can hand
@@ -1715,12 +1769,7 @@ export async function startDaemon(
       }
     },
     getRuns: () => runStore.listRuns(),
-    getWatchdogConfig: (projectName) => {
-      const serviceConfig = runtimeConfig.watchdogServiceConfig();
-      return serviceConfig === undefined
-        ? undefined
-        : resolveWatchdogConfig(serviceConfig, projectName);
-    },
+    getWatchdogConfig: watchdogConfigFor,
     getScheduled: () => activeRuns.peekDelayed(),
     getStatusSnapshot: () =>
       buildStatusSnapshot({

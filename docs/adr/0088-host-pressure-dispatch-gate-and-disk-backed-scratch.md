@@ -163,3 +163,8 @@ of them at once with `oom_kill 0`. The aggregate reading above survives: the sli
   tmpfs gains nothing from this change; the default (`~/.local/state/symphonika`) is disk-backed.
 - `RoutineSkipReason` gains `host_pressure`, which widens the skip-count record persisted per
   Routine and shown on the dashboard, the `symphonika routines` table and `/api/status`.
+
+**Amended by ADR 0093.** `host_pressure` is a capacity refusal, not a policy skip: a stalled host
+means no capacity *right now*, so the due clock event is deferred and retried rather than consumed,
+and it reaches this ADR's counter only once the deferral outlives its own event and is recorded as
+a missed run.

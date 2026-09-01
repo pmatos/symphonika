@@ -66,7 +66,7 @@ describe("autonomous prompt rendering", () => {
 
     expect(rendered).toMatchInlineSnapshot(`
       {
-        "preambleVersion": "autonomy-preamble-v2",
+        "preambleVersion": "autonomy-preamble-v3",
         "prompt": "# Autonomous run instructions
 
       You are running as an autonomous full-permission coding worker. No operator will respond to prompts, approve tool calls, or read intermediate output during this run; behaviour that depends on a human answering mid-run is a failure mode.
@@ -78,6 +78,8 @@ describe("autonomous prompt rendering", () => {
       2. **Never request approval at runtime.** Use the local gh CLI (\`gh issue ...\`, \`gh pr ...\`, \`gh issue comment ...\`, \`gh issue edit ...\`) for every GitHub mutation — issues, pull requests, comments, labels. Do not call the GitHub MCP connector tools (for example \`add_issue_labels\`, \`create_pull_request\`) — those tools elicit per-call operator approval through the provider transport, which Symphonika classifies as \`input_required\` and ends the run with \`terminal_reason="provider requested input"\`.
       3. **Do not self-apply \`needs-human\` as an exit strategy.** If you cannot proceed at all, post an explanatory comment with \`gh issue comment\` describing what blocked you and what would unblock it, then exit cleanly without applying handoff labels. The operator may still apply \`needs-human\` from outside the run; that is unchanged.
       4. **Branch and PR hygiene.** Commit, push, and open the PR via \`gh pr create\` with explicit non-interactive flags (\`--base\`, \`--head\`, \`--title\`, \`--body\`). Do not use \`--web\` or any other flag that opens a browser or waits for input.
+      5. **Build inside the memory budget.** Spawned providers usually share one memory cap across every concurrent attempt on the host, and exceeding it OOM-kills whole process trees — possibly another attempt's rather than yours — so a build that is merely slow is survivable where a greedy one is not. Cap build parallelism explicitly instead of letting a tool default to the host's core count, sizing it for the share you actually have rather than for the whole machine (\`ninja -jN\`, \`make -jN\`, \`cargo build -jN\`, \`CMAKE_BUILD_PARALLEL_LEVEL=N\`); skip debug info when nothing will read a backtrace, and build only the targets the task needs.
+      6. **Keep scratch under \`$TMPDIR\`.** It is set aside and cleaned up for you per attempt. A hardcoded \`/tmp/...\` path escapes that, and on a host whose \`/tmp\` is a tmpfs it spends memory from the same budget as the build.
 
       ## Previous-attempt workspace
 
@@ -147,7 +149,7 @@ describe("autonomous prompt rendering", () => {
       `Provider command ${DEFAULT_CODEX_COMMAND} with labels ["agent-ready"].`
     );
     expect(rendered.prompt).toContain("gh CLI");
-    expect(rendered.preambleVersion).toBe("autonomy-preamble-v2");
+    expect(rendered.preambleVersion).toBe("autonomy-preamble-v3");
   });
 
   it("fails rendering when the workflow references an unknown variable", () => {
@@ -308,7 +310,7 @@ describe("autonomous prompt rendering", () => {
       await readFile(evidence.metadataPath, "utf8")
     );
     expect(metadata).toMatchObject({
-      autonomy_preamble_version: "autonomy-preamble-v2",
+      autonomy_preamble_version: "autonomy-preamble-v3",
       branch: input.branch,
       provider: input.provider,
       project: input.project,

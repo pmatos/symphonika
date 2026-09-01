@@ -1322,7 +1322,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           );
           writeOut(
             program,
-            "  project  state  latest_outcome  disabled_reason  next_fire_at  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
+            "  project  state  latest_outcome  disabled_reason  next_fire_at  deferred  last_fired_at  last_attempted_at  last_skip_reason  last_skip_at  skips_24h  pull_requests\n"
           );
           for (const routine of targets) {
             writeOut(
@@ -1338,6 +1338,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
                     ),
                 routine.disabledReason ?? "-",
                 routine.nextFireAt ?? "-",
+                formatRoutineDeferral(routine.deferral),
                 routine.lastFiredAt ?? "-",
                 routine.lastAttemptedAt ?? "-",
                 routine.lastSkipReason ?? "-",
@@ -2783,6 +2784,12 @@ function formatRoutinePullRequestNumbers(numbers: number[]): string {
   return numbers.length === 0
     ? "-"
     : numbers.map((number) => `#${number}`).join(",");
+}
+
+function formatRoutineDeferral(deferral: RoutineStatus["deferral"]): string {
+  return deferral === null
+    ? "-"
+    : `${deferral.reason}x${deferral.attempts}@${deferral.since}`;
 }
 
 function formatRoutineSkipCounts(

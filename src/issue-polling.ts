@@ -10,8 +10,19 @@ import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 export type GitHubIssueRepositoryInput = {
   owner: string;
   repo: string;
+  // Octokit carries cancellation under `request`, not at the top level, so
+  // every method sharing this base gets the same plumbing via requestOption.
+  signal?: AbortSignal;
   token: string;
 };
+
+function requestOption(input: { signal?: AbortSignal }): {
+  request?: { signal: AbortSignal };
+} {
+  return input.signal === undefined
+    ? {}
+    : { request: { signal: input.signal } };
+}
 
 export type GitHubIssuesListInput = GitHubIssueRepositoryInput & {
   since?: string;
@@ -288,7 +299,8 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       issue_number: input.issueNumber,
       labels: input.labels,
       owner: input.owner,
-      repo: input.repo
+      repo: input.repo,
+      ...requestOption(input)
     });
   }
 
@@ -429,6 +441,7 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
 
   async removeLabelsFromIssue(input: GitHubIssueLabelInput): Promise<void> {
     const octokit = this.octokit(input.token);
+    const request = requestOption(input);
     for (const label of input.labels) {
       // Idempotent per label, inside the loop -- catching a 404 around
       // the whole multi-label call instead would abort on the first
@@ -438,7 +451,8 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
           issue_number: input.issueNumber,
           name: label,
           owner: input.owner,
-          repo: input.repo
+          repo: input.repo,
+          ...request
         })
       );
     }

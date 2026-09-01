@@ -34,6 +34,15 @@ export type RoutineSkipReason =
   // back regardless of how much count-headroom the caps left (ADR 0088).
   | "host_pressure";
 
+// The subset of skip reasons that mean "the host has no capacity right now"
+// rather than "this clock event is deliberately dropped". Capacity refusals
+// defer and retry instead of skipping, and count as a failed run once the
+// deferral outlives its clock event (ADR 0093).
+export type RoutineDeferralReason = Extract<
+  RoutineSkipReason,
+  "concurrency_cap" | "host_pressure"
+>;
+
 export type RoutineSchedule = { at: string } | { cron: string; tz: string };
 
 export type RoutineExecutionOverrides = {
@@ -72,9 +81,18 @@ export type RoutinePullRequestStatus = {
   routineName: string;
 };
 
+export type RoutineDeferralStatus = {
+  attempts: number;
+  reason: RoutineDeferralReason;
+  since: string;
+};
+
 export type RoutineStatus = {
   allowOverlap: boolean;
   catchUp: RoutineCatchUpPolicy;
+  // Set while this Target's due clock event is parked waiting for capacity
+  // (ADR 0093).
+  deferral: RoutineDeferralStatus | null;
   disabledReason: RoutineDisabledReason | null;
   kind: RoutineKind;
   latestOutcome: RoutineOutcome | null;

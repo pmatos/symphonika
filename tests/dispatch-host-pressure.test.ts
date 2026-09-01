@@ -190,7 +190,7 @@ describe("in-mutex claim under host pressure", () => {
 });
 
 describe("routine firing under host pressure", () => {
-  it("skips a due Routine and records the host_pressure reason", async () => {
+  it("defers a due Routine and records the host_pressure reason", async () => {
     const harness = await createRoutineHarness();
 
     const result = await dispatchDueRoutines({
@@ -216,14 +216,22 @@ describe("routine firing under host pressure", () => {
     });
 
     expect(result.fired).toEqual([]);
-    expect(result.skipped).toEqual([
+    expect(result.skipped).toEqual([]);
+    // A stalled host is a transient refusal like any other capacity
+    // refusal, so the due event waits for the host to recover instead of
+    // being dropped (ADR 0093).
+    expect(result.deferred).toEqual([
       { projectName: "alpha", reason: "host_pressure", routineName: "daily" }
     ]);
     const routine = harness.runStore.listRoutines({
       now: new Date("2026-05-22T10:00:02.000Z")
     })[0];
-    expect(routine?.lastSkipReason).toBe("host_pressure");
-    expect(routine?.skipCounts24h.host_pressure).toBe(1);
+    expect(routine?.deferral).toMatchObject({
+      attempts: 1,
+      reason: "host_pressure"
+    });
+    expect(routine?.lastSkipReason).toBe(null);
+    expect(routine?.skipCounts24h.host_pressure).toBe(0);
     expect(routine?.skipCounts24h.concurrency_cap).toBe(0);
   });
 

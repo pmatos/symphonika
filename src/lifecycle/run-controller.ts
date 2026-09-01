@@ -3792,10 +3792,14 @@ export class RunController {
     runId: string;
     sequence: number;
   }): Promise<void> {
-    // Stamped before the log appends, not after: the receipt is stall evidence
-    // about the provider transport, and awaiting two writes to a slow state
-    // root first would charge that latency to the provider. See ADR 0090.
-    const receivedAt = new Date().toISOString();
+    // Prefer the provider's own queue-ingestion stamp (set by adapters whose
+    // transport queue observes receipt independent of consumer speed, e.g.
+    // jsonl-process-queue.ts) over this method's own clock: awaiting a slow
+    // state-root write for the *previous* event before this one is even
+    // dequeued would otherwise charge that latency to this event's receipt
+    // time. The fallback covers orchestrator-synthesized events and adapters
+    // with no queue to timestamp. See ADR 0090.
+    const receivedAt = input.event.receivedAt ?? new Date().toISOString();
     await Promise.all([
       appendJsonl(input.rawLogPath, input.event.raw),
       ...(input.event.normalized === undefined

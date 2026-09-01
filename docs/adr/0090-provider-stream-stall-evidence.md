@@ -20,12 +20,27 @@ overwritten in place, which is why it is named for the receipt rather than for t
 A normalized event advances the same row inside the transaction that writes `provider_events`; a
 raw-only event advances it without fabricating a Normalized Event Log entry.
 
-The receipt timestamp is captured where the provider yields the event, not where the Run Store
-writes it. Persisting an event first appends to the raw and normalized evidence logs, so deriving
-the timestamp inside the store would time the state root's writes rather than the provider's
-transport: a five-minute append would be persisted as a five-minute recovered stall, and slower
-writes would inflate every later gap. `receivedAt` is therefore a required input to both Run Store
-receipt methods; the store never invents this clock.
+The receipt timestamp is captured where the provider's transport queue ingests the event, not where
+the Run Store writes it, and — for the Codex and Claude adapters, which share
+`jsonl-process-queue.ts` — not merely where the orchestrator's consumer loop happens to resume
+either. Persisting an event first appends to the raw and normalized evidence logs, so deriving the
+timestamp inside the store would time the state root's writes rather than the provider's transport: a
+five-minute append would be persisted as a five-minute recovered stall, and slower writes would
+inflate every later gap. `receivedAt` is therefore a required input to both Run Store receipt
+methods; the store never invents this clock.
+
+That alone is not sufficient: `RunController.iterateAttempt` only requests the next event from a
+provider's async generator after awaiting persistence of the current one, and the shared queue's
+`push()` — called synchronously from the child process's stdout/error/close handlers — can already
+hold several items in its internal buffer by the time the generator is resumed to hand them off. A
+timestamp taken at hand-off time would therefore still be delayed by the previous event's write
+latency, one event later than the case above. `push()` is stamped at the moment it runs, which is the
+one point in the pipeline genuinely decoupled from consumer speed, and that stamp — not a
+consumption-time clock — is threaded through as `ProviderEvent.receivedAt`. It is optional on that
+type (unlike the Run Store's own inputs) because `ProviderEvent` is the wide provider→orchestrator
+contract every test double also constructs; forcing a transport-receipt timestamp onto adapters and
+fakes with no real queue to timestamp would assert something false about them. `persistProviderEvent`
+falls back to its own clock only when a `ProviderEvent` carries no queue-sourced stamp.
 
 On upgrade, the newest
 existing normalized event per Attempt seeds the receipt row, once, on the first open that finds the
@@ -67,6 +82,11 @@ operators can measure duration distributions without parsing logs.
 - Existing Normalized Event Log evidence seeds last-receipt state after upgrade, but historical
   recovered durations are not synthesized from normalized rows because raw-only receipts were not
   previously durable.
+- The queue-ingestion `receivedAt` fix covers the Codex and Claude adapters, which share
+  `jsonl-process-queue.ts`. The OMP adapter keeps its own, structurally similar but more complex
+  queue (`createProcessQueue` in `omp.ts`, with its own backpressure and frame-reassembly logic) and
+  was left out of this change's scope; it still derives `receivedAt` from consumption time and so
+  retains the residual gap this ADR describes. Tracked as a follow-up.
 
 ## Interaction with existing decisions
 

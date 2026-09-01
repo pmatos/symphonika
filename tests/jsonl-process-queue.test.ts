@@ -153,8 +153,16 @@ describe("createJsonlProcessQueue", () => {
 
     stdout.emit("data", '{"a":1}\n{"b":2}\n');
 
-    expect(await queue.next()).toEqual({ kind: "message", raw: { a: 1 } });
-    expect(await queue.next()).toEqual({ kind: "message", raw: { b: 2 } });
+    expect(await queue.next()).toEqual({
+      kind: "message",
+      raw: { a: 1 },
+      receivedAt: expect.any(String) as string
+    });
+    expect(await queue.next()).toEqual({
+      kind: "message",
+      raw: { b: 2 },
+      receivedAt: expect.any(String) as string
+    });
   });
 
   it("reassembles a line delivered across multiple data chunks", async () => {
@@ -166,7 +174,8 @@ describe("createJsonlProcessQueue", () => {
 
     expect(await queue.next()).toEqual({
       kind: "message",
-      raw: { split: true }
+      raw: { split: true },
+      receivedAt: expect.any(String) as string
     });
   });
 
@@ -179,7 +188,8 @@ describe("createJsonlProcessQueue", () => {
 
     expect(await queue.next()).toEqual({
       kind: "message",
-      raw: { tail: true }
+      raw: { tail: true },
+      receivedAt: expect.any(String) as string
     });
   });
 
@@ -189,7 +199,11 @@ describe("createJsonlProcessQueue", () => {
 
     stdout.emit("data", '\n   \n{"kept":1}\n');
 
-    expect(await queue.next()).toEqual({ kind: "message", raw: { kept: 1 } });
+    expect(await queue.next()).toEqual({
+      kind: "message",
+      raw: { kept: 1 },
+      receivedAt: expect.any(String) as string
+    });
   });
 
   it("emits a malformed item for a line that is not valid JSON, trimming trailing whitespace", async () => {
@@ -230,7 +244,8 @@ describe("createJsonlProcessQueue", () => {
     expect(await queue.next()).toEqual({
       exitCode: 0,
       kind: "exit",
-      signal: null
+      signal: null,
+      receivedAt: expect.any(String) as string
     });
   });
 
@@ -241,7 +256,11 @@ describe("createJsonlProcessQueue", () => {
 
     child.emit("error", error);
 
-    expect(await queue.next()).toEqual({ error, kind: "error" });
+    expect(await queue.next()).toEqual({
+      error,
+      kind: "error",
+      receivedAt: expect.any(String) as string
+    });
   });
 
   it("emits an exit item carrying the exit code and signal on close", async () => {
@@ -253,7 +272,8 @@ describe("createJsonlProcessQueue", () => {
     expect(await queue.next()).toEqual({
       exitCode: 2,
       kind: "exit",
-      signal: null
+      signal: null,
+      receivedAt: expect.any(String) as string
     });
   });
 
@@ -264,6 +284,42 @@ describe("createJsonlProcessQueue", () => {
     const pending = queue.next();
     stdout.emit("data", '{"late":true}\n');
 
-    expect(await pending).toEqual({ kind: "message", raw: { late: true } });
+    expect(await pending).toEqual({
+      kind: "message",
+      raw: { late: true },
+      receivedAt: expect.any(String) as string
+    });
+  });
+
+  it("stamps receivedAt at push time, not when a busy consumer finally calls next()", async () => {
+    // The regression this guards: a consumer that awaits a slow write before
+    // requesting the next item must not see that wait folded into the next
+    // item's own receipt time. Both items below are pushed five minutes
+    // apart while nothing has called next() yet -- exactly the "N and N+1
+    // both already queued before N is consumed" shape a slow persist creates
+    // upstream in run-controller.ts.
+    const { child, stdout } = fakeChild();
+    const queue = createJsonlProcessQueue(child);
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      stdout.emit("data", '{"a":1}\n');
+
+      vi.setSystemTime(new Date("2026-01-01T00:05:00.000Z"));
+      stdout.emit("data", '{"b":2}\n');
+
+      // The consumer only gets around to asking for either item well after
+      // both arrived.
+      vi.setSystemTime(new Date("2026-01-01T00:10:00.000Z"));
+
+      const first = await queue.next();
+      const second = await queue.next();
+
+      expect(first.receivedAt).toBe("2026-01-01T00:00:00.000Z");
+      expect(second.receivedAt).toBe("2026-01-01T00:05:00.000Z");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

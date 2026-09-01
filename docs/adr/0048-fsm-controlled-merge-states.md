@@ -72,8 +72,13 @@ policy that does not gate on them, or a protection dimension Symphonika's policy
 all). A 405 therefore parks with a bounded, counted retry — five ticks at the default poll interval
 — rather than terminalizing on the first refusal; only once the bound is exceeded does the Run
 terminate as `blocked` with an actionable `merge_pr_refused: PR #<number>: <message>` terminal
-reason. A tracker adapter that exposes no `mergePullRequest` capability has no such ambiguity and
-terminates on the first observation. These terminal paths are handled inside merge-state
+reason. The count lives in a dedicated `runs.merge_refusal_count` column rather than a
+`state_transition_reason`-encoded token: that field is overwritten by every other kind of merge_pr
+observation, so a token there would parse back to zero — and the bound would never trip — the
+moment a permanently refused merge alternates with any intervening non-405 tick (issue #635 review
+feedback on the first cut of this bound). A tracker adapter that exposes no `mergePullRequest`
+capability has no such ambiguity and terminates on the first observation. These terminal paths are
+handled inside merge-state
 observation before the ordinary `decideNextStep` guard; an unconditional workflow catch-all would
 be inverted because it cannot see hard failures and would match healthy readiness deferrals. The
 built-in therefore deliberately has no catch-all transition.

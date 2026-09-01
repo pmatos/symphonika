@@ -2218,14 +2218,17 @@ Lifecycle:
    GitHub documents HTTP 405 as "merge cannot be performed," but gives no machine-readable signal
    for whether that is durable or will clear once a pending condition resolves (e.g. required
    checks still running under a policy that does not gate on them). A 405 therefore parks with a
-   bounded, counted retry (`state_transition_reason = "merge_pr_refusal_parked:<attempt>"`, five
-   attempts at the default poll interval) rather than terminalizing on the first refusal; only once
-   the bound is exceeded does the Run terminate as `blocked`, recording
-   `merge_pr_refused: PR #<number>: <message>` as its actionable terminal reason and receiving
-   `sym:blocked`. A tracker adapter with no `mergePullRequest` capability has no such ambiguity and
-   is terminal on the first observation. Other merge API failures record the error in
-   `state_transition_reason` and stay parked so a later tick can retry transient transport,
-   service, or head-race failures.
+   bounded, counted retry (five attempts at the default poll interval) rather than terminalizing on
+   the first refusal; only once the bound is exceeded does the Run terminate as `blocked`,
+   recording `merge_pr_refused: PR #<number>: <message>` as its actionable terminal reason and
+   receiving `sym:blocked`. The count lives in a dedicated `runs.merge_refusal_count` column, not a
+   `state_transition_reason`-encoded token: that field is overwritten by every other kind of
+   merge_pr observation (a policy-disabled or not-yet-ready tick, a transient non-405 failure), so
+   a token there would parse back to zero the moment a permanently refused merge alternates with
+   any intervening non-405 tick, defeating the bound. A tracker adapter with no `mergePullRequest`
+   capability has no such ambiguity and is terminal on the first observation. Other merge API
+   failures record the error in `state_transition_reason` and stay parked so a later tick can retry
+   transient transport, service, or head-race failures.
 5. Successful merge transitions advancing into a terminal state record the terminal as
    `succeeded`, exactly like wait-state terminals. Deferred or missing-PR outcomes remain parked;
    deterministic merge refusals terminate as `blocked`; every outcome records

@@ -1497,6 +1497,22 @@ export class RunStore {
     return row?.retry_count ?? 0;
   }
 
+  // A dedicated column rather than a state_transition_reason-encoded token:
+  // that field is overwritten by every kind of merge_pr observation (a
+  // policy-disabled or not-yet-ready tick, a transient non-405 failure), so
+  // a park-with-count token there would parse back to zero the moment a
+  // permanently refused merge alternates with any intervening non-405
+  // observation — the exact way SPEC.md's bounded-attempt contract could be
+  // defeated (issue #635 review feedback on the first cut of this bound).
+  incrementMergeRefusalCount(runId: string): number {
+    const updated = this.database
+      .prepare(
+        "update runs set merge_refusal_count = merge_refusal_count + 1, updated_at = ? where id = ? returning merge_refusal_count"
+      )
+      .get(timestamp(), runId) as { merge_refusal_count: number } | undefined;
+    return updated?.merge_refusal_count ?? 0;
+  }
+
   isContinuationRun(runId: string): boolean {
     const row = this.database
       .prepare("select is_continuation from runs where id = ?")
@@ -6218,6 +6234,7 @@ export class RunStore {
       ["runs", "evidence_ignore_json", "text not null default '[]'"],
       ["runs", "continuation_parent_run_id", "text"],
       ["runs", "retry_count", "integer not null default 0"],
+      ["runs", "merge_refusal_count", "integer not null default 0"],
       ["runs", "failure_classification", "text"],
       ["runs", "terminal_reason", "text"],
       ["runs", "cancel_requested", "integer not null default 0"],

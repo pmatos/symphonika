@@ -1456,7 +1456,6 @@ export class RunController {
     projectName: string;
     repository: GitHubIssueRepositoryInput;
     runId: string;
-    stateTransitionReason: string | null;
     waitState: ExpandedWorkflowState;
   }): Promise<WaitObservation | undefined> {
     const { isMergePr, repository, runId, waitState } = input;
@@ -1591,12 +1590,11 @@ export class RunController {
           const message =
             error instanceof Error ? error.message : String(error);
           if (isPermanentMergeRefusal(error)) {
-            const attempt =
-              parseMergeRefusalParkCount(input.stateTransitionReason) + 1;
+            const attempt = this.runStore.incrementMergeRefusalCount(runId);
             if (attempt < MAX_MERGE_REFUSAL_ATTEMPTS) {
               this.runStore.recordWaitingActivity(
                 runId,
-                buildMergeRefusalParkedReason(attempt)
+                `merge_pr refused for PR #${tracked.prNumber} (attempt ${attempt}/${MAX_MERGE_REFUSAL_ATTEMPTS}): ${message}`
               );
               this.logger?.warn(
                 { attempt, err: error, prNumber: tracked.prNumber, runId },
@@ -1714,7 +1712,6 @@ export class RunController {
       projectName: row.project,
       repository,
       runId,
-      stateTransitionReason: row.stateTransitionReason,
       waitState
     });
     if (observation === undefined) {
@@ -5111,25 +5108,15 @@ function isPermanentMergeRefusal(error: unknown): boolean {
   );
 }
 
-const MERGE_REFUSAL_PARK_PREFIX = "merge_pr_refusal_parked:";
-
 // Five ticks at the default 30s poll interval (issue-polling.ts's
 // DEFAULT_POLLING_INTERVAL_MS) is a couple of minutes — enough room for
 // pending required checks to finish without parking indefinitely the way a
-// bare "retry forever" would.
+// bare "retry forever" would. Counted in RunStore.merge_refusal_count, a
+// dedicated column rather than a state_transition_reason-encoded token: that
+// field is overwritten by every other kind of merge_pr observation, so a
+// count parked there would reset to zero the moment a permanently refused
+// merge alternates with any intervening non-405 tick.
 const MAX_MERGE_REFUSAL_ATTEMPTS = 5;
-
-function buildMergeRefusalParkedReason(attempt: number): string {
-  return `${MERGE_REFUSAL_PARK_PREFIX}${attempt}`;
-}
-
-function parseMergeRefusalParkCount(reason: string | null): number {
-  if (reason === null || !reason.startsWith(MERGE_REFUSAL_PARK_PREFIX)) {
-    return 0;
-  }
-  const count = Number(reason.slice(MERGE_REFUSAL_PARK_PREFIX.length));
-  return Number.isInteger(count) && count > 0 ? count : 0;
-}
 
 // True when every predicate a wait state names can be answered without
 // observing a pull request: at least one artifact predicate, and nothing beyond

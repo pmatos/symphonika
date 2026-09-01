@@ -172,7 +172,12 @@ export function createCodexProvider(
       const child = spawnProviderProcess(
         command,
         input.workspacePath,
-        providerScratchEnvironment(input.scratchPath)
+        providerScratchEnvironment(
+          input.scratchPath,
+          input.globalMaxInFlight === undefined
+            ? undefined
+            : { globalMaxInFlight: input.globalMaxInFlight }
+        )
       );
       activeRun.child = child;
       const spawnedRun: SpawnedCodexRun = activeRun as SpawnedCodexRun;

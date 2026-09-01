@@ -10,6 +10,7 @@ import {
   defaultUserConfigPath,
   serviceEnvironmentFilePath
 } from "./config-paths.js";
+import { PROVIDER_SLICE_MEMORY_MAX_GIB } from "./lifecycle/provider-scratch.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -94,7 +95,7 @@ const PROVIDERS_SLICE_UNIT = [
   "# allocation for all of them at once without killing anything, which",
   "# stalled whole fan-outs for hours with oom_kill=0 (docs/adr/0089).",
   "# MemoryMax= kills; MemoryHigh= only stalls.",
-  "MemoryMax=32G",
+  `MemoryMax=${PROVIDER_SLICE_MEMORY_MAX_GIB}G`,
   "TasksMax=4096",
   "",
   "# Lower I/O weight than symphonika-daemon.slice (500): under contention",

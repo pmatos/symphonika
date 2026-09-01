@@ -710,6 +710,59 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("passes the global capacity to routine provider attempts", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const providerInputs: ProviderRunInput[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        providerInputs.push(input);
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const project = dueRoutineProjectFixture(root, "codex");
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-capacity",
+        globalConcurrency: { maxInFlight: 8 },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", project]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(providerInputs).toMatchObject([{ globalMaxInFlight: 8 }]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("rejects a routine command whose resolved overrides fail provider validation", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

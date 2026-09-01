@@ -14,10 +14,14 @@
 // owner that can delete them when the attempt ends. See ADR 0088.
 
 import { mkdir, readdir, rm } from "node:fs/promises";
+import { availableParallelism } from "node:os";
 import path from "node:path";
 
 /** State-root-relative directory holding every attempt's scratch space. */
 const PROVIDER_SCRATCH_DIRECTORY = "scratch";
+/** Generated provider-slice hard memory ceiling; shared with service.ts. */
+export const PROVIDER_SLICE_MEMORY_MAX_GIB = 32;
+const BUILD_JOB_PEAK_MEMORY_MIB = 1536;
 
 export type ProviderScratchIdentity = {
   attempt: number;
@@ -70,18 +74,52 @@ export async function removeProviderScratch(
 }
 
 /**
- * The environment a spawned provider gets so its temporary files land in
- * `scratchPath`. TMPDIR is what POSIX tooling reads; TMP and TEMP are set
- * alongside it because Node's own `os.tmpdir()` and a good deal of
- * cross-platform tooling consult them first.
+ * Resource environment for a spawned provider. Temporary files land in
+ * `scratchPath`: TMPDIR is what POSIX tooling reads, while Node's
+ * `os.tmpdir()` and cross-platform tools commonly consult TMP or TEMP first.
+ *
+ * When global concurrency is bounded, make and `cmake --build` also get the
+ * smaller of this attempt's CPU share and its share of the generated provider
+ * slice's hard memory budget. The 1.5 GiB per-job allowance is the measured
+ * peak from the C++ build incident behind #643. With an unbounded global cap,
+ * no honest per-attempt share exists and those variables stay unset.
  */
 export function providerScratchEnvironment(
-  scratchPath: string | undefined
-): NodeJS.ProcessEnv {
-  if (scratchPath === undefined) {
-    return {};
+  scratchPath: string | undefined,
+  capacity?: {
+    globalMaxInFlight: number;
+    hostParallelism?: number;
   }
-  return { TEMP: scratchPath, TMP: scratchPath, TMPDIR: scratchPath };
+): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  if (scratchPath !== undefined) {
+    environment.TEMP = scratchPath;
+    environment.TMP = scratchPath;
+    environment.TMPDIR = scratchPath;
+  }
+  if (capacity !== undefined) {
+    const concurrentAttempts = Math.max(
+      1,
+      Math.floor(capacity.globalMaxInFlight)
+    );
+    const memoryShare = Math.max(
+      1,
+      Math.floor(
+        (PROVIDER_SLICE_MEMORY_MAX_GIB * 1024) /
+          BUILD_JOB_PEAK_MEMORY_MIB /
+          concurrentAttempts
+      )
+    );
+    const hostJobs = Math.max(
+      1,
+      Math.floor(capacity.hostParallelism ?? availableParallelism())
+    );
+    const cpuShare = Math.max(1, Math.floor(hostJobs / concurrentAttempts));
+    const buildParallelism = Math.min(cpuShare, memoryShare);
+    environment.CMAKE_BUILD_PARALLEL_LEVEL = String(buildParallelism);
+    environment.MAKEFLAGS = `-j${buildParallelism}`;
+  }
+  return environment;
 }
 
 export type SweepProviderScratchReport = {

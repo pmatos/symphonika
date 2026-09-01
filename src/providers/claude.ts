@@ -124,7 +124,12 @@ export function createClaudeProvider(
         return;
       }
       const child = spawnProviderProcess(command, input.workspacePath, {
-        ...providerScratchEnvironment(input.scratchPath),
+        ...providerScratchEnvironment(
+          input.scratchPath,
+          input.globalMaxInFlight === undefined
+            ? undefined
+            : { globalMaxInFlight: input.globalMaxInFlight }
+        ),
         ...(input.routine === undefined
           ? {}
           : { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" })

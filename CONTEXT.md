@@ -421,6 +421,13 @@ temporary directory, removed when the attempt ends. Transient, never read back â
 evidence, which is also under the state root but retained.
 _Avoid_: workspace, evidence, cache
 
+**Provider Build Parallelism Ceiling**:
+The make/`cmake --build` job count injected into a spawned provider's environment when the Service
+Config declares a daemon-wide concurrency cap. It gives every possible concurrent attempt a
+conservative share of host CPU and the generated provider-slice memory budget; it is not a
+per-scope memory cap or general command interposition.
+_Avoid_: Host Pressure, concurrency cap, Ninja wrapper
+
 **Project credential inventory**:
 The set of credential values Symphonika itself resolves for one execution's Project â€” the effective
 tracker token, plus the value of the variable named by `email.smtp_password_env` whenever an email
@@ -540,6 +547,9 @@ _Avoid_: chat session
   Firing** alike; it never stops work already in flight
 - A **Provider Scratch** directory belongs to exactly one attempt of one **Run** or **Routine
   Firing**, and outlives neither
+- A **Provider Build Parallelism Ceiling** is derived from the global concurrency cap and applies
+  to every orchestrated issue Run, Routine Firing, or one-shot provider attempt; it does not change
+  dispatch admission
 - **Full-Permission Agent Execution** is the default and assumed provider posture
 - **Provider PID Isolation** bounds what an **Agent Provider** can see and signal without changing
   **Full-Permission Agent Execution**

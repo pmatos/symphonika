@@ -61,7 +61,7 @@ describe("daemon dispatch", () => {
       "issues",
       "8-dispatch-an-end-to-end-run-through-a-test-provider"
     );
-    await writeValidProject(root);
+    await writeValidProject(root, { globalMaxInFlight: 8 });
 
     const githubIssuesApi = {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
@@ -227,6 +227,7 @@ describe("daemon dispatch", () => {
       );
       expect(providerInputs).toHaveLength(1);
       expect(providerInputs[0]).toMatchObject({
+        globalMaxInFlight: 8,
         issue: {
           number: 8
         },
@@ -4752,7 +4753,11 @@ async function writeInitialStateClaudeRawFsmProject(
 
 async function writeValidProject(
   root: string,
-  options: { pollingIntervalMs?: number; smtpPasswordEnv?: string } = {}
+  options: {
+    globalMaxInFlight?: number;
+    pollingIntervalMs?: number;
+    smtpPasswordEnv?: string;
+  } = {}
 ): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
@@ -4761,6 +4766,9 @@ async function writeValidProject(
       "  root: ./.symphonika",
       "polling:",
       `  interval_ms: ${options.pollingIntervalMs ?? 30000}`,
+      ...(options.globalMaxInFlight === undefined
+        ? []
+        : ["global:", `  max_in_flight: ${options.globalMaxInFlight}`]),
       ...(options.smtpPasswordEnv === undefined
         ? []
         : [

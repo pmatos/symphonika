@@ -165,6 +165,29 @@ describe("watchdog wall-clock deadline surfaces", () => {
     }
   });
 
+  it("reports the actual deadline when the claim is future-dated", async () => {
+    const store = openRunStore({ stateRoot: await makeTempRoot() });
+    try {
+      const status = buildWatchdogStatus({
+        config: CONFIG,
+        nowMs: Date.parse("2026-05-22T10:00:00.000Z"),
+        runCreatedAt: "2026-05-22T11:00:00.000Z",
+        runId: "run-clock-skew",
+        runStore: store
+      });
+
+      // The cap fires six hours after the future claim, seven hours from now.
+      // This is time to enforcement, not a fraction of the cap remaining.
+      expect(status).toMatchObject({
+        enabled: true,
+        maxRunMs: 21_600_000,
+        runRemainingMs: 25_200_000
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("omits the countdown when the cap is disabled or the claim is undatable", async () => {
     const store = openRunStore({ stateRoot: await makeTempRoot() });
     try {

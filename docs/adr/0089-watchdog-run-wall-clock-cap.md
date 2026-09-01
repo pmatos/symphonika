@@ -85,12 +85,21 @@ should be the outermost bound it breached. Telling an operator "no progress" abo
 out of time hides the rule that actually stopped it and makes the cap impossible to tune from
 operational data.
 
-### An unparseable claim timestamp never ages a Run
+### Claim timestamp errors and clock skew
 
 `run_timeout` is the only Watchdog verdict that could fire against a Run doing everything right, on
 the strength of one bad column. A `created_at` that does not parse is therefore read as "age
-unknown" and never as "infinitely old", and clock skew that places the claim in the future floors
-the age at zero rather than handing the cap a negative number.
+unknown" and never as "infinitely old".
+
+Clock skew that places the claim in the future preserves the signed elapsed measurement instead of
+flooring it at zero. The negative value cannot reach a positive cap, so this has no enforcement
+effect; it makes the skew visible and keeps the deadline arithmetic coherent. The operator
+countdown is the exact complement, `maxRunMs - runElapsedMs`: a claim one hour in the future under a
+six-hour cap reports `-1h` elapsed and `7h` until the Watchdog can fire. `runRemainingMs` is therefore
+unclamped at both ends — it may exceed the configured cap before a future claim and become negative
+after an overrun but before the next sampling tick. It means time until the enforcement deadline,
+not a fraction of the cap remaining. Capping that display at six hours would make it disagree with
+an enforcement event seven hours away.
 
 ## Why this does not contradict ADR 0086
 

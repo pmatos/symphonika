@@ -88,9 +88,13 @@ export function buildWatchdogStatus(input: {
 }
 
 // Milliseconds left before the wall-clock cap terminates the Run, against the
-// same effective clock the rest of the Progress Signal uses. An unparseable
-// claim timestamp yields no countdown rather than a nonsensical one, matching
-// the Watchdog's own refusal to age a Run it cannot date.
+// same effective clock the rest of the Progress Signal uses. This is
+// deliberately not clamped: a future-dated claim reports more than maxRunMs
+// because its enforcement deadline is genuinely that far away, just as an
+// overrun reports a negative value until the next Watchdog tick. Together with
+// runElapsedMs's signed result, this keeps maxRunMs - elapsed equal to the
+// actual time remaining. An unparseable claim yields no countdown, matching
+// the Watchdog's refusal to age a Run it cannot date.
 function runRemainingMs(
   runCreatedAt: string,
   maxRunMs: number,

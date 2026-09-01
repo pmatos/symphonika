@@ -7,7 +7,7 @@ import {
   rm,
   writeFile
 } from "node:fs/promises";
-import { homedir } from "node:os";
+import { availableParallelism, homedir } from "node:os";
 import path from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -73,6 +73,9 @@ export type DoctorOptions = {
   githubApi?: GitHubApi;
   githubIssuesApi?: GitHubIssuesApi;
   homeDir?: string;
+  // Test seam for the host fact used by the installed providers-slice
+  // capacity estimate. Production callers use os.availableParallelism().
+  hostParallelism?: number;
   // Opt-in: spawns providers.<name>.command for real with a trivial prompt
   // and waits for a reply, instead of only the static protocol checks every
   // doctor run already does. Not run by default — it is a real billed call
@@ -337,6 +340,7 @@ const dispatchProjectSchema = z
     mode: z.literal("dispatch").default("dispatch"),
     disabled: z.boolean().optional(),
     weight: z.number().int().positive().optional(),
+    max_in_flight: z.number().int().positive().optional(),
     dispatch: projectDispatchSchema.optional(),
     tracker: trackerSchema,
     issue_filters: issueFiltersSchema,
@@ -432,6 +436,12 @@ const serviceConfigSchema = z
       })
       .passthrough()
       .optional(),
+    global: z
+      .object({
+        max_in_flight: z.number().int().positive().optional()
+      })
+      .passthrough()
+      .optional(),
     providers: z
       .object({
         codex: providerCommandSchema,
@@ -494,6 +504,16 @@ export async function runDoctor(
   const parsedConfig = parseServiceConfig(rawConfig, errors);
   if (parsedConfig === undefined) {
     return report({ configPath, environment, errors, projects, warnings });
+  }
+
+  if (serviceContent !== undefined) {
+    warnings.push(
+      ...(await checkProviderBuildMemoryCapacity(
+        path.join(unitDir, "symphonika-providers.slice"),
+        parsedConfig,
+        options.hostParallelism ?? availableParallelism()
+      ))
+    );
   }
 
   const configuredEnvironment = await inspectConfiguredDoctorEnvironment({
@@ -838,6 +858,98 @@ async function checkSliceDrift(
 }
 
 type SliceAssignment = { name: string; source: string; value: string };
+
+const GIBIBYTE_BYTES = 1024 ** 3;
+const PEAK_COMPILER_RSS_BYTES = 1.5 * GIBIBYTE_BYTES;
+const PROVIDER_MEMORY_WARNING_RATIO = 1.1;
+
+async function checkProviderBuildMemoryCapacity(
+  slicePath: string,
+  config: ServiceConfig,
+  hostParallelism: number
+): Promise<string[]> {
+  if (!Number.isInteger(hostParallelism) || hostParallelism <= 0) {
+    return [];
+  }
+
+  const baseContent = await readFileIfExists(slicePath);
+  if (baseContent === undefined) {
+    return [];
+  }
+  const baseAssignments = sliceAssignments(baseContent, slicePath);
+  if (baseAssignments === undefined) {
+    return [];
+  }
+  const memoryMax = winningAssignment(
+    await effectiveSliceAssignments(slicePath, baseAssignments),
+    "MemoryMax"
+  );
+  if (memoryMax === undefined) {
+    return [];
+  }
+  const memoryMaxBytes = parseSystemdByteSize(memoryMax.value);
+  if (memoryMaxBytes === undefined) {
+    return [];
+  }
+
+  const projectCaps = config.projects
+    .filter((project) => project.disabled !== true)
+    .map((project) => ({
+      maxInFlight: project.max_in_flight ?? 1,
+      name: project.name
+    }));
+  const projectCapTotal = projectCaps.reduce(
+    (total, project) => total + project.maxInFlight,
+    0
+  );
+  const globalMaxInFlight = config.global?.max_in_flight;
+  const effectiveMaxInFlight = Math.min(
+    globalMaxInFlight ?? Number.POSITIVE_INFINITY,
+    projectCapTotal
+  );
+  if (effectiveMaxInFlight <= 0) {
+    return [];
+  }
+
+  const estimatedBytes =
+    hostParallelism * PEAK_COMPILER_RSS_BYTES * effectiveMaxInFlight;
+  if (estimatedBytes <= memoryMaxBytes * PROVIDER_MEMORY_WARNING_RATIO) {
+    return [];
+  }
+
+  const globalCap =
+    globalMaxInFlight === undefined
+      ? "global.max_in_flight=unbounded"
+      : `global.max_in_flight=${globalMaxInFlight}`;
+  const projectCapSummary = projectCaps
+    .map((project) => `${project.name} max_in_flight=${project.maxInFlight}`)
+    .join(", ");
+  return [
+    `provider build memory estimate: host parallelism=${hostParallelism} × ` +
+      `1.5 GiB/compiler × effective max_in_flight=${effectiveMaxInFlight} ` +
+      `(${globalCap}; Project caps: ${projectCapSummary}) = ` +
+      `${formatGibibytes(estimatedBytes)} GiB, exceeding ` +
+      `${memoryMax.source} MemoryMax=${memoryMax.value} ` +
+      `(${formatGibibytes(memoryMaxBytes)} GiB) by more than the 10% warning ` +
+      "margin; lower max_in_flight, raise MemoryMax=, or configure the " +
+      "build-parallelism ceiling from #643"
+  ];
+}
+
+function parseSystemdByteSize(value: string): number | undefined {
+  const match = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i.exec(value.trim());
+  if (match === null) {
+    return undefined;
+  }
+  const amount = Number(match[1]);
+  const exponent = "KMGT".indexOf((match[2] ?? "").toUpperCase()) + 1;
+  const bytes = amount * 1024 ** exponent;
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : undefined;
+}
+
+function formatGibibytes(bytes: number): string {
+  return (bytes / GIBIBYTE_BYTES).toFixed(1).replace(/\.0$/, "");
+}
 
 // A drop-in can carry the directive the slice is supposed to have shed, and
 // `service install --force` rewrites only the base unit (see

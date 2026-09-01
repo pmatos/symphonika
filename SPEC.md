@@ -2201,6 +2201,15 @@ config path and points the operator to `symphonika init`.
 - installed `symphonika.service` PATH liveness for selected Project provider executables and `gh`;
   the effective assignment includes adjacent `.service.d/*.conf` drop-ins, and failures here are
   warnings because the unit's frozen PATH may be intentional
+- installed providers-slice build capacity: when `symphonika.service` and a finite byte-size
+  `symphonika-providers.slice` `MemoryMax=` (bytes or a K/M/G/T suffix) are present, estimate the
+  aggregate worst case as the host's available parallelism times 1.5 GiB peak RSS per compiler
+  process times effective concurrency. Effective concurrency is the smaller of
+  `global.max_in_flight` (when configured)
+  and the sum of enabled Projects' `max_in_flight` values (using the documented per-Project default
+  of 1). Warn when the estimate exceeds `MemoryMax=` by more than 10%, naming every input and
+  suggesting a lower concurrency cap, a higher slice budget, or #643's build-parallelism ceiling;
+  resolve `MemoryMax=` from the base slice plus sorted drop-ins so operator overrides are honored
 - Dispatch Projects: workflow contract path and parse
 - every Routine declaration in the top-level `routines:` block, including unknown target Projects,
   a target Project name declared more than once, globally duplicate Routine names, and `kind: git`

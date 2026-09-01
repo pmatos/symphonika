@@ -1392,6 +1392,7 @@ describe("doctor", () => {
         env: { GITHUB_TOKEN: "test-secret-token", PATH: shellBin },
         githubApi: successfulGitHubApi(),
         homeDir: root,
+        hostParallelism: 1,
         offline: true
       });
 
@@ -1447,6 +1448,7 @@ describe("doctor", () => {
         env: { GITHUB_TOKEN: "test-secret-token", PATH: shellBin },
         githubApi: successfulGitHubApi(),
         homeDir: root,
+        hostParallelism: 1,
         offline: true
       });
 
@@ -1498,6 +1500,7 @@ describe("doctor", () => {
         },
         githubApi: successfulGitHubApi(),
         homeDir: root,
+        hostParallelism: 1,
         offline: true
       });
 
@@ -1966,6 +1969,52 @@ describe("doctor", () => {
       expect(report.warnings).toEqual([]);
     });
 
+    it("warns when host build parallelism and configured concurrency outrun the providers slice budget", async () => {
+      const report = await runProviderCapacityDoctor({
+        hostParallelism: 24
+      });
+
+      const warning = report.warnings.find((entry) =>
+        entry.includes("provider build memory estimate")
+      );
+      expect(warning).toContain("host parallelism=24");
+      expect(warning).toContain("1.5 GiB/compiler");
+      expect(warning).toContain("global.max_in_flight=8");
+      expect(warning).toContain("symphonika max_in_flight=1");
+      expect(warning).toContain("effective max_in_flight=1");
+      expect(warning).toContain("MemoryMax=32G");
+      expect(warning).toContain("36 GiB");
+      expect(warning).toContain("lower max_in_flight");
+      expect(warning).toContain("raise MemoryMax=");
+      expect(warning).toContain("build-parallelism ceiling from #643");
+      expect(report.ok).toBe(true);
+    });
+
+    it("does not warn when the build memory estimate exceeds MemoryMax by less than the 10% margin", async () => {
+      const report = await runProviderCapacityDoctor({
+        hostParallelism: 22
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
+    });
+
+    it("uses a drop-in's winning MemoryMax value for the build memory estimate", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "64G",
+        hostParallelism: 24
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
+    });
+
     // `service install --force` never reaches a host that doesn't re-run it,
     // so an installed providers slice still carrying the MemoryHigh= that
     // docs/adr/0089 removed keeps throttling every concurrent provider at
@@ -2301,6 +2350,63 @@ async function runDoctorCommand(
   return output;
 }
 
+async function runProviderCapacityDoctor(input: {
+  dropInMemoryMax?: string;
+  hostParallelism: number;
+}) {
+  const root = await makeTempRoot();
+  const configPath = path.join(root, "symphonika.yml");
+  const unitDir = path.join(root, ".config", "systemd", "user");
+  const unitBin = path.join(root, "bin");
+  await writeValidConfig(configPath, {
+    globalLines: ["global:", "  max_in_flight: 8"],
+    projectLines: ["    max_in_flight: 1"]
+  });
+  await writeFile(
+    path.join(root, "WORKFLOW.md"),
+    "Work on {{issue.title}} for {{project.name}}.\n"
+  );
+  await mkdir(unitDir, { recursive: true });
+  await writeStubExecutables(unitBin, ["codex", "gh"]);
+  await writeFile(
+    path.join(unitDir, "symphonika.service"),
+    currentServiceUnit(unitBin),
+    "utf8"
+  );
+  await writeFile(
+    path.join(unitDir, "symphonika-daemon.slice"),
+    renderSliceUnit(),
+    "utf8"
+  );
+  await writeFile(
+    path.join(unitDir, "symphonika-providers.slice"),
+    renderProvidersSliceUnit(),
+    "utf8"
+  );
+  if (input.dropInMemoryMax !== undefined) {
+    const dropInDir = path.join(unitDir, "symphonika-providers.slice.d");
+    await mkdir(dropInDir);
+    await writeFile(
+      path.join(dropInDir, "20-memory-budget.conf"),
+      `[Slice]\nMemoryMax=${input.dropInMemoryMax}\n`,
+      "utf8"
+    );
+  }
+
+  return runDoctor({
+    agentProviders: fakeAgentProviders(),
+    configPath,
+    env: {
+      GITHUB_TOKEN: "test-secret-token",
+      PATH: process.env.PATH
+    },
+    githubApi: successfulGitHubApi(),
+    homeDir: root,
+    hostParallelism: input.hostParallelism,
+    offline: true
+  });
+}
+
 function fakeAgentProviders(): AgentProviderRegistry {
   return {
     codex: {
@@ -2331,6 +2437,7 @@ async function writeValidConfig(
     agentProvider?: string;
     claudeCommand?: string;
     codexCommand?: string;
+    globalLines?: string[];
     ompCommand?: string;
     projectLines?: string[];
     routineDefaultLines?: string[];
@@ -2361,6 +2468,7 @@ async function writeValidConfig(
       "  root: ./.symphonika",
       "polling:",
       "  interval_ms: 30000",
+      ...(overrides.globalLines ?? []),
       "providers:",
       "  codex:",
       `    command: "${overrides.codexCommand ?? DEFAULT_CODEX_COMMAND}"`,

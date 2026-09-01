@@ -195,6 +195,7 @@ describe("Git workspace preparation", () => {
     const startedPath = path.join(root, "worktree-started");
     const interruptNextAddPath = path.join(root, "interrupt-next-add");
     const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    const realGit = realGitOutput.trim();
     await mkdir(wrapperRoot, { recursive: true });
     await writeFile(interruptNextAddPath, "interrupt\n");
     await writeFile(
@@ -202,13 +203,11 @@ describe("Git workspace preparation", () => {
       `#!/bin/sh
 if [ -f "${interruptNextAddPath}" ] && [ "$3" = "worktree" ] && [ "$4" = "add" ] && [ "$5" = "${workspacePath}" ]; then
   rm -f "${interruptNextAddPath}"
-  "${realGitOutput.trim()}" "$@"
+  "${realGit}" "$@"
   touch "${startedPath}"
-  while true; do
-    sleep 1
-  done
+  sleep infinity
 fi
-exec "${realGitOutput.trim()}" "$@"
+exec "${realGit}" "$@"
 `
     );
     await chmod(wrapperPath, 0o755);

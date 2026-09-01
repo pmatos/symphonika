@@ -398,12 +398,14 @@ checks (`success` or `failure`), concrete mergeability, resolved/unresolved feed
 state, merged state, and review decisions. A transition must match each observation. Pending checks
 are excluded because waiting for them to settle is the wait action's purpose; unknown mergeability
 is excluded the same way, but only while the PR is open -- a wait re-evaluates against whatever the
-tracked PR's current state is regardless of which state the run parked in, so a merge landing while
-parked is itself a settled observation, and GitHub does not keep recomputing mergeability once a PR
-is merged, so unknown mergeability stops being transient and needs a covering transition (the
-shipped `wait_for_pr`'s `pr_merged: true -> merged` catch-all is exactly that). Pure artefact waits
-are not PR-signal waits, and mixed artefact gates are excluded because a missing file is itself an
-intentional reason to stay parked.
+tracked PR's current state is regardless of which state the run parked in, so a merge or an unmerged
+close landing while parked is itself a settled observation, and GitHub does not keep recomputing
+mergeability once a PR closes, merged or not, so unknown mergeability stops being transient and
+needs a covering transition (the shipped `wait_for_pr`'s `pr_merged: true -> merged` catch-all
+covers the merged half of that; its unconditional `pr_open: false -> failed` escape covers the
+closed-unmerged half, mergeable resolved or not). Pure artefact waits are not PR-signal waits, and
+mixed artefact gates are excluded because a missing file is itself an intentional reason to stay
+parked.
 
 A transition from a repair state back to the wait it came from makes a cycle. That is expected and
 supported: the progress guard stops it from spinning by refusing to re-take an edge on an

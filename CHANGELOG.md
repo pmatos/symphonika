@@ -13,10 +13,10 @@ generated notes above it._
   mergeability, unresolved feedback, PR openness, merged state, and review decision. `workflow
   validate`, `doctor`, and reload now reject a transition table that can silently dead-end; pending
   checks, unknown mergeability while the PR is open, and waits whose every PR-observing transition
-  is artefact-gated remain parkable — but a merge landing while a run sits in an ordinary `wait`
-  state is itself a settled observation coverage is now required for, since GitHub stops
-  recomputing mergeability once a PR is merged. A transition gating on a positive
-  `unresolved_review_threads` count is now rejected outright — it can only ever match that one
+  is artefact-gated remain parkable — but a merge or an unmerged close landing while a run sits in
+  an ordinary `wait` state is itself a settled observation coverage is now required for, since
+  GitHub stops recomputing mergeability once a PR closes, merged or not. A transition gating on a
+  positive `unresolved_review_threads` count is now rejected outright — it can only ever match that one
   count, so a real PR sitting at a different positive count still dead-ends despite validation
   passing; use `has_unresolved_reviews: true` instead. Coverage checking also now recognizes a bare
   `provider_success: true` transition as a genuine catch-all (the wait poll always sets it —

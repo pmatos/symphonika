@@ -92,10 +92,11 @@ checks, or unknown mergeability while the PR is still open—but not because its
 forgot an actionable case. Expanded-graph validation enumerates settled checks, concrete
 mergeability, unresolved-review, open/closed, merged, and review-decision signals and rejects the
 state when no transition matches one of those combinations. A wait re-evaluates against the tracked
-PR's current state regardless of which state the run parked in, so a merge landing while a run sits
-in an ordinary `wait` is itself a settled observation the enumeration must include, not a case that
-has already "left" the wait; once merged, GitHub stops recomputing mergeability, so unknown
-mergeability there is enumerated as an actionable outcome rather than excluded as transient. A wait
+PR's current state regardless of which state the run parked in, so a merge or an unmerged close
+landing while a run sits in an ordinary `wait` is itself a settled observation the enumeration must
+include, not a case that has already "left" the wait; once a PR closes, merged or not, GitHub stops
+recomputing mergeability, so unknown mergeability there is enumerated as an actionable outcome
+rather than excluded as transient, for both the merged and the closed-unmerged case. A wait
 whose every pull-request-observing transition is artefact-gated is exempt, because an absent
 artefact intentionally keeps it parked; gating one transition among several does not exempt the
 rest. This turns an otherwise silent permanent PR-signal park into a `workflow validate`, `doctor`,

@@ -160,5 +160,30 @@ export function enumerateActionablePullRequestSignals(): WorkflowPredicateMap[] 
       }
     }
   }
+  // Closed-without-merging is symmetric to closed-by-merging above, for the
+  // same reason: GitHub stops recomputing mergeability once a PR leaves the
+  // merge-eligibility pipeline, whether it left by merging or by closing
+  // unmerged, so mergeable: unknown (the key omitted) is a permanent,
+  // actionable outcome here too. The main loop above only samples the two
+  // must_advance mergeable values while open is false; appended rather than
+  // folded in, so it only adds the previously-missing combination without
+  // reordering the enumeration the existing tests' error messages are
+  // pinned to.
+  for (const checks of mustAdvance(checksCoverage)) {
+    for (const unresolvedReviewThreads of [1, 0]) {
+      for (const reviewDecision of mustAdvance(reviewDecisionCoverage)) {
+        cases.push(
+          projectPullRequestSignals({
+            checks,
+            merged: false,
+            mergeable: "unknown",
+            open: false,
+            reviewDecision,
+            unresolvedReviewThreads
+          })
+        );
+      }
+    }
+  }
   return cases;
 }

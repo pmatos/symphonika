@@ -594,9 +594,10 @@ checks, concrete mergeability, resolved or unresolved review feedback, open or c
 merged state, and every review decision, with a coherent representative unresolved-thread count. At
 least one transition must match every such observation. Pending or unknown checks remain a
 legitimate polling state throughout, and unknown mergeability is likewise excluded while the PR is
-still open; once a tracked PR merges, GitHub stops recomputing mergeability, so unknown mergeability
-becomes a settled, actionable outcome the validator requires coverage for instead. An artefact-gated
-wait is also outside PR-signal coverage validation because absence of its file is itself an
+still open; once a tracked PR closes, merged or not, GitHub stops recomputing mergeability, so
+unknown mergeability becomes a settled, actionable outcome the validator requires coverage for
+instead. An artefact-gated wait is also outside PR-signal coverage validation because absence of its
+file is itself an
 intentional reason to stay parked. The same error is surfaced by `workflow validate`, `doctor`, and
 defensive reload. See ADRs 0047 and 0090.
 

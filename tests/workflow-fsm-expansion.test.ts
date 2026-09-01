@@ -1758,6 +1758,55 @@ describe("state machine workflow definitions", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("rejects a wait that only covers settled mergeable values for a closed PR", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: closed_unmerged_unknown_mergeable_gap",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: merged",
+        "          when:",
+        "            pr_merged: true",
+        "        - to: merge",
+        "          when:",
+        "            mergeable: true",
+        "        - to: repair",
+        "          when:",
+        "            mergeable: false",
+        "    merged:",
+        "      terminal: success",
+        "    merge:",
+        "      terminal: success",
+        "    repair:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // GitHub stops recomputing mergeability once a PR closes, merged or not,
+    // so a closed-unmerged PR can settle at mergeable: unknown (the key
+    // omitted) permanently, not just transiently the way it can while open.
+    // None of the three transitions above name pr_open at all, so this
+    // combination -- open: false, merged: false, mergeable omitted --
+    // matches nothing and must be reported, not silently accepted the way it
+    // was before mergeable: unknown was enumerated for a closed PR.
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals`
+      )
+    );
+  });
+
   it("accepts Oh My Pi for an agent action provider", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

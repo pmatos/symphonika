@@ -6049,6 +6049,129 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("does not record a pull request discovered after settlement already abandoned it", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JABANDONEDPR";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    let releaseLateDiscovery: (
+      pullRequests: RawGitHubPullRequest[]
+    ) => void = () => {};
+    const lateDiscoveryGate = new Promise<RawGitHubPullRequest[]>((resolve) => {
+      releaseLateDiscovery = resolve;
+    });
+    // Simulates an operator cancel landing while PR discovery (not the
+    // before/after snapshot) is still awaiting GitHub: the settlement window
+    // abandons this await rather than stopping it, so the underlying call
+    // keeps running and can only resolve later, via releaseLateDiscovery.
+    // Call 1 is the before-run snapshot, call 2 is the after-run snapshot
+    // (made to fail so `pullRequestsAvailable` is false and the dispatcher
+    // falls through to `discoverRoutinePullRequests`), call 3 is that
+    // discovery call itself.
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error("after-run PR snapshot unavailable"))
+      .mockImplementationOnce(async () => {
+        await activeRuns.requestCancel("fire-abandoned-discovery", "operator");
+        return lateDiscoveryGate;
+      });
+    const prepareRoutineWorkspace = vi.fn(
+      (): Promise<PreparedRoutineWorkspace> =>
+        Promise.resolve({
+          branchName,
+          branchRef: `refs/heads/${branchName}`,
+          cachePath: path.join(root, ".cache", "repo.git"),
+          reused: false,
+          workspacePath
+        })
+    );
+
+    try {
+      const dispatchPromise = dispatchDueRoutines({
+        activeRuns,
+        agentProviders: { codex: provider },
+        cancellationSettleMs: 25,
+        configDir: root,
+        createFanoutId: () => "fanout-abandoned-discovery",
+        createFiringId: () => "fire-abandoned-discovery",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace,
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Commit on {{branch.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      await dispatchPromise;
+
+      expect(runStore.getRoutineFiring("fire-abandoned-discovery")).toEqual(
+        expect.objectContaining({
+          cancelReason: "operator",
+          pullRequests: [],
+          state: "cancelled"
+        })
+      );
+
+      // The abandoned discovery finally resolves after the firing already
+      // went terminal. It must not write a PR onto a firing whose outcome
+      // was already recorded and reported.
+      releaseLateDiscovery([
+        { head: { ref: branchName, sha: "late123" }, number: 99, state: "open" }
+      ]);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(
+        runStore.getRoutineFiring("fire-abandoned-discovery")?.pullRequests
+      ).toEqual([]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("reclassifies a failed firing as cancelled when an operator cancel lands during the failure-path GitHub snapshot", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

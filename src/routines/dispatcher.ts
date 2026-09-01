@@ -2541,6 +2541,19 @@ async function discoverRoutinePullRequests(input: {
     return;
   }
 
+  // The cancellation settlement window races this call rather than aborting
+  // it: a discovery abandoned there keeps running and can resolve after the
+  // firing already went terminal and its fan-out summary was sent. Re-check
+  // the firing is still `running` before writing so a late discovery never
+  // records PRs onto a firing whose outcome has already been reported.
+  if (input.runStore.getRoutineFiring(input.firingId)?.state !== "running") {
+    input.logger?.warn(
+      { firingId: input.firingId, routine: input.routineName },
+      "symphonika routine PR discovery abandoned after firing already completed"
+    );
+    return;
+  }
+
   recordRoutinePullRequests({
     branchName: input.branchName,
     firingId: input.firingId,

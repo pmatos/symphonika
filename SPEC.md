@@ -1918,8 +1918,12 @@ The deadline is sourced from the in-memory slot, not a fixed state list: a fresh
 `queued`, preparation uses `preparing_workspace`, and a retry reserves capacity while its reused row
 can still read `failed`. It threads an AbortSignal through Workspace preparation and its Git process
 groups, and through retry-claim and pre-provider running-label writes. The lifecycle waits for
-aborted Workspace preparation and owned-path cleanup to settle before unregistering the slot. Once
-a provider is attached, the same expiry requests provider cancellation.
+aborted Workspace preparation and owned-path cleanup to settle before unregistering the slot, and
+for nothing else: the setup that follows preparation cannot observe the abort, so waiting on it
+would let a stalled filesystem retain capacity past the cap. Once a provider is attached, the same
+expiry requests provider cancellation. A bounded claim write that never confirms leaves an
+indeterminate `sym:claimed`, so the Issue's claim is best-effort rolled back rather than left for
+the stale-claim sweep to escalate to `sym:stale`.
 
 The timeout transition is a first-winner compare-and-set. Its caller must synchronously prove slot
 ownership; the database update is state-independent and generation-independent, requires

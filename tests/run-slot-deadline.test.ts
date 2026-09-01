@@ -1,6 +1,9 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { constants } from "node:fs";
+import { mkdir, mkdtemp, open, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -218,6 +221,80 @@ describe("Run slot deadline", () => {
     }
   });
 
+  // Workspace preparation is abortable; the setup that follows it is not. If
+  // the finally waited on all of startAttempt, a stalled filesystem would keep
+  // the slot past max_run_minutes — the leak this deadline exists to close.
+  it("releases the slot when setup stalls after preparation settles", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    // The workflow read happens after preparation and carries no signal. A
+    // FIFO with no writer blocks it exactly the way a stalled filesystem does.
+    const workflowPath = path.join(root, "WORKFLOW.md");
+    await unlink(workflowPath);
+    await promisify(execFile)("mkfifo", [workflowPath]);
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: successfulAttempt,
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    let preparationSettled = false;
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-setup-stall",
+        prepareIssueWorkspace: () => {
+          preparationSettled = true;
+          return Promise.resolve(preparedWorkspace(root));
+        }
+      }
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T14:00:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await flushPromises();
+      expect(preparationSettled).toBe(true);
+      expect(activeRuns.countInFlight()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      // The workflow read is still blocked on the FIFO, yet the slot is free.
+      expect(activeRuns.countInFlight()).toBe(0);
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-setup-stall"
+      });
+      expect(runStore.getRun("run-setup-stall")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      expect(provider.validate).not.toHaveBeenCalled();
+      expect(onTerminated).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+      await unblockFifo(workflowPath);
+      runStore.close();
+    }
+  });
+
   it("times out an expired retry reservation while its row still reads failed", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
@@ -412,6 +489,74 @@ describe("Run slot deadline", () => {
       releaseRunningWrite();
       await vi.advanceTimersByTimeAsync(60_000);
       await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("rolls back an indeterminate claim when the bounded write times out", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    // GitHub may have applied the label already; the response never arrives.
+    const addLabelsToIssue = vi.fn(() => new Promise<void>(() => undefined));
+    const removeLabelsFromIssue = vi.fn().mockResolvedValue(undefined);
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-indeterminate-claim",
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          removeLabelsFromIssue
+        }
+      }
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T15:00:00.000Z"));
+    try {
+      // The claim deadline rejects while timers advance, so the handler has to
+      // be attached before then or the rejection surfaces as unhandled.
+      const dispatch = controller
+        .dispatchOneFresh(pollStatus())
+        .catch((error: unknown) => error);
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      await expect(dispatch).resolves.toMatchObject({
+        name: "RunTimeoutError"
+      });
+      expect(removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: 611,
+          labels: ["sym:claimed"]
+        })
+      );
+      // No Run row exists to explain the claim, so nothing may mark it failed.
+      expect(addLabelsToIssue).toHaveBeenCalledOnce();
+      expect(runStore.getRun("run-indeterminate-claim")).toBeUndefined();
+      expect(activeRuns.countInFlight()).toBe(0);
+    } finally {
       runStore.close();
     }
   });
@@ -623,6 +768,20 @@ function makeRunController(
       overrides.watchdogConfigLoader ??
       (() => ({ enabled: true, maxRunMinutes: 1 }))
   });
+}
+
+async function unblockFifo(fifoPath: string): Promise<void> {
+  // Hands the blocked reader an EOF so its libuv thread is released. Opening
+  // non-blocking keeps cleanup from hanging if no reader ever arrived.
+  try {
+    const writer = await open(
+      fifoPath,
+      constants.O_WRONLY | constants.O_NONBLOCK
+    );
+    await writer.close();
+  } catch {
+    // No reader is waiting; nothing to release.
+  }
 }
 
 async function makeTempRoot(): Promise<string> {

@@ -28,6 +28,18 @@ than defaulted (ADR 0092), and an unavailable policy arms no deadline: substitut
 would fabricate an expiry from configuration the operator never supplied. That state cannot admit a
 Run in the first place, since a daemon without a snapshot has no Projects to dispatch.
 
+The slot is held open only for the teardown the deadline can actually drive. Workspace preparation
+is awaited after an abort so its Git process groups and owned-path cleanup settle; the setup that
+follows it — workflow loading, evidence persistence, log-file creation — carries no signal, so it is
+abandoned rather than awaited. Waiting on a non-abortable await would reintroduce the unbounded
+slot ownership this ADR removes.
+
+The pre-Run claim write is bounded by the same policy but measured from now, because the Run's
+origin is not yet recorded. When that write neither confirms nor fails cleanly the Issue may already
+carry `sym:claimed` with no Run row behind it, and the stale-claim sweep would escalate it to
+`sym:stale`, which v1 never auto-clears. The claim is therefore best-effort removed on any failure
+of that bounded write; removing a label that was never applied is a no-op.
+
 Before provider attachment, the in-flight registry binds cancellation to the deadline's abort
 handler instead of a no-op. The same signal is threaded through issue Workspace preparation and
 every Git command it starts. On POSIX, the existing process-group teardown sends SIGTERM and then

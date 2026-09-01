@@ -323,7 +323,6 @@ type RunRuntime = {
 
 type StartedAttempt = {
   evidence: AttemptEvidence;
-  prepared: PreparedIssueWorkspace;
   prompt: string;
   promptPath: string;
 };
@@ -3004,6 +3003,7 @@ export class RunController {
       );
     }
 
+    let claimAttempted = false;
     let claimed = false;
     let deadline = NO_RUN_SLOT_DEADLINE;
     let runCreated = false;
@@ -3022,6 +3022,9 @@ export class RunController {
           });
     claimDeadline.arm();
     try {
+      // Once the request is issued its outcome is indeterminate: the bounded
+      // race can reject while GitHub has already applied the label.
+      claimAttempted = true;
       await claimDeadline.race(
         this.addLabelsBounded({
           deadline: claimDeadline,
@@ -3138,6 +3141,28 @@ export class RunController {
           issueNumber: input.issue.number,
           repository: input.repository
         });
+      } else if (claimAttempted) {
+        // The claim write timed out or failed without confirming, so the Issue
+        // may carry `sym:claimed` with no Run row behind it. Left alone, the
+        // stale-claim sweep would add `sym:stale`, which v1 never auto-clears,
+        // excluding the Issue until an operator intervenes. Removing a label
+        // that was never applied is a no-op, so roll the claim back either way.
+        const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
+        await this.bestEffort(
+          () =>
+            api.removeLabelsFromIssue({
+              ...input.repository,
+              issueNumber: input.issue.number,
+              labels: ["sym:claimed"]
+            }),
+          {
+            issueNumber: input.issue.number,
+            label: "sym:claimed",
+            operation: "removeLabel",
+            project: input.project.name,
+            runId: input.runId
+          }
+        );
       }
       throw error;
     } finally {
@@ -3188,7 +3213,10 @@ export class RunController {
     };
     let attemptCreated = false;
     let started: StartedAttempt | undefined;
-    let startOperation: Promise<StartedAttempt> | undefined;
+    // Workspace preparation is the only setup operation the deadline can
+    // actually stop, so it is the only one the finally may wait on after the
+    // deadline fires. See ADR 0093.
+    let workspaceOperation: Promise<PreparedIssueWorkspace> | undefined;
     let headShaAtAttemptStart: string | undefined;
     let headInspectionFailed = false;
     let caughtError: unknown;
@@ -3347,22 +3375,33 @@ export class RunController {
         }
       }
 
-      startOperation = this.startAttempt({
-        attemptId,
-        attemptNumber: input.attemptNumber,
-        ...(input.extraInstructions === undefined
-          ? {}
-          : { extraInstructions: input.extraInstructions }),
-        isContinuation: input.isContinuation,
-        issue: input.issue,
+      workspaceOperation = this.prepareIssueWorkspace({
+        configDir: this.configDir,
+        issue: {
+          number: input.issue.number,
+          title: input.issue.title
+        },
         project: projectForAttempt,
-        providerCommand: input.providerCommand,
-        providerName: input.providerName,
-        ...(promptTemplate === undefined ? {} : { promptTemplate }),
-        ...input.deadline.signalOption,
-        runId: input.runId
+        ...input.deadline.signalOption
       });
-      started = await input.deadline.race(startOperation);
+      const prepared = await input.deadline.race(workspaceOperation);
+      started = await input.deadline.race(
+        this.startAttempt({
+          attemptId,
+          attemptNumber: input.attemptNumber,
+          ...(input.extraInstructions === undefined
+            ? {}
+            : { extraInstructions: input.extraInstructions }),
+          isContinuation: input.isContinuation,
+          issue: input.issue,
+          prepared,
+          project: projectForAttempt,
+          providerCommand: input.providerCommand,
+          providerName: input.providerName,
+          ...(promptTemplate === undefined ? {} : { promptTemplate }),
+          runId: input.runId
+        })
+      );
       await input.deadline.race(input.provider.validate(input.providerCommand));
       await input.deadline.race(
         this.addLabelsBounded({
@@ -3443,10 +3482,14 @@ export class RunController {
       // and attachProvider (loadWorkflow / prepareIssueWorkspace / validate /
       // sym:running label / createAttempt). See ADR 0052.
       // The deadline race can reject before AbortSignal-driven Git teardown
-      // and owned-path cleanup settle. Keep the slot until startAttempt has
-      // actually stopped, matching Routine Firing deadline semantics.
+      // and owned-path cleanup settle. Keep the slot until that teardown has
+      // actually stopped, matching Routine Firing deadline semantics. Only
+      // Workspace preparation is waited on: the rest of startAttempt
+      // (loadWorkflow, evidence persistence, log-file creation) cannot observe
+      // the abort, so waiting on it would let a stalled filesystem retain
+      // capacity past max_run_minutes — the very leak this deadline closes.
       if (input.deadline.signal?.aborted === true) {
-        await startOperation?.catch(() => undefined);
+        await workspaceOperation?.catch(() => undefined);
       }
       input.deadline.clear();
       const removed = this.activeRuns.unregister(input.runId);
@@ -3728,21 +3771,13 @@ export class RunController {
     isContinuation: boolean;
     issue: IssueSnapshot;
     project: DispatchProjectConfig;
+    prepared: PreparedIssueWorkspace;
     promptTemplate?: string;
     providerCommand: string;
     providerName: AgentProviderName;
     runId: string;
-    signal?: AbortSignal;
   }): Promise<StartedAttempt> {
-    const prepared = await this.prepareIssueWorkspace({
-      configDir: this.configDir,
-      issue: {
-        number: input.issue.number,
-        title: input.issue.title
-      },
-      project: input.project,
-      ...(input.signal === undefined ? {} : { signal: input.signal })
-    });
+    const { prepared } = input;
     const workflow = await this.loadWorkflow(input.project.workflow);
     const workflowPath = workflow.path;
     if (workflow.errors.length > 0) {
@@ -3814,7 +3849,6 @@ export class RunController {
 
     return {
       evidence: attemptEvidence,
-      prepared,
       prompt: renderedPrompt.prompt,
       promptPath: evidence.promptPath
     };

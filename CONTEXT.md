@@ -332,7 +332,8 @@ _Avoid_: daemon loop when referring to Run-local progression
 **Run Slot Deadline**:
 The Run-scoped absolute wall-clock enforcement of `watchdog.max_run_minutes` while an issue Run owns
 in-flight capacity. It begins at the original Run claim, aborts pre-provider preparation or active
-provider work, and persists `run_timeout` independently of the Run row's current lifecycle state.
+provider work, persists `run_timeout` independently of the Run row's current lifecycle state, and
+holds capacity after expiry only while abort-triggered process and owned-path cleanup settles.
 _Avoid_: attempt timeout, Watchdog sample
 
 **Watchdog**:
@@ -517,7 +518,8 @@ _Avoid_: chat session
 - A **Routine Firing Deadline** terminates an over-time **Routine Firing** independently of the
   **Watchdog**'s progress-liveness decision
 - A **Run Slot Deadline** bounds an issue **Run** while it owns in-flight capacity, including before
-  a provider starts and during a retry reservation
+  a provider starts and during a retry reservation; expired preparation releases that capacity
+  after its abort cleanup settles even when unrelated Workspace I/O remains pending
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A terminal **Routine Firing** may produce one best-effort **Routine Notification Delivery**
 - A **Routine Fan-out** notification and a **Routine Notification Delivery** run outside Routine

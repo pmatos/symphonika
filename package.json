@@ -10,6 +10,7 @@
     "build": "npm run build:client && npm run build:server",
     "build:client": "node scripts/build-client.mjs",
     "build:server": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+    "check:adr-numbers": "node scripts/check-adr-numbers.mjs",
     "dev": "npm run build:client && tsx src/cli.ts",
     "format": "prettier . --write",
     "format:check": "prettier . --check",

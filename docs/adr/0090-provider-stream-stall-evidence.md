@@ -102,7 +102,10 @@ operators can measure duration distributions without parsing logs.
   shared `jsonl-process-queue.ts`. Follow-up #638 closes the deferred OMP gap: its structurally
   similar but more complex `createProcessQueue` now stamps items in `push()` and threads that stamp
   through OMP frame mapping while preserving its independent backpressure and frame-reassembly
-  behavior.
+  behavior. When OMP's backpressure gate is holding buffered bytes back, those bytes are only parsed
+  and pushed once the queue drains below the low-water mark, so the stamp for that data reflects
+  drain time rather than transport-arrival time; this is bounded by the same backpressure thresholds
+  and does not reintroduce the unbounded consumption-time gap this ADR describes.
 
 ## Interaction with existing decisions
 

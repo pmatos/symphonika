@@ -16,6 +16,7 @@ import type {
 } from "../provider.js";
 import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import { parseProviderCommand, type ProviderLabel } from "./command-parse.js";
+import { mapProcessQueueControlEvent } from "./jsonl-process-queue.js";
 import {
   providerProcessExitResult,
   shutdownProviderProcess,
@@ -60,9 +61,8 @@ type ProcessQueuePayload =
       raw: unknown;
     };
 
-// Stamp receipt inside push(), which runs from the child-process stream
-// handlers independently of the async generator's consumer. A timestamp
-// added when next() resolves would include time spent persisting prior events.
+// receivedAt is stamped in push(), same rationale and ADR 0090 reference as
+// the sibling queue's ProcessQueueItem in jsonl-process-queue.ts.
 type ProcessQueueItem = ProcessQueuePayload & { receivedAt: string };
 
 export type ProcessQueue = {
@@ -83,6 +83,7 @@ type PendingRpcChunks = {
 };
 
 type ResponseReadResult = {
+  receivedAt?: string;
   response?: unknown;
   stopped: boolean;
 };
@@ -197,7 +198,10 @@ export function createOmpProvider(
               message: "Oh My Pi provider emitted an incompatible ready frame",
               type: "turn_failed"
             },
-            raw: ready.response
+            raw: ready.response,
+            ...(ready.receivedAt === undefined
+              ? {}
+              : { receivedAt: ready.receivedAt })
           };
           queue.discardBeforeFrameLimits();
           await shutdownProviderProcess(child);
@@ -299,7 +303,10 @@ export function createOmpProvider(
           if (isTerminalAgentEnd(event.raw)) {
             await markTerminalAgentEnd(activeRun);
             if (terminalAgentEndBeforePrompt(item)) {
-              yield terminalAgentEndBeforePromptEvent(event.raw);
+              yield {
+                ...terminalAgentEndBeforePromptEvent(event.raw),
+                receivedAt: item.receivedAt
+              };
               yield* drainUntilExit(queue, activeRun);
               return;
             }
@@ -334,41 +341,10 @@ function providerEventFromQueueItem(
   item: ProcessQueueItem,
   activeRun: ActiveOmpRun
 ): ProviderEvent {
-  let event: ProviderEvent;
-  switch (item.kind) {
-    case "error":
-      event = {
-        normalized: {
-          message: item.error.message,
-          type: "turn_failed"
-        },
-        raw: {
-          kind: "process_error",
-          message: item.error.message
-        }
-      };
-      break;
-    case "exit":
-      event = processExitEvent(activeRun, item.exitCode, item.signal);
-      break;
-    case "malformed":
-      event = {
-        normalized: {
-          line: item.line,
-          message: item.message,
-          type: "malformed_event"
-        },
-        raw: {
-          kind: "malformed_json",
-          line: item.line,
-          message: item.message
-        }
-      };
-      break;
-    case "message":
-      event = mapOmpFrame(item.raw, activeRun);
-      break;
-  }
+  const event =
+    item.kind === "message"
+      ? mapOmpFrame(item.raw, activeRun)
+      : mapProcessQueueControlEvent(item, activeRun.cancelled);
 
   return { ...event, receivedAt: item.receivedAt };
 }
@@ -606,13 +582,20 @@ async function* readUntilFrame(
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
       await markTerminalAgentEnd(activeRun);
       if (terminalAgentEndBeforePrompt(item)) {
-        yield terminalAgentEndBeforePromptEvent(item.raw);
+        yield {
+          ...terminalAgentEndBeforePromptEvent(item.raw),
+          receivedAt: item.receivedAt
+        };
         yield* drainUntilExit(queue, activeRun);
         return { stopped: true };
       }
     }
     if (item.kind === "message" && predicate(item.raw)) {
-      return { response: item.raw, stopped: false };
+      return {
+        receivedAt: item.receivedAt,
+        response: item.raw,
+        stopped: false
+      };
     }
     if (isTerminalFailure(event.normalized?.type)) {
       activeRun.terminalEventSeen = true;
@@ -652,13 +635,20 @@ async function* readUntilResponse(
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
       await markTerminalAgentEnd(activeRun);
       if (terminalAgentEndBeforePrompt(item)) {
-        yield terminalAgentEndBeforePromptEvent(item.raw);
+        yield {
+          ...terminalAgentEndBeforePromptEvent(item.raw),
+          receivedAt: item.receivedAt
+        };
         yield* drainUntilExit(queue, activeRun);
         return { stopped: true };
       }
     }
     if (item.kind === "message" && stringField(item.raw, "id") === id) {
-      return { response: item.raw, stopped: false };
+      return {
+        receivedAt: item.receivedAt,
+        response: item.raw,
+        stopped: false
+      };
     }
     if (isTerminalFailure(event.normalized?.type)) {
       activeRun.terminalEventSeen = true;

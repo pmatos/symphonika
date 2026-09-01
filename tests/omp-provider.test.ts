@@ -191,35 +191,15 @@ describe("Oh My Pi RPC provider", () => {
       })
       [Symbol.asyncIterator]();
 
-    let firstMessage: ProviderEvent | undefined;
-    while (firstMessage === undefined) {
-      const next = await iterator.next();
-      expect(next.done).toBe(false);
-      const event = next.value as ProviderEvent;
-      if (event.normalized?.type === "message") {
-        firstMessage = event;
-      }
-    }
-
+    const firstMessage = await nextMessageEvent(iterator);
     const consumerPausedAt = Date.now();
     await new Promise((resolve) => setTimeout(resolve, 25));
-    const consumerResumedAt = Date.now();
-
-    let secondMessage: ProviderEvent | undefined;
-    while (secondMessage === undefined) {
-      const next = await iterator.next();
-      expect(next.done).toBe(false);
-      const event = next.value as ProviderEvent;
-      if (event.normalized?.type === "message") {
-        secondMessage = event;
-      }
-    }
+    const secondMessage = await nextMessageEvent(iterator);
 
     expect(firstMessage.receivedAt).toEqual(expect.any(String));
     expect(secondMessage.receivedAt).toEqual(expect.any(String));
-    expect(consumerResumedAt).toBeGreaterThan(consumerPausedAt);
     expect(Date.parse(secondMessage.receivedAt ?? "")).toBeLessThanOrEqual(
-      consumerResumedAt
+      consumerPausedAt
     );
 
     while (!(await iterator.next()).done) {
@@ -2143,6 +2123,19 @@ async function collectProviderEvents(
     events.push(event);
   }
   return events;
+}
+
+async function nextMessageEvent(
+  iterator: AsyncIterator<ProviderEvent>
+): Promise<ProviderEvent> {
+  while (true) {
+    const next = await iterator.next();
+    expect(next.done).toBe(false);
+    const event = next.value as ProviderEvent;
+    if (event.normalized?.type === "message") {
+      return event;
+    }
+  }
 }
 
 function providerInputFixture(): ProviderRunInput {

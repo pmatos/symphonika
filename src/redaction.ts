@@ -24,7 +24,19 @@ export function redactAll(
   message: string,
   redactSecrets: readonly string[]
 ): string {
-  const spans = secretSpans(message, redactSecrets);
+  return redactUnique(message, uniqueSecrets(redactSecrets));
+}
+
+// Distinct, non-empty secrets. Hoisted to the entry points so a deep walk
+// normalizes the inventory once instead of once per string leaf.
+function uniqueSecrets(redactSecrets: readonly string[]): readonly string[] {
+  const unique = new Set(redactSecrets);
+  unique.delete("");
+  return [...unique];
+}
+
+function redactUnique(message: string, secrets: readonly string[]): string {
+  const spans = uniqueSecretSpans(message, secrets);
   if (spans.length === 0) {
     return message;
   }
@@ -44,26 +56,31 @@ export function redactValueDeep<T>(
   value: T,
   redactSecrets: readonly string[]
 ): T {
-  return redactUnknownDeep(value, redactSecrets) as T;
+  return redactUnknownDeep(value, uniqueSecrets(redactSecrets)) as T;
 }
 
 function redactUnknownDeep(
   value: unknown,
-  redactSecrets: readonly string[]
+  secrets: readonly string[]
 ): unknown {
   if (typeof value === "string") {
-    return redactAll(value, redactSecrets);
+    return redactUnique(value, secrets);
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => redactUnknownDeep(entry, redactSecrets));
+    return value.map((entry) => redactUnknownDeep(entry, secrets));
   }
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [
-        key,
-        redactUnknownDeep(entry, redactSecrets)
-      ])
-    );
+    // A keys loop rather than Object.fromEntries(Object.entries(...).map(...)):
+    // this runs on every raw provider event, and the entries form allocates a
+    // pair array per key on top of the rebuilt object.
+    const redacted: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      redacted[key] = redactUnknownDeep(
+        (value as Record<string, unknown>)[key],
+        secrets
+      );
+    }
+    return redacted;
   }
   return value;
 }
@@ -78,11 +95,15 @@ export function secretSpans(
   message: string,
   redactSecrets: readonly string[]
 ): SecretSpan[] {
+  return uniqueSecretSpans(message, uniqueSecrets(redactSecrets));
+}
+
+function uniqueSecretSpans(
+  message: string,
+  secrets: readonly string[]
+): SecretSpan[] {
   const found: SecretSpan[] = [];
-  for (const secret of new Set(redactSecrets)) {
-    if (secret.length === 0) {
-      continue;
-    }
+  for (const secret of secrets) {
     let index = message.indexOf(secret);
     while (index !== -1) {
       found.push({ end: index + secret.length, start: index });

@@ -791,17 +791,16 @@ provider-evidence redaction boundary; its value must not be written to SQLite, l
 notification content, or prompt evidence. SMTP transport errors are redacted before logging or
 durable failure recording.
 
-The provider-evidence redaction inventory is the set of credential values Symphonika resolves for
-the execution's Project: its effective tracker token and, whenever an email sink is configured, the
+The Project credential inventory is the set of credential values Symphonika resolves for the
+execution's Project: its effective tracker token and, whenever an email sink is configured, the
 value of the named password variable. The inventory does not depend on whether SMTP authentication
 is actually in use: providers inherit the daemon's environment either way, so a variable Service
-Config names and the environment sets is echoable back into evidence regardless. Both issue Runs
-and Routine Firings scrub that inventory from raw and
-Normalized Event Logs, provider stderr, provider-derived terminal reasons, and any SQLite event
-metadata before persistence; Routine Firings also scrub their structured outcome evidence. The
-inventory is explicit rather than inferred from every environment variable: provider-native
-credentials and unrelated operator environment values have no Symphonika-owned configuration or
-resolution boundary that can identify them reliably.
+Config names and the environment sets is echoable back into evidence regardless. Both issue Runs and
+Routine Firings scrub that inventory from raw and Normalized Event Logs, provider stderr,
+provider-derived terminal reasons, and any SQLite event metadata before persistence; Routine Firings
+also scrub their structured outcome evidence. The inventory is explicit rather than inferred from
+every environment variable: provider-native credentials and unrelated operator environment values
+have no Symphonika-owned configuration or resolution boundary that can identify them reliably.
 
 Codex, Claude, and OMP use their native local authentication.
 

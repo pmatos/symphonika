@@ -255,7 +255,11 @@ export type RunControllerOptions = {
   // gates (reconcileWaitingRuns, stale-claims) can still consult it. See
   // ADR 0052.
   dispatchMutex?: AsyncMutex;
-  emailConfigLoader?: () => EmailNotificationConfig | undefined;
+  // Required, not optional: this loader supplies half the Project credential
+  // inventory, and a caller that omits it silently drops the SMTP password from
+  // every evidence boundary a Run writes. That silent-omission shape is exactly
+  // what issue #612 was. Return undefined for "no email sink configured".
+  emailConfigLoader: () => EmailNotificationConfig | undefined;
   env?: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi;
   // Returns the global concurrency cap (undefined = unbounded). Per-project
@@ -459,8 +463,7 @@ export class RunController {
   private readonly configDir: string;
   private readonly createRunId: () => string;
   private readonly dispatchMutex: AsyncMutex;
-  private readonly emailConfigLoader:
-    (() => EmailNotificationConfig | undefined) | undefined;
+  private readonly emailConfigLoader: () => EmailNotificationConfig | undefined;
   private readonly env: NodeJS.ProcessEnv;
   private readonly fileOverlapGuard: DispatchFileOverlapGuard;
   private readonly githubIssuesApi: GitHubIssuesApi;
@@ -3247,12 +3250,11 @@ export class RunController {
       // !parkedAsWaiting. The unconditional unregister above already
       // released the in-flight slot. See ADR 0052 — slot-leak fix.
       if (!parkedAsWaiting && !preservedWatchdogTerminal) {
-        const redactSecrets = this.redactionInventory(input.repository.token);
         const terminal = await classifyFailure({
           cancelRequested,
           ...(caughtError === undefined ? {} : { error: caughtError }),
           events: runtime.events,
-          redactSecrets,
+          redactSecrets: this.redactionInventory(input.repository.token),
           ...(started === undefined
             ? {}
             : {
@@ -3835,11 +3837,11 @@ export class RunController {
   // (SPEC.md §6). Resolved per use rather than stored, so a Service Config
   // reload is picked up mid-Run.
   private redactionInventory(repositoryToken: string): string[] {
+    // Not deduped here: every consumer funnels through secretSpans, which
+    // already collapses duplicates.
     return [
-      ...new Set([
-        repositoryToken,
-        ...secretsForEmailConfig(this.emailConfigLoader?.(), this.env)
-      ])
+      repositoryToken,
+      ...secretsForEmailConfig(this.emailConfigLoader(), this.env)
     ];
   }
 

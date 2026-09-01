@@ -51,11 +51,11 @@ The password is passed only as SMTP authentication input. It is excluded from re
 SQLite, and logs; transport errors are redacted before they reach durable evidence or logging.
 
 Issue #612 widens that resolution boundary without widening durable storage: issue-Run and Routine
-Firing orchestration may also resolve the configured password into an in-memory redaction inventory
-before provider execution. That resolution is gated on an `email:` block existing, not on
-`smtp_username` — an unauthenticated sink still names a password variable the provider inherits.
-The value is used only to scrub provider-authored evidence and terminal text before persistence; it
-still never becomes configuration, prompt, or Run Store data.
+Firing orchestration may also resolve the configured password into the in-memory Project credential
+inventory before provider execution. That resolution is gated on an `email:` block existing, not
+on `smtp_username` — an unauthenticated sink still names a password variable the provider
+inherits. The value is used only to scrub provider-authored evidence and terminal text before
+persistence; it still never becomes configuration, prompt, or Run Store data.
 
 `smtp_security: none` with `smtp_username` is rejected unless `smtp_host` is `localhost`,
 `127.0.0.1`, or `::1`. Default ports are 587 for `starttls`, 465 for `ssl`, and 25 for `none`.

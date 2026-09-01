@@ -1139,29 +1139,25 @@ describe("daemon dispatch", () => {
       expect(rawLog).toContain("[REDACTED]");
       expect(normalizedLog).toContain("[REDACTED]");
 
-      const database = await readFile(
-        path.join(root, ".symphonika", "symphonika.db")
-      );
+      const databaseFile = path.join(root, ".symphonika", "symphonika.db");
+      const databaseBytes = await readFile(databaseFile);
       for (const secret of [trackerToken, smtpPassword]) {
         expect(rawLog).not.toContain(secret);
         expect(normalizedLog).not.toContain(secret);
-        expect(database.includes(Buffer.from(secret))).toBe(false);
+        expect(databaseBytes.includes(Buffer.from(secret))).toBe(false);
       }
 
-      const sqlite = new Database(
-        path.join(root, ".symphonika", "symphonika.db"),
-        { readonly: true }
-      );
+      const database = new Database(databaseFile, { readonly: true });
       try {
         expect(
-          sqlite
+          database
             .prepare("select terminal_reason from runs where id = ?")
             .get("run-redacted-evidence")
         ).toEqual({
           terminal_reason: "provider leaked [REDACTED] and [REDACTED]"
         });
       } finally {
-        sqlite.close();
+        database.close();
       }
     } finally {
       await daemon.stop();
@@ -1568,6 +1564,7 @@ describe("daemon dispatch", () => {
         agentProviders: { codex: codexProvider },
         configDir: root,
         createRunId: () => "run-sentinel",
+        emailConfigLoader: () => undefined,
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi: {
           addLabelsToIssue: vi.fn().mockResolvedValue(undefined),

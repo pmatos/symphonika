@@ -3833,12 +3833,20 @@ export class RunController {
       input.event.normalized === undefined
         ? undefined
         : redactValueDeep(input.event.normalized, input.redactSecrets);
-    await Promise.all([
-      appendJsonl(input.rawLogPath, raw),
-      ...(redactedNormalized === undefined
-        ? []
-        : [appendJsonl(input.normalizedLogPath, redactedNormalized)])
-    ]);
+    // The Run Store write happens before the JSONL appends below, not after:
+    // recordProviderEvent/recordProviderStreamReceipt are synchronous SQLite
+    // writes that embed the full raw/normalized payload in the row (they do
+    // not depend on the JSONL file), and the live status APIs derive their
+    // watermark from this row. Awaiting the (slower, purely supplementary)
+    // JSONL appends first would delay that watermark by the same write
+    // latency this whole method exists to keep out of receivedAt -- the
+    // Watchdog already tails the normalized log independently by its own
+    // byte offset, so nothing depends on the JSONL line preceding this row.
+    // A failed append can therefore now leave a Run Store row with no
+    // corresponding JSONL line, which the previous ordering could not: this
+    // append is still awaited and its rejection still propagates out of
+    // iterateAttempt exactly as before, but the row is no longer rolled back
+    // with it. See ADR 0090.
     if (redactedNormalized === undefined) {
       this.runStore.recordProviderStreamReceipt({
         attemptId: input.attemptId,
@@ -3846,16 +3854,22 @@ export class RunController {
         runId: input.runId,
         sequence: input.sequence
       });
-      return undefined;
+    } else {
+      this.runStore.recordProviderEvent({
+        attemptId: input.attemptId,
+        normalized: redactedNormalized,
+        raw,
+        receivedAt,
+        runId: input.runId,
+        sequence: input.sequence
+      });
     }
-    this.runStore.recordProviderEvent({
-      attemptId: input.attemptId,
-      normalized: redactedNormalized,
-      raw,
-      receivedAt,
-      runId: input.runId,
-      sequence: input.sequence
-    });
+    await Promise.all([
+      appendJsonl(input.rawLogPath, raw),
+      ...(redactedNormalized === undefined
+        ? []
+        : [appendJsonl(input.normalizedLogPath, redactedNormalized)])
+    ]);
     return input.event.normalized;
   }
 

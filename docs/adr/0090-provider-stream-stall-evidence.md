@@ -42,6 +42,22 @@ contract every test double also constructs; forcing a transport-receipt timestam
 fakes with no real queue to timestamp would assert something false about them. `persistProviderEvent`
 falls back to its own clock only when a `ProviderEvent` carries no queue-sourced stamp.
 
+An accurate `receivedAt` value is still not enough on its own: the live status APIs
+(`GET /runs/:id`, `GET /api/runs/:id`) read the receipt watermark from the Run Store, not from
+`ProviderEvent`, so the watermark write itself must not lag behind ingestion either. Both Run Store
+receipt methods are synchronous SQLite writes that embed the full raw/normalized payload in their own
+row — they do not read back from, or otherwise depend on, the JSONL evidence files —
+so `persistProviderEvent` now calls them before awaiting the JSONL appends rather than after. The
+Watchdog already tails the normalized log independently by its own byte offset (not by watermark
+existence), so nothing depends on the JSONL line preceding the Run Store row. One consequence: a
+failed append can now leave a Run Store row with no corresponding JSONL line, where the previous
+ordering could not. The append is still awaited and its rejection still propagates out of
+`iterateAttempt` exactly as before; only the row is no longer implicitly rolled back with it.
+Consumption ordering itself — the `for await` still awaits the whole of `persistProviderEvent`,
+including the JSONL appends, before requesting the next event — is unchanged by this: pipelining
+iterator consumption ahead of persistence was considered and rejected as its own, separate change
+(see Alternatives below).
+
 On upgrade, the newest
 existing normalized event per Attempt seeds the receipt row, once, on the first open that finds the
 table empty. Raw-only activity from before this evidence existed cannot be reconstructed.
@@ -124,6 +140,17 @@ orchestrator with provider output.
 
 **Terminate after the five-minute gap.** Rejected. The motivating Run recovered after 46 minutes;
 termination would turn normal provider retry behavior into data loss.
+
+**Pipeline `iterateAttempt` so the next iterator item is requested before `persistProviderEvent`
+resolves.** Rejected as the fix for late `receivedAt` values: capturing the clock only where the
+`for await` loop resumes is still gated on the previous event's persistence finishing, so a naive
+one-item lookahead does not actually move the timestamp earlier — it changes when the *next* item is
+fetched, not when the *current* one is stamped. It would also change `iterateAttempt`'s fast-fail
+behavior on a persistence error (today, a thrown write error stops iteration and the generator's
+`finally` tears down the provider process promptly; decoupled consumption would keep pulling and
+discarding further events until the stream itself ends) for a benefit the queue-ingestion timestamp
+already provides. `push()`-time stamping (see Decision) gets the same accuracy without touching
+consumption ordering or fast-fail semantics.
 
 ## Numbering
 

@@ -1207,13 +1207,18 @@ and `scheduled_at` fields. A skipped one-shot expires rather than remaining due.
 
 A capacity refusal — a full per-Project or global cap, or a stalled host — defers the clock event
 instead of consuming it (ADR 0093). The Routine Target keeps its due `next_fire_at`, its fan-out
-leg stays `pending` recording `deferred_reason`, `deferred_since` and `deferred_attempts`, no skip
-counter moves, and the next daemon tick retries admission; Routine dispatch precedes issue dispatch
+leg stays `pending` recording `deferred_reason`, `deferred_since` and `deferred_attempts`, each
+retry refreshes `last_attempted_at`, no skip counter moves, and the next daemon tick retries
+admission; Routine dispatch precedes issue dispatch
 in a tick, so a deferred target gets first refusal on the next freed slot. A recurring Target
 defers until its next clock event is due, a one-shot Target for 24 hours. A deferral that reaches
 that bound unadmitted is recorded as missed: the clock advances exactly as a skip's does, the
 reason increments its rolling 24-hour counter once, the fan-out leg settles as `missed`, the
-Routine did not run, and the fan-out counts it as a failure. Restart schedule recompute leaves a
+Routine did not run, and the fan-out counts it as a failure. The clock lands on the successor event
+that ended the wait rather than jumping past it, so one lost run never costs two; a backlog older
+than a whole period still collapses to the next future event. A deferred leg that loses its target
+mid-wait — Project disabled, Routine removed, cron edited — also settles as `missed` rather than as
+an uncounted `target_unavailable` skip. Restart schedule recompute leaves a
 parked clock event alone rather than settling it as a catch-up skip. Deferring emits
 `routine.deferred` with `reason`, `project`, `routine`, `scheduled_at`, and the `deferred_until`
 bound; recording a miss emits `routine.missed` with `reason`, `project`, `routine`, `scheduled_at`,

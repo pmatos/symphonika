@@ -273,7 +273,9 @@ _Avoid_: Routine Skip, schedule advance
 A **Routine Deferral** that reached the bound of its own clock event — the next due event for a
 recurring Target, a fixed horizon for a one-shot — without ever being admitted. It consumes the
 clock event like a skip, increments that reason's rolling counter once, and settles its Routine
-Fan-out leg as a failure: the Routine did not run.
+Fan-out leg as a failure: the Routine did not run. It shares the skip counters and the
+`last_skip_reason` / `last_skip_at` evidence because the reasons are shared; only the path to them
+differs. A Target that loses its Project or declaration mid-deferral is a Missed Routine too.
 _Avoid_: Routine Skip, Routine Firing
 
 **Routine Dispatch Hold**:

@@ -2767,11 +2767,19 @@ export class RunStore {
   settleUnavailableRoutineFanoutTargets(): number {
     // Terminal or in-flight notifications already represent immutable
     // one-shot snapshots; only a still-pending group may be reconciled.
+    //
+    // A leg carrying a capacity deferral is settled as `missed` rather than
+    // as an uncounted `target_unavailable` skip: the Routine was waiting for
+    // a slot and then lost its target, which is still a run that did not
+    // happen and must reach the fan-out failure count (ADR 0093).
     const result = this.database
       .prepare(
         [
           "update routine_fanout_targets",
-          "set disposition = 'skipped', hold_reason = null, skip_reason = 'target_unavailable', updated_at = ?",
+          "set disposition = case when deferred_reason is null then 'skipped' else 'missed' end,",
+          "hold_reason = null,",
+          "skip_reason = coalesce(deferred_reason, 'target_unavailable'),",
+          "updated_at = ?",
           "where disposition in ('pending', 'held')",
           "and exists (",
           "select 1 from routine_fanouts writable_fanout",

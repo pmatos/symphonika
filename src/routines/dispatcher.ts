@@ -723,7 +723,8 @@ export async function dispatchDueRoutines(
             now,
             projectName: project.name,
             reason: deferral.reason,
-            routine
+            routine,
+            scheduledAt
           })
         ) {
           logRoutineMiss(input.logger, {
@@ -872,7 +873,8 @@ export async function dispatchDueRoutines(
             now,
             projectName: project.name,
             reason: capacityReason,
-            routine
+            routine,
+            scheduledAt
           })
         ) {
           logRoutineMiss(input.logger, {
@@ -2570,18 +2572,44 @@ function recordMissedRoutineFiring(
     projectName: string;
     reason: RoutineDeferralReason;
     routine: RoutineStatus;
+    scheduledAt: string;
   }
 ): boolean {
+  const nextFireAt = missedClockAdvance(input);
   return runStore.missRoutineFiring({
     attemptedAt: input.now.toISOString(),
     fanoutId: input.fanoutId,
     name: input.routine.name,
-    ...(input.evaluation.nextAt === undefined
-      ? {}
-      : { nextFireAt: input.evaluation.nextAt }),
+    ...(nextFireAt === undefined ? {} : { nextFireAt }),
     projectName: input.projectName,
     reason: input.reason
   });
+}
+
+// Where the clock lands once a parked event is recorded as missed. The event
+// that ended the wait is the successor of the parked one, and it has had no
+// admission attempt of its own — handing the clock to it, rather than to the
+// next event after `now`, is what stops one lost run from silently costing
+// two. A backlog older than a whole period still collapses to the next future
+// event, exactly as a skip's advance does (ADR 0058).
+function missedClockAdvance(input: {
+  evaluation: Extract<RoutineScheduleEvaluation, { kind: "fire_now" }>;
+  now: Date;
+  routine: RoutineStatus;
+  scheduledAt: string;
+}): string | undefined {
+  if (input.evaluation.nextAt === undefined) {
+    return undefined;
+  }
+  const schedule = routineSchedule(input.routine);
+  if (!("cron" in schedule)) {
+    return input.evaluation.nextAt;
+  }
+  const successor = nextRecurringFireAt(schedule, new Date(input.scheduledAt));
+  const afterSuccessor = nextRecurringFireAt(schedule, new Date(successor));
+  return input.now.getTime() < new Date(afterSuccessor).getTime()
+    ? successor
+    : input.evaluation.nextAt;
 }
 
 function logRoutineMiss(

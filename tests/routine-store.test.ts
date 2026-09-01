@@ -982,6 +982,55 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("settles a swept target that was waiting for capacity as a failed run", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const routine = {
+      kind: "report" as const,
+      name: "refactor-audit",
+      prompt: "Audit.",
+      provider: "codex" as const,
+      schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+      sourcePath: "/tmp/refactor-audit.md"
+    };
+    try {
+      store.syncRoutines([{ ...routine, projectName: "alpha" }]);
+      const scheduledAt =
+        store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+          ?.nextFireAt ?? "";
+      store.ensureRoutineFanout({
+        id: "fanout-swept",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt
+      });
+      store.deferRoutineFanoutTarget({
+        deferredAt: scheduledAt,
+        fanoutId: "fanout-swept",
+        name: "refactor-audit",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+
+      // The Routine is removed from the config while its clock event is
+      // still parked, so the leg loses its target mid-wait.
+      store.syncRoutines([], { projects: ["alpha"] });
+
+      expect(store.settleUnavailableRoutineFanoutTargets()).toBe(1);
+      const fanout = store.getRoutineFanout("fanout-swept");
+      expect(fanout?.targets[0]).toMatchObject({
+        disposition: "missed",
+        skipReason: "concurrency_cap"
+      });
+      // A run that waited for a slot and then lost its target still did not
+      // happen; reporting it as an uncounted skip is what mailed "0 failed".
+      expect(fanout?.failureCount).toBe(1);
+      expect(fanout?.subject).toContain("1 failed");
+    } finally {
+      store.close();
+    }
+  });
+
   it("builds the grouped subject from terminal failures and discovered pull requests", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

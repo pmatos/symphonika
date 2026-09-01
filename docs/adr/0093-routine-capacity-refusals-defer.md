@@ -22,7 +22,15 @@ dispatch in a tick, so a deferred target gets first refusal on the next freed sl
 
 A deferral is bounded by the Routine's own schedule. A recurring Target defers until its next clock
 event is due; that successor supersedes the parked event, so carrying it further would double-fire.
-A one-shot Target has no successor and defers for 24 hours instead.
+A one-shot Target has no successor to bound it and no successor to release its fan-out summary, so
+it takes a fixed 24-hour horizon instead — the one place this deviates from "until the next
+scheduled fire", because for a one-shot there is no such fire.
+
+Recording a miss hands the clock to the successor event that ended the wait, not to the next event
+after `now`. That event has had no admission attempt of its own, and advancing past it would make
+one lost run cost two — the exact failure this ADR exists to remove. A backlog older than a whole
+period still collapses to the next future event, as ADR 0058's advance does. The successor is
+evaluated on the following tick, so a slot that frees around the deadline still runs it.
 
 When the bound passes with the target still unadmitted, the event settles as **missed**: the clock
 advances (or a one-shot expires) exactly as a skip does, the reason increments the existing rolling
@@ -43,7 +51,15 @@ had.
   nightly Routine deferred for hours mails hours late; a Routine that misses mails when its next
   clock event supersedes the parked one.
 - Skip counter evidence keeps ADR 0058's meaning — one count per lost clock event — because only
-  the terminal miss increments it. Deferral attempts are counted per fan-out leg instead.
+  the terminal miss increments it, and the miss hands the clock to the successor rather than
+  skipping over it. Deferral attempts are counted per fan-out leg instead. A Missed Routine reuses
+  that counter and the `last_skip_reason` / `last_skip_at` columns: the reasons are shared, only the
+  path to them differs.
+- A deferred leg that loses its target mid-wait — its Project disabled, its Routine removed, its
+  cron edited — settles as `missed` rather than as an uncounted `target_unavailable` skip. The run
+  still did not happen, so it still reaches the failure count.
+- Each deferring tick refreshes the Routine's `last_attempted_at`, so an operator can see that
+  admission is being retried without reading the fan-out.
 - `deferred` and `missed` join `fired` and `skipped` in the dispatch result, and operator surfaces
   (`symphonika routines`, the status dashboard, `/routines`) show a live deferral so a Routine that
   is due but unadmitted no longer looks inexplicably late.

@@ -1630,9 +1630,27 @@ describe("RoutineFiringDispatcher", () => {
       ).toMatchObject({
         deferral: null,
         lastSkipReason: "concurrency_cap",
-        nextFireAt: "2026-05-22T10:02:00.000Z",
+        // The event that ended the wait had no admission attempt of its own,
+        // so the clock lands on it rather than jumping past it — one lost
+        // run must not silently cost two (ADR 0093).
+        nextFireAt: "2026-05-22T10:01:00.000Z",
         skipCounts24h: { concurrency_cap: 1 }
       });
+
+      activeRuns.unregister("issue-run");
+      const successor = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        notification,
+        now: new Date("2026-05-22T10:01:30.000Z")
+      });
+
+      expect(successor.fired).toEqual(["new-fire"]);
     } finally {
       activeRuns.unregister("issue-run");
       runStore.close();

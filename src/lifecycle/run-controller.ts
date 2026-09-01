@@ -4138,11 +4138,15 @@ export class RunController {
     let sequence = 0;
     try {
       scratchPath = await input.deadline.race(scratchOperation);
+      const { maxInFlight: globalMaxInFlight } = await input.deadline.race(
+        this.providerBuildCapacityLoader()
+      );
 
       // This is the last pre-provider await. A cancellation during HEAD
-      // inspection or scratch creation fired the preparation handler and is
-      // latched on the slot; observe it before replacing that handler so a
-      // provider process is never launched after cancellation.
+      // inspection, scratch creation, or capacity loading fired the
+      // preparation handler and is latched on the slot; observe it before
+      // replacing that handler so a provider process is never launched
+      // after cancellation.
       const cancelBeforeProviderStart = this.cancelledBeforeProviderStart(
         input.runId
       );
@@ -4154,8 +4158,6 @@ export class RunController {
         provider: input.provider
       });
 
-      const { maxInFlight: globalMaxInFlight } =
-        await this.providerBuildCapacityLoader();
       for await (const event of input.provider.runAttempt({
         branchName: input.evidence.branchName,
         ...(globalMaxInFlight === undefined ? {} : { globalMaxInFlight }),

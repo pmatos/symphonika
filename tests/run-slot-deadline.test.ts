@@ -775,6 +775,88 @@ describe("Run slot deadline", () => {
     }
   });
 
+  it("releases the slot without launching a provider when the deadline expires during capacity loading", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const onTerminated = vi.fn();
+    let capacityLoadStarted = false;
+    const capacityLoadStalled = createDeferred<{
+      maxInFlight: number | undefined;
+    }>();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-capacity-load-timeout",
+        providerBuildCapacityLoader: () => {
+          capacityLoadStarted = true;
+          return capacityLoadStalled.promise;
+        }
+      }
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await vi.waitFor(() => {
+        expect(capacityLoadStarted).toBe(true);
+      });
+      expect(activeRuns.countInFlight()).toBe(1);
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      // The slot's own scratch directory was created successfully (only the
+      // capacity load is stalled), so releasing it awaits a real
+      // removeProviderScratch() fs.rm() — a genuine macrotask, not something
+      // flushPromises()'s microtask-only loop can observe. Poll with real
+      // time (vi.waitFor does this even while fake timers are active).
+      await vi.waitFor(() => {
+        expect(activeRuns.countInFlight()).toBe(0);
+      });
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-capacity-load-timeout"
+      });
+      expect(runStore.getRun("run-capacity-load-timeout")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      // The regression this guards against: attachProvider must not run
+      // before the capacity load settles, or a cancel landing in this
+      // window would burn its one shot on a provider.cancel() that has no
+      // process to cancel yet, and runAttempt would launch anyway once the
+      // load resolves.
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(provider.cancel).not.toHaveBeenCalled();
+      expect(onTerminated).toHaveBeenCalledOnce();
+    } finally {
+      capacityLoadStalled.resolve({ maxInFlight: undefined });
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
   it("rolls back an indeterminate claim when the bounded write times out", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
@@ -1156,6 +1238,7 @@ function makeRunController(
     createRunId?: RunControllerOptions["createRunId"];
     githubIssuesApi?: RunControllerOptions["githubIssuesApi"];
     prepareIssueWorkspace?: RunControllerOptions["prepareIssueWorkspace"];
+    providerBuildCapacityLoader?: RunControllerOptions["providerBuildCapacityLoader"];
     watchdogConfigLoader?: RunControllerOptions["watchdogConfigLoader"];
   } = {}
 ): RunController {
@@ -1184,6 +1267,9 @@ function makeRunController(
       vi.fn().mockResolvedValue(preparedWorkspace(deps.root)),
     projectsLoader: () =>
       Promise.resolve(new Map([[deps.project.name, deps.project]])),
+    ...(overrides.providerBuildCapacityLoader === undefined
+      ? {}
+      : { providerBuildCapacityLoader: overrides.providerBuildCapacityLoader }),
     providersLoader: () => Promise.resolve(deps.reloader.providersConfig()),
     runStore: deps.runStore,
     schedule: () => undefined,

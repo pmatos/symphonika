@@ -31,6 +31,7 @@ import type {
   PrepareIssueWorkspaceInput
 } from "../src/workspace.js";
 import { abortSignalMatcher } from "./helpers/abort-signal.js";
+import { createDeferred } from "./helpers/deferred.js";
 
 const fsOverrides = vi.hoisted(() => ({
   mkdir: undefined as
@@ -643,16 +644,13 @@ describe("Run slot deadline", () => {
       "run-scratch-timeout-attempt-1"
     );
     let scratchCreationStarted = false;
-    let releaseScratchCreation: () => void = () => undefined;
-    const scratchCreationStalled = new Promise<void>((resolve) => {
-      releaseScratchCreation = resolve;
-    });
+    const scratchCreationStalled = createDeferred<void>();
     fsOverrides.mkdir = async (target) => {
       if (path.resolve(target) !== expectedScratchPath) {
         return "passthrough";
       }
       scratchCreationStarted = true;
-      await scratchCreationStalled;
+      await scratchCreationStalled.promise;
       return "handled";
     };
 
@@ -682,7 +680,7 @@ describe("Run slot deadline", () => {
       expect(provider.cancel).not.toHaveBeenCalled();
       expect(onTerminated).toHaveBeenCalledOnce();
     } finally {
-      releaseScratchCreation();
+      scratchCreationStalled.resolve();
       fsOverrides.mkdir = undefined;
       await dispatch.catch(() => undefined);
       runStore.close();

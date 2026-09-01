@@ -122,7 +122,8 @@ import { DispatchFileOverlapGuard } from "./file-overlap-guard.js";
 import type { HostPressureGate, HostPressureVerdict } from "./host-pressure.js";
 import {
   createProviderScratch,
-  removeProviderScratch
+  removeProviderScratch,
+  type ProviderScratchIdentity
 } from "./provider-scratch.js";
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
 import { buildCapReachedReason } from "./terminal-reason.js";
@@ -3296,11 +3297,7 @@ export class RunController {
     // If reconcile flipped cancelRequested between reserveSlot (inside the
     // narrowed dispatch mutex) and entry into runAttemptLifecycle, honor it
     // immediately without launching the provider. See ADR 0052.
-    const reservedEntry = this.activeRuns.getInFlight(input.runId);
-    const cancelBeforeAttach: Error | undefined =
-      reservedEntry !== undefined && reservedEntry.cancelRequested
-        ? new Error(`run ${input.runId} was cancelled before provider start`)
-        : undefined;
+    const cancelBeforeAttach = this.cancelledBeforeProviderStart(input.runId);
 
     try {
       // If pre-attempt cancel-request was observed above, jump straight to
@@ -4080,6 +4077,16 @@ export class RunController {
     };
   }
 
+  // Shared by runAttemptLifecycle (pre-loadWorkflow) and iterateAttempt
+  // (pre-attachProvider): a cancel that lands during any pre-provider await
+  // latches cancelRequested on the slot, and both callers must observe it
+  // before doing more preparation work or attaching the real provider.
+  private cancelledBeforeProviderStart(runId: string): Error | undefined {
+    return this.activeRuns.getInFlight(runId)?.cancelRequested === true
+      ? new Error(`run ${runId} was cancelled before provider start`)
+      : undefined;
+  }
+
   private async iterateAttempt(input: {
     attemptId: string;
     attemptNumber: number;
@@ -4114,13 +4121,11 @@ export class RunController {
       // inspection or scratch creation fired the preparation handler and is
       // latched on the slot; observe it before replacing that handler so a
       // provider process is never launched after cancellation.
-      const cancelBeforeProviderStart = this.activeRuns.getInFlight(
+      const cancelBeforeProviderStart = this.cancelledBeforeProviderStart(
         input.runId
       );
-      if (cancelBeforeProviderStart?.cancelRequested === true) {
-        throw new Error(
-          `run ${input.runId} was cancelled before provider start`
-        );
+      if (cancelBeforeProviderStart !== undefined) {
+        throw cancelBeforeProviderStart;
       }
       this.activeRuns.attachProvider(input.runId, {
         cancel: () => input.provider.cancel(input.runId),
@@ -4165,8 +4170,8 @@ export class RunController {
     } finally {
       // Best effort: failing to delete temporary files must never mask the
       // attempt's own outcome. The startup sweep reclaims what is left.
-      const removeScratch = (): Promise<void> =>
-        this.bestEffort(
+      if (scratchPath !== undefined) {
+        await this.bestEffort(
           () => removeProviderScratch(this.stateRoot, scratchIdentity),
           {
             issueNumber: input.issue.number,
@@ -4174,15 +4179,38 @@ export class RunController {
             runId: input.runId
           }
         );
-      if (scratchPath !== undefined) {
-        await removeScratch();
       } else {
         // The deadline race deliberately abandons a stalled mkdir so it
         // cannot retain capacity. If that mkdir later settles, reclaim its
-        // directory asynchronously without extending slot ownership.
-        void scratchOperation.then(removeScratch).catch(() => undefined);
+        // directory asynchronously without extending slot ownership. Handed
+        // off to a method taking only the primitives it needs, rather than a
+        // closure over this scope, so the orphaned promise chain cannot keep
+        // the whole attempt (prompt, evidence, provider) reachable for as
+        // long as the stalled mkdir is pending.
+        this.reclaimAbandonedScratch(
+          scratchOperation,
+          scratchIdentity,
+          input.issue.number,
+          input.runId
+        );
       }
     }
+  }
+
+  private reclaimAbandonedScratch(
+    scratchOperation: Promise<string>,
+    scratchIdentity: ProviderScratchIdentity,
+    issueNumber: number,
+    runId: string
+  ): void {
+    void scratchOperation
+      .then(() =>
+        this.bestEffort(
+          () => removeProviderScratch(this.stateRoot, scratchIdentity),
+          { issueNumber, operation: "removeProviderScratch", runId }
+        )
+      )
+      .catch(() => undefined);
   }
 
   private async persistProviderEvent(input: {

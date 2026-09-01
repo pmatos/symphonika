@@ -106,10 +106,7 @@ export class InFlightRunRegistry {
   // Mutates the existing entry in place so the (project, issue) lock remains
   // held across reserve → attach.
   attachProvider(runId: string, input: AttachProviderInput): void {
-    const entry = this.entries.get(runId);
-    if (entry === undefined) {
-      throw new Error(`no in-flight run for ${runId}`);
-    }
+    const entry = this.getEntryOrThrow(runId);
     entry.cancel = input.cancel;
     if (input.provider !== undefined) {
       entry.provider = input.provider;
@@ -138,11 +135,15 @@ export class InFlightRunRegistry {
   // cancellation-handler handoff through all pre-provider setup does not
   // reopen issue #258's eligibility-loss window.
   updateRespectsIssueLabels(runId: string, respectsIssueLabels: boolean): void {
+    this.getEntryOrThrow(runId).respectsIssueLabels = respectsIssueLabels;
+  }
+
+  private getEntryOrThrow(runId: string): InFlightRunEntry {
     const entry = this.entries.get(runId);
     if (entry === undefined) {
       throw new Error(`no in-flight run for ${runId}`);
     }
-    entry.respectsIssueLabels = respectsIssueLabels;
+    return entry;
   }
 
   register(input: RegisterRunInput): void {

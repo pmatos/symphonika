@@ -983,46 +983,50 @@ const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
 // then an optional single-letter K/M/G/T/P/E suffix or an explicit "B"
 // (bytes) marker — never both combined ("32GB" is not a valid systemd unit,
 // only "32G" or "32000000000B" are).
-const SYSTEMD_MEMORY_VALUE_TERM = /^\d+(?:\.\d+)?\s*(?:[KMGTPE]|B)?$/i;
-const SYSTEMD_MEMORY_PERCENTAGE = /^\d+(?:\.\d+)?%$/;
+const SYSTEMD_MEMORY_VALUE_TERM = /^(\d+(?:\.\d+)?)\s*(?:[KMGTPE]|B)?$/i;
+const SYSTEMD_MEMORY_PERCENTAGE = /^(\d+(?:\.\d+)?)%$/;
 
-// Whether `value` has the general SHAPE of a systemd memory-limit
-// assignment — a percentage, or a sum of magnitudes each carrying at most
-// one K/M/G/T/P/E-or-"B" suffix — regardless of whether this file's
-// narrower K/M/G/T-only parser can compute its byte value. Used only to
-// tell "might still be genuinely in force, so decline to evaluate rather
-// than warn against the wrong value" (shape matches, e.g. "1024B", "2P",
-// "50%", "1G 500M", "32 G") apart from "systemd itself would never have
-// accepted this text in the first place" (shape doesn't match at all, e.g.
-// "bogus", "32GB", "10garbage" — confirmed against systemd's
-// `systemd-analyze verify`, which logs each as invalid and ignored). Splits
-// only on whitespace immediately before a digit, so a single spaced-out
-// term ("32 G") stays one component while a compound sum ("1G 500M") still
-// splits into its parts. A compact, no-separator compound like "1G500M" is
-// a known systemd-valid form this shape check doesn't recognize either —
-// modeling it needs a full tokenizer, out of proportion for this check.
-function looksLikeSystemdMemoryValue(value: string): boolean {
-  if (SYSTEMD_MEMORY_PERCENTAGE.test(value)) {
-    return true;
-  }
-  return value
-    .split(/\s+(?=\d)/)
-    .every((term) => SYSTEMD_MEMORY_VALUE_TERM.test(term));
-}
-
-// config_parse_memory_limit() ignores an assignment whose text isn't a
-// systemd memory value at all, and separately rejects a magnitude of zero
-// as out of range — both cases make systemd keep whatever was previously in
-// force. Everything else (a value this parser's narrower K/M/G/T-only
-// grammar merely fails to compute a byte count for) is still shaped like a
-// systemd-valid form outside that narrower grammar, so it is never treated
-// as skippable here.
+// config_parse_memory_limit() drops an assignment two different ways, both
+// of which make systemd keep whatever limit was previously in force:
+//
+//   - "Invalid memory limit ..., ignoring" when the text is not a memory
+//     value at all — neither a percentage of at most two decimal places nor
+//     a sum of magnitudes each carrying at most one K/M/G/T/P/E-or-"B"
+//     suffix. Covers "bogus", "32GB", "10garbage", and a percentage above
+//     100 ("101%", "200%"), which overflows parse_permyriad and then fails
+//     parse_size because of the "%".
+//   - "Memory limit ... out of range, ignoring" when the text parses but
+//     resolves to zero bytes — "0", "0B", "0P", "0K", and "0%".
+//
+// Both verified against `systemd-analyze verify` (systemd 261), which also
+// confirms the inclusive upper bound: "100%" is accepted, "100.01%" is not.
+//
+// A value systemd accepts that this file's narrower K/M/G/T-only
+// parseSystemdByteSize merely cannot compute a byte count for ("50%",
+// "1024B", "2P", "1G 500M") is never treated as skippable here: it IS the
+// effective assignment, so skipping past it would warn against the wrong,
+// no-longer-effective value instead of just declining to evaluate. Splits
+// a compound sum only on whitespace immediately before a digit, so a single
+// spaced-out term ("32 G") stays one component. Two systemd-valid forms
+// this deliberately misreads as invalid are the compact, no-separator
+// compound ("1G500M") and an explicitly-signed magnitude ("+5G");
+// recognizing them needs a full tokenizer, out of proportion for a check
+// whose only job is to decide which drop-in line to read a ceiling from.
 function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
-  if (!looksLikeSystemdMemoryValue(value)) {
-    return true;
+  const percentage = SYSTEMD_MEMORY_PERCENTAGE.exec(value);
+  if (percentage !== null) {
+    const percent = Number(percentage[1]);
+    return !(percent > 0 && percent <= 100);
   }
-  const match = SYSTEMD_BYTE_SIZE_PATTERN.exec(value);
-  return match !== null && Number(match[1]) === 0;
+  const magnitudes: number[] = [];
+  for (const term of value.split(/\s+(?=\d)/)) {
+    const match = SYSTEMD_MEMORY_VALUE_TERM.exec(term);
+    if (match === null) {
+      return true;
+    }
+    magnitudes.push(Number(match[1]));
+  }
+  return magnitudes.every((magnitude) => magnitude === 0);
 }
 
 function parseSystemdByteSize(value: string): number | undefined {

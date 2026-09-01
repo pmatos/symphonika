@@ -2029,7 +2029,7 @@ describe("doctor", () => {
       expect(warning).toContain("36 GiB");
     });
 
-    it.each(["bogus", "0", "10garbage", "32GB"])(
+    it.each(["bogus", "0", "10garbage", "32GB", "0%", "200%", "0B", "0 0"])(
       "falls back to the last valid MemoryMax= when a later drop-in is invalid (%s)",
       async (invalidValue) => {
         const report = await runProviderCapacityDoctor({
@@ -2045,7 +2045,7 @@ describe("doctor", () => {
       }
     );
 
-    it.each(["50%", "1024B", "2P", "1G 500M"])(
+    it.each(["50%", "100%", "1024B", "2P", "1G 500M"])(
       "does not fall back past a MemoryMax= form it cannot parse but systemd accepts (%s)",
       async (unparseableButValid) => {
         const report = await runProviderCapacityDoctor({

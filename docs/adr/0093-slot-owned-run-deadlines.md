@@ -37,8 +37,13 @@ slot ownership this ADR removes.
 The pre-Run claim write is bounded by the same policy but measured from now, because the Run's
 origin is not yet recorded. When that write neither confirms nor fails cleanly the Issue may already
 carry `sym:claimed` with no Run row behind it, and the stale-claim sweep would escalate it to
-`sym:stale`, which v1 never auto-clears. The claim is therefore best-effort removed on any failure
-of that bounded write; removing a label that was never applied is a no-op.
+`sym:stale`, which v1 never auto-clears. The claim is therefore best-effort removed whenever the
+failure leaves no Run row behind; once a Run row exists, the label is the caller's only durable
+record of ownership, so a shutdown-driven rollback stays scoped to that branch and any other
+post-creation failure leaves the label alone. Removing a label that was never applied is a no-op.
+The rollback write is itself bounded under the same policy as the claim write it undoes: it also
+runs while `dispatchMutex` is held, so an unbounded rollback would stall every later dispatch just
+as surely as an unbounded claim write would.
 
 Before provider attachment, the in-flight registry binds cancellation to the deadline's abort
 handler instead of a no-op. The same signal is threaded through issue Workspace preparation and

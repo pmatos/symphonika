@@ -3003,7 +3003,6 @@ export class RunController {
       );
     }
 
-    let claimAttempted = false;
     let claimed = false;
     let deadline = NO_RUN_SLOT_DEADLINE;
     let runCreated = false;
@@ -3022,9 +3021,6 @@ export class RunController {
           });
     claimDeadline.arm();
     try {
-      // Once the request is issued its outcome is indeterminate: the bounded
-      // race can reject while GitHub has already applied the label.
-      claimAttempted = true;
       await claimDeadline.race(
         this.addLabelsBounded({
           deadline: claimDeadline,
@@ -3111,58 +3107,83 @@ export class RunController {
       }
     } catch (error) {
       deadline.clear();
-      if (error instanceof RegistryShutdownError && runCreated) {
-        // The shutdown snapshot in stop() predates this row, so record the
-        // shutdown reason here and release the claim label best-effort.
-        this.runStore.markCancelRequested(
-          input.runId,
-          CANCEL_REASONS.DAEMON_SHUTDOWN
-        );
-        this.runStore.updateRunState(input.runId, "cancelled");
-        const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
-        await this.bestEffort(
-          () =>
-            api.removeLabelsFromIssue({
-              ...input.repository,
+      // Once the claim request was issued its outcome is indeterminate: the
+      // bounded race above can reject while GitHub has already applied the
+      // label. Any rollback below runs while dispatchMutex is held, so it
+      // gets its own bound under the same policy -- an unbounded rollback
+      // would stall every later dispatch just like the write it undoes.
+      const rollbackDeadline =
+        claimCapMs === undefined
+          ? NO_RUN_SLOT_DEADLINE
+          : runSlotDeadline({
+              expiresAtMs: Date.now() + claimCapMs,
+              onExpire: () => undefined
+            });
+      rollbackDeadline.arm();
+      try {
+        if (error instanceof RegistryShutdownError && runCreated) {
+          // The shutdown snapshot in stop() predates this row, so record the
+          // shutdown reason here and release the claim label best-effort.
+          this.runStore.markCancelRequested(
+            input.runId,
+            CANCEL_REASONS.DAEMON_SHUTDOWN
+          );
+          this.runStore.updateRunState(input.runId, "cancelled");
+          await this.bestEffort(
+            () =>
+              rollbackDeadline.race(
+                this.removeLabelsBounded({
+                  deadline: rollbackDeadline,
+                  issueNumber: input.issue.number,
+                  labels: ["sym:claimed"],
+                  repository: input.repository
+                })
+              ),
+            {
               issueNumber: input.issue.number,
-              labels: ["sym:claimed"]
-            }),
-          {
+              label: "sym:claimed",
+              operation: "removeLabel",
+              project: input.project.name,
+              runId: input.runId
+            }
+          );
+        } else if (!runCreated && claimed) {
+          // Failure between claim and createRun (rare): still mark sym:failed best-effort.
+          await this.markIssueFailed({
             issueNumber: input.issue.number,
-            label: "sym:claimed",
-            operation: "removeLabel",
-            project: input.project.name,
-            runId: input.runId
-          }
-        );
-      } else if (!runCreated && claimed) {
-        // Failure between claim and createRun (rare): still mark sym:failed best-effort.
-        await this.markIssueFailed({
-          issueNumber: input.issue.number,
-          repository: input.repository
-        });
-      } else if (claimAttempted) {
-        // The claim write timed out or failed without confirming, so the Issue
-        // may carry `sym:claimed` with no Run row behind it. Left alone, the
-        // stale-claim sweep would add `sym:stale`, which v1 never auto-clears,
-        // excluding the Issue until an operator intervenes. Removing a label
-        // that was never applied is a no-op, so roll the claim back either way.
-        const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
-        await this.bestEffort(
-          () =>
-            api.removeLabelsFromIssue({
-              ...input.repository,
+            repository: input.repository
+          });
+        } else if (!runCreated) {
+          // The claim write timed out or failed without confirming, so the
+          // Issue may carry `sym:claimed` with no Run row behind it. Left
+          // alone, the stale-claim sweep would add `sym:stale`, which v1
+          // never auto-clears, excluding the Issue until an operator
+          // intervenes. Removing a label that was never applied is a no-op,
+          // so roll the claim back either way. Scoped to !runCreated: once
+          // the Run row exists, the label is the caller's only durable
+          // record of ownership, and other branches above already own its
+          // fate.
+          await this.bestEffort(
+            () =>
+              rollbackDeadline.race(
+                this.removeLabelsBounded({
+                  deadline: rollbackDeadline,
+                  issueNumber: input.issue.number,
+                  labels: ["sym:claimed"],
+                  repository: input.repository
+                })
+              ),
+            {
               issueNumber: input.issue.number,
-              labels: ["sym:claimed"]
-            }),
-          {
-            issueNumber: input.issue.number,
-            label: "sym:claimed",
-            operation: "removeLabel",
-            project: input.project.name,
-            runId: input.runId
-          }
-        );
+              label: "sym:claimed",
+              operation: "removeLabel",
+              project: input.project.name,
+              runId: input.runId
+            }
+          );
+        }
+      } finally {
+        rollbackDeadline.clear();
       }
       throw error;
     } finally {
@@ -3184,6 +3205,22 @@ export class RunController {
     await (
       this.githubIssuesApi as LabelWritingGitHubIssuesApi
     ).addLabelsToIssue({
+      ...input.repository,
+      issueNumber: input.issueNumber,
+      labels: input.labels,
+      ...input.deadline.signalOption
+    });
+  }
+
+  private async removeLabelsBounded(input: {
+    deadline: RunSlotDeadline;
+    issueNumber: number;
+    labels: string[];
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    await (
+      this.githubIssuesApi as LabelWritingGitHubIssuesApi
+    ).removeLabelsFromIssue({
       ...input.repository,
       issueNumber: input.issueNumber,
       labels: input.labels,

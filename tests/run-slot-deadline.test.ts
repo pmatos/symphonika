@@ -561,6 +561,147 @@ describe("Run slot deadline", () => {
     }
   });
 
+  it("keeps the claim label when a Run row exists and a non-shutdown error follows", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+    const removeLabelsFromIssue = vi.fn().mockResolvedValue(undefined);
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-conflict",
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          removeLabelsFromIssue
+        }
+      }
+    );
+
+    // Simulates a non-shutdown failure between createRun and slot
+    // reservation (e.g. a plain reserveSlot conflict, or the run store
+    // throwing on a DB error) without consuming the project's dispatch cap,
+    // which a pre-existing activeRuns entry for this project would do.
+    vi.spyOn(activeRuns, "reserveSlot").mockImplementationOnce(() => {
+      throw new Error("boom: non-shutdown failure after Run row created");
+    });
+
+    try {
+      await expect(controller.dispatchOneFresh(pollStatus())).rejects.toThrow(
+        "boom: non-shutdown failure after Run row created"
+      );
+
+      // The claim succeeded and the Run row was created before reserveSlot
+      // threw, so the label is the caller's only durable record of
+      // ownership; a blind rollback here would strip it while the orphaned
+      // Run row lingers, letting the issue be re-dispatched underneath it.
+      expect(removeLabelsFromIssue).not.toHaveBeenCalled();
+      expect(addLabelsToIssue).toHaveBeenCalledOnce();
+      expect(runStore.getRun("run-conflict")).toBeDefined();
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("bounds the claim rollback so a hung removeLabelsFromIssue cannot stall dispatchMutex", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    // Neither the claim write nor its rollback ever confirms.
+    const addLabelsToIssue = vi.fn(() => new Promise<void>(() => undefined));
+    const removeLabelsFromIssue = vi.fn(
+      () => new Promise<void>(() => undefined)
+    );
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-stuck-rollback",
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          removeLabelsFromIssue
+        }
+      }
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T15:00:00.000Z"));
+    try {
+      const dispatch = controller
+        .dispatchOneFresh(pollStatus())
+        .catch((error: unknown) => error);
+      await flushPromises();
+      // First minute: the claim write's own deadline expires.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+      // Second minute: the rollback's own deadline expires. Without one,
+      // this await never settles and dispatchMutex stays held forever --
+      // the exact stall the P1 review flagged.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      await expect(dispatch).resolves.toMatchObject({
+        name: "RunTimeoutError"
+      });
+      expect(removeLabelsFromIssue).toHaveBeenCalledOnce();
+
+      // dispatchMutex was released: a second dispatch reaches its own claim
+      // write instead of hanging behind the still-unsettled call above.
+      const secondDispatch = controller
+        .dispatchOneFresh(pollStatus())
+        .catch((error: unknown) => error);
+      await flushPromises();
+      expect(addLabelsToIssue).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      await flushPromises();
+      await expect(secondDispatch).resolves.toMatchObject({
+        name: "RunTimeoutError"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("cancels an attached provider when the deadline wins mid-attempt", async () => {
     const root = await makeTempRoot();
     await writeProject(root);

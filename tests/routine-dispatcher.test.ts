@@ -6904,6 +6904,75 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("reports a miss with no firing when the deadline is reached with capacity free", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      await dispatchDueRoutinesAndDrain(
+        recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        })
+      );
+
+      // The slot frees before the deadline, so this tick has capacity — the
+      // parked event is still past its own clock and settles as missed.
+      activeRuns.unregister("issue-run");
+      const atDeadline = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-22T10:01:00.000Z")
+      });
+
+      // This exact shape — a miss with nothing fired — is what daemon.ts
+      // keys on to end the tick instead of letting an issue Run claim the
+      // slot the now-due successor is owed (ADR 0093).
+      expect(atDeadline.fired).toEqual([]);
+      expect(atDeadline.missed).toHaveLength(1);
+      expect(runStore.listRoutines()[0]?.nextFireAt).toBe(
+        "2026-05-22T10:01:00.000Z"
+      );
+
+      const successor = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        now: new Date("2026-05-22T10:01:30.000Z")
+      });
+
+      expect(successor.fired).toEqual(["new-fire"]);
+    } finally {
+      activeRuns.unregister("issue-run");
+      runStore.close();
+    }
+  });
+
   it("keeps a parked clock event through a restart schedule recompute", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

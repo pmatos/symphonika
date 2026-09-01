@@ -108,3 +108,12 @@ transition is coverable in practice even though the projection itself never emit
 excludes any signal combination a state's own `complete_when` gate already keeps from ever reaching
 the transitions loop (`decideNextStep` checks `complete_when` first), so such a combination does not
 need a matching transition of its own.
+
+A wait whose only pull-request predicate lives in `complete_when` — no transition names one — is
+still classified as PR-observing and validated: `complete_when` is checked before transitions
+regardless of what the transitions themselves name, so a transition table that can never actually be
+reached would otherwise read as trivially covered. `complete_when`'s own `provider_success: true` is
+resolved the same static way transitions resolve it, for the same reason. An unconditional
+transition (no predicates at all) counts as covering every enumerated combination — `decideNextStep`
+already treats an empty `when` map as vacuously satisfied, so it is a genuine runtime catch-all, not
+an instance of the "no PR predicate at all" case that a bare `provider_success` alone is.

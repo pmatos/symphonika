@@ -573,18 +573,28 @@ function rejectUnboundedReviewThreadCounts(
 // An artifact-gated transition parks on purpose while its artifact is absent,
 // so a state whose every pull-request-observing transition is artifact-gated is
 // exempt. Gating one transition among several must not exempt the rest.
+// complete_when is checked before any transition (decideNextStep), so a
+// pull-request predicate named there puts the state on the PR-signal path
+// regardless of what the transitions themselves name -- a state whose only
+// pr_signal predicate lives in complete_when must still be validated, or a
+// transition table that can never actually be reached (because complete_when
+// never lets a real observation past it) reads as fully covered.
 function observesPullRequestSignals(state: ExpandedWorkflowState): boolean {
+  if (gatesOn(state.completeWhen, "pr_signal")) {
+    return true;
+  }
   return state.transitions.some(
     (transition) =>
-      gatesOn(transition, "pr_signal") && !gatesOn(transition, "artifact")
+      gatesOn(transition.when, "pr_signal") &&
+      !gatesOn(transition.when, "artifact")
   );
 }
 
 function gatesOn(
-  transition: WorkflowTransition,
+  predicates: WorkflowPredicateMap,
   evaluation: WorkflowPredicateEvaluation
 ): boolean {
-  return Object.keys(transition.when).some(
+  return Object.keys(predicates).some(
     (key) => workflowPredicateEvaluation(key) === evaluation
   );
 }
@@ -606,42 +616,63 @@ function firstUncoveredPullRequestSignals(
 // consulting transitions: a signal combination that fails it comes back
 // "blocked" without the transitions loop running at all, so that combination
 // needs no matching transition and is not an uncovered wait state. A
-// complete_when made only of pr_signal predicates can be evaluated against
-// the same synthetic maps the enumeration already builds. A complete_when
-// that also names a predicate this validator cannot resolve statically (an
-// artifact probe, an agent signal) is left unfiltered instead of assumed
-// satisfied, so the coverage check keeps its full strength rather than risk
-// exempting a case it cannot actually reason about.
+// complete_when made only of pr_signal predicates (plus provider_success,
+// which observeWaitPullRequestSignals always sets true on a real PR-signal
+// observation -- same reasoning as transitionMatchesSignals below) can be
+// evaluated against the same synthetic maps the enumeration already builds.
+// A complete_when that also names a predicate this validator cannot resolve
+// statically (an artifact probe, another agent signal) is left unfiltered
+// instead of assumed satisfied, so the coverage check keeps its full
+// strength rather than risk exempting a case it cannot actually reason
+// about.
 function reachesTransitions(
   completeWhen: WorkflowPredicateMap,
   signals: WorkflowPredicateMap
 ): boolean {
   const entries = Object.entries(completeWhen);
   if (
-    entries.some(([key]) => workflowPredicateEvaluation(key) !== "pr_signal")
+    entries.some(
+      ([key]) =>
+        key !== "provider_success" &&
+        workflowPredicateEvaluation(key) !== "pr_signal"
+    )
   ) {
     return true;
   }
-  return entries.every(([key, expected]) => signals[key] === expected);
+  return entries.every(([key, expected]) => {
+    if (key === "provider_success") {
+      return expected === true;
+    }
+    return signals[key] === expected;
+  });
 }
 
 // A parked wait is re-evaluated from projected pull request signals alone, so a
 // predicate answered any other way -- an artifact probe, an agent signal --
 // cannot carry the state out and must not count as covering a combination.
 // Asking for the evaluation kind says that outright, rather than leaning on
-// those keys happening to be absent from the projected map. provider_success
-// is the one exception: observeWaitPullRequestSignals (run-controller.ts)
+// those keys happening to be absent from the projected map. An unconditional
+// transition (no predicates at all) is the one exception below that rule
+// rather than an instance of it: decideNextStep's own unmetPredicate treats
+// an empty when map as vacuously satisfied, so an unconditional transition is
+// a real runtime catch-all and must count as covering every combination, the
+// same way it already does outside PR-signal states. provider_success is the
+// other exception: observeWaitPullRequestSignals (run-controller.ts)
 // unconditionally sets it true alongside every real PR-signal observation it
 // makes, so a transition combining the two is genuinely coverable at runtime.
-// A bare provider_success predicate with no pr_signal predicate alongside it
-// is not treated as observing pull request signals at all -- it says nothing
-// about which PR-signal case it covers -- and provider_success: false never
-// occurs for a PR-observing wait, so it still correctly never matches.
+// A bare, non-empty provider_success predicate with no pr_signal predicate
+// alongside it is not treated as observing pull request signals at all -- it
+// says nothing about which PR-signal case it covers -- and
+// provider_success: false never occurs for a PR-observing wait, so it still
+// correctly never matches.
 function transitionMatchesSignals(
   transition: WorkflowTransition,
   signals: WorkflowPredicateMap
 ): boolean {
   const entries = Object.entries(transition.when);
+  if (entries.length === 0) {
+    return true;
+  }
   if (
     !entries.some(([key]) => workflowPredicateEvaluation(key) === "pr_signal")
   ) {

@@ -1368,6 +1368,107 @@ describe("state machine workflow definitions", () => {
     );
   });
 
+  it("checks coverage for a wait whose only pull request predicate lives in complete_when", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_only_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            provider_success: false",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // No transition names a pr_signal predicate, so without also inspecting
+    // complete_when this state would be classified as not observing pull
+    // request signals at all and skipped entirely -- even though every
+    // settled successful poll reaches the transition loop (complete_when is
+    // satisfied) and matches nothing, since provider_success is always true
+    // on a real observation.
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals`
+      )
+    );
+  });
+
+  it("lets an unconditional transition cover every observation on a parked wait", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: unconditional_fallback",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "        - to: done",
+        "          when: {}",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("resolves provider_success: true inside complete_when the same way transitions do", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_provider_success",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "        provider_success: true",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
   it("accepts Oh My Pi for an agent action provider", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

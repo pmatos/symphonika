@@ -1375,9 +1375,8 @@ export class RunController {
 
   // Shared tail of every "terminalize this waiting Run as blocked" path (ADR
   // 0058): record the actionable reason, flip RunState, and label the issue.
-  // Callers that also need recordWorkflowTerminal (a raw-FSM terminal node, or
-  // this method's own merge_pr caller) run that first, since only they know
-  // the terminal state id and its own transition reason.
+  // A caller that also needs recordWorkflowTerminal runs that first, since
+  // only it knows the terminal state id and its own transition reason.
   private async terminalizeBlocked(input: {
     issueNumber: number;
     reason: string;

@@ -53,8 +53,8 @@ function readAdrNumbers(ref) {
     if (number === undefined) {
       continue;
     }
-    const numberedPaths = numbers.get(number) ?? new Set();
-    numberedPaths.add(path);
+    const numberedPaths = numbers.get(number) ?? [];
+    numberedPaths.push(path);
     numbers.set(number, numberedPaths);
   }
 
@@ -66,17 +66,17 @@ function findConflicts({ baseNumbers, forkNumbers, headNumbers }) {
   const conflicts = [];
 
   for (const number of [...numbers].sort()) {
-    const forkPaths = forkNumbers.get(number) ?? new Set();
-    const headPaths = headNumbers.get(number) ?? new Set();
-    const basePaths = baseNumbers.get(number) ?? new Set();
-    const featureDelta = headPaths.size - forkPaths.size;
-    const projectedCount = basePaths.size + featureDelta;
+    const forkPaths = forkNumbers.get(number) ?? [];
+    const headPaths = headNumbers.get(number) ?? [];
+    const basePaths = baseNumbers.get(number) ?? [];
+    const featureDelta = headPaths.length - forkPaths.length;
+    const projectedCount = basePaths.length + featureDelta;
 
     if (featureDelta > 0 && projectedCount > 1) {
       conflicts.push({
         basePaths: [...basePaths].sort(),
-        featurePaths: [...headPaths]
-          .filter((path) => !forkPaths.has(path))
+        featurePaths: headPaths
+          .filter((path) => !forkPaths.includes(path))
           .sort(),
         number,
         projectedCount

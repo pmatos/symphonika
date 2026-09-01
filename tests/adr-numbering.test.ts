@@ -19,7 +19,7 @@ afterEach(() => {
 describe("ADR number validation", () => {
   it("rejects a number allocated concurrently on the current base branch", () => {
     const repo = makeRepository();
-    commitAdr(repo, "0001-existing.md");
+    git(repo, "commit", "--allow-empty", "-m", "init");
 
     git(repo, "checkout", "-b", "feature");
     commitAdr(repo, "0002-feature-decision.md");

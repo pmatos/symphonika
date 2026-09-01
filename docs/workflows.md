@@ -307,7 +307,7 @@ The parser recognizes the following keys:
 | `checks` | `success`, `failure`, `pending` | no | omitted while unknown | supported |
 | `review_decision` | `approved`, `changes_requested`, `review_required`, `none` | no | always | supported |
 | `has_unresolved_reviews` | `true`, `false` | no | always | supported |
-| `unresolved_review_threads` | non-negative integer | no | always | supported, exact count only |
+| `unresolved_review_threads` | non-negative integer | no | always | supported, exact count only; a wait transition may only gate on `0` — a positive value fails `workflow validate` (issue #632), use `has_unresolved_reviews: true` |
 | `artifact_exists` | path, or a sequence of paths | yes | yes | supported, existence only |
 
 `branch_ahead_of_base` counts commits ahead of `origin/<base_branch>`, not ahead of the commit the
@@ -391,6 +391,21 @@ up: the orchestrator-wide PR follow-up loop defers entirely to a raw FSM parked 
 own (ADR 0090), so a wait state that gates `merge` on `unresolved_review_threads: 0` and routes
 `repair` only on `checks: failure` parks forever on the commonest shape there is — green checks with
 one open thread. Order it after `merge`, so a clean and fully resolved PR still merges.
+
+`workflow validate`, `doctor`, and daemon reload reject this dead end before a Run can park on it.
+For every wait state with PR-signal transitions, validation checks the cross-product of settled
+checks (`success` or `failure`), concrete mergeability, resolved/unresolved feedback, open/closed PR
+state, merged state, and review decisions. A transition must match each observation. Pending checks
+are excluded because waiting for them to settle is the wait action's purpose; unknown mergeability
+is excluded the same way, but only while the PR is open -- a wait re-evaluates against whatever the
+tracked PR's current state is regardless of which state the run parked in, so a merge or an unmerged
+close landing while parked is itself a settled observation, and GitHub does not keep recomputing
+mergeability once a PR closes, merged or not, so unknown mergeability stops being transient and
+needs a covering transition (the shipped `wait_for_pr`'s `pr_merged: true -> merged` catch-all
+covers the merged half of that; its unconditional `pr_open: false -> failed` escape covers the
+closed-unmerged half, mergeable resolved or not). Pure artefact waits are not PR-signal waits, and
+mixed artefact gates are excluded because a missing file is itself an intentional reason to stay
+parked.
 
 A transition from a repair state back to the wait it came from makes a cycle. That is expected and
 supported: the progress guard stops it from spinning by refusing to re-take an edge on an
@@ -577,8 +592,8 @@ Their exact expanded behavior is:
   inspect files, commits, diffs, and tests. This is prompt isolation, not sandboxing.
 - **`autofix-until-clean`:** its wait state takes `success` when checks succeed and unresolved
   threads equal zero, takes `blocked` when checks fail, and launches the autofix agent when checks
-  succeed but the zero-thread transition did not match. Other PR states stay parked. A successful
-  autofix returns to the wait; its fallback takes `blocked`.
+  report `has_unresolved_reviews: true`. Other PR states stay parked. A successful autofix returns
+  to the wait; its fallback takes `blocked`.
 - **`merge-when-green`:** enter `merge_pr` directly. A successful merge takes `success`; a closed
   PR, failed checks, or explicit merge conflict takes `blocked`; all other observations stay
   parked. Service-level merge policy still controls whether a merge is attempted.
@@ -721,6 +736,7 @@ Common validation failures:
 - a prompt file that does not exist (`doctor` or daemon reload);
 - an unknown Markdown-contract variable, or a raw prompt variable that fails when its state starts;
 - an unsupported predicate;
+- a PR-observing wait state with no transition for a settled actionable signal combination;
 - a template path outside the workflow directory;
 - a missing required template input; or
 - an unmapped non-terminal template exit.

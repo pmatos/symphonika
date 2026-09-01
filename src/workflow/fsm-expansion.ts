@@ -10,6 +10,8 @@ import {
   parseArtifactExistsPaths,
   workflowPredicateEvaluation
 } from "./predicates.js";
+import type { WorkflowPredicateEvaluation } from "./predicates.js";
+import { enumerateActionablePullRequestSignals } from "./pr-signal-projection.js";
 import {
   parseWorkflowContract,
   projectWorkflowReferences,
@@ -491,6 +493,7 @@ async function expandRawStateMachineWorkflow(
       }
     }
   }
+  errors.push(...validateWaitStateCoverage(states, workflowPath));
 
   return {
     errors,
@@ -513,6 +516,185 @@ async function expandRawStateMachineWorkflow(
       templateFiles
     }
   };
+}
+
+function validateWaitStateCoverage(
+  states: ExpandedWorkflowState[],
+  workflowPath: string
+): string[] {
+  const errors: string[] = [];
+  for (const state of states) {
+    if (state.action?.kind !== "wait") {
+      continue;
+    }
+
+    errors.push(...rejectUnboundedReviewThreadCounts(state, workflowPath));
+
+    if (!observesPullRequestSignals(state)) {
+      continue;
+    }
+
+    const uncovered = firstUncoveredPullRequestSignals(state);
+    if (uncovered !== undefined) {
+      errors.push(
+        `workflow state ${state.id} at ${workflowPath} is a wait with no transition matching pull request signals ${formatPredicateMap(uncovered)}`
+      );
+    }
+  }
+  return errors;
+}
+
+// unresolved_review_threads is documented (docs/workflows.md) as "exact count
+// only": it matches one specific non-negative integer. Zero is a sound thing
+// to route on -- there is exactly one way for the count to be zero -- but any
+// positive value is not: a transition gating on `unresolved_review_threads: 1`
+// matches a PR sitting at exactly one unresolved thread and nothing else, so a
+// real PR with two or more parks forever even though this validator's
+// enumeration (which only samples one positive count) would call the state
+// covered. has_unresolved_reviews is the derived boolean built for this --
+// equality on it is exhaustive by construction. Reject the unsound form
+// outright rather than trying to enumerate every count.
+function rejectUnboundedReviewThreadCounts(
+  state: ExpandedWorkflowState,
+  workflowPath: string
+): string[] {
+  const errors: string[] = [];
+  for (const transition of state.transitions) {
+    const value = transition.when.unresolved_review_threads;
+    if (typeof value === "number" && value > 0) {
+      errors.push(
+        `workflow state ${state.id} at ${workflowPath} transition to ${transition.to} gates on unresolved_review_threads: ${value}, which cannot cover every unresolved-thread count; use has_unresolved_reviews: true instead`
+      );
+    }
+  }
+  return errors;
+}
+
+// An artifact-gated transition parks on purpose while its artifact is absent,
+// so a state whose every pull-request-observing transition is artifact-gated is
+// exempt. Gating one transition among several must not exempt the rest.
+// complete_when is checked before any transition (decideNextStep), so a
+// pull-request predicate named there puts the state on the PR-signal path
+// regardless of what the transitions themselves name -- a state whose only
+// pr_signal predicate lives in complete_when must still be validated, or a
+// transition table that can never actually be reached (because complete_when
+// never lets a real observation past it) reads as fully covered. The same
+// artifact exemption still applies here: a complete_when-gated state whose
+// only transition(s) are artifact-gated legitimately parks on the missing
+// artifact too, and a zero-transition state must still be flagged (it can
+// never leave once complete_when passes).
+function observesPullRequestSignals(state: ExpandedWorkflowState): boolean {
+  if (gatesOn(state.completeWhen, "pr_signal")) {
+    return (
+      state.transitions.length === 0 ||
+      state.transitions.some(
+        (transition) => !gatesOn(transition.when, "artifact")
+      )
+    );
+  }
+  return state.transitions.some(
+    (transition) =>
+      gatesOn(transition.when, "pr_signal") &&
+      !gatesOn(transition.when, "artifact")
+  );
+}
+
+function gatesOn(
+  predicates: WorkflowPredicateMap,
+  evaluation: WorkflowPredicateEvaluation
+): boolean {
+  return Object.keys(predicates).some(
+    (key) => workflowPredicateEvaluation(key) === evaluation
+  );
+}
+
+function firstUncoveredPullRequestSignals(
+  state: ExpandedWorkflowState
+): WorkflowPredicateMap | undefined {
+  // completeWhen is an AND of every predicate it names: a combination is
+  // provably excluded from ever reaching the transitions loop when *any*
+  // resolvable predicate proves it unmet, regardless of whether other
+  // completeWhen predicates are statically resolvable at all -- see
+  // reachesTransitions.
+  return enumerateActionablePullRequestSignals()
+    .filter((signals) => reachesTransitions(state.completeWhen, signals))
+    .find(
+      (signals) =>
+        !state.transitions.some((transition) =>
+          transitionMatchesSignals(transition, signals)
+        )
+    );
+}
+
+// decideNextStep (state-machine-dispatch.ts) checks complete_when before ever
+// consulting transitions: a signal combination that fails it comes back
+// "blocked" without the transitions loop running at all, so that combination
+// needs no matching transition and is not an uncovered wait state. A
+// resolvable predicate (pr_signal, or provider_success which
+// observeWaitPullRequestSignals always sets true on a real PR-signal
+// observation) that this combination fails proves the combination is
+// excluded on its own, regardless of whether complete_when also names a
+// predicate this validator cannot resolve statically (an artifact probe,
+// another agent signal) -- complete_when is an AND, so one proven-unmet
+// predicate is enough. An unresolvable predicate can never prove a
+// combination excluded, so it never removes one from the coverage
+// requirement; that keeps the check from exempting a case it cannot
+// actually reason about.
+function reachesTransitions(
+  completeWhen: WorkflowPredicateMap,
+  signals: WorkflowPredicateMap
+): boolean {
+  return !Object.entries(completeWhen).some(([key, expected]) => {
+    if (key === "provider_success") {
+      return expected !== true;
+    }
+    if (workflowPredicateEvaluation(key) === "pr_signal") {
+      return signals[key] !== expected;
+    }
+    return false;
+  });
+}
+
+// A parked wait is re-evaluated from projected pull request signals alone, so a
+// predicate answered any other way -- an artifact probe, an agent signal --
+// cannot carry the state out and must not count as covering a combination.
+// Asking for the evaluation kind says that outright, rather than leaning on
+// those keys happening to be absent from the projected map. An unconditional
+// transition (no predicates at all) is one exception to that rule rather than
+// an instance of it: decideNextStep's own unmetPredicate treats an empty when
+// map as vacuously satisfied, so an unconditional transition is a real
+// runtime catch-all and must count as covering every combination, the same
+// way it already does outside PR-signal states. A bare provider_success:
+// true predicate is the other exception, for the same reason:
+// observeWaitPullRequestSignals (run-controller.ts) is the only builder of a
+// parked wait's signal map, and it unconditionally sets provider_success:
+// true on every real observation it makes -- so a transition naming only
+// provider_success: true also matches every combination, whether or not it
+// shares a transition with a pr_signal predicate or complete_when narrows the
+// enumeration first; declaration order (state-machine-dispatch.ts evaluates
+// transitions in order, first match wins) only decides which transition a
+// combination lands on, never whether one matches. provider_success: false
+// never occurs for a PR-observing wait, so it still correctly never matches,
+// and every other evaluation kind (artifact, another agent signal such as
+// branch_ahead_of_base) is never emitted into the signals map at all, so it
+// can never satisfy the equality check below.
+function transitionMatchesSignals(
+  transition: WorkflowTransition,
+  signals: WorkflowPredicateMap
+): boolean {
+  const entries = Object.entries(transition.when);
+  if (entries.length === 0) {
+    return true;
+  }
+  return entries.every(([key, expected]) => {
+    if (key === "provider_success") {
+      return expected === true;
+    }
+    return (
+      workflowPredicateEvaluation(key) === "pr_signal" &&
+      signals[key] === expected
+    );
+  });
 }
 
 export function resolveWorkflowFormat(

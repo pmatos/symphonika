@@ -588,6 +588,19 @@ wait state whose predicates are only artefact predicates is polled without a tra
 while a wait state that also names PR predicates and every `merge_pr` state still require one. See
 ADR 0087.
 
+Expanded-graph validation rejects a `wait` state whose PR-signal transitions leave a settled,
+actionable pull-request observation uncovered. The validator enumerates successful or failed
+checks, concrete mergeability, resolved or unresolved review feedback, open or closed PR state,
+merged state, and every review decision, with a coherent representative unresolved-thread count. At
+least one transition must match every such observation. Pending or unknown checks remain a
+legitimate polling state throughout, and unknown mergeability is likewise excluded while the PR is
+still open; once a tracked PR closes, merged or not, GitHub stops recomputing mergeability, so
+unknown mergeability becomes a settled, actionable outcome the validator requires coverage for
+instead. An artefact-gated wait is also outside PR-signal coverage validation because absence of its
+file is itself an
+intentional reason to stay parked. The same error is surfaced by `workflow validate`, `doctor`, and
+defensive reload. See ADRs 0047 and 0090.
+
 The daemon must not dispatch a Dispatch Project when its workflow contract is missing or invalid. A
 Routine Host is never dispatched, so this gate does not apply to it.
 
@@ -2063,10 +2076,11 @@ tracked. For each tracked open PR:
 A review follow-up Run never picks its own start state. For a raw FSM this loop does not dispatch at
 all, so the only entry point is the transition the parked state itself names — a wait state that
 routes reviewer feedback (`has_unresolved_reviews: true`) into a repair state, with the observed
-thread context carried into that state's prompt. A wait state naming no such transition parks and
-raises manual attention rather than being replayed from `workflow.initial`. Markdown
-compatibility-graph workflows have no state machine and no position, so this loop remains their
-follow-up route and their single entry point is the right one.
+thread context carried into that state's prompt. Expanded-graph validation rejects a wait state
+that leaves the otherwise-green unresolved-review observation uncovered; a legacy or hand-built
+graph that bypassed validation would park rather than being replayed from `workflow.initial`.
+Markdown compatibility-graph workflows have no state machine and no position, so this loop remains
+their follow-up route and their single entry point is the right one.
 
 A successful PR Follow-up observation requires a non-empty `headRefOid` from the same GraphQL
 response that supplies mergeability, checks, and review state. GitHub declares this field as
@@ -2145,7 +2159,11 @@ Lifecycle:
    states alone is not guarded. Progress history, including claim counts, is cleared when a chain
    reaches a terminal and when a fresh claim opens a new one. See ADR 0090.
 5. If no transition matches and the wait state's `complete_when` is not violated, the wait stays
-   parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick. For a workflow
+   parked (`stay_waiting`); reconciliation will re-evaluate it on the next tick. This is the normal
+   outcome for transient PR observations such as pending checks or unknown mergeability, and for
+   an artefact-only wait whose file is not present yet. Expanded-graph validation rejects an
+   uncovered settled PR observation before dispatch, so a validated PR-observing wait cannot park
+   forever on an actionable shape such as green checks plus unresolved feedback. For a workflow
    whose Issue is not workflow-owned, unresolved review feedback that has exhausted the PR
    Follow-up dispatch cap also leaves the Run parked, with its detail surfaces identifying the
    tracked PR and requiring manual attention.

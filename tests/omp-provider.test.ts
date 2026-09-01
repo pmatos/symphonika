@@ -926,6 +926,34 @@ describe("Oh My Pi RPC provider", () => {
     expect(stdout.isPaused()).toBe(false);
   });
 
+  it("stamps backpressure-deferred frames with their chunk's arrival time, not drain time", async () => {
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      queueOptions: { maxPendingItems: 3 }
+    });
+    const frame = `${JSON.stringify({ type: "notice" })}\n`;
+    // One chunk, five frames: only 3 fit before the item high-water mark
+    // pauses the stream; frames 4-5 stay unparsed in stdoutBuffer until a
+    // later drain resumes them.
+    stdout.write(frame.repeat(5));
+    expect(stdout.isPaused()).toBe(true);
+
+    const first = await queue.next();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    // Dequeuing the second item crosses the low-water mark and triggers the
+    // deferred drain of frames 4-5 as a side effect of this call, well after
+    // the delay above.
+    await queue.next();
+    await queue.next();
+    const fourth = await queue.next();
+    const fifth = await queue.next();
+
+    expect(first.receivedAt).toEqual(expect.any(String));
+    expect(fourth.receivedAt).toBe(first.receivedAt);
+    expect(fifth.receivedAt).toBe(first.receivedAt);
+    expect(stdout.isPaused()).toBe(false);
+  });
+
   it("drains a deferred EOF backlog without crossing the high-water marks", async () => {
     const { queue, stdout } = await createQueueHarness({
       emitReady: false,

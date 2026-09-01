@@ -62,10 +62,15 @@ type ProcessQueuePayload =
     };
 
 // receivedAt is stamped in push(), same mechanism as the sibling queue's
-// ProcessQueueItem in jsonl-process-queue.ts (see ADR 0090) — except while
-// this queue's own backpressure gate is holding bytes back, when the stamp
-// reflects drain time rather than transport-arrival time. See the ADR's
-// Consequences section for that bounded caveat.
+// ProcessQueueItem in jsonl-process-queue.ts (see ADR 0090). Frames parsed
+// from stdoutBuffer carry lastStdoutDataAt — the arrival time of the chunk
+// that produced them — even when this queue's own backpressure defers
+// parsing them to a later drain; a chunk the child writes while stdout is
+// paused is necessarily stamped once the readable resumes, since that is
+// genuinely when the orchestrator received it. The one remaining residual:
+// an exit item deferred by the same backpressure at close is still stamped
+// at drain time, not close time (tracked separately). See the ADR's
+// Consequences section.
 type ProcessQueueItem = ProcessQueuePayload & { receivedAt: string };
 
 export type ProcessQueue = {
@@ -762,11 +767,23 @@ export function createProcessQueue(
   let closeResult:
     { exitCode: number | null; signal: NodeJS.Signals | null } | undefined;
   let exitEnqueued = false;
+  // Set at the top of the stdout "data" handler and read by every push that
+  // originates from parsing stdoutBuffer, so a line that arrived in one chunk
+  // keeps that chunk's arrival time even when backpressure defers parsing it
+  // to a later drain. Safe because stdoutBuffer only accumulates bytes from a
+  // single chunk while the stream is paused: pause() (backpressure or the
+  // ready-frame latch) stops further "data" events, and every drain path
+  // (next(), setFrameLimits) runs before resume().
+  let lastStdoutDataAt: string | undefined;
 
-  const push = (payload: ProcessQueuePayload, byteSize = 0): void => {
+  const push = (
+    payload: ProcessQueuePayload,
+    byteSize = 0,
+    receivedAt: string = new Date().toISOString()
+  ): void => {
     const item: ProcessQueueItem = {
       ...payload,
-      receivedAt: new Date().toISOString()
+      receivedAt
     };
     if (waiting !== undefined) {
       const resolve = waiting;
@@ -788,7 +805,8 @@ export function createProcessQueue(
           line: evidence,
           message: "Oh My Pi RPC frame exceeds the physical frame limit"
         },
-        Buffer.byteLength(evidence, "utf8")
+        Buffer.byteLength(evidence, "utf8"),
+        lastStdoutDataAt
       );
       return;
     }
@@ -806,7 +824,8 @@ export function createProcessQueue(
           line: evidence,
           message: "Oh My Pi RPC frame is not valid UTF-8"
         },
-        Buffer.byteLength(evidence, "utf8")
+        Buffer.byteLength(evidence, "utf8"),
+        lastStdoutDataAt
       );
       return;
     }
@@ -821,7 +840,8 @@ export function createProcessQueue(
             message:
               "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
           },
-          lineBytes
+          lineBytes,
+          lastStdoutDataAt
         );
       }
       return;
@@ -837,7 +857,8 @@ export function createProcessQueue(
           line: text,
           message: error instanceof Error ? error.message : String(error)
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
       return;
     }
@@ -851,7 +872,8 @@ export function createProcessQueue(
           line: text,
           message: "Oh My Pi physical RPC frame must be an object"
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
       return;
     }
@@ -864,7 +886,8 @@ export function createProcessQueue(
           line: text,
           message: "Oh My Pi physical RPC frame must have a string type"
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
       return;
     }
@@ -875,7 +898,8 @@ export function createProcessQueue(
         promptDispatched: options.isPromptDispatched?.() === true,
         raw
       },
-      lineBytes
+      lineBytes,
+      lastStdoutDataAt
     );
     // The protocol begins with the versioned ready frame (ADR 0066); any
     // other first nonblank frame is malformed, not evidence to scan past.
@@ -887,7 +911,8 @@ export function createProcessQueue(
           line: text,
           message: "Oh My Pi RPC protocol must begin with a ready frame"
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
       return;
     }
@@ -912,7 +937,8 @@ export function createProcessQueue(
             message:
               "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
           },
-          lineBytes
+          lineBytes,
+          lastStdoutDataAt
         );
       }
       return;
@@ -928,7 +954,8 @@ export function createProcessQueue(
           line: text,
           message: "Oh My Pi RPC chunk received before protocol v2 negotiation"
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
       return;
     }
@@ -942,7 +969,8 @@ export function createProcessQueue(
             promptDispatched: options.isPromptDispatched?.() === true,
             raw: logical.frame
           },
-          logical.byteLength
+          logical.byteLength,
+          lastStdoutDataAt
         );
       }
     } catch (error) {
@@ -952,7 +980,8 @@ export function createProcessQueue(
           line: text,
           message: error instanceof Error ? error.message : String(error)
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
     }
   };
@@ -979,7 +1008,8 @@ export function createProcessQueue(
         line: evidence,
         message: "Oh My Pi RPC frame exceeds the physical frame limit"
       },
-      Buffer.byteLength(evidence, "utf8")
+      Buffer.byteLength(evidence, "utf8"),
+      lastStdoutDataAt
     );
   };
 
@@ -1031,11 +1061,15 @@ export function createProcessQueue(
       stdoutBuffer = Buffer.alloc(0);
     }
     if (frameDecoder.interrupt()) {
-      push({
-        kind: "malformed",
-        line: "",
-        message: "Oh My Pi RPC chunk sequence incomplete at end of stream"
-      });
+      push(
+        {
+          kind: "malformed",
+          line: "",
+          message: "Oh My Pi RPC chunk sequence incomplete at end of stream"
+        },
+        0,
+        lastStdoutDataAt
+      );
     }
     // The exit event goes last: evidence buffered before the close must be
     // consumed before runAttempt can see process_exit.
@@ -1053,6 +1087,7 @@ export function createProcessQueue(
     if (discardingOutput) {
       return;
     }
+    lastStdoutDataAt = new Date().toISOString();
     let data = chunk;
     if (stdoutOverflowed) {
       const frameEndIndex = data.indexOf(0x0a);

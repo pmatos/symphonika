@@ -102,10 +102,15 @@ operators can measure duration distributions without parsing logs.
   shared `jsonl-process-queue.ts`. Follow-up #638 closes the deferred OMP gap: its structurally
   similar but more complex `createProcessQueue` now stamps items in `push()` and threads that stamp
   through OMP frame mapping while preserving its independent backpressure and frame-reassembly
-  behavior. When OMP's backpressure gate is holding buffered bytes back, those bytes are only parsed
-  and pushed once the queue drains below the low-water mark, so the stamp for that data reflects
-  drain time rather than transport-arrival time; this is bounded by the same backpressure thresholds
-  and does not reintroduce the unbounded consumption-time gap this ADR describes.
+  behavior. Frames already sitting in `stdoutBuffer` when the backpressure gate engages keep the
+  arrival time of the stdout chunk that produced them, even though parsing them is deferred to a
+  later drain — a chunk the child writes while stdout is paused is stamped once the readable
+  resumes, which is genuinely when the orchestrator received it, not a gap. The one residual this
+  round does not close: an exit item deferred by the same backpressure gate at process close is
+  still stamped at drain time rather than close time, tracked as a separate follow-up rather than
+  bundled here, since it is safe to land independently once the buffered-frame case above is
+  accurate (fixing the exit time alone, while frames were still drain-stamped, would have risked
+  moving the receipt watermark backward — that risk does not apply the other way around).
 
 ## Interaction with existing decisions
 

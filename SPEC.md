@@ -1916,10 +1916,15 @@ preparation deadline rather than a wider Watchdog state scope, and is tracked se
 not span a Run *chain* — a continuation,
 an FSM state advance, and a shutdown resume each write their own `runs` row and so each start a
 fresh cap. A Run whose `created_at` cannot be parsed is treated as having an unknown age and is
-never terminated by the cap. The cap is checked before the convergence budget and the idle clock,
-so a Run that has overrun several bounds at once reports the outermost one; it honours the same
-per-Project override scope as `grace_minutes`, and like the other two verdicts is deterministic
-rather than a transient retry reason. See ADR 0089.
+never terminated by the cap. Clock skew that places `created_at` in the future produces a negative
+elapsed measurement, which cannot meet a positive cap until the actual deadline. The matching
+`runRemainingMs` operator value is intentionally unclamped: it may exceed `maxRunMs` for a
+future-dated claim and becomes negative after an overrun until the next Watchdog tick, because it
+means time until `created_at + maxRunMs`, not a fraction of the configured cap remaining. The cap
+is checked before the convergence budget and the idle clock, so a Run that has overrun several
+bounds at once reports the outermost one; it honours the same per-Project override scope as
+`grace_minutes`, and like the other two verdicts is deterministic rather than a transient retry
+reason. See ADR 0089.
 
 ### 12.5 PR Follow-up
 

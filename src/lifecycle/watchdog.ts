@@ -80,17 +80,18 @@ type NormalizedLogRead = {
   offset: number;
 };
 
-// Milliseconds a Run has been alive, or undefined when its claim timestamp is
+// Signed milliseconds since a Run's claim, or undefined when its timestamp is
 // unusable. An unparseable timestamp must read as "age unknown" rather than
 // "infinitely old": the wall-clock cap is the one rule that would otherwise
-// terminate a perfectly live Run on the strength of a bad row. Clamped at zero
-// so clock skew cannot produce a negative age.
+// terminate a perfectly live Run on the strength of a bad row. A future claim
+// remains negative so clock skew stays visible and this value remains the exact
+// complement of the time-to-deadline calculation in watchdog-status.ts.
 export function runElapsedMs(createdAt: string, now: Date): number | undefined {
   const claimedAtMs = Date.parse(createdAt);
   if (Number.isNaN(claimedAtMs)) {
     return undefined;
   }
-  return Math.max(0, now.getTime() - claimedAtMs);
+  return now.getTime() - claimedAtMs;
 }
 
 export function watchdogProgressObserved(

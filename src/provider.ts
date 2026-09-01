@@ -69,8 +69,8 @@ export type ProviderRunInput = {
   // evidence directory (the doctor/probe path), which drain stderr instead.
   stderrLogPath?: string;
   // Resolved secret values the stderr tee must scrub before writing. Supplied
-  // by the routine dispatcher, which holds the only redaction data the
-  // orchestrator resolves today (SPEC.md §6).
+  // by issue-Run and Routine Firing orchestration from the same credential
+  // inventory used for their other durable provider evidence (SPEC.md §6).
   stderrRedactSecrets?: readonly string[];
   workspacePath: string;
 };

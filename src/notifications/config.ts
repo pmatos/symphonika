@@ -121,3 +121,19 @@ export function emailNotificationSourceEnabled(
   }
   return config.sources.routineFirings;
 }
+
+// The password named here is part of the provider-evidence redaction
+// inventory whenever an email: block exists, not only when SMTP auth is on:
+// providers inherit the daemon's environment either way, so a set variable is
+// echoable back into durable evidence regardless of whether Symphonika itself
+// authenticates with it (SPEC.md §6).
+export function secretsForEmailConfig(
+  config: EmailNotificationConfig | undefined,
+  env: NodeJS.ProcessEnv
+): string[] {
+  if (config === undefined) {
+    return [];
+  }
+  const secret = env[config.smtpPasswordEnv];
+  return secret === undefined || secret.length === 0 ? [] : [secret];
+}

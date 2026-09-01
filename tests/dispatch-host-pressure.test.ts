@@ -357,6 +357,7 @@ async function createHarness(
     agentProviders: { codex: succeedingProvider() },
     configDir: root,
     createRunId: () => `run-${++runCounter}`,
+    emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret" },
     githubIssuesApi: {
       addLabelsToIssue,

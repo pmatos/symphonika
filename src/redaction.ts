@@ -2,9 +2,10 @@
 // (full-permission execution, see CLAUDE.md) — persisted evidence and any
 // terminal reason derived from it must never retain the raw SMTP password or
 // tracker token (SPEC.md §6). This lives outside the routine dispatcher
-// because the same invariant now has two enforcement points: the dispatcher's
-// JSONL evidence writer and the provider adapters' stderr tee. One definition
-// of the redaction semantics, not two that can drift.
+// because the same invariant is enforced at every durable provider-evidence
+// boundary for Runs and Firings alike: JSONL evidence, provider-event rows,
+// provider-derived terminal reasons, and the provider adapters' stderr tee.
+// One definition of the redaction semantics, not several that can drift.
 //
 // Every occurrence of every secret is located against the ORIGINAL text first,
 // then overlapping spans are merged and masked as one. The two simpler shapes
@@ -23,7 +24,19 @@ export function redactAll(
   message: string,
   redactSecrets: readonly string[]
 ): string {
-  const spans = secretSpans(message, redactSecrets);
+  return redactUnique(message, uniqueSecrets(redactSecrets));
+}
+
+// Distinct, non-empty secrets. Hoisted to the entry points so a deep walk
+// normalizes the inventory once instead of once per string leaf.
+function uniqueSecrets(redactSecrets: readonly string[]): readonly string[] {
+  const unique = new Set(redactSecrets);
+  unique.delete("");
+  return [...unique];
+}
+
+function redactUnique(message: string, secrets: readonly string[]): string {
+  const spans = uniqueSecretSpans(message, secrets);
   if (spans.length === 0) {
     return message;
   }
@@ -37,6 +50,54 @@ export function redactAll(
   return redacted + message.slice(cursor);
 }
 
+// Structurally shape-preserving (objects/arrays keep their nesting), but a
+// matched primitive or property name is rewritten to a string, and the
+// caller's `T` is cast back rather than re-derived — callers that persist the
+// result as evidence rather than re-typing it are the intended use.
+export function redactValueDeep<T>(
+  value: T,
+  redactSecrets: readonly string[]
+): T {
+  return redactUnknownDeep(value, uniqueSecrets(redactSecrets)) as T;
+}
+
+function redactUnknownDeep(
+  value: unknown,
+  secrets: readonly string[]
+): unknown {
+  if (typeof value === "string") {
+    return redactUnique(value, secrets);
+  }
+  // A secret configured as a bare numeric/boolean spelling (e.g. an SMTP
+  // password of "123456") still leaks if the provider happens to emit it as
+  // a JSON primitive rather than a string — check the serialized form too.
+  if (typeof value === "number" || typeof value === "boolean") {
+    const serialized = String(value);
+    return redactUnique(serialized, secrets) === serialized
+      ? value
+      : "[REDACTED]";
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactUnknownDeep(entry, secrets));
+  }
+  if (value !== null && typeof value === "object") {
+    // A keys loop rather than Object.fromEntries(Object.entries(...).map(...)):
+    // this runs on every raw provider event, and the entries form allocates a
+    // pair array per key on top of the rebuilt object.
+    const redacted: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      // Property names can carry a credential too (e.g. a tool call keyed by
+      // token), not just their values.
+      redacted[redactUnique(key, secrets)] = redactUnknownDeep(
+        (value as Record<string, unknown>)[key],
+        secrets
+      );
+    }
+    return redacted;
+  }
+  return value;
+}
+
 export type SecretSpan = { end: number; start: number };
 
 // Non-overlapping, ascending spans covering every occurrence of every secret.
@@ -47,11 +108,15 @@ export function secretSpans(
   message: string,
   redactSecrets: readonly string[]
 ): SecretSpan[] {
+  return uniqueSecretSpans(message, uniqueSecrets(redactSecrets));
+}
+
+function uniqueSecretSpans(
+  message: string,
+  secrets: readonly string[]
+): SecretSpan[] {
   const found: SecretSpan[] = [];
-  for (const secret of new Set(redactSecrets)) {
-    if (secret.length === 0) {
-      continue;
-    }
+  for (const secret of secrets) {
     let index = message.indexOf(secret);
     while (index !== -1) {
       found.push({ end: index + secret.length, start: index });

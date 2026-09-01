@@ -106,6 +106,10 @@ import {
   isProjectCapReached
 } from "./concurrency-capacity.js";
 import {
+  ClaimLabelWriter,
+  type ApplyLabelsInput
+} from "./claim-label-writer.js";
+import {
   classifyFailure,
   inspectWorkspaceHead,
   type ClassifiedTerminal
@@ -366,24 +370,6 @@ type AttemptEvidence = {
   workspacePath: string;
 };
 
-type ApplyLabelsInput = {
-  cancelReason?: CancelReason;
-  // True when applyWorkflowOutcome advanced the raw-FSM walk to a non-terminal
-  // next state or parked into a wait/merge_pr action. The per-state
-  // ClassifiedTerminal may still be `failed` (e.g. a planning step that
-  // exited provider_success=true without committing → no_workspace_changes,
-  // which isBlockedOutcome would otherwise map to `sym:blocked`), but the
-  // workflow as a whole is continuing — so neither `sym:failed` nor
-  // `sym:blocked` must be added on this transition or the issue will stay
-  // externally marked failed/blocked even after a later state succeeds
-  // (subsequent applyTerminalLabels calls only remove `sym:running`).
-  fsmContinuing: boolean;
-  issueNumber: number;
-  outcome: ClassifiedTerminal;
-  repository: GitHubIssueRepositoryInput;
-  willRetry: boolean;
-};
-
 type RetryPayload = {
   attemptNumber: number;
   extraInstructions?: string;
@@ -592,6 +578,7 @@ function runSlotDeadline(input: {
 export class RunController {
   private readonly activeRuns: ActiveRunRegistry;
   private readonly agentProviders: AgentProviderRegistry;
+  private readonly claimLabels: ClaimLabelWriter;
   private readonly configDir: string;
   private readonly createRunId: () => string;
   private readonly dispatchMutex: AsyncMutex;
@@ -634,6 +621,10 @@ export class RunController {
   constructor(options: RunControllerOptions) {
     this.activeRuns = options.activeRuns;
     this.agentProviders = options.agentProviders;
+    this.claimLabels = new ClaimLabelWriter({
+      api: options.githubIssuesApi as LabelWritingGitHubIssuesApi,
+      ...(options.logger === undefined ? {} : { logger: options.logger })
+    });
     this.configDir = options.configDir;
     this.createRunId = options.createRunId ?? randomUUID;
     this.dispatchMutex = options.dispatchMutex ?? createAsyncMutex();
@@ -1023,7 +1014,7 @@ export class RunController {
       },
       "symphonika fresh dispatch failed before provider launch"
     );
-    await this.applyTerminalLabels({
+    await this.claimLabels.applyTerminal({
       fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: {
@@ -1307,7 +1298,7 @@ export class RunController {
     this.runStore.markCancelRequested(input.runId, input.reason);
     this.runStore.recordTerminalReason(input.runId, input.reason);
     this.runStore.updateRunState(input.runId, "cancelled");
-    await this.applyTerminalLabels({
+    await this.claimLabels.applyTerminal({
       cancelReason: input.reason,
       fsmContinuing: false,
       issueNumber: input.issueNumber,
@@ -1425,7 +1416,7 @@ export class RunController {
       "deterministic"
     );
     this.runStore.updateRunState(input.runId, "blocked");
-    await this.markIssueBlocked({
+    await this.claimLabels.markBlocked({
       issueNumber: input.issueNumber,
       repository: input.repository
     });
@@ -2326,7 +2317,7 @@ export class RunController {
     repository: GitHubIssueRepositoryInput;
     runId: string;
   }): Promise<void> {
-    await this.releaseIssueClaim({
+    await this.claimLabels.release({
       issueNumber: input.issueNumber,
       phase: input.phase,
       repository: input.repository
@@ -2415,7 +2406,7 @@ export class RunController {
         input.phase === "state-advance" ? "state advance" : "continuation"
       } failed before provider launch`
     );
-    await this.applyTerminalLabels({
+    await this.claimLabels.applyTerminal({
       fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: {
@@ -2514,7 +2505,7 @@ export class RunController {
         },
         "symphonika state advance recorded reloaded terminal target without launching provider"
       );
-      await this.applyTerminalLabels({
+      await this.claimLabels.applyTerminal({
         fsmContinuing: false,
         issueNumber: input.issue.number,
         outcome,
@@ -2576,7 +2567,7 @@ export class RunController {
       // Issue closure ends every Continuation Eligibility scope. The
       // one-shot callback has been consumed and no replacement step will be
       // scheduled, so the Issue Reservation ends here. See SPEC section 9.3.
-      await this.releaseIssueClaim({
+      await this.claimLabels.release({
         issueNumber: payload.issue.number,
         phase: "continuation-closed-issue",
         repository
@@ -2592,7 +2583,7 @@ export class RunController {
       // PR Follow-up Run remains workflow-owned and may share the claim with
       // a parked/waiting Run. Preserve that label-immune reservation.
       if (payload.respectsIssueLabels !== false) {
-        await this.releaseIssueClaim({
+        await this.claimLabels.release({
           issueNumber: payload.issue.number,
           phase: "continuation-eligibility-loss",
           repository
@@ -3270,7 +3261,7 @@ export class RunController {
           );
         } else if (!runCreated && claimed) {
           // Failure between claim and createRun (rare): still mark sym:failed best-effort.
-          await this.markIssueFailed({
+          await this.claimLabels.markFailed({
             issueNumber: input.issue.number,
             repository: input.repository
           });
@@ -3689,7 +3680,7 @@ export class RunController {
           if (attemptCreated) {
             this.runStore.updateAttemptState(attemptId, "stale");
           }
-          await this.applyTerminalLabels({
+          await this.claimLabels.applyTerminal({
             cancelReason: watchdogTerminalReason,
             fsmContinuing: false,
             issueNumber: input.issue.number,
@@ -3868,7 +3859,7 @@ export class RunController {
           if (cancelReason !== undefined) {
             labelInput.cancelReason = cancelReason;
           }
-          await this.applyTerminalLabels(labelInput);
+          await this.claimLabels.applyTerminal(labelInput);
 
           // scheduleNext also handles transient throws (kind=failed/transient with retry budget).
           // It is a no-op for cancelled, deterministic, and input_required outcomes.
@@ -4419,256 +4410,6 @@ export class RunController {
     ];
   }
 
-  // Independent, best-effort add: called alongside the sym:* label in both
-  // markIssueFailed and markIssueBlocked so a human-attention signal exists
-  // regardless of which terminal-failure path was taken (exhausted retries,
-  // provider asking for input, or an explicit blocked terminal). Kept as its
-  // own try/catch so a sym:* label failure never suppresses this one, and
-  // vice versa. sym:human-needed uses the sym: prefix like every other
-  // orchestrator-owned label (sym:claimed/running/blocked/failed/stale) —
-  // distinct from the pre-existing manual "needs-human" convention operators
-  // may add by hand. It is listed in REQUIRED_OPERATIONAL_LABELS, so
-  // evaluateProjectEligibility (issue-polling.ts) already excludes it from
-  // redispatch while agent-ready is still present, the same way sym:blocked
-  // and sym:failed do.
-  private async markIssueNeedsHuman(input: {
-    issueNumber: number;
-    repository: GitHubIssueRepositoryInput;
-  }): Promise<void> {
-    const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
-    try {
-      await api.addLabelsToIssue({
-        ...input.repository,
-        issueNumber: input.issueNumber,
-        labels: ["sym:human-needed"]
-      });
-    } catch (err) {
-      this.logger?.warn(
-        { err, issueNumber: input.issueNumber },
-        "symphonika failed to add sym:human-needed label"
-      );
-      return;
-    }
-    this.logger?.info(
-      { issueNumber: input.issueNumber },
-      "symphonika marked issue sym:human-needed"
-    );
-  }
-
-  private async markIssueFailed(input: {
-    issueNumber: number;
-    repository: GitHubIssueRepositoryInput;
-  }): Promise<void> {
-    const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
-    try {
-      await api.addLabelsToIssue({
-        ...input.repository,
-        issueNumber: input.issueNumber,
-        labels: ["sym:failed"]
-      });
-    } catch (err) {
-      this.logger?.warn(
-        { err, issueNumber: input.issueNumber },
-        "symphonika failed to add sym:failed label; sym:claimed left in place"
-      );
-      await this.markIssueNeedsHuman(input);
-      return;
-    }
-    this.logger?.info(
-      { issueNumber: input.issueNumber },
-      "symphonika marked issue sym:failed"
-    );
-    await this.markIssueNeedsHuman(input);
-  }
-
-  private async markIssueBlocked(input: {
-    issueNumber: number;
-    repository: GitHubIssueRepositoryInput;
-  }): Promise<void> {
-    const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
-    try {
-      await api.addLabelsToIssue({
-        ...input.repository,
-        issueNumber: input.issueNumber,
-        labels: ["sym:blocked"]
-      });
-    } catch (err) {
-      this.logger?.warn(
-        { err, issueNumber: input.issueNumber },
-        "symphonika failed to add sym:blocked label; sym:claimed left in place"
-      );
-      await this.markIssueNeedsHuman(input);
-      return;
-    }
-    this.logger?.info(
-      { issueNumber: input.issueNumber },
-      "symphonika marked issue sym:blocked"
-    );
-    await this.markIssueNeedsHuman(input);
-  }
-
-  private async applyTerminalLabels(input: ApplyLabelsInput): Promise<void> {
-    const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
-    if (input.outcome.kind === "cancelled") {
-      const reason = input.cancelReason;
-      await this.bestEffort(
-        () =>
-          api.removeLabelsFromIssue({
-            ...input.repository,
-            issueNumber: input.issueNumber,
-            labels: ["sym:running"]
-          }),
-        {
-          issueNumber: input.issueNumber,
-          label: "sym:running",
-          operation: "removeLabel",
-          phase: "cancelled"
-        }
-      );
-      if (
-        reason === CANCEL_REASONS.CLOSED_ISSUE ||
-        reason === CANCEL_REASONS.ELIGIBILITY_LOSS
-      ) {
-        await this.releaseIssueClaim({
-          issueNumber: input.issueNumber,
-          phase:
-            reason === CANCEL_REASONS.CLOSED_ISSUE
-              ? "closed-issue-cleanup"
-              : "eligibility-loss-cleanup",
-          repository: input.repository
-        });
-      }
-      if (reason === CANCEL_REASONS.CLOSED_ISSUE) {
-        await this.bestEffort(
-          () =>
-            api.removeLabelsFromIssue({
-              ...input.repository,
-              issueNumber: input.issueNumber,
-              labels: ["sym:failed"]
-            }),
-          {
-            issueNumber: input.issueNumber,
-            label: "sym:failed",
-            operation: "removeLabel",
-            phase: "closed-issue-cleanup"
-          }
-        );
-        await this.bestEffort(
-          () =>
-            api.removeLabelsFromIssue({
-              ...input.repository,
-              issueNumber: input.issueNumber,
-              labels: ["sym:blocked"]
-            }),
-          {
-            issueNumber: input.issueNumber,
-            label: "sym:blocked",
-            operation: "removeLabel",
-            phase: "closed-issue-cleanup"
-          }
-        );
-        await this.bestEffort(
-          () =>
-            api.removeLabelsFromIssue({
-              ...input.repository,
-              issueNumber: input.issueNumber,
-              labels: ["sym:human-needed"]
-            }),
-          {
-            issueNumber: input.issueNumber,
-            label: "sym:human-needed",
-            operation: "removeLabel",
-            phase: "closed-issue-cleanup"
-          }
-        );
-      }
-      return;
-    }
-
-    await this.bestEffort(
-      () =>
-        api.removeLabelsFromIssue({
-          ...input.repository,
-          issueNumber: input.issueNumber,
-          labels: ["sym:running"]
-        }),
-      {
-        issueNumber: input.issueNumber,
-        label: "sym:running",
-        operation: "removeLabel",
-        phase: "terminal"
-      }
-    );
-
-    // Skip `sym:failed` only for `failed && !willRetry` outcomes when the
-    // raw-FSM walk advanced or parked: the per-state outcome is failed
-    // (e.g. no_workspace_changes on a planning step that exited
-    // provider_success=true) but the workflow as a whole is continuing,
-    // and a later successful state would otherwise leave `sym:failed` on
-    // the issue because the success path here only removes `sym:running`.
-    //
-    // `input_required` is always terminal regardless of `fsmContinuing`:
-    // `scheduleNext` returns immediately for input_required at the top of
-    // its method, so no FSM continuation is actually scheduled even when
-    // applyWorkflowOutcome's signals matched a non-terminal transition.
-    // Suppressing `sym:failed` there would orphan the issue with neither
-    // `sym:running` nor `sym:failed` nor a continuation.
-    if (input.outcome.kind === "input_required") {
-      await this.markIssueFailed({
-        issueNumber: input.issueNumber,
-        repository: input.repository
-      });
-      return;
-    }
-    if (
-      input.outcome.kind === "failed" &&
-      !input.willRetry &&
-      !input.fsmContinuing
-    ) {
-      if (isBlockedOutcome(input.outcome)) {
-        await this.markIssueBlocked({
-          issueNumber: input.issueNumber,
-          repository: input.repository
-        });
-      } else {
-        await this.markIssueFailed({
-          issueNumber: input.issueNumber,
-          repository: input.repository
-        });
-      }
-    }
-  }
-
-  private async releaseIssueClaim(input: {
-    issueNumber: number;
-    phase:
-      | "closed-issue-cleanup"
-      | "continuation"
-      | "continuation-closed-issue"
-      | "continuation-eligibility-loss"
-      | "continuation-scheduling-closed-issue"
-      | "continuation-scheduling-eligibility-loss"
-      | "eligibility-loss-cleanup"
-      | "state-advance";
-    repository: GitHubIssueRepositoryInput;
-  }): Promise<void> {
-    const api = this.githubIssuesApi as LabelWritingGitHubIssuesApi;
-    await this.bestEffort(
-      () =>
-        api.removeLabelsFromIssue({
-          ...input.repository,
-          issueNumber: input.issueNumber,
-          labels: ["sym:claimed"]
-        }),
-      {
-        issueNumber: input.issueNumber,
-        label: "sym:claimed",
-        operation: "removeLabel",
-        phase: input.phase
-      }
-    );
-  }
-
   private async scheduleNext(input: {
     extraInstructions?: string;
     issue: IssueSnapshot;
@@ -4767,12 +4508,12 @@ export class RunController {
       //   when `stateAdvance != null`) ends the call.
       if (input.outcome.kind === "failed" && !input.willRetry) {
         if (isBlockedOutcome(input.outcome)) {
-          await this.markIssueBlocked({
+          await this.claimLabels.markBlocked({
             issueNumber: input.issue.number,
             repository: input.repository
           });
         } else {
-          await this.markIssueFailed({
+          await this.claimLabels.markFailed({
             issueNumber: input.issue.number,
             repository: input.repository
           });
@@ -4883,7 +4624,7 @@ export class RunController {
       // label-immune PR Follow-up work. The completed run has already
       // released its in-flight slot and no continuation will be scheduled,
       // so the Issue Reservation ends here. See SPEC section 9.3.
-      await this.releaseIssueClaim({
+      await this.claimLabels.release({
         issueNumber: input.issue.number,
         phase: "continuation-scheduling-closed-issue",
         repository: input.repository
@@ -4902,7 +4643,7 @@ export class RunController {
       // releasing sym:claimed for it would strip the claim out from under a
       // still-live parked/waiting Run that owns the same Issue Reservation.
       if (input.respectsIssueLabels !== false) {
-        await this.releaseIssueClaim({
+        await this.claimLabels.release({
           issueNumber: input.issue.number,
           phase: "continuation-scheduling-eligibility-loss",
           repository: input.repository
@@ -4948,7 +4689,7 @@ export class RunController {
         projectName: input.project.name,
         reason: buildCapReachedReason(kind)
       });
-      await this.markIssueFailed({
+      await this.claimLabels.markFailed({
         issueNumber: input.issue.number,
         repository: input.repository
       });

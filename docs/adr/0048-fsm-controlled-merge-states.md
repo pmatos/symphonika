@@ -56,3 +56,9 @@ echoing ADR 0047's reasoning for sharing `projectPullRequestSignals`.
 **Widened by ADR 0090.** The deference this ADR gives the global loop was scoped to `merge_pr`
 states. It now covers any raw-FSM workflow parked at a state of its own, and covers the review
 feedback as well as the merge: `isIssueOwnedByWorkflow` replaces `isIssueParkedInMergePrState`.
+
+**Amended by issue #632.** That wider ownership makes transition completeness a validation
+requirement for PR-observing `wait` states. The expanded graph must cover every settled actionable
+combination of checks, mergeability, unresolved feedback, PR openness, and review decision; the
+global loop will not rescue an omitted branch. This validation applies to `wait`, not `merge_pr`,
+whose policy-driven retry behavior remains the deliberate parked-state contract described above.

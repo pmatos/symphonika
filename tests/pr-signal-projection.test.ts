@@ -1,7 +1,10 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { projectPullRequestSignals } from "../src/lifecycle/pr-signal-projection.js";
+import { decideNextStep } from "../src/lifecycle/state-machine-dispatch.js";
 import type { PullRequestState } from "../src/pull-request-state.js";
+import { loadExpandedWorkflow } from "../src/workflow/fsm-expansion.js";
 
 function makePullRequestState(
   overrides: Partial<PullRequestState> = {}
@@ -145,5 +148,37 @@ describe("projectPullRequestSignals", () => {
       makePullRequestState({ unresolvedReviewThreads: 1 })
     );
     expect(one.has_unresolved_reviews).toBe(true);
+  });
+
+  it("routes an otherwise-green pull request with unresolved reviews into autofix", async () => {
+    const workflowPath = path.resolve(
+      import.meta.dirname,
+      "..",
+      "workflow.yml"
+    );
+    const loaded = await loadExpandedWorkflow(workflowPath);
+    const waitForPr = loaded.workflow.states.find(
+      (state) => state.id === "wait_for_pr"
+    );
+    if (waitForPr === undefined) {
+      throw new Error("expected the repository workflow to define wait_for_pr");
+    }
+    const signals = projectPullRequestSignals(
+      makePullRequestState({
+        checks: "success",
+        mergeable: "mergeable",
+        open: true,
+        unresolvedReviewThreads: 1
+      })
+    );
+
+    expect(loaded.errors).toEqual([]);
+    expect(waitForPr.transitions.at(-1)).toEqual({
+      to: "autofix",
+      when: { has_unresolved_reviews: true }
+    });
+    expect(
+      decideNextStep({ actionExecuted: true, signals, state: waitForPr })
+    ).toMatchObject({ kind: "advance", to: "autofix" });
   });
 });

@@ -392,6 +392,14 @@ own (ADR 0090), so a wait state that gates `merge` on `unresolved_review_threads
 `repair` only on `checks: failure` parks forever on the commonest shape there is — green checks with
 one open thread. Order it after `merge`, so a clean and fully resolved PR still merges.
 
+`workflow validate`, `doctor`, and daemon reload reject this dead end before a Run can park on it.
+For every wait state with PR-signal transitions, validation checks the cross-product of settled
+checks (`success` or `failure`), concrete mergeability, resolved/unresolved feedback, open/closed PR
+state, and review decisions. A transition must match each observation. Pending checks and unknown
+mergeability are excluded because waiting for them to settle is the wait action's purpose; pure
+artefact waits are not PR-signal waits, and mixed artefact gates are excluded because a missing
+file is itself an intentional reason to stay parked.
+
 A transition from a repair state back to the wait it came from makes a cycle. That is expected and
 supported: the progress guard stops it from spinning by refusing to re-take an edge on an
 observation identical to the one it was last taken on, parking the run and raising manual attention
@@ -577,8 +585,8 @@ Their exact expanded behavior is:
   inspect files, commits, diffs, and tests. This is prompt isolation, not sandboxing.
 - **`autofix-until-clean`:** its wait state takes `success` when checks succeed and unresolved
   threads equal zero, takes `blocked` when checks fail, and launches the autofix agent when checks
-  succeed but the zero-thread transition did not match. Other PR states stay parked. A successful
-  autofix returns to the wait; its fallback takes `blocked`.
+  report `has_unresolved_reviews: true`. Other PR states stay parked. A successful autofix returns
+  to the wait; its fallback takes `blocked`.
 - **`merge-when-green`:** enter `merge_pr` directly. A successful merge takes `success`; a closed
   PR, failed checks, or explicit merge conflict takes `blocked`; all other observations stay
   parked. Service-level merge policy still controls whether a merge is attempted.
@@ -721,6 +729,7 @@ Common validation failures:
 - a prompt file that does not exist (`doctor` or daemon reload);
 - an unknown Markdown-contract variable, or a raw prompt variable that fails when its state starts;
 - an unsupported predicate;
+- a PR-observing wait state with no transition for a settled actionable signal combination;
 - a template path outside the workflow directory;
 - a missing required template input; or
 - an unmapped non-terminal template exit.

@@ -1049,6 +1049,7 @@ describe("state machine workflow definitions", () => {
         "        - to: ready",
         "          when:",
         "            review_decision: approved",
+        "        - to: ready",
         "    autofix:",
         "      action:",
         "        kind: agent",
@@ -1070,7 +1071,8 @@ describe("state machine workflow definitions", () => {
     );
     expect(waitState?.transitions).toEqual([
       { to: "autofix", when: { has_unresolved_reviews: true } },
-      { to: "ready", when: { review_decision: "approved" } }
+      { to: "ready", when: { review_decision: "approved" } },
+      { to: "ready", when: {} }
     ]);
   });
 
@@ -1122,6 +1124,7 @@ describe("state machine workflow definitions", () => {
         "        - to: done",
         "          when:",
         "            checks: success",
+        "        - to: done",
         "    done:",
         "      terminal: success",
         ""
@@ -1135,6 +1138,35 @@ describe("state machine workflow definitions", () => {
       (state) => state.id === "holding"
     );
     expect(holding?.action?.kind).toBe("wait");
+  });
+
+  it("allows an artifact-gated wait to park while its artifact is absent", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: artifact_handoff",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "            artifact_exists: HANDOFF.md",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
   });
 
   it("accepts Oh My Pi for an agent action provider", async () => {
@@ -1931,9 +1963,31 @@ describe("built-in workflow templates", () => {
     if (waiting === undefined) {
       throw new Error("expected review.waiting state");
     }
+    expect(waiting.transitions).toEqual([
+      {
+        to: "shipped",
+        when: { checks: "success", unresolved_review_threads: 0 }
+      },
+      { to: "needs_human", when: { checks: "failure" } },
+      {
+        to: "review.autofix",
+        when: { has_unresolved_reviews: true }
+      }
+    ]);
 
-    const advance = (signals: Record<string, string | number>) =>
-      decideNextStep({ actionExecuted: true, signals, state: waiting });
+    const advance = (signals: Record<string, string | number>) => {
+      const unresolvedReviewThreads = signals.unresolved_review_threads;
+      return decideNextStep({
+        actionExecuted: true,
+        signals: {
+          ...signals,
+          ...(typeof unresolvedReviewThreads === "number"
+            ? { has_unresolved_reviews: unresolvedReviewThreads > 0 }
+            : {})
+        },
+        state: waiting
+      });
+    };
 
     expect(
       advance({ checks: "success", unresolved_review_threads: 0 })

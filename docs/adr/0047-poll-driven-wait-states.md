@@ -67,11 +67,10 @@ keeps the existing fresh-dispatch guard against starting a second parallel agent
 Issue close is still honored — a waiting row whose issue transitions to `closed` is cancelled with
 `cancel_reason="closed_issue"`, matching the cancellation semantics of in-flight agent runs.
 
-Two predicates are intentionally out of scope for this slice. `timeout` stays defined in the
-predicate set but unimplemented; adding it requires tracking a wait-entered-at timestamp and a
-clock signal, which belongs in a follow-up issue. Webhook-driven wake-ups are also out of scope —
-the wait predicate set is intentionally observation-based, so the same daemon tick cadence that
-already drives PR follow-up drives wait re-evaluation, with no second event path to maintain.
+ADR 0087 later removed the unevaluated `timeout` predicate entirely: accepting a predicate that can
+never match is worse than rejecting it. Webhook-driven wake-ups remain out of scope — the wait
+predicate set is intentionally observation-based, so the same daemon tick cadence that already
+drives PR follow-up drives wait re-evaluation, with no second event path to maintain.
 
 Projection of `mergeable` deliberately omits the predicate key when GitHub reports
 `UNKNOWN` or `null`. A workflow author writing `when: { mergeable: false }` will not match on
@@ -87,3 +86,11 @@ review exists" without comparator syntax.
 Raw GitHub PR observations are first interpreted as **Pull Request State**. The PR follow-up
 verdicts in `src/pull-request-followup.ts` and the wait-handler predicate projection both derive
 from that normalized value so the two paths cannot drift in how they interpret a given GitHub state.
+
+**Amended by issue #632.** A PR-observing wait may still park on a transient observation—pending
+checks or unknown mergeability—but not because its transition table forgot an actionable case.
+Expanded-graph validation enumerates settled checks, concrete mergeability, unresolved-review,
+open/closed, and review-decision signals and rejects the state when no transition matches one of
+those combinations. Artefact-gated waits are exempt because an absent artefact intentionally keeps
+them parked. This turns an otherwise silent permanent PR-signal park into a `workflow validate`,
+`doctor`, and reload error.

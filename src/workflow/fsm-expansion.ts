@@ -491,6 +491,7 @@ async function expandRawStateMachineWorkflow(
       }
     }
   }
+  errors.push(...validateWaitStateCoverage(states, workflowPath));
 
   return {
     errors,
@@ -513,6 +514,105 @@ async function expandRawStateMachineWorkflow(
       templateFiles
     }
   };
+}
+
+const actionableChecks = ["success", "failure"] as const;
+const concreteMergeability = [true, false] as const;
+const unresolvedReviewStates = [false, true] as const;
+const pullRequestOpenStates = [true, false] as const;
+const reviewDecisions = [
+  "none",
+  "approved",
+  "changes_requested",
+  "review_required"
+] as const;
+
+function validateWaitStateCoverage(
+  states: ExpandedWorkflowState[],
+  workflowPath: string
+): string[] {
+  const errors: string[] = [];
+  for (const state of states) {
+    if (
+      state.action?.kind !== "wait" ||
+      state.transitions.some((transition) =>
+        Object.keys(transition.when).some(
+          (key) => workflowPredicateEvaluation(key) === "artifact"
+        )
+      ) ||
+      !state.transitions.some((transition) =>
+        Object.keys(transition.when).some(
+          (key) => workflowPredicateEvaluation(key) === "pr_signal"
+        )
+      )
+    ) {
+      continue;
+    }
+
+    const uncovered = firstUncoveredPullRequestSignals(state);
+    if (uncovered !== undefined) {
+      errors.push(
+        `wait state ${state.id} leaves actionable pull request signals uncovered: checks=${uncovered.checks}, mergeable=${uncovered.mergeable}, has_unresolved_reviews=${uncovered.hasUnresolvedReviews}, pr_open=${uncovered.prOpen}, review_decision=${uncovered.reviewDecision} at ${workflowPath}; add a matching transition`
+      );
+    }
+  }
+  return errors;
+}
+
+function firstUncoveredPullRequestSignals(state: ExpandedWorkflowState):
+  | {
+      checks: (typeof actionableChecks)[number];
+      hasUnresolvedReviews: boolean;
+      mergeable: boolean;
+      prOpen: boolean;
+      reviewDecision: (typeof reviewDecisions)[number];
+    }
+  | undefined {
+  for (const checks of actionableChecks) {
+    for (const mergeable of concreteMergeability) {
+      for (const hasUnresolvedReviews of unresolvedReviewStates) {
+        for (const prOpen of pullRequestOpenStates) {
+          for (const reviewDecision of reviewDecisions) {
+            const signals: WorkflowPredicateMap = {
+              checks,
+              has_unresolved_reviews: hasUnresolvedReviews,
+              mergeable,
+              pr_open: prOpen,
+              provider_success: true,
+              review_decision: reviewDecision,
+              unresolved_review_threads: hasUnresolvedReviews ? 1 : 0
+            };
+            if (
+              !state.transitions.some((transition) =>
+                transitionMatchesSignals(transition, signals)
+              )
+            ) {
+              return {
+                checks,
+                hasUnresolvedReviews,
+                mergeable,
+                prOpen,
+                reviewDecision
+              };
+            }
+          }
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function transitionMatchesSignals(
+  transition: WorkflowTransition,
+  signals: WorkflowPredicateMap
+): boolean {
+  return Object.entries(transition.when).every(([key, expected]) => {
+    if (workflowPredicateEvaluation(key) === "artifact") {
+      return false;
+    }
+    return signals[key] === expected;
+  });
 }
 
 export function resolveWorkflowFormat(

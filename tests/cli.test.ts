@@ -1226,6 +1226,89 @@ describe("CLI", () => {
     }
   });
 
+  it("reports a wait state that can dead-end on green checks with unresolved reviews", async () => {
+    const previousExitCode = process.exitCode;
+    process.exitCode = 0;
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        "  - name: symphonika",
+        "    workflow: ./workflow.yml",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: wait_for_pr",
+        "  states:",
+        "    wait_for_pr:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: closed",
+        "          when:",
+        "            pr_open: false",
+        "        - to: ready",
+        "          when:",
+        "            checks: success",
+        "            mergeable: true",
+        "            unresolved_review_threads: 0",
+        "        - to: repair",
+        "          when:",
+        "            mergeable: false",
+        "        - to: repair",
+        "          when:",
+        "            checks: failure",
+        "    ready:",
+        "      terminal: success",
+        "    repair:",
+        "      terminal: blocked",
+        "    closed:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    try {
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "workflow",
+        "validate",
+        "--config",
+        configPath,
+        "--project",
+        "symphonika"
+      ]);
+
+      expect(process.exitCode).toBe(1);
+      expect(output.stdout).toBe("");
+      expect(output.stderr).toContain("workflow validate failed");
+      expect(output.stderr).toContain(
+        "wait state wait_for_pr leaves actionable pull request signals uncovered: checks=success, mergeable=true, has_unresolved_reviews=true, pr_open=true"
+      );
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
   it("rejects YAML workflow files that omit the top-level workflow mapping", async () => {
     const previousExitCode = process.exitCode;
     process.exitCode = 0;

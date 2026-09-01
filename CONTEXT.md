@@ -45,7 +45,9 @@ _Avoid_: service config when referring to repo-owned agent policy
 
 **Expanded Workflow Graph**:
 The fully resolved state machine the Orchestrator validates, stores as run evidence, and executes
-after Markdown compatibility and Workflow Template expansion.
+after Markdown compatibility and Workflow Template expansion. A PR-observing wait in a valid graph
+has a transition for every settled actionable Pull Request State combination; pending or unknown
+observations may remain parked for polling.
 _Avoid_: workflow template when referring to the executable graph
 
 **Workflow Template**:

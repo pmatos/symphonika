@@ -173,6 +173,60 @@ describe("Oh My Pi RPC provider", () => {
     ]);
   });
 
+  it("timestamps buffered events when they enter the OMP process queue", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-buffered-events-omp.mjs");
+    await writeFakeBufferedEventsOmp(fakeOmpPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+    const iterator = provider
+      .runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+      [Symbol.asyncIterator]();
+
+    let firstMessage: ProviderEvent | undefined;
+    while (firstMessage === undefined) {
+      const next = await iterator.next();
+      expect(next.done).toBe(false);
+      const event = next.value as ProviderEvent;
+      if (event.normalized?.type === "message") {
+        firstMessage = event;
+      }
+    }
+
+    const consumerPausedAt = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const consumerResumedAt = Date.now();
+
+    let secondMessage: ProviderEvent | undefined;
+    while (secondMessage === undefined) {
+      const next = await iterator.next();
+      expect(next.done).toBe(false);
+      const event = next.value as ProviderEvent;
+      if (event.normalized?.type === "message") {
+        secondMessage = event;
+      }
+    }
+
+    expect(firstMessage.receivedAt).toEqual(expect.any(String));
+    expect(secondMessage.receivedAt).toEqual(expect.any(String));
+    expect(consumerResumedAt).toBeGreaterThan(consumerPausedAt);
+    expect(Date.parse(secondMessage.receivedAt ?? "")).toBeLessThanOrEqual(
+      consumerResumedAt
+    );
+
+    while (!(await iterator.next()).done) {
+      // Drain the provider so its process scope is cleaned up.
+    }
+  });
+
   it("does not carry a stale result from an earlier turn into a later textless turn", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -2159,6 +2213,34 @@ async function writeFakeOmp(
       "    send({ type: 'message_end', message: { role: 'assistant' } });",
       "    send({ type: 'turn_end', message: { role: 'assistant' }, toolResults: [] });",
       "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeBufferedEventsOmp(filePath: string): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-buffered', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    const frames = [",
+      "      { id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } },",
+      "      { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'first' } },",
+      "      { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'second' } },",
+      "      { type: 'turn_end' },",
+      "      { type: 'agent_end', isTerminal: true, messages: [] }",
+      "    ];",
+      "    process.stdout.write(`${frames.map((frame) => JSON.stringify(frame)).join('\\n')}\\n`);",
       "  }",
       "}",
       ""

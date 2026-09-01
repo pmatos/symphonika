@@ -98,11 +98,11 @@ operators can measure duration distributions without parsing logs.
 - Existing Normalized Event Log evidence seeds last-receipt state after upgrade, but historical
   recovered durations are not synthesized from normalized rows because raw-only receipts were not
   previously durable.
-- The queue-ingestion `receivedAt` fix covers the Codex and Claude adapters, which share
-  `jsonl-process-queue.ts`. The OMP adapter keeps its own, structurally similar but more complex
-  queue (`createProcessQueue` in `omp.ts`, with its own backpressure and frame-reassembly logic) and
-  was left out of this change's scope; it still derives `receivedAt` from consumption time and so
-  retains the residual gap this ADR describes. Tracked as a follow-up.
+- The original queue-ingestion `receivedAt` fix covered the Codex and Claude adapters through their
+  shared `jsonl-process-queue.ts`. Follow-up #638 closes the deferred OMP gap: its structurally
+  similar but more complex `createProcessQueue` now stamps items in `push()` and threads that stamp
+  through OMP frame mapping while preserving its independent backpressure and frame-reassembly
+  behavior.
 
 ## Interaction with existing decisions
 

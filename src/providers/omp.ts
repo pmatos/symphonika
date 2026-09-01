@@ -39,7 +39,7 @@ type ActiveOmpRun = {
   sessionId: string | undefined;
 };
 
-type ProcessQueueItem =
+type ProcessQueuePayload =
   | {
       kind: "exit";
       exitCode: number | null;
@@ -59,6 +59,11 @@ type ProcessQueueItem =
       promptDispatched: boolean;
       raw: unknown;
     };
+
+// Stamp receipt inside push(), which runs from the child-process stream
+// handlers independently of the async generator's consumer. A timestamp
+// added when next() resolves would include time spent persisting prior events.
+type ProcessQueueItem = ProcessQueuePayload & { receivedAt: string };
 
 export type ProcessQueue = {
   discardBeforeFrameLimits: () => void;
@@ -329,9 +334,10 @@ function providerEventFromQueueItem(
   item: ProcessQueueItem,
   activeRun: ActiveOmpRun
 ): ProviderEvent {
+  let event: ProviderEvent;
   switch (item.kind) {
     case "error":
-      return {
+      event = {
         normalized: {
           message: item.error.message,
           type: "turn_failed"
@@ -341,10 +347,12 @@ function providerEventFromQueueItem(
           message: item.error.message
         }
       };
+      break;
     case "exit":
-      return processExitEvent(activeRun, item.exitCode, item.signal);
+      event = processExitEvent(activeRun, item.exitCode, item.signal);
+      break;
     case "malformed":
-      return {
+      event = {
         normalized: {
           line: item.line,
           message: item.message,
@@ -356,9 +364,13 @@ function providerEventFromQueueItem(
           message: item.message
         }
       };
+      break;
     case "message":
-      return mapOmpFrame(item.raw, activeRun);
+      event = mapOmpFrame(item.raw, activeRun);
+      break;
   }
+
+  return { ...event, receivedAt: item.receivedAt };
 }
 
 function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
@@ -621,7 +633,7 @@ async function* readUntilResponse(
     const item = await queue.next();
     const event =
       item.kind === "message" && stringField(item.raw, "id") === id
-        ? mapResponse(item.raw, activeRun)
+        ? { ...mapResponse(item.raw, activeRun), receivedAt: item.receivedAt }
         : providerEventFromQueueItem(item, activeRun);
     if (event.normalized?.type === "process_exit") {
       if (!activeRun.cancelled && !activeRun.terminalEventSeen) {
@@ -783,7 +795,11 @@ export function createProcessQueue(
     { exitCode: number | null; signal: NodeJS.Signals | null } | undefined;
   let exitEnqueued = false;
 
-  const push = (item: ProcessQueueItem, byteSize = 0): void => {
+  const push = (payload: ProcessQueuePayload, byteSize = 0): void => {
+    const item: ProcessQueueItem = {
+      ...payload,
+      receivedAt: new Date().toISOString()
+    };
     if (waiting !== undefined) {
       const resolve = waiting;
       waiting = undefined;

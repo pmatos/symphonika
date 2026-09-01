@@ -16,6 +16,7 @@ import { isSeq, parse, parseDocument } from "yaml";
 import { z } from "zod";
 
 import type { WorkflowFormat } from "./config-schemas.js";
+import { resolveProjectMaxInFlight } from "./lifecycle/concurrency-capacity.js";
 import {
   pathStringSchema,
   projectDispatchSchema,
@@ -506,24 +507,24 @@ export async function runDoctor(
     return report({ configPath, environment, errors, projects, warnings });
   }
 
-  if (serviceContent !== undefined) {
-    warnings.push(
-      ...(await checkProviderBuildMemoryCapacity(
-        path.join(unitDir, "symphonika-providers.slice"),
-        parsedConfig,
-        options.hostParallelism ?? availableParallelism()
-      ))
-    );
-  }
-
-  const configuredEnvironment = await inspectConfiguredDoctorEnvironment({
-    cwd,
-    env,
-    environment,
-    homeDir,
-    projects: parsedConfig.projects,
-    providers: parsedConfig.providers
-  });
+  const [buildMemoryWarnings, configuredEnvironment] = await Promise.all([
+    serviceContent !== undefined
+      ? checkProviderBuildMemoryCapacity(
+          path.join(unitDir, "symphonika-providers.slice"),
+          parsedConfig,
+          options.hostParallelism ?? availableParallelism()
+        )
+      : Promise.resolve([]),
+    inspectConfiguredDoctorEnvironment({
+      cwd,
+      env,
+      environment,
+      homeDir,
+      projects: parsedConfig.projects,
+      providers: parsedConfig.providers
+    })
+  ]);
+  warnings.push(...buildMemoryWarnings);
   environment = configuredEnvironment.environment;
   errors.push(...configuredEnvironment.errors);
   warnings.push(...configuredEnvironment.warnings);
@@ -868,22 +869,11 @@ async function checkProviderBuildMemoryCapacity(
   config: ServiceConfig,
   hostParallelism: number
 ): Promise<string[]> {
-  if (!Number.isInteger(hostParallelism) || hostParallelism <= 0) {
+  if (!Number.isInteger(hostParallelism)) {
     return [];
   }
 
-  const baseContent = await readFileIfExists(slicePath);
-  if (baseContent === undefined) {
-    return [];
-  }
-  const baseAssignments = sliceAssignments(baseContent, slicePath);
-  if (baseAssignments === undefined) {
-    return [];
-  }
-  const memoryMax = winningAssignment(
-    await effectiveSliceAssignments(slicePath, baseAssignments),
-    "MemoryMax"
-  );
+  const memoryMax = await winningSliceAssignment(slicePath, "MemoryMax");
   if (memoryMax === undefined) {
     return [];
   }
@@ -895,7 +885,7 @@ async function checkProviderBuildMemoryCapacity(
   const projectCaps = config.projects
     .filter((project) => project.disabled !== true)
     .map((project) => ({
-      maxInFlight: project.max_in_flight ?? 1,
+      maxInFlight: resolveProjectMaxInFlight(project.max_in_flight),
       name: project.name
     }));
   const projectCapTotal = projectCaps.reduce(
@@ -907,9 +897,6 @@ async function checkProviderBuildMemoryCapacity(
     globalMaxInFlight ?? Number.POSITIVE_INFINITY,
     projectCapTotal
   );
-  if (effectiveMaxInFlight <= 0) {
-    return [];
-  }
 
   const estimatedBytes =
     hostParallelism * PEAK_COMPILER_RSS_BYTES * effectiveMaxInFlight;
@@ -917,23 +904,41 @@ async function checkProviderBuildMemoryCapacity(
     return [];
   }
 
-  const globalCap =
-    globalMaxInFlight === undefined
-      ? "global.max_in_flight=unbounded"
-      : `global.max_in_flight=${globalMaxInFlight}`;
+  const globalCap = `global.max_in_flight=${globalMaxInFlight ?? "unbounded"}`;
   const projectCapSummary = projectCaps
     .map((project) => `${project.name} max_in_flight=${project.maxInFlight}`)
     .join(", ");
+  const warningMarginPercent = Math.round(
+    (PROVIDER_MEMORY_WARNING_RATIO - 1) * 100
+  );
   return [
     `provider build memory estimate: host parallelism=${hostParallelism} × ` +
-      `1.5 GiB/compiler × effective max_in_flight=${effectiveMaxInFlight} ` +
-      `(${globalCap}; Project caps: ${projectCapSummary}) = ` +
-      `${formatGibibytes(estimatedBytes)} GiB, exceeding ` +
-      `${memoryMax.source} MemoryMax=${memoryMax.value} ` +
-      `(${formatGibibytes(memoryMaxBytes)} GiB) by more than the 10% warning ` +
-      "margin; lower max_in_flight, raise MemoryMax=, or configure the " +
-      "build-parallelism ceiling from #643"
+      `${formatGibibytes(PEAK_COMPILER_RSS_BYTES)} GiB/compiler × effective ` +
+      `max_in_flight=${effectiveMaxInFlight} (${globalCap}; Project caps: ` +
+      `${projectCapSummary}) = ${formatGibibytes(estimatedBytes)} GiB, ` +
+      `exceeding ${memoryMax.source} MemoryMax=${memoryMax.value} ` +
+      `(${formatGibibytes(memoryMaxBytes)} GiB) by more than the ` +
+      `${warningMarginPercent}% warning margin; lower max_in_flight, raise ` +
+      "MemoryMax=, or configure the build-parallelism ceiling from #643"
   ];
+}
+
+async function winningSliceAssignment(
+  slicePath: string,
+  name: string
+): Promise<SliceAssignment | undefined> {
+  const baseContent = await readFileIfExists(slicePath);
+  if (baseContent === undefined) {
+    return undefined;
+  }
+  const baseAssignments = sliceAssignments(baseContent, slicePath);
+  if (baseAssignments === undefined) {
+    return undefined;
+  }
+  return winningAssignment(
+    await effectiveSliceAssignments(slicePath, baseAssignments),
+    name
+  );
 }
 
 function parseSystemdByteSize(value: string): number | undefined {

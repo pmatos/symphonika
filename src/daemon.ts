@@ -507,6 +507,9 @@ export async function startDaemon(
     globalConcurrencyLoader,
     hostPressureGate,
     logger,
+    onWatchdogTerminated: (run) => {
+      daemonHealthNotifications.notifyWatchdogTerminations([run]);
+    },
     projectsLoader,
     providersLoader,
     pullRequestPolicyLoader,
@@ -540,6 +543,13 @@ export async function startDaemon(
       });
     },
     stateRoot: state.stateRoot,
+    watchdogConfigLoader: (projectName) =>
+      Promise.resolve(
+        resolveWatchdogConfig(
+          runtimeConfig.watchdogServiceConfig(),
+          projectName
+        )
+      ),
     ...(options.createRunId === undefined
       ? {}
       : { createRunId: options.createRunId }),

@@ -1558,6 +1558,7 @@ export class RunStore {
           "where id = @id",
           "and state = 'running'",
           "and cancel_requested = 0",
+          "and (terminal_reason is null or terminal_reason not in ('no_progress', 'no_convergence', 'run_timeout'))",
           generationGuard
         ].join(" ")
       )
@@ -1568,6 +1569,70 @@ export class RunStore {
         ...(watchdogGeneration === undefined
           ? {}
           : { watchdog_generation: watchdogGeneration })
+      });
+    if (result.changes === 0) {
+      return false;
+    }
+    this.recordRunTransition(runId, "stale", updatedAt);
+    return true;
+  }
+
+  // The Run wall-clock cap protects the resource represented by an in-memory
+  // slot, not one fixed durable state. In particular a retry reserves a slot
+  // while its reused row still reads `failed`. The caller must synchronously
+  // prove slot ownership immediately before this CAS. The terminal-reason
+  // guard makes competing Watchdog verdicts first-winner, while an earlier
+  // transient attempt reason remains replaceable by the Run-scoped timeout.
+  markSlotOwnedRunTimedOut(runId: string, updatedAt = timestamp()): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update runs set",
+          "state = 'stale',",
+          "terminal_reason = 'run_timeout',",
+          "failure_classification = 'deterministic',",
+          "notification_state = 'pending',",
+          "notification_error = null,",
+          "updated_at = @updated_at",
+          "where id = @id",
+          "and cancel_requested = 0",
+          "and (terminal_reason is null or terminal_reason not in ('no_progress', 'no_convergence', 'run_timeout'))"
+        ].join(" ")
+      )
+      .run({ id: runId, updated_at: updatedAt });
+    if (result.changes === 0) {
+      return false;
+    }
+    this.recordRunTransition(runId, "stale", updatedAt);
+    return true;
+  }
+
+  // Attempt setup can race a timeout CAS and overwrite only `state` (for
+  // example stale -> preparing_workspace or stale -> running). Preserve the
+  // first-winner reason while restoring the state after setup unwinds. The
+  // CAS already made notification evidence pending, so this repair must leave
+  // its current state alone: a sender may have completed it in the meantime.
+  reassertRunWatchdogStale(
+    runId: string,
+    terminalReason: WatchdogTerminalReason,
+    updatedAt = timestamp()
+  ): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update runs set",
+          "state = 'stale',",
+          "failure_classification = 'deterministic',",
+          "updated_at = @updated_at",
+          "where id = @id",
+          "and terminal_reason = @terminal_reason",
+          "and cancel_requested = 0"
+        ].join(" ")
+      )
+      .run({
+        id: runId,
+        terminal_reason: terminalReason,
+        updated_at: updatedAt
       });
     if (result.changes === 0) {
       return false;

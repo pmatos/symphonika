@@ -21,6 +21,7 @@ export type GitHubIssuesListInput = GitHubIssueRepositoryInput & {
 export type GitHubIssueLabelInput = GitHubIssueRepositoryInput & {
   issueNumber: number;
   labels: string[];
+  signal?: AbortSignal;
 };
 
 export type RawGitHubIssue = {
@@ -288,7 +289,10 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       issue_number: input.issueNumber,
       labels: input.labels,
       owner: input.owner,
-      repo: input.repo
+      repo: input.repo,
+      ...(input.signal === undefined
+        ? {}
+        : { request: { signal: input.signal } })
     });
   }
 
@@ -438,7 +442,10 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
           issue_number: input.issueNumber,
           name: label,
           owner: input.owner,
-          repo: input.repo
+          repo: input.repo,
+          ...(input.signal === undefined
+            ? {}
+            : { request: { signal: input.signal } })
         })
       );
     }

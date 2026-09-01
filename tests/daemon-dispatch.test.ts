@@ -33,6 +33,7 @@ import {
 
 const tempRoots: string[] = [];
 const execFileAsync = promisify(execFile);
+const abortSignalMatcher = expect.any(AbortSignal) as unknown as AbortSignal;
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 
 async function makeTempRoot(): Promise<string> {
@@ -194,6 +195,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:running"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ]
@@ -864,6 +866,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:running"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],
@@ -1357,6 +1360,7 @@ describe("daemon dispatch", () => {
             labels: ["sym:running"],
             owner: "pmatos",
             repo: "symphonika",
+            signal: abortSignalMatcher,
             token: "secret-token"
           }
         ],

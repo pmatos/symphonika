@@ -248,6 +248,12 @@ continued progress, cancels active workspace preparation or provider work, and f
 terminal reason `firing_timeout` after that work settles.
 _Avoid_: Watchdog timeout, no-progress grace
 
+**Run Slot Deadline**:
+The Run-scoped absolute wall-clock enforcement of `watchdog.max_run_minutes` while an issue Run owns
+in-flight capacity. It begins at the original Run claim, aborts pre-provider preparation or active
+provider work, and persists `run_timeout` independently of the Run row's current lifecycle state.
+_Avoid_: attempt timeout, Watchdog sample
+
 **Routine Skip**:
 An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
 an overlapping non-terminal firing, a concurrency cap, or **Host Pressure**. It updates the Routine's latest skip
@@ -302,7 +308,8 @@ _Avoid_: daemon loop when referring to Run-local progression
 **Watchdog**:
 A daemon reconciliation component that samples active Runs for observable progress and marks wedged
 Runs `stale` with `terminal_reason = "no_progress"` after the configured grace window, or
-`terminal_reason = "no_convergence"` once a Run exceeds its Convergence Budget.
+`terminal_reason = "no_convergence"` once a Run exceeds its Convergence Budget. Its wall-clock policy
+is also enforced by a Run Slot Deadline before provider execution begins.
 _Avoid_: retry, timeout when referring to no-progress termination
 
 **Lifecycle Event**:
@@ -319,7 +326,8 @@ _Avoid_: callback when referring to lifecycle policy
 The orchestrator subsystem that samples a Progress Signal for each `running` Run on the reconciliation
 tick and transitions the Run to `stale` with terminal reason `no_progress` when no progress signal
 advances within the configured grace window, or `no_convergence` when the Run exceeds its
-Convergence Budget.
+Convergence Budget. Its Run-scoped `run_timeout` verdict can also be won by a Run Slot Deadline while
+the Run owns capacity outside `running`.
 _Avoid_: heartbeat checker, liveness probe
 
 **Progress Signal**:
@@ -467,6 +475,8 @@ _Avoid_: chat session
   persisted commits-ahead evidence
 - A **Routine Firing Deadline** terminates an over-time **Routine Firing** independently of the
   **Watchdog**'s progress-liveness decision
+- A **Run Slot Deadline** bounds an issue **Run** while it owns in-flight capacity, including before
+  a provider starts and during a retry reservation
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A terminal **Routine Firing** may produce one best-effort **Routine Notification Delivery**
 - A **Routine Fan-out** notification and a **Routine Notification Delivery** run outside Routine
@@ -475,7 +485,10 @@ _Avoid_: chat session
 - A daemon start, health transition, or Watchdog pass may produce one **Daemon Health Notification**
 - A **Notification Sink** delivers a rendered message without owning event-specific policy
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
-- A **Watchdog** samples a **Progress Signal** for each active **Run** during daemon reconciliation and may mark no-progress work `stale`, or stop a **Run** that exceeds its **Convergence Budget**, preserving **Workspace** contents in both cases
+- A **Watchdog** samples a **Progress Signal** for each active **Run** during daemon reconciliation
+  and may mark no-progress work `stale`, stop a **Run** that exceeds its **Convergence Budget**, or
+  enforce its outer wall-clock policy through a **Run Slot Deadline**, preserving **Workspace**
+  contents in every case
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete

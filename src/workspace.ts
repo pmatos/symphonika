@@ -43,6 +43,7 @@ export type PrepareIssueWorkspaceInput = {
   configDir?: string;
   issue: WorkspaceIssue;
   project: WorkspaceProject;
+  signal?: AbortSignal;
 };
 
 export type PreparedIssueWorkspace = WorkspacePathPlan & { reused: boolean };
@@ -80,18 +81,20 @@ export async function prepareIssueWorkspace(
 ): Promise<PreparedIssueWorkspace> {
   const plan = planWorkspacePaths(input);
 
-  await ensureRepositoryCache(input.project, plan.cachePath);
-  await ensureIssueBranch(input.project, plan.cachePath, plan.branchName);
+  await ensureRepositoryCache(input.project, plan.cachePath, input.signal);
+  await ensureIssueBranch(
+    input.project,
+    plan.cachePath,
+    plan.branchName,
+    input.signal
+  );
   if (await exists(plan.workspacePath)) {
     let currentBranch: string;
     try {
-      currentBranch = await git([
-        "-C",
-        plan.workspacePath,
-        "rev-parse",
-        "--abbrev-ref",
-        "HEAD"
-      ]);
+      currentBranch = await git(
+        ["-C", plan.workspacePath, "rev-parse", "--abbrev-ref", "HEAD"],
+        input.signal
+      );
     } catch (error) {
       throw new WorkspacePreparationError(
         "workspace_conflict",
@@ -101,14 +104,20 @@ export async function prepareIssueWorkspace(
     }
 
     if (currentBranch === plan.branchName) {
-      if (!(await isWorktreeRoot(plan.workspacePath))) {
+      if (!(await isWorktreeRoot(plan.workspacePath, input.signal))) {
         throw new WorkspacePreparationError(
           "workspace_conflict",
           `workspace path ${plan.workspacePath} is checked out on ${plan.branchName} but is not the Git worktree root`
         );
       }
 
-      if (!(await isWorktreeForCache(plan.workspacePath, plan.cachePath))) {
+      if (
+        !(await isWorktreeForCache(
+          plan.workspacePath,
+          plan.cachePath,
+          input.signal
+        ))
+      ) {
         throw new WorkspacePreparationError(
           "workspace_conflict",
           `workspace path ${plan.workspacePath} is checked out on ${plan.branchName} but is not linked to cache ${plan.cachePath}`
@@ -129,7 +138,8 @@ export async function prepareIssueWorkspace(
 
   const conflictingWorktreePath = await worktreePathForBranch(
     plan.cachePath,
-    plan.branchName
+    plan.branchName,
+    input.signal
   );
   if (conflictingWorktreePath !== undefined) {
     throw new WorkspacePreparationError(
@@ -139,14 +149,17 @@ export async function prepareIssueWorkspace(
   }
 
   await mkdir(path.dirname(plan.workspacePath), { recursive: true });
-  await git([
-    "-C",
-    plan.cachePath,
-    "worktree",
-    "add",
-    plan.workspacePath,
-    plan.branchName
-  ]);
+  await git(
+    [
+      "-C",
+      plan.cachePath,
+      "worktree",
+      "add",
+      plan.workspacePath,
+      plan.branchName
+    ],
+    input.signal
+  );
 
   return {
     ...plan,
@@ -154,13 +167,14 @@ export async function prepareIssueWorkspace(
   };
 }
 
-async function isWorktreeRoot(workspacePath: string): Promise<boolean> {
-  const topLevel = await git([
-    "-C",
-    workspacePath,
-    "rev-parse",
-    "--show-toplevel"
-  ]);
+async function isWorktreeRoot(
+  workspacePath: string,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const topLevel = await git(
+    ["-C", workspacePath, "rev-parse", "--show-toplevel"],
+    signal
+  );
   const [actualTopLevel, expectedTopLevel] = await Promise.all([
     realpath(topLevel),
     realpath(workspacePath)
@@ -171,15 +185,19 @@ async function isWorktreeRoot(workspacePath: string): Promise<boolean> {
 
 async function isWorktreeForCache(
   workspacePath: string,
-  cachePath: string
+  cachePath: string,
+  signal?: AbortSignal
 ): Promise<boolean> {
-  const commonDirectory = await git([
-    "-C",
-    workspacePath,
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-common-dir"
-  ]);
+  const commonDirectory = await git(
+    [
+      "-C",
+      workspacePath,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir"
+    ],
+    signal
+  );
   const [actualCommonDirectory, expectedCommonDirectory] = await Promise.all([
     realpath(commonDirectory),
     realpath(cachePath)
@@ -190,15 +208,13 @@ async function isWorktreeForCache(
 
 async function worktreePathForBranch(
   cachePath: string,
-  branchName: string
+  branchName: string,
+  signal?: AbortSignal
 ): Promise<string | undefined> {
-  const output = await git([
-    "-C",
-    cachePath,
-    "worktree",
-    "list",
-    "--porcelain"
-  ]);
+  const output = await git(
+    ["-C", cachePath, "worktree", "list", "--porcelain"],
+    signal
+  );
   let currentWorktreePath: string | undefined;
   const expectedBranchLine = `branch refs/heads/${branchName}`;
 
@@ -231,9 +247,14 @@ export async function ensureRepositoryCache(
   signal?: AbortSignal
 ): Promise<void> {
   const prior = fetchLocks.get(cachePath) ?? Promise.resolve();
+  let markTurnStarted = (): void => undefined;
+  const turnStarted = new Promise<void>((resolve) => {
+    markTurnStarted = resolve;
+  });
   const next = prior
     .catch(() => undefined)
     .then(async () => {
+      markTurnStarted();
       signal?.throwIfAborted();
       if (!(await exists(cachePath))) {
         await createRepositoryCache(project, cachePath, signal);
@@ -253,13 +274,48 @@ export async function ensureRepositoryCache(
       );
     });
   fetchLocks.set(cachePath, next);
-  try {
-    await next;
-  } finally {
+  const releaseLock = (): void => {
     // Only clear the slot if no later caller has overwritten it.
     if (fetchLocks.get(cachePath) === next) {
       fetchLocks.delete(cachePath);
     }
+  };
+  // Keep `next` as the serialization tail even when this caller stops
+  // waiting. Once the predecessor settles, the aborted callback exits before
+  // Git and then releases the tail. Clearing it at caller-abort time would let
+  // a third fetch bypass a predecessor that still owns the cache.
+  void next.then(releaseLock, releaseLock);
+  await waitForAbortableOperation(turnStarted, signal);
+  // Once this invocation owns the cache turn, await its Git process-group
+  // teardown and staging-path cleanup rather than returning on signal alone.
+  await next;
+}
+
+async function waitForAbortableOperation<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  if (signal === undefined) {
+    return await operation;
+  }
+  signal.throwIfAborted();
+  let removeAbortListener = (): void => undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = (): void => {
+      const reason: unknown = signal.reason;
+      reject(
+        reason instanceof Error
+          ? reason
+          : new Error("Workspace preparation aborted", { cause: reason })
+      );
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    removeAbortListener();
   }
 }
 
@@ -354,27 +410,28 @@ async function ensureRepositoryCacheRemote(
 async function ensureIssueBranch(
   project: WorkspaceProject,
   cachePath: string,
-  branchName: string
+  branchName: string,
+  signal?: AbortSignal
 ): Promise<void> {
   if (
-    await gitSucceeds([
-      "-C",
-      cachePath,
-      "show-ref",
-      "--verify",
-      `refs/heads/${branchName}`
-    ])
+    await gitSucceeds(
+      ["-C", cachePath, "show-ref", "--verify", `refs/heads/${branchName}`],
+      signal
+    )
   ) {
     return;
   }
 
-  await git([
-    "-C",
-    cachePath,
-    "branch",
-    branchName,
-    `origin/${project.workspace.git.base_branch}`
-  ]);
+  await git(
+    [
+      "-C",
+      cachePath,
+      "branch",
+      branchName,
+      `origin/${project.workspace.git.base_branch}`
+    ],
+    signal
+  );
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -660,11 +717,17 @@ function processGroupExists(pid: number): boolean {
   }
 }
 
-async function gitSucceeds(args: string[]): Promise<boolean> {
+async function gitSucceeds(
+  args: string[],
+  signal?: AbortSignal
+): Promise<boolean> {
   try {
-    await git(args);
+    await git(args, signal);
     return true;
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
     return false;
   }
 }

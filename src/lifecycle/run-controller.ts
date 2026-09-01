@@ -261,6 +261,14 @@ export type RunControllerOptions = {
   hostPressureGate?: HostPressureGate;
   lifecyclePolicy?: LifecyclePolicy;
   logger?: Logger;
+  // Receives the same lifecycle event as the sampled Watchdog observer when
+  // the slot-owned Run deadline wins. The daemon uses it for health
+  // notifications; the Run Store CAS guarantees exactly-once delivery.
+  onWatchdogTerminated?: (run: {
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }) => void;
   prepareIssueWorkspace?: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
@@ -270,6 +278,11 @@ export type RunControllerOptions = {
   runStore: RunStore;
   schedule: ScheduleHandler;
   stateRoot: string;
+  // Resolves the effective daemon + Project Watchdog policy at slot claim.
+  // Omitted by one-shot/unit callers that do not run the daemon Watchdog.
+  watchdogConfigLoader?: (
+    projectName: string
+  ) => Promise<{ enabled: boolean; maxRunMinutes: number }>;
 };
 
 export type DispatchOneFreshResult =
@@ -447,6 +460,114 @@ class FreshClaimDeferredError extends Error {
   readonly name = "FreshClaimDeferredError";
 }
 
+class RunTimeoutError extends Error {
+  readonly terminalReason = "run_timeout";
+
+  constructor() {
+    super(
+      "run exceeded its wall-clock timeout while owning a concurrency slot"
+    );
+    this.name = "RunTimeoutError";
+  }
+}
+
+type RunSlotDeadline = {
+  abortPreparation: () => Promise<void>;
+  arm: () => void;
+  clear: () => void;
+  race: <T>(operation: Promise<T>) => Promise<T>;
+  signal: AbortSignal | undefined;
+};
+
+const NO_RUN_SLOT_DEADLINE: RunSlotDeadline = {
+  abortPreparation: () => Promise.resolve(),
+  arm: () => undefined,
+  clear: () => undefined,
+  race: (operation) => operation,
+  signal: undefined
+};
+
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+function abortSignalError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  return reason instanceof Error
+    ? reason
+    : new Error("Run slot deadline aborted", { cause: reason });
+}
+
+function runSlotDeadline(input: {
+  createdAt: string;
+  maxRunMinutes: number;
+  onExpire: (error: RunTimeoutError) => void;
+}): RunSlotDeadline {
+  const createdAtMs = Date.parse(input.createdAt);
+  if (input.maxRunMinutes <= 0 || Number.isNaN(createdAtMs)) {
+    return NO_RUN_SLOT_DEADLINE;
+  }
+
+  const controller = new AbortController();
+  const expiresAtMs = createdAtMs + input.maxRunMinutes * 60_000;
+  let timer: NodeJS.Timeout | undefined;
+  let cleared = false;
+  const clear = (): void => {
+    cleared = true;
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+  const expire = (): void => {
+    if (cleared || controller.signal.aborted) {
+      return;
+    }
+    const error = new RunTimeoutError();
+    controller.abort(error);
+    input.onExpire(error);
+  };
+  const schedule = (): void => {
+    if (cleared || controller.signal.aborted) {
+      return;
+    }
+    const remainingMs = expiresAtMs - Date.now();
+    if (remainingMs <= 0) {
+      expire();
+      return;
+    }
+    timer = setTimeout(schedule, Math.min(remainingMs, MAX_TIMER_DELAY_MS));
+  };
+  const abortPreparation = (): Promise<void> => {
+    if (!controller.signal.aborted) {
+      controller.abort(new Error("run cancelled before provider start"));
+    }
+    clear();
+    return Promise.resolve();
+  };
+  return {
+    abortPreparation,
+    arm: schedule,
+    clear,
+    race: async <T>(operation: Promise<T>): Promise<T> => {
+      if (controller.signal.aborted) {
+        throw abortSignalError(controller.signal);
+      }
+      let removeAbortListener = (): void => undefined;
+      const aborted = new Promise<never>((_resolve, reject) => {
+        const onAbort = (): void => reject(abortSignalError(controller.signal));
+        controller.signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () =>
+          controller.signal.removeEventListener("abort", onAbort);
+      });
+      try {
+        return await Promise.race([operation, aborted]);
+      } finally {
+        removeAbortListener();
+      }
+    },
+    signal: controller.signal
+  };
+}
+
 export class RunController {
   private readonly activeRuns: ActiveRunRegistry;
   private readonly agentProviders: AgentProviderRegistry;
@@ -462,6 +583,13 @@ export class RunController {
   private readonly hostPressureGate: HostPressureGate | undefined;
   private readonly lifecyclePolicy: LifecyclePolicy;
   private readonly logger?: Logger;
+  private readonly onWatchdogTerminated:
+    | ((run: {
+        issueNumber: number;
+        projectName: string;
+        runId: string;
+      }) => void)
+    | undefined;
   private readonly prepareIssueWorkspace: (
     input: PrepareIssueWorkspaceInput
   ) => Promise<PreparedIssueWorkspace>;
@@ -479,6 +607,9 @@ export class RunController {
   // hasPendingShutdownResume.
   private readonly shutdownResumesPending = new Map<string, number>();
   private readonly stateRoot: string;
+  private readonly watchdogConfigLoader: (
+    projectName: string
+  ) => Promise<{ enabled: boolean; maxRunMinutes: number }>;
 
   constructor(options: RunControllerOptions) {
     this.activeRuns = options.activeRuns;
@@ -505,6 +636,7 @@ export class RunController {
     if (options.logger !== undefined) {
       this.logger = options.logger;
     }
+    this.onWatchdogTerminated = options.onWatchdogTerminated;
     this.prepareIssueWorkspace =
       options.prepareIssueWorkspace ?? defaultPrepareIssueWorkspace;
     this.projectsLoader = options.projectsLoader;
@@ -516,6 +648,58 @@ export class RunController {
     this.runStore = options.runStore;
     this.schedule = options.schedule;
     this.stateRoot = options.stateRoot;
+    this.watchdogConfigLoader =
+      options.watchdogConfigLoader ??
+      ((): Promise<{ enabled: boolean; maxRunMinutes: number }> =>
+        Promise.resolve({ enabled: false, maxRunMinutes: 0 }));
+  }
+
+  private createRunSlotDeadline(input: {
+    config: { enabled: boolean; maxRunMinutes: number };
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }): RunSlotDeadline {
+    const run = this.runStore.getRun(input.runId);
+    if (!input.config.enabled || run === undefined) {
+      return NO_RUN_SLOT_DEADLINE;
+    }
+    return runSlotDeadline({
+      createdAt: run.createdAt,
+      maxRunMinutes: input.config.maxRunMinutes,
+      onExpire: () => {
+        // Slot ownership is the enforcement scope. This read and the
+        // synchronous SQLite CAS below share one event-loop turn, so an
+        // unregister cannot interleave between the proof and mutation.
+        if (this.activeRuns.getInFlight(input.runId) === undefined) {
+          return;
+        }
+        const marked = this.runStore.markSlotOwnedRunTimedOut(input.runId);
+        if (!marked) {
+          return;
+        }
+        void this.activeRuns
+          .requestCancel(input.runId, CANCEL_REASONS.RUN_TIMEOUT)
+          .catch((error: unknown) => {
+            this.logger?.warn(
+              { err: error, runId: input.runId },
+              "symphonika Run deadline cancellation failed"
+            );
+          });
+        try {
+          this.onWatchdogTerminated?.({
+            issueNumber: input.issueNumber,
+            projectName: input.projectName,
+            runId: input.runId
+          });
+        } catch (error) {
+          this.logger?.warn(
+            { err: error, runId: input.runId },
+            "symphonika Run deadline termination observer failed"
+          );
+        }
+      }
+    });
   }
 
   // Re-samples at most once per configured interval (createHostPressureGate
@@ -916,6 +1100,7 @@ export class RunController {
     // WITHOUT rescheduling, since the scheduler itself is being torn down.
     // See ADR 0052.
     let shuttingDown = false;
+    let deadline = NO_RUN_SLOT_DEADLINE;
     await this.dispatchMutex.acquire();
     try {
       if (this.activeRuns.isShuttingDown()) {
@@ -926,6 +1111,7 @@ export class RunController {
         // reschedules the retry rather than breaching it. See ADR 0088.
         const pressure = await this.refreshHostPressure();
         const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
+        const watchdogConfig = await this.watchdogConfigLoader(project.name);
         const capacity = evaluateConcurrencyCapacity({
           configuredProjectMax: project.max_in_flight,
           globalInFlight: this.activeRuns.countInFlight(),
@@ -950,7 +1136,16 @@ export class RunController {
           // slot here and no stale sym:claimed label is left behind. See
           // ADR 0052.
           try {
+            deadline = this.createRunSlotDeadline({
+              config: watchdogConfig,
+              issueNumber: refreshed.number,
+              projectName: project.name,
+              runId: payload.runId
+            });
             this.activeRuns.reserveSlot({
+              ...(deadline.signal === undefined
+                ? {}
+                : { cancel: deadline.abortPreparation }),
               issueNumber: refreshed.number,
               projectName: project.name,
               ...(payload.respectsIssueLabels === undefined
@@ -958,7 +1153,9 @@ export class RunController {
                 : { respectsIssueLabels: payload.respectsIssueLabels }),
               runId: payload.runId
             });
+            deadline.arm();
           } catch (error) {
+            deadline.clear();
             if (!(error instanceof RegistryShutdownError)) {
               throw error;
             }
@@ -966,21 +1163,32 @@ export class RunController {
             shuttingDown = true;
           }
           if (!shuttingDown) {
-            await this.bestEffort(
-              () =>
-                this.githubIssuesApi.addLabelsToIssue!({
-                  ...repository,
-                  issueNumber: refreshed.number,
-                  labels: ["sym:claimed"]
-                }),
-              {
-                issueNumber: refreshed.number,
-                label: "sym:claimed",
-                operation: "addLabel",
-                project: project.name,
-                runId: payload.runId
-              }
-            );
+            try {
+              await deadline.race(
+                this.bestEffort(
+                  () =>
+                    this.githubIssuesApi.addLabelsToIssue!({
+                      ...repository,
+                      issueNumber: refreshed.number,
+                      labels: ["sym:claimed"],
+                      ...(deadline.signal === undefined
+                        ? {}
+                        : { signal: deadline.signal })
+                    }),
+                  {
+                    issueNumber: refreshed.number,
+                    label: "sym:claimed",
+                    operation: "addLabel",
+                    project: project.name,
+                    runId: payload.runId
+                  }
+                )
+              );
+            } catch {
+              // A slot cancellation or Run timeout aborts the label request.
+              // runAttemptLifecycle observes the latched cancellation and
+              // owns unregister + terminal classification outside the mutex.
+            }
           }
         }
       }
@@ -989,6 +1197,7 @@ export class RunController {
     }
 
     if (shuttingDown) {
+      deadline.clear();
       this.logger?.debug(
         {
           issueNumber: refreshed.number,
@@ -1001,6 +1210,7 @@ export class RunController {
     }
 
     if (contention !== undefined) {
+      deadline.clear();
       // Reschedule the retry with the configured continuation delay; the
       // next fire will re-check caps and proceed when contention clears.
       this.logger?.warn(
@@ -1025,6 +1235,7 @@ export class RunController {
 
     await this.runAttemptLifecycle({
       attemptNumber: payload.attemptNumber,
+      deadline,
       ...(payload.extraInstructions === undefined
         ? {}
         : { extraInstructions: payload.extraInstructions }),
@@ -2664,9 +2875,10 @@ export class RunController {
     // IssueReservedError propagate to the caller, which decides whether to
     // silently no-op (fresh dispatch) or reschedule (continuation / state
     // advance / PR followup). See ADR 0052 / ADR 0053.
+    let deadline: RunSlotDeadline;
     await this.dispatchMutex.acquire();
     try {
-      await this.claimAndPersistRun(input);
+      deadline = await this.claimAndPersistRun(input);
     } finally {
       this.dispatchMutex.release();
     }
@@ -2686,6 +2898,7 @@ export class RunController {
       ...(input.respectsIssueLabels === undefined
         ? {}
         : { respectsIssueLabels: input.respectsIssueLabels }),
+      deadline,
       runId: input.runId
     });
   }
@@ -2707,7 +2920,7 @@ export class RunController {
       weight: number;
     }>;
     verifyFileOverlap?: boolean;
-  }): Promise<void> {
+  }): Promise<RunSlotDeadline> {
     // Shutdown gate, fast path: throwing before any side effect needs no
     // rollback. The gate can still land during the addLabelsToIssue await
     // below; the catch then cleans up the partial claim. See ADR 0052.
@@ -2740,6 +2953,7 @@ export class RunController {
     // have filled the cap. Scheduled callers catch CapBreachedError and
     // reschedule. See ADR 0053.
     const { maxInFlight: globalMax } = await this.globalConcurrencyLoader();
+    const watchdogConfig = await this.watchdogConfigLoader(input.project.name);
     const capacity = evaluateConcurrencyCapacity({
       configuredProjectMax: input.project.max_in_flight,
       globalInFlight: this.activeRuns.countInFlight(),
@@ -2787,6 +3001,7 @@ export class RunController {
     }
 
     let claimed = false;
+    let deadline = NO_RUN_SLOT_DEADLINE;
     let runCreated = false;
     try {
       await (
@@ -2843,11 +3058,20 @@ export class RunController {
         this.runStore.createRun(createInput);
       }
       runCreated = true;
+      deadline = this.createRunSlotDeadline({
+        config: watchdogConfig,
+        issueNumber: input.issue.number,
+        projectName: input.project.name,
+        runId: input.runId
+      });
       // Reserve the in-flight slot BEFORE mutex release so subsequent picks
       // (per-issue reservation + Slice-2 cap counts) observe the run. The
       // provider cancel handler is bound later in runAttemptLifecycle via
       // attachProvider once provider.validate has succeeded. See ADR 0052.
       this.activeRuns.reserveSlot({
+        ...(deadline.signal === undefined
+          ? {}
+          : { cancel: deadline.abortPreparation }),
         issueNumber: input.issue.number,
         projectName: input.project.name,
         ...(input.respectsIssueLabels === undefined
@@ -2855,6 +3079,7 @@ export class RunController {
           : { respectsIssueLabels: input.respectsIssueLabels }),
         runId: input.runId
       });
+      deadline.arm();
       if (
         overlapInspection !== undefined &&
         overlapInspection.candidateFiles.length > 0
@@ -2865,6 +3090,7 @@ export class RunController {
         });
       }
     } catch (error) {
+      deadline.clear();
       if (error instanceof RegistryShutdownError && runCreated) {
         // The shutdown snapshot in stop() predates this row, so record the
         // shutdown reason here and release the claim label best-effort.
@@ -2898,10 +3124,12 @@ export class RunController {
       }
       throw error;
     }
+    return deadline;
   }
 
   private async runAttemptLifecycle(input: {
     attemptNumber: number;
+    deadline: RunSlotDeadline;
     extraInstructions?: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
@@ -2921,6 +3149,7 @@ export class RunController {
     };
     let attemptCreated = false;
     let started: StartedAttempt | undefined;
+    let startOperation: Promise<StartedAttempt> | undefined;
     let headShaAtAttemptStart: string | undefined;
     let headInspectionFailed = false;
     let caughtError: unknown;
@@ -2960,7 +3189,9 @@ export class RunController {
       // the unregister in finally (preventing the slot leak the previous
       // structure had: throw -> early exit -> reserveSlot'd entry stranded
       // until daemon restart). See ADR 0052.
-      loadedWorkflow = await this.loadWorkflow(input.project.workflow);
+      loadedWorkflow = await input.deadline.race(
+        this.loadWorkflow(input.project.workflow)
+      );
       if (loadedWorkflow.errors.length === 0) {
         const persistedStateId = this.runStore.getRun(
           input.runId
@@ -3064,7 +3295,9 @@ export class RunController {
           currentState.action.prompt
         );
         try {
-          promptTemplate = await readFile(promptPath, "utf8");
+          promptTemplate = await input.deadline.race(
+            readFile(promptPath, "utf8")
+          );
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
@@ -3075,7 +3308,7 @@ export class RunController {
         }
       }
 
-      started = await this.startAttempt({
+      startOperation = this.startAttempt({
         attemptId,
         attemptNumber: input.attemptNumber,
         ...(input.extraInstructions === undefined
@@ -3087,16 +3320,23 @@ export class RunController {
         providerCommand: input.providerCommand,
         providerName: input.providerName,
         ...(promptTemplate === undefined ? {} : { promptTemplate }),
+        ...(input.deadline.signal === undefined
+          ? {}
+          : { signal: input.deadline.signal }),
         runId: input.runId
       });
-      await input.provider.validate(input.providerCommand);
-      await (
-        this.githubIssuesApi as LabelWritingGitHubIssuesApi
-      ).addLabelsToIssue({
-        ...input.repository,
-        issueNumber: input.issue.number,
-        labels: ["sym:running"]
-      });
+      started = await input.deadline.race(startOperation);
+      await input.deadline.race(input.provider.validate(input.providerCommand));
+      await input.deadline.race(
+        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
+          ...input.repository,
+          issueNumber: input.issue.number,
+          labels: ["sym:running"],
+          ...(input.deadline.signal === undefined
+            ? {}
+            : { signal: input.deadline.signal })
+        })
+      );
       this.runStore.updateRunState(input.runId, "running");
       this.runStore.createAttempt({
         ...started.evidence,
@@ -3167,6 +3407,13 @@ export class RunController {
       // guard would leak the slot if a throw happened between reserveSlot
       // and attachProvider (loadWorkflow / prepareIssueWorkspace / validate /
       // sym:running label / createAttempt). See ADR 0052.
+      // The deadline race can reject before AbortSignal-driven Git teardown
+      // and owned-path cleanup settle. Keep the slot until startAttempt has
+      // actually stopped, matching Routine Firing deadline semantics.
+      if (input.deadline.signal?.aborted === true) {
+        await startOperation?.catch(() => undefined);
+      }
+      input.deadline.clear();
       const removed = this.activeRuns.unregister(input.runId);
       if (removed !== undefined) {
         cancelRequested = removed.cancelRequested;
@@ -3197,7 +3444,7 @@ export class RunController {
         // in "running" with no provider (a state-machine leak).
         const reasserted =
           preservedRun?.state === "stale" ||
-          this.runStore.markRunWatchdogStale(
+          this.runStore.reassertRunWatchdogStale(
             input.runId,
             watchdogTerminalReason
           );
@@ -3450,6 +3697,7 @@ export class RunController {
     providerCommand: string;
     providerName: AgentProviderName;
     runId: string;
+    signal?: AbortSignal;
   }): Promise<StartedAttempt> {
     const prepared = await this.prepareIssueWorkspace({
       configDir: this.configDir,
@@ -3457,7 +3705,8 @@ export class RunController {
         number: input.issue.number,
         title: input.issue.title
       },
-      project: input.project
+      project: input.project,
+      ...(input.signal === undefined ? {} : { signal: input.signal })
     });
     const workflow = await this.loadWorkflow(input.project.workflow);
     const workflowPath = workflow.path;

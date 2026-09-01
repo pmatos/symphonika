@@ -28,6 +28,38 @@ afterEach(async () => {
 });
 
 describe("Git workspace preparation", () => {
+  it("does not start issue-workspace Git after its Run signal is aborted", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "symphonika");
+    const controller = new AbortController();
+    const timeout = new Error("run timeout");
+    controller.abort(timeout);
+
+    await expect(
+      prepareIssueWorkspace({
+        issue: {
+          number: 6,
+          title: "Prepare deterministic Git workspaces and issue branches"
+        },
+        project: {
+          name: "symphonika",
+          workspace: {
+            git: {
+              base_branch: "main",
+              remote: remotePath
+            },
+            root: workspaceRoot
+          }
+        },
+        signal: controller.signal
+      })
+    ).rejects.toBe(timeout);
+    await expect(
+      git(["-C", path.join(workspaceRoot, ".cache", "repo.git"), "status"])
+    ).rejects.toThrow();
+  });
+
   it("creates the repository cache, deterministic issue branch, and issue worktree on first preparation", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

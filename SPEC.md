@@ -2241,9 +2241,11 @@ states (§12.6).
 Terminalizing a merge refusal releases FSM ownership the same way any other terminalization does,
 which would otherwise let the global PR follow-up loop (`§12.5`) read the released ownership as
 license to re-attempt the exact merge just declared refused. `RunController.isIssueMergeRefused`
-is a guard the follow-up loop consults before its own merge attempt, scoped to the
-`merge_pr_refused:` terminal-reason prefix so every other blocked outcome keeps releasing ownership
-to the global loop unchanged.
+is a guard the follow-up loop consults before its own merge attempt, scoped to both the
+`merge_pr_refused:` terminal-reason prefix and the specific PR number — an issue can have more
+than one open tracked PR over its lifetime, and the guard must not let one PR's refusal shadow, or
+fail to shadow, a different PR on the same issue — so every other blocked outcome keeps releasing
+ownership to the global loop unchanged.
 
 ## 13. CLI
 

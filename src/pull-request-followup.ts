@@ -413,10 +413,12 @@ async function processTrackedPullRequests(input: {
     // isIssueOwnedByWorkflow above no longer sees that Run (terminalizing
     // released FSM ownership), so this loop would otherwise re-attempt the
     // exact merge just declared refused — and could succeed while the issue
-    // still carries sym:blocked/sym:human-needed.
+    // still carries sym:blocked/sym:human-needed. Scoped to this tracked
+    // PR's own number: an issue can have more than one open tracked PR.
     if (
       input.runController.isIssueMergeRefused({
         issueNumber: tracked.issueNumber,
+        prNumber: tracked.prNumber,
         projectName: project.name
       })
     ) {

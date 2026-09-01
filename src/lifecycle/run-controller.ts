@@ -128,8 +128,7 @@ import {
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
 import {
   buildCapReachedReason,
-  buildMergePrRefusedReason,
-  isMergePrRefusedReason
+  buildMergePrRefusedReason
 } from "./terminal-reason.js";
 
 export type WorkflowSnapshot = {
@@ -1385,15 +1384,15 @@ export class RunController {
   // outcome that release is correct — the global PR follow-up loop should
   // pick up review-followup duties. For a deterministic merge refusal it is
   // not: re-attempting the exact merge this Run just declared refused would
-  // contradict the terminalization. Scoped to the `merge_pr_refused:`
-  // terminal reason so every other blocked outcome keeps today's contract.
+  // contradict the terminalization. Scoped to the exact PR (not just the
+  // issue) so a refusal on one of an issue's tracked PRs cannot gate — or
+  // fail to gate — a different tracked PR on the same issue.
   isIssueMergeRefused(input: {
     issueNumber: number;
+    prNumber: number;
     projectName: string;
   }): boolean {
-    return isMergePrRefusedReason(
-      this.runStore.mostRecentRunTerminalReason(input)
-    );
+    return this.runStore.hasMergeRefusalForPullRequest(input);
   }
 
   // Shared tail of every "terminalize this waiting Run as blocked" path (ADR

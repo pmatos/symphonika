@@ -84,5 +84,9 @@ that release is correct: the global PR follow-up loop should pick up review-foll
 For a deterministic merge refusal it is not — `isIssueOwnedByWorkflow` alone cannot see the
 difference, so the follow-up loop would read the released ownership as "nothing owns this issue"
 and re-attempt the exact merge just declared refused. `RunController.isIssueMergeRefused` is a
-sibling predicate scoped to the `merge_pr_refused:` terminal-reason prefix that the follow-up loop
-consults before its own merge attempt, so every other blocked outcome keeps today's contract.
+sibling predicate the follow-up loop consults before its own merge attempt, scoped to both the
+`merge_pr_refused:` terminal-reason prefix and the specific PR number: `listOpenTrackedPullRequests`
+can return more than one open tracked PR for the same issue (e.g. a redispatch onto a renamed
+branch while an earlier PR stays open), so keying the guard by issue alone would let one PR's
+refusal shadow — or fail to shadow — a different PR on the same issue. Every other blocked outcome
+keeps today's contract of releasing ownership to the follow-up loop.

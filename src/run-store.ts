@@ -5349,25 +5349,38 @@ export class RunStore {
     return { currentStateId: row.current_state_id, runId: row.id };
   }
 
-  // The global PR follow-up loop's merge-refusal guard needs a Run's
-  // terminal reason regardless of `state` — unlike findWaitingRunByIssue,
-  // which only ever matches a still-parked row, a terminalized Run has
-  // already left "waiting".
-  mostRecentRunTerminalReason(input: {
+  // Scoped to the exact PR the global follow-up loop is about to merge, not
+  // just the issue: listOpenTrackedPullRequests can return more than one
+  // open tracked PR for the same issue (e.g. redispatch onto a renamed
+  // branch while an earlier PR stays open), so keying only by
+  // (project, issue) would let a Run refusing PR A's merge also gate PR B's
+  // — or, if a later unrelated Run for the same issue sorts more recently,
+  // fail to gate PR A at all. Existence, not recency, is what matters here:
+  // once a refused PR actually merges it leaves `listOpenTrackedPullRequests`
+  // entirely (state moves off "open"), and re-enabling a still-open refused
+  // PR requires an operator to clear it and redispatch — the operator-
+  // attention contract ADR 0058 already establishes — not a Run that quietly
+  // outranks this one by timestamp.
+  hasMergeRefusalForPullRequest(input: {
     issueNumber: number;
+    prNumber: number;
     projectName: string;
-  }): string | null {
+  }): boolean {
     const row = this.database
       .prepare(
         [
-          "select terminal_reason from runs",
+          "select 1 from runs",
           "where project_name = ? and issue_number = ?",
-          "order by created_at desc limit 1"
+          "and terminal_reason like ?",
+          "limit 1"
         ].join(" ")
       )
-      .get(input.projectName, input.issueNumber) as
-      { terminal_reason: string | null } | undefined;
-    return row?.terminal_reason ?? null;
+      .get(
+        input.projectName,
+        input.issueNumber,
+        `merge_pr_refused: PR #${input.prNumber}:%`
+      );
+    return row !== undefined;
   }
 
   // Wait re-evaluation needs to see merged/closed tracked PRs so a workflow

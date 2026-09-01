@@ -1246,6 +1246,81 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("still merges a different open PR on the same issue despite another PR's refusal", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-clean-pr";
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath: path.join(root, "workspace")
+      });
+      // A different tracked PR on the SAME issue (e.g. an earlier redispatch
+      // onto a renamed branch) was refused and terminalized as blocked. The
+      // guard must be scoped to PR #82, not the issue as a whole, or it
+      // would also shadow this unrelated, healthy PR #91.
+      seedMergeRefusedBlockedRun(store, { runId: "merge-refused-run" });
+      store.trackPullRequest({
+        branchName: "sym/symphonika/54-clean-pr-original",
+        headSha: "def456",
+        issueNumber: 54,
+        prNumber: 82,
+        prUrl: "https://github.com/pmatos/symphonika/pull/82",
+        projectName: "symphonika",
+        runId: "merge-refused-run"
+      });
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        prNumber: 91,
+        prUrl: "https://github.com/pmatos/symphonika/pull/91",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        workspacePath: path.join(root, "workspace")
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(result).toEqual({ action: "merged", prNumber: 91 });
+      expect(githubIssuesApi.mergePullRequest).toHaveBeenCalledTimes(1);
+      expect(githubIssuesApi.mergePullRequest).toHaveBeenCalledWith({
+        expectedHeadSha: "abc123",
+        method: "squash",
+        owner: "pmatos",
+        pullNumber: 91,
+        repo: "symphonika",
+        token: "secret-token"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("auto-merges a tracked PR when reviews are clear, checks pass, and GitHub says it is mergeable", async () => {
     const root = await makeTempRoot();
     await writeProject(root);

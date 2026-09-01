@@ -1209,8 +1209,9 @@ A capacity refusal — a full per-Project or global cap, or a stalled host — d
 instead of consuming it (ADR 0093). The Routine Target keeps its due `next_fire_at`, its fan-out
 leg stays `pending` recording `deferred_reason`, `deferred_since` and `deferred_attempts`, each
 retry refreshes `last_attempted_at`, no skip counter moves, and the next daemon tick retries
-admission; Routine dispatch precedes issue dispatch
-in a tick, so a deferred target gets first refusal on the next freed slot. A recurring Target
+admission; Routine dispatch precedes fresh issue dispatch in a tick, so an issue Run never takes a
+freed slot out from under a deferral evaluated in the same tick. PR review follow-up is admitted
+earlier than either and may still claim a freed slot ahead of a parked deferral. A recurring Target
 defers until its next clock event is due, a one-shot Target for 24 hours. A deferral that reaches
 that bound unadmitted is recorded as missed: the clock advances exactly as a skip's does, the
 reason increments its rolling 24-hour counter once, the fan-out leg settles as `missed`, the

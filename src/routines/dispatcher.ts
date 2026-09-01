@@ -843,9 +843,10 @@ export async function dispatchDueRoutines(
       }
       // A capacity refusal is transient, so it parks the clock event rather
       // than consuming it: the target keeps retrying every tick until a slot
-      // frees or its own event lapses. Routine dispatch runs ahead of issue
-      // dispatch in the daemon tick, so a deferred target gets first refusal
-      // on the next freed slot (ADR 0093).
+      // frees or its own event lapses. Routine dispatch runs ahead of fresh
+      // issue dispatch in the daemon tick, so an issue Run never takes a slot
+      // out from under a deferral evaluated in the same tick — though PR
+      // review follow-up, admitted earlier still, can (ADR 0093, #648).
       const capacityReason = capacityRefusalReason({
         activeRuns: input.activeRuns,
         globalConcurrency: input.globalConcurrency,

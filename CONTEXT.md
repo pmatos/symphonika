@@ -45,7 +45,9 @@ _Avoid_: service config when referring to repo-owned agent policy
 
 **Expanded Workflow Graph**:
 The fully resolved state machine the Orchestrator validates, stores as run evidence, and executes
-after Markdown compatibility and Workflow Template expansion.
+after Markdown compatibility and Workflow Template expansion. A PR-observing wait in a valid graph
+has a transition for every settled actionable Pull Request State combination; pending or unknown
+observations may remain parked for polling.
 _Avoid_: workflow template when referring to the executable graph
 
 **Workflow Template**:
@@ -332,14 +334,16 @@ _Avoid_: daemon loop when referring to Run-local progression
 **Run Slot Deadline**:
 The Run-scoped absolute wall-clock enforcement of `watchdog.max_run_minutes` while an issue Run owns
 in-flight capacity. It begins at the original Run claim, aborts pre-provider preparation or active
-provider work, and persists `run_timeout` independently of the Run row's current lifecycle state.
+provider work, persists `run_timeout` independently of the Run row's current lifecycle state, and
+holds capacity after expiry only while abort-triggered process and owned-path cleanup settles.
 _Avoid_: attempt timeout, Watchdog sample
 
 **Watchdog**:
-A daemon reconciliation component that samples active Runs for observable progress and marks wedged
-Runs `stale` with `terminal_reason = "no_progress"` after the configured grace window, or
-`terminal_reason = "no_convergence"` once a Run exceeds its Convergence Budget. Its wall-clock policy
-is also enforced by a Run Slot Deadline before provider execution begins.
+A daemon reconciliation component that samples running issue Runs and Routine Firings for
+observable progress. It marks a wedged Run `stale` or a wedged Routine Firing `failed`, both with
+`terminal_reason = "no_progress"`; issue Runs are also stopped with `no_convergence` once they
+exceed their Convergence Budget. A Run's wall-clock policy is also enforced by a Run Slot Deadline
+before provider execution begins.
 _Avoid_: retry, timeout when referring to no-progress termination
 
 **Lifecycle Event**:
@@ -353,28 +357,29 @@ run, schedule retry, re-evaluate a waiting row, cancel, or mark failed.
 _Avoid_: callback when referring to lifecycle policy
 
 **Watchdog**:
-The orchestrator subsystem that samples a Progress Signal for each `running` Run on the reconciliation
-tick and transitions the Run to `stale` with terminal reason `no_progress` when no progress signal
-advances within the configured grace window, or `no_convergence` when the Run exceeds its
-Convergence Budget. Its Run-scoped `run_timeout` verdict can also be won by a Run Slot Deadline while
-the Run owns capacity outside `running`.
+The orchestrator subsystem that samples a Progress Signal for each `running` issue Run and Routine
+Firing on the reconciliation tick. When no signal advances within the configured grace window, an
+issue Run becomes `stale / no_progress` and a Routine Firing becomes `failed / no_progress`; only
+issue Runs additionally use the Convergence Budget and wall-clock Run cap, whose `run_timeout`
+verdict can also be won by a Run Slot Deadline while the Run owns capacity outside `running`.
 _Avoid_: heartbeat checker, liveness probe
 
 **Progress Signal**:
-The tuple of observed Run-progress evidence the Watchdog samples — most recent tool-call timestamp,
-provider progress timestamp (including Thinking Markers), Workspace Digest, distinct turn-id count,
-output-token growth since the last sample, and most recent streamed assistant-message timestamp.
+The tuple of observed active-provider progress evidence the Watchdog samples — most recent
+tool-call timestamp, provider progress timestamp (including Thinking Markers), Workspace Digest,
+distinct turn-id count, output-token growth since the last sample, and most recent streamed
+assistant-message timestamp.
 Advance of any one signal counts as progress.
 _Avoid_: heartbeat when describing observable side-effects — rate-limit events are excluded from
 the Progress Signal outright, and the bare presence of usage events is not progress, though the
 Progress Signal still reads output-token growth from `usage_updated` events (signal 4)
 
 **Workspace Digest**:
-The hash over the sorted `relative-path:size` pairs of every non-excluded file in a Run's
-Workspace, and the Progress Signal's workspace evidence. A change means files appeared,
-disappeared, or changed size; a rebuild that restamps byte-identical output does not change it and
-is not progress. The maximum workspace mtime is still sampled and shown to operators but no longer
-decides the signal on its own (ADR 0086).
+The hash over the sorted `relative-path:size` pairs of every non-excluded file in an active Run or
+Routine Firing Workspace, and the Progress Signal's workspace evidence. A change means files
+appeared, disappeared, or changed size; a rebuild that restamps byte-identical output does not
+change it and is not progress. The maximum workspace mtime is still sampled but no longer decides
+the signal on its own (ADR 0086).
 _Avoid_: workspace mtime when describing what counts as workspace progress
 
 **Convergence Budget**:
@@ -505,6 +510,8 @@ _Avoid_: chat session
   **Missed Routine**, or one non-gating **Routine Dispatch Hold**
 - A **Routine Deferral** keeps a **Routine Target**'s clock event due and its **Routine Fan-out**
   leg pending until the target is admitted or the event lapses into a **Missed Routine**
+- A parked **Routine Deferral** gets first refusal over **PR Follow-up** admission on later daemon
+  ticks; a newly due **Routine** does not
 - A **Routine Dispatch Hold** preserves a **Routine Target**'s original due clock event as claimable
   while making its held **Routine Fan-out** leg non-gating and visible as a summary failure
 - A **Routine Fan-out** produces one grouped notification after all target legs are terminal or held
@@ -517,7 +524,8 @@ _Avoid_: chat session
 - A **Routine Firing Deadline** terminates an over-time **Routine Firing** independently of the
   **Watchdog**'s progress-liveness decision
 - A **Run Slot Deadline** bounds an issue **Run** while it owns in-flight capacity, including before
-  a provider starts and during a retry reservation
+  a provider starts and during a retry reservation; expired preparation releases that capacity
+  after its abort cleanup settles even when unrelated Workspace I/O remains pending
 - A succeeded `kind: git` **Routine Firing** may link zero or more read-only **Routine Pull Requests**
 - A terminal **Routine Firing** may produce one best-effort **Routine Notification Delivery**
 - A **Routine Fan-out** notification and a **Routine Notification Delivery** run outside Routine
@@ -526,10 +534,10 @@ _Avoid_: chat session
 - A daemon start, health transition, or Watchdog pass may produce one **Daemon Health Notification**
 - A **Notification Sink** delivers a rendered message without owning event-specific policy
 - A **Run Lifecycle** consumes **Lifecycle Events** and chooses **Planned Steps**
-- A **Watchdog** samples a **Progress Signal** for each active **Run** during daemon reconciliation
-  and may mark no-progress work `stale`, stop a **Run** that exceeds its **Convergence Budget**, or
-  enforce its outer wall-clock policy through a **Run Slot Deadline**, preserving **Workspace**
-  contents in every case
+- A **Watchdog** samples a **Progress Signal** for each running **Run** and **Routine Firing** during
+  daemon reconciliation; no-progress Runs become `stale`, no-progress Firings become `failed`, and
+  only Runs are additionally stopped by the **Convergence Budget** or enforce their outer wall-clock
+  policy through a **Run Slot Deadline**, preserving **Workspace** contents in every case
 - A **Continuation** is capped so an eligible issue cannot loop forever
 - A **State Advance** is not capped by the continuation cap; the FSM bounds the walk via terminal states
 - A **Bootstrap Slice** operates on one real **Project** before full multi-project behavior is complete

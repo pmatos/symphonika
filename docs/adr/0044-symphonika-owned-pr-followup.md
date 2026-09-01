@@ -29,6 +29,12 @@ pull request and left the Issue with two live FSM positions. A raw FSM now owns 
 entirely — this loop defers to it and does not dispatch — and the parked state's own transitions
 name where review feedback lands.
 
+**Amended by issue #632.** Because no second dispatcher exists for a raw FSM, expanded-graph
+validation rejects a PR-observing `wait` state that leaves any settled actionable PR-signal
+combination uncovered. In particular, a merge gate requiring zero unresolved threads must also
+name `has_unresolved_reviews: true` (or provide another matching transition). Pending checks and
+unknown mergeability remain pollable waits rather than validation errors.
+
 For a markdown compatibility-graph workflow, which has no state machine and no position, the
 follow-up run's Continuation parent remains "record-keeping only": it links the follow-up back to
 the tracked PR in status surfaces, and the workflow's single entry point is the right and only

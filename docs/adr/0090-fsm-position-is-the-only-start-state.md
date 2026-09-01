@@ -29,10 +29,10 @@ position, and for which the single entry point is the right and only answer.
 Where review feedback lands is therefore a workflow-authoring question, answered in the workflow
 file. No new contract syntax was needed: `has_unresolved_reviews` has been a live `pr_signal`
 predicate since ADR 0048's predicate vocabulary, projected by `projectPullRequestSignals` on every
-park re-evaluation, and simply unused because ADR 0044 had assigned this case elsewhere. A wait
-state that does not name the case is one nothing handles: the run parks and raises manual
-attention. That is a real behaviour change for workflow files that never authored the transition,
-and it is the intended one — a visible park beats an invisible replay.
+park re-evaluation, and simply unused because ADR 0044 had assigned this case elsewhere. Issue #632
+adds expanded-graph validation for that ownership rule: a PR-observing wait state that does not name
+the case is rejected by `workflow validate`, `doctor`, and reload. A legacy or hand-built graph that
+bypasses validation still parks and raises manual attention; it is never replayed invisibly.
 
 Moving review rounds onto the park-to-advance path put them inside the state machine's cycles, and
 the state machine had no cycle guard at all. Nothing bounded `autofix → wait_for_pr → autofix`; it

@@ -3489,7 +3489,8 @@ export class RunController {
       try {
         headShaAtAttemptStart = await input.deadline.race(
           inspectWorkspaceHead({
-            workspacePath: started.evidence.workspacePath
+            workspacePath: started.evidence.workspacePath,
+            ...input.deadline.signalOption
           })
         );
       } catch (error) {

@@ -600,6 +600,15 @@ describe("Run slot deadline", () => {
       expect(provider.runAttempt).not.toHaveBeenCalled();
       expect(provider.cancel).not.toHaveBeenCalled();
       expect(onTerminated).toHaveBeenCalledOnce();
+
+      // Abandoning the race alone would leave the blocked `git` process
+      // running. A non-blocking write-open of the FIFO fails once no reader
+      // remains, proving the deadline signal actually tore the process down.
+      await vi.waitFor(async () => {
+        await expect(
+          open(fifoPath, constants.O_WRONLY | constants.O_NONBLOCK)
+        ).rejects.toThrow();
+      });
     } finally {
       process.env.PATH = originalPath;
       vi.useRealTimers();

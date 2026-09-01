@@ -1953,10 +1953,13 @@ effective policy and arms a **Run Slot Deadline** for the remaining time since t
 The deadline is sourced from the in-memory slot, not a fixed state list: a fresh row can still read
 `queued`, preparation uses `preparing_workspace`, and a retry reserves capacity while its reused row
 can still read `failed`. It threads an AbortSignal through Workspace preparation and its Git process
-groups, and through retry-claim and pre-provider running-label writes. The lifecycle waits for
-aborted Workspace preparation and owned-path cleanup to settle before unregistering the slot, and
-for nothing else: the setup that follows preparation cannot observe the abort, so waiting on it
-would let a stalled filesystem retain capacity past the cap. Once a provider is attached, the same
+groups, through the post-preparation HEAD inspection's own Git process group, and through
+retry-claim and pre-provider running-label writes. The lifecycle waits for aborted Workspace
+preparation and owned-path cleanup to settle before unregistering the slot, and for nothing else:
+the setup that follows preparation cannot observe the abort, so waiting on it would let a stalled
+filesystem retain capacity past the cap. HEAD inspection's Git process is torn down the same way,
+but that teardown is not awaited before the slot releases, matching every other post-preparation
+step. Once a provider is attached, the same
 expiry requests provider cancellation. A bounded claim write that never confirms leaves an
 indeterminate `sym:claimed`, so the Issue's claim is best-effort rolled back rather than left for
 the stale-claim sweep to escalate to `sym:stale`.

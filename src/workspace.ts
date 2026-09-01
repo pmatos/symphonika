@@ -436,10 +436,33 @@ async function isWorktreeRegistered(
   workspacePath: string,
   abortCleanup: WorkspaceAbortCleanup
 ): Promise<boolean> {
-  const expectedPath = path.resolve(workspacePath);
-  return parseWorktreeEntries(
+  const entries = parseWorktreeEntries(
     await worktreeListLines(cachePath, undefined, abortCleanup)
-  ).some((entry) => path.resolve(entry.path) === expectedPath);
+  );
+  const [expectedPath, entryPaths] = await Promise.all([
+    canonicalizePath(workspacePath),
+    Promise.all(entries.map((entry) => canonicalizePath(entry.path)))
+  ]);
+
+  return entryPaths.includes(expectedPath);
+}
+
+// `git worktree add` records the resolved real path, so `git worktree list`
+// reports a canonical path even when the workspace root was configured through
+// a symlink. Both sides must therefore be canonicalized before comparison.
+// Cleanup runs after the workspace directory has been removed, so `realpath`
+// on the leaf fails; canonicalize the nearest existing ancestor instead of
+// throwing, because a throw here is reported as an incomplete cleanup.
+async function canonicalizePath(target: string): Promise<string> {
+  try {
+    return await realpath(target);
+  } catch {
+    const parent = path.dirname(target);
+    if (parent === target) {
+      return path.resolve(target);
+    }
+    return path.join(await canonicalizePath(parent), path.basename(target));
+  }
 }
 
 // Per-cache-path serialization for ensureRepositoryCache. `git fetch` on the

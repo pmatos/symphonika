@@ -7,6 +7,7 @@ import {
   readdir,
   rm,
   stat,
+  symlink,
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -416,6 +417,98 @@ exec "${realGit}" "$@"
       expect(error.name).toBe("WorkspacePreparationCleanupError");
       expect(error.message).toContain(
         `failed to clean aborted issue worktree ${workspacePath}`
+      );
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
+  it("surfaces incomplete cleanup when the workspace root traverses a symlink", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const realRoot = path.join(root, "real");
+    const linkedRoot = path.join(root, "linked");
+    await mkdir(realRoot, { recursive: true });
+    await symlink(realRoot, linkedRoot);
+    const workspaceRoot = path.join(linkedRoot, "workspaces", "symphonika");
+    const workspacePath = path.join(
+      workspaceRoot,
+      "issues",
+      "642-clean-up-partially-created-worktrees"
+    );
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const startedPath = path.join(root, "worktree-started");
+    const interruptNextAddPath = path.join(root, "interrupt-next-add");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    const realGit = realGitOutput.trim();
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(interruptNextAddPath, "interrupt\n");
+    // `worktree remove`/`prune` fail, so the aborted registration survives
+    // cleanup. `git worktree list` reports it under the resolved real path
+    // while the orchestrator only knows the symlinked path.
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ -f "${interruptNextAddPath}" ] && [ "$3" = "worktree" ] && [ "$4" = "add" ] && [ "$5" = "${workspacePath}" ]; then
+  rm -f "${interruptNextAddPath}"
+  "${realGit}" "$@"
+  touch "${startedPath}"
+  sleep infinity
+fi
+if [ "$3" = "worktree" ]; then
+  if [ "$4" = "remove" ] || [ "$4" = "prune" ]; then
+    exit 1
+  fi
+fi
+exec "${realGit}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+
+    try {
+      const preparation = rejectionOf(
+        prepareIssueWorkspace({
+          issue: {
+            number: 642,
+            title: "Clean up partially-created worktrees"
+          },
+          project: {
+            name: "symphonika",
+            workspace: {
+              git: { base_branch: "main", remote: remotePath },
+              root: workspaceRoot
+            }
+          },
+          signal: controller.signal
+        })
+      );
+      await waitForPath(startedPath);
+      controller.abort(new Error("run timeout"));
+
+      const error = await preparation;
+      expect(error).toBeInstanceOf(Error);
+      if (!(error instanceof Error)) {
+        throw new Error("expected workspace cleanup to reject with an Error");
+      }
+      expect(error.name).toBe("WorkspacePreparationCleanupError");
+
+      const cachePath = path.join(workspaceRoot, ".cache", "repo.git");
+      await expect(worktreePaths(cachePath)).resolves.toContain(
+        path.join(
+          realRoot,
+          "workspaces",
+          "symphonika",
+          "issues",
+          "642-clean-up-partially-created-worktrees"
+        )
       );
     } finally {
       if (previousPath === undefined) {

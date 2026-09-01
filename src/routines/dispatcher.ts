@@ -1630,22 +1630,37 @@ async function runRoutineFiring(input: {
       input.routine.kind,
       githubSnapshotSince
     );
+    let failureCommitsInspectionTimedOut = false;
     const commitsAhead =
       prepared === undefined
         ? false
-        : await inspectRoutineCommitsAhead({
-            baseBranch: input.project.workspace.git.base_branch,
-            kind: input.routine.kind,
-            logger: input.logger,
-            routineName: input.routine.name,
-            inspectWorkspaceCommitsAhead: input.inspectWorkspaceCommitsAhead,
-            workspacePath: prepared.workspacePath
-          });
+        : await deadline
+            .race(
+              inspectRoutineCommitsAhead({
+                baseBranch: input.project.workspace.git.base_branch,
+                kind: input.routine.kind,
+                logger: input.logger,
+                routineName: input.routine.name,
+                inspectWorkspaceCommitsAhead:
+                  input.inspectWorkspaceCommitsAhead,
+                workspacePath: prepared.workspacePath
+              })
+            )
+            .catch((inspectionError: unknown) => {
+              if (inspectionError instanceof RoutineFiringTimeoutError) {
+                failureCommitsInspectionTimedOut = true;
+                // The inspection is now unknown, so preserve the workspace
+                // under Routine Workspace Retention's conservative rule.
+                return true;
+              }
+              throw inspectionError;
+            });
     // Re-read after the Git subprocess for the same reason as the try path.
-    // Either timeout signal still wins over a cancellation that arrived
+    // Any timeout signal still wins over a cancellation that arrived
     // during snapshot capture or commit inspection.
     const completionCancelEntry = input.activeRuns.get(input.firingId);
-    const timeoutWon = timedOut || failureSnapshotTimedOut;
+    const timeoutWon =
+      timedOut || failureSnapshotTimedOut || failureCommitsInspectionTimedOut;
     const finalCancelled =
       !timeoutWon &&
       (cancelled ||

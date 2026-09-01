@@ -6080,6 +6080,64 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("reclassifies a failed firing as firing_timeout when the deadline expires during the failure-path commits-ahead inspection", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { sessionId: "routine-session", type: "session_started" },
+          raw: { id: "routine-session" }
+        };
+        throw new Error("provider process failed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const inspectWorkspaceCommitsAhead = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          setTimeout(() => resolve(false), 200);
+        })
+    );
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns: new ActiveRunRegistry(),
+          provider,
+          root,
+          routine: {
+            kind: "git",
+            name: "dependency-update",
+            prompt: "Update dependencies.",
+            provider: null,
+            schedule: { at: "2026-05-22T10:00:00.000Z" },
+            sourcePath: path.join(root, "dependency-update.md"),
+            timeoutMinutes: 0.001
+          },
+          runStore
+        }),
+        createFiringId: () => "fire-timeout-during-failure-inspection",
+        inspectWorkspaceCommitsAhead
+      });
+
+      expect(
+        runStore.getRoutineFiring("fire-timeout-during-failure-inspection")
+      ).toMatchObject({
+        commitsAhead: true,
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fires every recurring tick and advances next_fire_at after success or failure", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

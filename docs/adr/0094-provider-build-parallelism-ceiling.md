@@ -32,9 +32,10 @@ N            = max(1, min(cpu_share, memory_share))
 `availableParallelism()` is used instead of the host's raw CPU count so affinity and CPU quotas
 participate in the ceiling. The 32 GiB value is one constant shared with generated
 `symphonika-providers.slice` output. The 1.5 GiB allowance is the approximate peak RSS per compiler
-process measured in the incident and recorded by follow-up #644. The configured maximum, rather
-than the current in-flight count, deliberately reserves a share for every attempt the daemon may
-admit; the ceiling does not become more aggressive merely because peers have not started yet.
+process measured in the incident and recorded by follow-up #644. Within one config snapshot, the
+configured maximum, rather than the current in-flight count, deliberately reserves a share for
+every attempt the daemon may admit; the ceiling does not become more aggressive merely because
+peers have not started yet.
 
 If `global.max_in_flight` is omitted, the build variables remain unset. Treating an unbounded fleet
 as one attempt would manufacture a share the configuration does not promise. The one-shot dispatcher
@@ -51,6 +52,13 @@ tool. The boundary stays explicit:
 - an operator-edited installed `MemoryMax=` is not discovered at provider launch. A higher budget
   makes this conservative; a lower budget can make it optimistic. Follow-up #644 owns installed
   budget/core/config diagnosis.
+- a live `global.max_in_flight` increase does not retroactively resize an attempt already running
+  under the old cap: `MAKEFLAGS`/`CMAKE_BUILD_PARALLEL_LEVEL` are fixed in the child process's
+  environment at spawn and cannot change mid-run. This mirrors ADR 0053's existing hot-reload
+  posture — a running run continues under the snapshot it started with, and only future dispatches
+  see the new cap — so during the window between a reload and every larger-sized attempt draining,
+  the sum of in-flight jobs is bounded by the old cap's divisor for old attempts and the new cap's
+  divisor for new ones, not by a single divisor across both.
 
 Enforcing a ceiling against explicit flags or bare Ninja requires command interposition and policy
 for flag precedence. That is a materially larger boundary and remains out of scope. Prompt-level

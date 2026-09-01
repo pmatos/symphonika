@@ -189,11 +189,12 @@ function providerEventsFromQueueItem(
   item: ProcessQueueItem,
   activeRun: ActiveClaudeRun
 ): ProviderEvent[] {
-  if (item.kind === "message") {
-    return activeRun.reducer.reduce(item.raw);
-  }
+  const events =
+    item.kind === "message"
+      ? activeRun.reducer.reduce(item.raw)
+      : [mapProcessQueueControlEvent(item, activeRun.cancelled)];
 
-  return [mapProcessQueueControlEvent(item, activeRun.cancelled)];
+  return events.map((event) => ({ ...event, receivedAt: item.receivedAt }));
 }
 
 function withOutputSchema(

@@ -33,6 +33,14 @@ export type NormalizedProviderEvent = {
 export type ProviderEvent = {
   normalized?: NormalizedProviderEvent;
   raw: unknown;
+  // Set only by adapters whose transport queue can genuinely observe ingestion
+  // independent of how fast the orchestrator consumes it (see
+  // jsonl-process-queue.ts). Optional rather than required: forcing every
+  // AgentProvider implementation (including every test double across the
+  // suite) to invent a transport-receipt timestamp would say something false
+  // about providers that have no queue to timestamp. persistProviderEvent
+  // falls back to its own clock when this is absent.
+  receivedAt?: string;
 };
 
 export type ProviderRunInput = {

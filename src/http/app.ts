@@ -30,6 +30,7 @@ import {
 import { reconcileRoutineOutcome } from "../routines/outcome.js";
 import type { RoutineFiringState, RoutineState } from "../routines/types.js";
 import type { PullRequestState } from "../pull-request-state.js";
+import { buildProviderStreamStatus } from "../provider-stream-status.js";
 import type { ReloadOutcome } from "./save-pipeline.js";
 import type { StatusSnapshot } from "../status.js";
 import type { UpdateActionResult } from "../update/coordinator.js";
@@ -593,6 +594,17 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       }
       const events = runStore.listProviderEvents(detail.id, { limit: 100 });
       const { attempts, transitions, ...run } = detail;
+      // A terminal Run must not pair a frozen Watchdog age with an
+      // ever-drifting provider-event age, so both sections freeze — each on
+      // the clock its own evidence supports. See resolveWatchdogNowMs in
+      // watchdog-status.ts and resolveProviderStreamNowMs in
+      // provider-stream-status.ts.
+      const detailNowMs = resolveWatchdogNowMs({
+        liveNowMs: now(),
+        runId: run.id,
+        runState: run.state,
+        runStore
+      });
       const pullRequestFollowup = buildPullRequestFollowupAttention({
         detail,
         maxDispatches:
@@ -604,6 +616,13 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       return context.json({
         attempts,
         events,
+        providerStream: buildProviderStreamStatus({
+          attempt: attempts.at(-1),
+          liveNowMs: now(),
+          runId: run.id,
+          runState: run.state,
+          runStore
+        }),
         pullRequestFollowup,
         run,
         transitions,
@@ -613,12 +632,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
             ? null
             : buildWatchdogStatus({
                 config: watchdogConfig,
-                nowMs: resolveWatchdogNowMs({
-                  liveNowMs: now(),
-                  runId: run.id,
-                  runState: run.state,
-                  runStore
-                }),
+                nowMs: detailNowMs,
                 runCreatedAt: run.createdAt,
                 runId: run.id,
                 runStore

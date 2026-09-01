@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { mkdir, mkdtemp, open, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Writable } from "node:stream";
 import { promisify } from "node:util";
 
 import pino from "pino";
@@ -22,6 +23,7 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "../src/workspace.js";
+import { WorkspacePreparationCleanupError } from "../src/workspace.js";
 import { abortSignalMatcher } from "./helpers/abort-signal.js";
 
 const tempRoots: string[] = [];
@@ -224,6 +226,99 @@ describe("Run slot deadline", () => {
       });
     } finally {
       releasePreparation();
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("logs an incomplete issue workspace cleanup without blocking slot release", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // The provider must never be reached by this test.
+      runAttempt: successfulAttempt,
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    let preparationStarted = false;
+    let releaseAbortCleanup: () => void = () => undefined;
+    const abortCleanup = new Promise<void>((resolve) => {
+      releaseAbortCleanup = resolve;
+    });
+    const prepareIssueWorkspace = (
+      input: PrepareIssueWorkspaceInput
+    ): Promise<PreparedIssueWorkspace> => {
+      preparationStarted = true;
+      const result = new Promise<PreparedIssueWorkspace>((_resolve, reject) => {
+        input.signal?.addEventListener(
+          "abort",
+          () => {
+            reject(
+              new WorkspacePreparationCleanupError(
+                "failed to clean aborted issue worktree",
+                new Error("worktree remove --force failed")
+              )
+            );
+          },
+          { once: true }
+        );
+      });
+      return Object.assign(result, { abortCleanup });
+    };
+    const { lines, logger } = createCapturingLogger();
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-cleanup-failure-logged",
+        logger,
+        prepareIssueWorkspace
+      }
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T10:00:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await flushPromises();
+      expect(preparationStarted).toBe(true);
+      expect(activeRuns.countInFlight()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      releaseAbortCleanup();
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-cleanup-failure-logged"
+      });
+      // Slot release is not blocked on the full (rejected) preparation
+      // result, only on the abort-cleanup channel settling. See ADR 0093 /
+      // issue #640 — awaiting the full result here would reintroduce it.
+      expect(activeRuns.countInFlight()).toBe(0);
+      expect(
+        lines.some(
+          (line) =>
+            line.msg ===
+              "issue workspace cleanup did not complete after Run Slot Deadline abort" &&
+            line.runId === "run-cleanup-failure-logged"
+        )
+      ).toBe(true);
+    } finally {
       await dispatch.catch(() => undefined);
       runStore.close();
     }
@@ -952,6 +1047,7 @@ function makeRunController(
   overrides: {
     createRunId?: RunControllerOptions["createRunId"];
     githubIssuesApi?: RunControllerOptions["githubIssuesApi"];
+    logger?: RunControllerOptions["logger"];
     prepareIssueWorkspace?: RunControllerOptions["prepareIssueWorkspace"];
     watchdogConfigLoader?: RunControllerOptions["watchdogConfigLoader"];
   } = {}
@@ -974,7 +1070,7 @@ function makeRunController(
       continuation: { cap: 0, delayMs: 0 },
       retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
     },
-    logger: pino({ enabled: false }),
+    logger: overrides.logger ?? pino({ enabled: false }),
     onWatchdogTerminated: deps.onTerminated,
     prepareIssueWorkspace:
       overrides.prepareIssueWorkspace ??
@@ -1103,4 +1199,27 @@ async function writeProject(root: string): Promise<void> {
     ].join("\n")
   );
   await writeFile(path.join(root, "WORKFLOW.md"), "Work on the issue.\n");
+}
+
+type CapturedLine = Record<string, unknown>;
+
+function createCapturingLogger(): {
+  lines: CapturedLine[];
+  logger: pino.Logger;
+} {
+  const lines: CapturedLine[] = [];
+  const stream = new Writable({
+    write(chunk: Buffer, _enc, callback): void {
+      const text = chunk.toString("utf8").trim();
+      if (text.length > 0) {
+        for (const part of text.split("\n")) {
+          if (part.length > 0) {
+            lines.push(JSON.parse(part) as CapturedLine);
+          }
+        }
+      }
+      callback();
+    }
+  });
+  return { lines, logger: pino({ level: "debug" }, stream) };
 }

@@ -581,12 +581,14 @@ ADR 0087.
 Expanded-graph validation rejects a `wait` state whose PR-signal transitions leave a settled,
 actionable pull-request observation uncovered. The validator enumerates successful or failed
 checks, concrete mergeability, resolved or unresolved review feedback, open or closed PR state,
-and every review decision, with a coherent representative unresolved-thread count. At least one
-transition must match every such observation. Pending or unknown checks and unknown mergeability
-remain legitimate polling states and are deliberately outside this check; an artefact-gated wait is
-also outside PR-signal coverage validation because absence of its file is itself an intentional
-reason to stay parked. The same error is surfaced by `workflow validate`, `doctor`, and defensive
-reload. See ADRs 0047 and 0090.
+merged state, and every review decision, with a coherent representative unresolved-thread count. At
+least one transition must match every such observation. Pending or unknown checks remain a
+legitimate polling state throughout, and unknown mergeability is likewise excluded while the PR is
+still open; once a tracked PR merges, GitHub stops recomputing mergeability, so unknown mergeability
+becomes a settled, actionable outcome the validator requires coverage for instead. An artefact-gated
+wait is also outside PR-signal coverage validation because absence of its file is itself an
+intentional reason to stay parked. The same error is surfaced by `workflow validate`, `doctor`, and
+defensive reload. See ADRs 0047 and 0090.
 
 The daemon must not dispatch a Dispatch Project when its workflow contract is missing or invalid. A
 Routine Host is never dispatched, so this gate does not apply to it.

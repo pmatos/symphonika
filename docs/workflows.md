@@ -395,10 +395,15 @@ one open thread. Order it after `merge`, so a clean and fully resolved PR still 
 `workflow validate`, `doctor`, and daemon reload reject this dead end before a Run can park on it.
 For every wait state with PR-signal transitions, validation checks the cross-product of settled
 checks (`success` or `failure`), concrete mergeability, resolved/unresolved feedback, open/closed PR
-state, and review decisions. A transition must match each observation. Pending checks and unknown
-mergeability are excluded because waiting for them to settle is the wait action's purpose; pure
-artefact waits are not PR-signal waits, and mixed artefact gates are excluded because a missing
-file is itself an intentional reason to stay parked.
+state, merged state, and review decisions. A transition must match each observation. Pending checks
+are excluded because waiting for them to settle is the wait action's purpose; unknown mergeability
+is excluded the same way, but only while the PR is open -- a wait re-evaluates against whatever the
+tracked PR's current state is regardless of which state the run parked in, so a merge landing while
+parked is itself a settled observation, and GitHub does not keep recomputing mergeability once a PR
+is merged, so unknown mergeability stops being transient and needs a covering transition (the
+shipped `wait_for_pr`'s `pr_merged: true -> merged` catch-all is exactly that). Pure artefact waits
+are not PR-signal waits, and mixed artefact gates are excluded because a missing file is itself an
+intentional reason to stay parked.
 
 A transition from a repair state back to the wait it came from makes a cycle. That is expected and
 supported: the progress guard stops it from spinning by refusing to re-take an edge on an

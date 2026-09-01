@@ -102,9 +102,7 @@ function mustAdvance<Key extends string>(
 // from. Built by driving projectPullRequestSignals rather than by transcribing
 // what it emits, so the projected key set, the omitted-when-unknown keys, and
 // the has_unresolved_reviews/unresolved_review_threads coupling all come from
-// the one function that decides them. `merged` is pinned false because a merged
-// pull request has left the wait rather than parked in it -- which is also why
-// no map here can carry `pr_merged`, the projection only sets it when merged.
+// the one function that decides them.
 export function enumerateActionablePullRequestSignals(): WorkflowPredicateMap[] {
   const cases: WorkflowPredicateMap[] = [];
   for (const checks of mustAdvance(checksCoverage)) {
@@ -125,6 +123,39 @@ export function enumerateActionablePullRequestSignals(): WorkflowPredicateMap[] 
               })
             );
           }
+        }
+      }
+    }
+  }
+  // A wait state re-evaluates against the tracked PR's current state
+  // regardless of what state the run parked in (observeWaitPullRequestSignals
+  // uses the all-states lookup precisely so a merge landing while a run sits
+  // in an ordinary `wait` -- not just `merge_pr` -- is still seen), so a
+  // merged, closed PR is itself a settled observation a wait must have
+  // somewhere to go from -- the shipped wait_for_pr's own
+  // `pr_merged: true -> merged` catch-all exists for exactly this case.
+  // GitHub always reports a merged PR as closed, so `open` is pinned false.
+  // Unlike an open PR, GitHub does not keep recomputing mergeability once a
+  // PR is merged, so `mergeable: unknown` (the key omitted) is itself a
+  // permanent, actionable outcome here rather than the transient one it is
+  // for an open PR -- every mergeable value is enumerated, not only the
+  // must_advance ones.
+  for (const checks of mustAdvance(checksCoverage)) {
+    for (const mergeable of Object.keys(
+      mergeableCoverage
+    ) as (keyof typeof mergeableCoverage)[]) {
+      for (const unresolvedReviewThreads of [1, 0]) {
+        for (const reviewDecision of mustAdvance(reviewDecisionCoverage)) {
+          cases.push(
+            projectPullRequestSignals({
+              checks,
+              merged: true,
+              mergeable,
+              open: false,
+              reviewDecision,
+              unresolvedReviewThreads
+            })
+          );
         }
       }
     }

@@ -5,16 +5,19 @@
 ### Breaking changes
 
 - PR-observing raw-FSM `wait` states must cover every settled actionable combination of checks,
-  mergeability, unresolved feedback, PR openness, and review decision. `workflow validate`,
-  `doctor`, and reload now reject a transition table that can silently dead-end; pending checks,
-  unknown mergeability, and waits whose every PR-observing transition is artefact-gated remain
-  parkable. A transition gating on a positive `unresolved_review_threads` count is now rejected
-  outright — it can only ever match that one count, so a real PR sitting at a different positive
-  count still dead-ends despite validation passing; use `has_unresolved_reviews: true` instead.
-  Coverage checking also now recognizes `provider_success: true` alongside PR-signal predicates
-  (the wait poll always sets it — `observeWaitPullRequestSignals` — so a mixed transition is
-  genuinely coverable) and skips signal combinations a state's own `complete_when` gate already
-  excludes from ever reaching its transitions. See issue #632.
+  mergeability, unresolved feedback, PR openness, merged state, and review decision. `workflow
+  validate`, `doctor`, and reload now reject a transition table that can silently dead-end; pending
+  checks, unknown mergeability while the PR is open, and waits whose every PR-observing transition
+  is artefact-gated remain parkable — but a merge landing while a run sits in an ordinary `wait`
+  state is itself a settled observation coverage is now required for, since GitHub stops
+  recomputing mergeability once a PR is merged. A transition gating on a positive
+  `unresolved_review_threads` count is now rejected outright — it can only ever match that one
+  count, so a real PR sitting at a different positive count still dead-ends despite validation
+  passing; use `has_unresolved_reviews: true` instead. Coverage checking also now recognizes a bare
+  `provider_success: true` transition as a genuine catch-all (the wait poll always sets it —
+  `observeWaitPullRequestSignals` — regardless of whether it shares a transition with a PR-signal
+  predicate) and skips signal combinations a state's own `complete_when` gate already excludes from
+  ever reaching its transitions. See issue #632.
 - `builtin:plan-tdd-pr` now gates `planning -> implementing` on the planning agent having written its
   plan file. A planner that returns success without producing `plan_artifact` (new input, default
   `PLAN.md`) takes the template's `blocked` exit instead of advancing to an unplanned implementation

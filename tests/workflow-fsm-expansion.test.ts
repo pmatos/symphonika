@@ -1660,6 +1660,104 @@ describe("state machine workflow definitions", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("rejects a wait whose complete_when gates on pr_merged with no covering transition", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: merged_gate_uncovered",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        pr_merged: true",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // Before merged cases were enumerated, every generated signal map had
+    // pr_merged absent, so reachesTransitions excluded every one of them and
+    // this state read as fully covered with zero enumerated combinations
+    // ever reaching the transitions loop -- even though a wait re-evaluates
+    // against the tracked PR's live state regardless of which state the run
+    // parked in, so complete_when: { pr_merged: true } genuinely can pass at
+    // runtime once the PR merges, landing on a transition table that only
+    // names `checks`.
+    expect(result.errors).toContainEqual(
+      expect.stringContaining(
+        `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals`
+      )
+    );
+  });
+
+  it("lets a pr_merged catch-all cover every merged combination", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: merged_catch_all",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: merged",
+        "          when:",
+        "            pr_merged: true",
+        "        - to: failed",
+        "          when:",
+        "            pr_open: false",
+        "        - to: merge",
+        "          when:",
+        "            checks: success",
+        "            mergeable: true",
+        "            unresolved_review_threads: 0",
+        "        - to: repair",
+        "          when:",
+        "            mergeable: false",
+        "        - to: repair",
+        "          when:",
+        "            checks: failure",
+        "        - to: repair",
+        "          when:",
+        "            has_unresolved_reviews: true",
+        "    merged:",
+        "      terminal: success",
+        "    failed:",
+        "      terminal: blocked",
+        "    merge:",
+        "      terminal: success",
+        "    repair:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // This is the shape shipped in this repo's own workflow.yml wait_for_pr
+    // state. Every merged combination (mergeable settled or permanently
+    // unknown, checks settled, any review decision or thread count) is
+    // caught by the pr_merged: true transition, ordered first so it is never
+    // shadowed by the pr_open: false escape.
+    expect(result.errors).toEqual([]);
+  });
+
   it("accepts Oh My Pi for an agent action provider", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

@@ -41,6 +41,61 @@ describe("ADR number validation", () => {
     expect(result.stderr).toContain("docs/adr/0002-base-decision.md");
     expect(result.stderr).toContain("docs/adr/0002-feature-decision.md");
   });
+
+  it("accepts a fresh, unambiguous ADR number", () => {
+    const repo = makeRepository();
+    commitAdr(repo, "0001-existing.md");
+
+    git(repo, "checkout", "-b", "feature");
+    commitAdr(repo, "0002-feature-decision.md");
+
+    const result = spawnSync(
+      process.execPath,
+      [checkScript, "--base", "main"],
+      { cwd: repo, encoding: "utf8" }
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      "ADR numbers remain unambiguous after merge into main."
+    );
+  });
+
+  it("allows a rename that keeps the same number's file count unchanged", () => {
+    const repo = makeRepository();
+    commitAdr(repo, "0002-original-name.md");
+
+    git(repo, "checkout", "-b", "feature");
+    git(repo, "rm", path.join("docs", "adr", "0002-original-name.md"));
+    git(repo, "commit", "-m", "remove 0002-original-name.md");
+    commitAdr(repo, "0002-renamed.md");
+
+    const result = spawnSync(
+      process.execPath,
+      [checkScript, "--base", "main"],
+      { cwd: repo, encoding: "utf8" }
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      "ADR numbers remain unambiguous after merge into main."
+    );
+  });
+
+  it("reports usage and exits non-zero without --base", () => {
+    const repo = makeRepository();
+    git(repo, "commit", "--allow-empty", "-m", "init");
+
+    const result = spawnSync(process.execPath, [checkScript], {
+      cwd: repo,
+      encoding: "utf8"
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain(
+      "Usage: check-adr-numbers.mjs --base <git-ref>"
+    );
+  });
 });
 
 function makeRepository(): string {

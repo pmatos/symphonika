@@ -5,7 +5,7 @@ import type { NormalizedProviderEvent } from "../provider.js";
 import { withProviderStderrTail } from "../providers/provider-stderr.js";
 import { redactAll } from "../redaction.js";
 import type { FailureClassification } from "../run-store.js";
-import { WorkspacePreparationError } from "../workspace.js";
+import { git, WorkspacePreparationError } from "../workspace.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,6 +42,7 @@ export type WorkspaceCommitInspectionInput = {
 };
 
 export type WorkspaceHeadInspectionInput = {
+  signal?: AbortSignal;
   workspacePath: string;
 };
 
@@ -192,13 +193,13 @@ export async function inspectWorkspaceCommitsAhead(
 export async function inspectWorkspaceHead(
   workspace: WorkspaceHeadInspectionInput
 ): Promise<string> {
-  const { stdout } = await execFileAsync("git", [
-    "-C",
-    workspace.workspacePath,
-    "rev-parse",
-    "--verify",
-    "HEAD^{commit}"
-  ]);
+  // Uses the shared process-group-aware git() helper, not execFileAsync,
+  // so a caller that passes a deadline signal actually tears down a stalled
+  // `git rev-parse` rather than merely abandoning the promise racing it.
+  const stdout = await git(
+    ["-C", workspace.workspacePath, "rev-parse", "--verify", "HEAD^{commit}"],
+    workspace.signal
+  );
   const trimmed = stdout.trim();
   if (!/^[0-9a-f]{40,64}$/i.test(trimmed)) {
     throw new Error(`invalid git HEAD: ${trimmed}`);

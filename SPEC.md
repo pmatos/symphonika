@@ -2033,16 +2033,19 @@ effective policy and arms a **Run Slot Deadline** for the remaining time since t
 The deadline is sourced from the in-memory slot, not a fixed state list: a fresh row can still read
 `queued`, preparation uses `preparing_workspace`, and a retry reserves capacity while its reused row
 can still read `failed`. It threads an AbortSignal through Workspace preparation and its Git process
-groups, and through retry-claim and pre-provider running-label writes. The lifecycle waits for
-the preparation operation's separate abort-cleanup channel before unregistering the slot, not for
-the full preparation result. That channel settles after active Git process-group teardown and
+groups, through the post-preparation HEAD inspection's own Git process group, and through
+retry-claim and pre-provider running-label writes. The lifecycle waits for the preparation
+operation's separate abort-cleanup channel before unregistering the slot, not for the full
+preparation result. That channel settles after active Git process-group teardown and
 preparation-owned staging-path removal; non-Git filesystem calls such as `stat`, `mkdir`,
 `realpath`, or `rename` cannot observe cancellation and are abandoned if still pending. The full
 cache-turn operation remains the shared-cache serialization tail, and signal guards prevent its
 later continuation from starting new Git work. The setup that follows preparation is likewise
-abandoned because it cannot observe the abort. Once a provider is attached, the same expiry
-requests provider cancellation. A bounded claim write that never confirms leaves an indeterminate
-`sym:claimed`, so
+abandoned because it cannot observe the abort, except HEAD inspection: it is itself signal-aware
+and its own Git process group is torn down the same way as preparation's, but — like the rest of
+that setup — its settlement is not awaited before the slot releases; only preparation's
+abort-cleanup channel is. Once a provider is attached, the same expiry requests provider
+cancellation. A bounded claim write that never confirms leaves an indeterminate `sym:claimed`, so
 the Issue's claim is best-effort rolled back rather than left for the stale-claim sweep to escalate
 to `sym:stale`.
 

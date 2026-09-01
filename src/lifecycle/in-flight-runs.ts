@@ -102,14 +102,11 @@ export class InFlightRunRegistry {
   }
 
   // Binds the live provider cancel closure onto a previously reserved slot.
-  // Called from runAttemptLifecycle once the provider has been validated and
-  // the attempt row is committed. Mutates the existing entry in place so the
-  // (project, issue) lock remains held across reserve → attach.
+  // Called from runAttemptLifecycle once every pre-provider await has settled.
+  // Mutates the existing entry in place so the (project, issue) lock remains
+  // held across reserve → attach.
   attachProvider(runId: string, input: AttachProviderInput): void {
-    const entry = this.entries.get(runId);
-    if (entry === undefined) {
-      throw new Error(`no in-flight run for ${runId}`);
-    }
+    const entry = this.getEntryOrThrow(runId);
     entry.cancel = input.cancel;
     if (input.provider !== undefined) {
       entry.provider = input.provider;
@@ -118,8 +115,8 @@ export class InFlightRunRegistry {
       entry.respectsIssueLabels = input.respectsIssueLabels;
     }
     // If a cancel arrived BETWEEN reserveSlot and attachProvider (e.g. during
-    // prepareIssueWorkspace / provider.validate / sym:running label write),
-    // it fired the preparation handler (or the legacy noop) and left
+    // Workspace preparation, validation, HEAD inspection, or scratch
+    // creation), it fired the preparation handler (or the legacy noop) and left
     // cancelRequested=true on the entry. Subsequent requestCancel calls
     // return early because cancelRequested is already true, so without this
     // hand-off the real provider would never be cancelled and the run would
@@ -131,6 +128,22 @@ export class InFlightRunRegistry {
         // unwinds itself; we don't need to propagate cancel-handler errors.
       });
     }
+  }
+
+  // Workflow loading can establish label-immunity before a provider exists.
+  // Keep that policy update separate from attachProvider so delaying the
+  // cancellation-handler handoff through all pre-provider setup does not
+  // reopen issue #258's eligibility-loss window.
+  updateRespectsIssueLabels(runId: string, respectsIssueLabels: boolean): void {
+    this.getEntryOrThrow(runId).respectsIssueLabels = respectsIssueLabels;
+  }
+
+  private getEntryOrThrow(runId: string): InFlightRunEntry {
+    const entry = this.entries.get(runId);
+    if (entry === undefined) {
+      throw new Error(`no in-flight run for ${runId}`);
+    }
+    return entry;
   }
 
   register(input: RegisterRunInput): void {

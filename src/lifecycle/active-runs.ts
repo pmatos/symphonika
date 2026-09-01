@@ -119,6 +119,10 @@ export class ActiveRunRegistry {
     this.inFlightRuns.attachProvider(runId, input);
   }
 
+  updateRespectsIssueLabels(runId: string, respectsIssueLabels: boolean): void {
+    this.inFlightRuns.updateRespectsIssueLabels(runId, respectsIssueLabels);
+  }
+
   unregister(runId: string): ActiveRunEntry | undefined {
     return this.inFlightRuns.unregister(runId);
   }

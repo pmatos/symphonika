@@ -1,6 +1,14 @@
 import { execFile } from "node:child_process";
-import { constants } from "node:fs";
-import { mkdir, mkdtemp, open, rm, unlink, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  open,
+  rm,
+  unlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -23,10 +31,50 @@ import type {
   PrepareIssueWorkspaceInput
 } from "../src/workspace.js";
 import { abortSignalMatcher } from "./helpers/abort-signal.js";
+import { createDeferred } from "./helpers/deferred.js";
+
+const fsOverrides = vi.hoisted(() => ({
+  mkdir: undefined as
+    ((target: string) => Promise<"handled" | "passthrough">) | undefined,
+  rm: undefined as
+    ((target: string) => Promise<"handled" | "passthrough">) | undefined
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...original,
+    mkdir: async (...args: Parameters<typeof original.mkdir>) => {
+      const override = fsOverrides.mkdir;
+      if (
+        override !== undefined &&
+        (await override(String(args[0]))) === "handled"
+      ) {
+        return undefined;
+      }
+      const mkdirOriginal = original.mkdir as (
+        ...parameters: Parameters<typeof original.mkdir>
+      ) => ReturnType<typeof original.mkdir>;
+      return await mkdirOriginal(...args);
+    },
+    rm: async (...args: Parameters<typeof original.rm>) => {
+      const override = fsOverrides.rm;
+      if (
+        override !== undefined &&
+        (await override(String(args[0]))) === "handled"
+      ) {
+        return undefined;
+      }
+      return await original.rm(...args);
+    }
+  };
+});
 
 const tempRoots: string[] = [];
 
 afterEach(async () => {
+  fsOverrides.mkdir = undefined;
+  fsOverrides.rm = undefined;
   vi.useRealTimers();
   await Promise.all(
     tempRoots
@@ -572,6 +620,341 @@ describe("Run slot deadline", () => {
     }
   });
 
+  it("releases the slot without launching a provider when the deadline expires during HEAD inspection", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const fifoPath = path.join(root, "head-inspection.fifo");
+    const inspectionStartedPath = path.join(root, "head-inspection.started");
+    await promisify(execFile)("mkfifo", [fifoPath]);
+    const binPath = path.join(root, "bin");
+    const gitPath = path.join(binPath, "git");
+    await mkdir(binPath, { recursive: true });
+    await writeFile(
+      gitPath,
+      [
+        "#!/bin/sh",
+        `touch '${inspectionStartedPath}'`,
+        `read -r _line < '${fifoPath}'`,
+        "printf '%s\\n' '0123456789abcdef0123456789abcdef01234567'"
+      ].join("\n")
+    );
+    await chmod(gitPath, 0o755);
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      { createRunId: () => "run-head-inspection-timeout" }
+    );
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binPath}${path.delimiter}${originalPath ?? ""}`;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T11:30:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await vi.waitFor(() => {
+        expect(existsSync(inspectionStartedPath)).toBe(true);
+      });
+      expect(activeRuns.countInFlight()).toBe(1);
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      expect(activeRuns.countInFlight()).toBe(0);
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-head-inspection-timeout"
+      });
+      expect(runStore.getRun("run-head-inspection-timeout")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(provider.cancel).not.toHaveBeenCalled();
+      expect(onTerminated).toHaveBeenCalledOnce();
+
+      // Abandoning the race alone would leave the blocked `git` process
+      // running. A non-blocking write-open of the FIFO fails once no reader
+      // remains, proving the deadline signal actually tore the process down.
+      await vi.waitFor(async () => {
+        await expect(
+          open(fifoPath, constants.O_WRONLY | constants.O_NONBLOCK)
+        ).rejects.toThrow();
+      });
+    } finally {
+      process.env.PATH = originalPath;
+      vi.useRealTimers();
+      await unblockFifo(fifoPath);
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("releases the slot without launching a provider when the deadline expires during scratch creation", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      { createRunId: () => "run-scratch-timeout" }
+    );
+
+    const expectedScratchPath = path.join(
+      root,
+      ".symphonika",
+      "scratch",
+      "run-scratch-timeout-attempt-1"
+    );
+    let scratchCreationStarted = false;
+    const scratchCreationStalled = createDeferred<void>();
+    fsOverrides.mkdir = async (target) => {
+      if (path.resolve(target) !== expectedScratchPath) {
+        return "passthrough";
+      }
+      scratchCreationStarted = true;
+      await scratchCreationStalled.promise;
+      return "handled";
+    };
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T11:45:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await vi.waitFor(() => {
+        expect(scratchCreationStarted).toBe(true);
+      });
+      expect(activeRuns.countInFlight()).toBe(1);
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      expect(activeRuns.countInFlight()).toBe(0);
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-scratch-timeout"
+      });
+      expect(runStore.getRun("run-scratch-timeout")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(provider.cancel).not.toHaveBeenCalled();
+      expect(onTerminated).toHaveBeenCalledOnce();
+    } finally {
+      scratchCreationStalled.resolve();
+      fsOverrides.mkdir = undefined;
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("releases the slot without launching a provider when the deadline expires during capacity loading", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const onTerminated = vi.fn();
+    let capacityLoadStarted = false;
+    const capacityLoadStalled = createDeferred<{
+      maxInFlight: number | undefined;
+    }>();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-capacity-load-timeout",
+        providerBuildCapacityLoader: () => {
+          capacityLoadStarted = true;
+          return capacityLoadStalled.promise;
+        }
+      }
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await vi.waitFor(() => {
+        expect(capacityLoadStarted).toBe(true);
+      });
+      expect(activeRuns.countInFlight()).toBe(1);
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      expect(activeRuns.countInFlight()).toBe(0);
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-capacity-load-timeout"
+      });
+      expect(runStore.getRun("run-capacity-load-timeout")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      // The regression this guards against: attachProvider must not run
+      // before the capacity load settles, or a cancel landing in this
+      // window would burn its one shot on a provider.cancel() that has no
+      // process to cancel yet, and runAttempt would launch anyway once the
+      // load resolves.
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(provider.cancel).not.toHaveBeenCalled();
+      expect(onTerminated).toHaveBeenCalledOnce();
+    } finally {
+      capacityLoadStalled.resolve({ maxInFlight: undefined });
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("does not wait for a stalled scratch removal when the deadline expires after scratch creation succeeds", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const onTerminated = vi.fn();
+    let capacityLoadStarted = false;
+    const capacityLoadStalled = createDeferred<{
+      maxInFlight: number | undefined;
+    }>();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-scratch-removal-timeout",
+        providerBuildCapacityLoader: () => {
+          capacityLoadStarted = true;
+          return capacityLoadStalled.promise;
+        }
+      }
+    );
+
+    const expectedScratchPath = path.join(
+      root,
+      ".symphonika",
+      "scratch",
+      "run-scratch-removal-timeout-attempt-1"
+    );
+    let removalStarted = false;
+    const removalStalled = createDeferred<void>();
+    fsOverrides.rm = async (target) => {
+      if (path.resolve(target) !== expectedScratchPath) {
+        return "passthrough";
+      }
+      removalStarted = true;
+      await removalStalled.promise;
+      return "handled";
+    };
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:15:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await vi.waitFor(() => {
+        expect(capacityLoadStarted).toBe(true);
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      // Scratch creation succeeded before the deadline fired during
+      // capacity loading, so removeProviderScratch's rm() is now stalled --
+      // but slot release must not wait on it (the regression this guards
+      // against: an unbounded rm() on an unresponsive filesystem would
+      // otherwise retain the slot past the deadline).
+      expect(removalStarted).toBe(true);
+      expect(activeRuns.countInFlight()).toBe(0);
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-scratch-removal-timeout"
+      });
+      expect(runStore.getRun("run-scratch-removal-timeout")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(onTerminated).toHaveBeenCalledOnce();
+    } finally {
+      capacityLoadStalled.resolve({ maxInFlight: undefined });
+      removalStalled.resolve();
+      fsOverrides.rm = undefined;
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
   it("rolls back an indeterminate claim when the bounded write times out", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
@@ -953,6 +1336,7 @@ function makeRunController(
     createRunId?: RunControllerOptions["createRunId"];
     githubIssuesApi?: RunControllerOptions["githubIssuesApi"];
     prepareIssueWorkspace?: RunControllerOptions["prepareIssueWorkspace"];
+    providerBuildCapacityLoader?: RunControllerOptions["providerBuildCapacityLoader"];
     watchdogConfigLoader?: RunControllerOptions["watchdogConfigLoader"];
   } = {}
 ): RunController {
@@ -981,6 +1365,9 @@ function makeRunController(
       vi.fn().mockResolvedValue(preparedWorkspace(deps.root)),
     projectsLoader: () =>
       Promise.resolve(new Map([[deps.project.name, deps.project]])),
+    ...(overrides.providerBuildCapacityLoader === undefined
+      ? {}
+      : { providerBuildCapacityLoader: overrides.providerBuildCapacityLoader }),
     providersLoader: () => Promise.resolve(deps.reloader.providersConfig()),
     runStore: deps.runStore,
     schedule: () => undefined,

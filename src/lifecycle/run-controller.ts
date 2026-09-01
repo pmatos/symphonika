@@ -2998,7 +2998,11 @@ export class RunController {
     let deadline: RunSlotDeadline;
     await this.dispatchMutex.acquire();
     try {
-      deadline = await this.claimAndPersistRun(input);
+      deadline = await this.claimAndPersistRun({
+        ...input,
+        onPostCreateClaimFailure: (error) =>
+          this.reconcilePostCreateClaimFailure({ ...input, error })
+      });
     } finally {
       this.dispatchMutex.release();
     }
@@ -3051,10 +3055,7 @@ export class RunController {
       redactSecrets: this.redactionInventory(input.repository.token)
     });
     const state = mapOutcomeToRunState(terminal);
-    const willRetry =
-      terminal.kind === "failed" &&
-      terminal.classification === "transient" &&
-      this.runStore.runRetryCount(input.runId) < this.lifecyclePolicy.retry.cap;
+    const willRetry = this.isRetryableTransientFailure(terminal, input.runId);
     this.runStore.recordTerminalReason(
       input.runId,
       terminal.reason,
@@ -3107,6 +3108,20 @@ export class RunController {
     );
   }
 
+  // Shared retry-eligibility check: a failed+transient outcome still has
+  // budget left in the retry cap. Used at every point that decides whether a
+  // Run row is reused for a retry or finalized as terminal.
+  private isRetryableTransientFailure(
+    outcome: ClassifiedTerminal,
+    runId: string
+  ): boolean {
+    return (
+      outcome.kind === "failed" &&
+      outcome.classification === "transient" &&
+      this.runStore.runRetryCount(runId) < this.lifecyclePolicy.retry.cap
+    );
+  }
+
   // Shared by reconcilePostCreateClaimFailure and runAttemptLifecycle's
   // terminal handling: once the retry budget is spent, this is the point
   // that makes the attempt visible to the durable notification digest (ADR
@@ -3129,13 +3144,17 @@ export class RunController {
   }
 
   private async claimAndPersistRun(input: {
-    attemptNumber: number;
     claimGuard?: () => boolean;
-    extraInstructions?: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
+    // Invoked (still under dispatchMutex) when this call's own createRun
+    // succeeded but a later step in the same claim failed. The caller
+    // supplies it because reconciliation needs attemptNumber/extraInstructions
+    // and the DispatchProjectConfig-narrowed project, none of which
+    // claimAndPersistRun itself reads — see ADR 0093.
+    onPostCreateClaimFailure: (error: unknown) => Promise<void>;
     parentRunId: string | null;
-    project: DispatchProjectConfig;
+    project: RunControllerProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
     repository: GitHubIssueRepositoryInput;
@@ -3411,7 +3430,7 @@ export class RunController {
         rollbackDeadline.clear();
       }
       if (runCreated && !(error instanceof RegistryShutdownError)) {
-        await this.reconcilePostCreateClaimFailure({ ...input, error });
+        await input.onPostCreateClaimFailure(error);
       }
       throw error;
     } finally {
@@ -3871,11 +3890,10 @@ export class RunController {
         // still evaluate terminal workflow transitions below, because a raw FSM
         // may intentionally map provider_success=false to terminal blocked/failure,
         // but non-terminal advances are deferred until the retry budget is spent.
-        const deferRetryableTransientAdvance =
-          terminal.kind === "failed" &&
-          terminal.classification === "transient" &&
-          this.runStore.runRetryCount(input.runId) <
-            this.lifecyclePolicy.retry.cap;
+        const deferRetryableTransientAdvance = this.isRetryableTransientFailure(
+          terminal,
+          input.runId
+        );
         // loadedWorkflow can be undefined if this.loadWorkflow itself threw
         // before currentState was set; in that case we run the bare
         // classifyFailure outcome without an FSM-driven overlay.
@@ -3926,11 +3944,10 @@ export class RunController {
         try {
           this.runStore.updateRunState(input.runId, outcomeState);
 
-          const willRetry =
-            effectiveOutcome.kind === "failed" &&
-            effectiveOutcome.classification === "transient" &&
-            this.runStore.runRetryCount(input.runId) <
-              this.lifecyclePolicy.retry.cap;
+          const willRetry = this.isRetryableTransientFailure(
+            effectiveOutcome,
+            input.runId
+          );
           // updateRunState deliberately defers transient failures because the
           // same Run row is reused by retries. Once the budget is exhausted,
           // this is the point that makes the genuinely-terminal attempt

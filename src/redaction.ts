@@ -50,8 +50,10 @@ function redactUnique(message: string, secrets: readonly string[]): string {
   return redacted + message.slice(cursor);
 }
 
-// Shape-preserving: only string leaves change, so the caller keeps the type
-// it handed in rather than re-asserting it back out of `unknown`.
+// Structurally shape-preserving (objects/arrays keep their nesting), but a
+// matched primitive or property name is rewritten to a string, and the
+// caller's `T` is cast back rather than re-derived — callers that persist the
+// result as evidence rather than re-typing it are the intended use.
 export function redactValueDeep<T>(
   value: T,
   redactSecrets: readonly string[]
@@ -66,6 +68,15 @@ function redactUnknownDeep(
   if (typeof value === "string") {
     return redactUnique(value, secrets);
   }
+  // A secret configured as a bare numeric/boolean spelling (e.g. an SMTP
+  // password of "123456") still leaks if the provider happens to emit it as
+  // a JSON primitive rather than a string — check the serialized form too.
+  if (typeof value === "number" || typeof value === "boolean") {
+    const serialized = String(value);
+    return redactUnique(serialized, secrets) === serialized
+      ? value
+      : "[REDACTED]";
+  }
   if (Array.isArray(value)) {
     return value.map((entry) => redactUnknownDeep(entry, secrets));
   }
@@ -75,7 +86,9 @@ function redactUnknownDeep(
     // pair array per key on top of the rebuilt object.
     const redacted: Record<string, unknown> = {};
     for (const key of Object.keys(value)) {
-      redacted[key] = redactUnknownDeep(
+      // Property names can carry a credential too (e.g. a tool call keyed by
+      // token), not just their values.
+      redacted[redactUnique(key, secrets)] = redactUnknownDeep(
         (value as Record<string, unknown>)[key],
         secrets
       );

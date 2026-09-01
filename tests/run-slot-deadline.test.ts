@@ -35,6 +35,8 @@ import { createDeferred } from "./helpers/deferred.js";
 
 const fsOverrides = vi.hoisted(() => ({
   mkdir: undefined as
+    ((target: string) => Promise<"handled" | "passthrough">) | undefined,
+  rm: undefined as
     ((target: string) => Promise<"handled" | "passthrough">) | undefined
 }));
 
@@ -54,6 +56,16 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         ...parameters: Parameters<typeof original.mkdir>
       ) => ReturnType<typeof original.mkdir>;
       return await mkdirOriginal(...args);
+    },
+    rm: async (...args: Parameters<typeof original.rm>) => {
+      const override = fsOverrides.rm;
+      if (
+        override !== undefined &&
+        (await override(String(args[0]))) === "handled"
+      ) {
+        return undefined;
+      }
+      return await original.rm(...args);
     }
   };
 });
@@ -62,6 +74,7 @@ const tempRoots: string[] = [];
 
 afterEach(async () => {
   fsOverrides.mkdir = undefined;
+  fsOverrides.rm = undefined;
   vi.useRealTimers();
   await Promise.all(
     tempRoots
@@ -826,14 +839,7 @@ describe("Run slot deadline", () => {
       await vi.advanceTimersByTimeAsync(60_000);
       await flushPromises();
 
-      // The slot's own scratch directory was created successfully (only the
-      // capacity load is stalled), so releasing it awaits a real
-      // removeProviderScratch() fs.rm() — a genuine macrotask, not something
-      // flushPromises()'s microtask-only loop can observe. Poll with real
-      // time (vi.waitFor does this even while fake timers are active).
-      await vi.waitFor(() => {
-        expect(activeRuns.countInFlight()).toBe(0);
-      });
+      expect(activeRuns.countInFlight()).toBe(0);
       await expect(dispatch).resolves.toEqual({
         dispatched: true,
         runId: "run-capacity-load-timeout"
@@ -852,6 +858,98 @@ describe("Run slot deadline", () => {
       expect(onTerminated).toHaveBeenCalledOnce();
     } finally {
       capacityLoadStalled.resolve({ maxInFlight: undefined });
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it("does not wait for a stalled scratch removal when the deadline expires after scratch creation succeeds", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const onTerminated = vi.fn();
+    let capacityLoadStarted = false;
+    const capacityLoadStalled = createDeferred<{
+      maxInFlight: number | undefined;
+    }>();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-scratch-removal-timeout",
+        providerBuildCapacityLoader: () => {
+          capacityLoadStarted = true;
+          return capacityLoadStalled.promise;
+        }
+      }
+    );
+
+    const expectedScratchPath = path.join(
+      root,
+      ".symphonika",
+      "scratch",
+      "run-scratch-removal-timeout-attempt-1"
+    );
+    let removalStarted = false;
+    const removalStalled = createDeferred<void>();
+    fsOverrides.rm = async (target) => {
+      if (path.resolve(target) !== expectedScratchPath) {
+        return "passthrough";
+      }
+      removalStarted = true;
+      await removalStalled.promise;
+      return "handled";
+    };
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:15:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await vi.waitFor(() => {
+        expect(capacityLoadStarted).toBe(true);
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+
+      // Scratch creation succeeded before the deadline fired during
+      // capacity loading, so removeProviderScratch's rm() is now stalled --
+      // but slot release must not wait on it (the regression this guards
+      // against: an unbounded rm() on an unresponsive filesystem would
+      // otherwise retain the slot past the deadline).
+      expect(removalStarted).toBe(true);
+      expect(activeRuns.countInFlight()).toBe(0);
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-scratch-removal-timeout"
+      });
+      expect(runStore.getRun("run-scratch-removal-timeout")).toMatchObject({
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      expect(onTerminated).toHaveBeenCalledOnce();
+    } finally {
+      capacityLoadStalled.resolve({ maxInFlight: undefined });
+      removalStalled.resolve();
+      fsOverrides.rm = undefined;
       await dispatch.catch(() => undefined);
       runStore.close();
     }

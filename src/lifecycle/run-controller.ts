@@ -4197,7 +4197,10 @@ export class RunController {
     } finally {
       // Best effort: failing to delete temporary files must never mask the
       // attempt's own outcome. The startup sweep reclaims what is left.
-      if (scratchPath !== undefined) {
+      if (
+        scratchPath !== undefined &&
+        input.deadline.signal?.aborted !== true
+      ) {
         await this.bestEffort(
           () => removeProviderScratch(this.stateRoot, scratchIdentity),
           {
@@ -4207,13 +4210,16 @@ export class RunController {
           }
         );
       } else {
-        // The deadline race deliberately abandons a stalled mkdir so it
-        // cannot retain capacity. If that mkdir later settles, reclaim its
-        // directory asynchronously without extending slot ownership. Handed
-        // off to a method taking only the primitives it needs, rather than a
-        // closure over this scope, so the orphaned promise chain cannot keep
-        // the whole attempt (prompt, evidence, provider) reachable for as
-        // long as the stalled mkdir is pending.
+        // Either the deadline race deliberately abandoned a stalled mkdir, or
+        // scratch creation succeeded but the deadline (or a pre-attach
+        // cancel, which shares the same signal) fired during a later
+        // pre-provider await. removeProviderScratch's rm() is not
+        // signal-aware and could stall on an unresponsive filesystem, so
+        // slot release cannot wait on it either way. Handed off to a method
+        // taking only the primitives it needs, rather than a closure over
+        // this scope, so the orphaned promise chain cannot keep the whole
+        // attempt (prompt, evidence, provider) reachable for as long as
+        // removal is pending.
         this.reclaimAbandonedScratch(
           scratchOperation,
           scratchIdentity,

@@ -7085,6 +7085,121 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("keeps a provider-held deferral parked through restart recomputation", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      const deferred = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        createFanoutId: () => "provider-held-deferral"
+      });
+      expect(deferred.deferred).toEqual([
+        {
+          projectName: "alpha",
+          reason: "concurrency_cap",
+          routineName: "minute-report"
+        }
+      ]);
+
+      const held = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        agentProviders: {},
+        createFanoutId: () => "fanout-must-not-be-created",
+        now: new Date("2026-05-22T10:00:15.000Z")
+      });
+      expect(held.skipped).toEqual([
+        {
+          projectName: "alpha",
+          reason: "provider_not_registered: codex",
+          routineName: "minute-report"
+        }
+      ]);
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-22T10:00:15.000Z") })[0]
+      ).toMatchObject({
+        deferral: null,
+        nextFireAt: "2026-05-22T10:00:00.000Z"
+      });
+
+      const afterRestart = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        agentProviders: {},
+        createFanoutId: () => "fanout-must-not-be-created",
+        now: new Date("2026-05-22T10:00:30.000Z"),
+        recomputeSchedulesFromNow: true
+      });
+
+      expect(afterRestart).toEqual({
+        deferred: [],
+        fired: [],
+        missed: [],
+        skipped: [
+          {
+            projectName: "alpha",
+            reason: "provider_not_registered: codex",
+            routineName: "minute-report"
+          }
+        ]
+      });
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-22T10:00:30.000Z") })[0]
+      ).toMatchObject({
+        deferral: null,
+        lastSkipAt: null,
+        lastSkipReason: null,
+        nextFireAt: "2026-05-22T10:00:00.000Z",
+        skipCounts24h: {
+          catch_up_window: 0,
+          concurrency_cap: 0
+        }
+      });
+      expect(
+        runStore.getRoutineFanout("provider-held-deferral")?.targets[0]
+      ).toMatchObject({
+        deferredAttempts: 1,
+        deferredReason: "concurrency_cap",
+        disposition: "held",
+        holdReason: "provider_not_registered: codex",
+        skipReason: null
+      });
+    } finally {
+      activeRuns.unregister("issue-run");
+      runStore.close();
+    }
+  });
+
   it("records a one-shot Routine as missed once its deferral horizon passes", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

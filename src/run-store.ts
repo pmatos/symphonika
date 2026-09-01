@@ -1005,16 +1005,20 @@ type RoutineFanoutTargetRow = {
   skip_reason: RoutineSkipReason | "target_unavailable" | null;
 };
 
-// One definition of "this Routine Target's clock event is parked by a capacity
-// deferral" (ADR 0093), shared by the dispatch read and the restart-recompute
-// guard so the two can never drift apart. Callers supply their own correlation
-// of f.routine_name / f.scheduled_at / t.project_name.
+// Both predicates correlate one Routine Target's clock event with durable
+// capacity-deferral evidence (ADR 0093). Dispatch surfaces report only a live
+// pending deferral; restart recomputation also treats a provider-held leg that
+// retains that evidence as parked, so it cannot consume the clock event as a
+// catch-up skip. Callers supply their own correlation of f.routine_name /
+// f.scheduled_at / t.project_name.
 const DEFERRED_FANOUT_TARGET_SOURCE = [
   "from routine_fanout_targets t",
   "join routine_fanouts f on f.id = t.fanout_id"
 ].join(" ");
-const DEFERRED_FANOUT_TARGET_PREDICATE =
+const LIVE_ROUTINE_DEFERRAL_PREDICATE =
   "t.disposition = 'pending' and t.deferred_reason is not null";
+const PARKED_ROUTINE_DEFERRAL_PREDICATE =
+  "t.disposition in ('pending', 'held') and t.deferred_reason is not null";
 
 const PULL_REQUEST_DISCOVERY_LIMIT = 25;
 const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
@@ -2393,7 +2397,7 @@ export class RunStore {
         `select 1 ${DEFERRED_FANOUT_TARGET_SOURCE}`,
         "where f.routine_name = routines.name and f.scheduled_at = routines.next_fire_at",
         "and t.project_name = routines.project_name and",
-        DEFERRED_FANOUT_TARGET_PREDICATE,
+        PARKED_ROUTINE_DEFERRAL_PREDICATE,
         ") then excluded.next_fire_at",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then excluded.next_fire_at",
         // Un-disabling (front matter disabled: true removed, or the routine's
@@ -3465,11 +3469,35 @@ export class RunStore {
     return this.runIfClaimable(apply) ?? false;
   }
 
-  // The capacity deferral parking a Routine Target's due clock event, if it
-  // has one. Dispatch consults this to decide whether a parked event is
-  // still retryable or has outlived its own clock, and restart catch-up
-  // consults it so it settles genuinely missed events without discarding one
-  // the daemon is still actively retrying.
+  // Whether restart schedule recomputation must preserve this clock event.
+  // A provider-held leg is not a live capacity deferral for dispatch or
+  // operator surfaces, but retained deferral evidence still means restart
+  // catch-up must leave its clock parked for the due-event loop.
+  hasParkedRoutineTargetDeferral(input: {
+    name: string;
+    projectName: string;
+    scheduledAt: string;
+  }): boolean {
+    return (
+      this.database
+        .prepare(
+          [
+            "select 1",
+            DEFERRED_FANOUT_TARGET_SOURCE,
+            "where f.routine_name = ? and f.scheduled_at = ?",
+            "and t.project_name = ? and",
+            PARKED_ROUTINE_DEFERRAL_PREDICATE
+          ].join(" ")
+        )
+        .get(input.name, input.scheduledAt, input.projectName) !== undefined
+    );
+  }
+
+  // The live capacity deferral parking a Routine Target's due clock event, if
+  // it has one. Dispatch consults this to decide whether a pending event is
+  // still retryable or has outlived its own clock; operator surfaces use the
+  // same read so a provider-held leg is presented as a hold, not capacity
+  // pressure.
   getRoutineTargetDeferral(input: {
     name: string;
     projectName: string;
@@ -3482,7 +3510,7 @@ export class RunStore {
           DEFERRED_FANOUT_TARGET_SOURCE,
           "where f.routine_name = ? and f.scheduled_at = ?",
           "and t.project_name = ? and",
-          DEFERRED_FANOUT_TARGET_PREDICATE
+          LIVE_ROUTINE_DEFERRAL_PREDICATE
         ].join(" ")
       )
       .get(input.name, input.scheduledAt, input.projectName) as

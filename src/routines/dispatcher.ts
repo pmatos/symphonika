@@ -559,11 +559,11 @@ export async function dispatchDueRoutines(
           // A parked capacity deferral is not a clock event the daemon
           // missed while it was down — it is one it is still retrying, so
           // the due-event loop below owns it (ADR 0093).
-          input.runStore.getRoutineTargetDeferral({
+          input.runStore.hasParkedRoutineTargetDeferral({
             name: persisted.name,
             projectName: project.name,
             scheduledAt: persisted.nextFireAt
-          }) !== undefined
+          })
         ) {
           continue;
         }

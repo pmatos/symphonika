@@ -548,6 +548,7 @@ describe("CLI run commands", () => {
       attemptId: "dash-run-attempt-1",
       normalized: { message: "hello from dashboard", type: "message" },
       raw: { message: "hello from dashboard" },
+      receivedAt: new Date().toISOString(),
       runId: "dash-run",
       sequence: 1
     });
@@ -677,6 +678,7 @@ describe("CLI run commands", () => {
       attemptId: "needs-input-attempt-1",
       normalized: { message: "approval prompt", type: "input_required" },
       raw: { message: "approval prompt" },
+      receivedAt: new Date().toISOString(),
       runId: "needs-input",
       sequence: 1
     });
@@ -1099,6 +1101,7 @@ describe("CLI run commands", () => {
       attemptId: "show-1-attempt-1",
       normalized: { message: "hello from provider", type: "message" },
       raw: { message: "hello from provider" },
+      receivedAt: new Date().toISOString(),
       runId: "show-1",
       sequence: 1
     });

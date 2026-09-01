@@ -492,6 +492,30 @@ export type ProviderEventRecord = {
   type: string;
 };
 
+// Matches Codex's built-in stream idle timeout. It has no control effect —
+// nothing terminates on it — so it stays a constant until recovered-gap
+// evidence justifies tuning. See ADR 0090.
+export const PROVIDER_STREAM_STALL_THRESHOLD_MS = 5 * 60_000;
+
+export type ProviderStreamStallRecord = {
+  attemptId: string;
+  durationMs: number;
+  gapStartedAt: string;
+  lastEventSequence: number;
+  resumedAt: string;
+  resumedWithSequence: number;
+  runId: string;
+};
+
+// One watermark row per Attempt, not a log: the newest raw provider-event
+// receipt the orchestrator has durably observed.
+export type ProviderStreamReceipt = {
+  attemptId: string;
+  lastEventAt: string;
+  lastEventSequence: number;
+  runId: string;
+};
+
 export type WatchdogSample = {
   idleSince: string | null;
   lastMessageAt: string | null;
@@ -575,6 +599,18 @@ export type ProviderEventMetadataInput = {
   attemptId: string;
   normalized: NormalizedProviderEvent;
   raw: unknown;
+  receivedAt: string;
+  runId: string;
+  sequence: number;
+};
+
+// receivedAt is the caller's, not the store's: it must be captured when the
+// provider yields the event, before the evidence logs are appended. Deriving
+// it here would time the write instead of the transport, so a slow state root
+// would fabricate stalls out of its own latency. See ADR 0090.
+export type ProviderStreamReceiptInput = {
+  attemptId: string;
+  receivedAt: string;
   runId: string;
   sequence: number;
 };
@@ -663,6 +699,23 @@ type ProviderEventRow = {
   type: string;
 };
 
+type ProviderStreamStallRow = {
+  attempt_id: string;
+  duration_ms: number;
+  gap_started_at: string;
+  last_event_sequence: number;
+  resumed_at: string;
+  resumed_with_sequence: number;
+  run_id: string;
+};
+
+type ProviderStreamReceiptRow = {
+  attempt_id: string;
+  last_event_at: string;
+  last_event_sequence: number;
+  run_id: string;
+};
+
 function mapProviderEventRow(row: ProviderEventRow): ProviderEventRecord {
   return {
     attemptId: row.attempt_id,
@@ -672,6 +725,31 @@ function mapProviderEventRow(row: ProviderEventRow): ProviderEventRecord {
     runId: row.run_id,
     sequence: row.sequence,
     type: row.type
+  };
+}
+
+function mapProviderStreamStallRow(
+  row: ProviderStreamStallRow
+): ProviderStreamStallRecord {
+  return {
+    attemptId: row.attempt_id,
+    durationMs: row.duration_ms,
+    gapStartedAt: row.gap_started_at,
+    lastEventSequence: row.last_event_sequence,
+    resumedAt: row.resumed_at,
+    resumedWithSequence: row.resumed_with_sequence,
+    runId: row.run_id
+  };
+}
+
+function mapProviderStreamReceiptRow(
+  row: ProviderStreamReceiptRow
+): ProviderStreamReceipt {
+  return {
+    attemptId: row.attempt_id,
+    lastEventAt: row.last_event_at,
+    lastEventSequence: row.last_event_sequence,
+    runId: row.run_id
   };
 }
 
@@ -3925,24 +4003,93 @@ export class RunStore {
   }
 
   recordProviderEvent(input: ProviderEventMetadataInput): void {
+    const createdAt = input.receivedAt;
+    const apply = this.database.transaction(() => {
+      this.database
+        .prepare(
+          [
+            "insert into provider_events (",
+            "run_id, attempt_id, sequence, type, raw_json, normalized_json, created_at",
+            ") values (",
+            "@run_id, @attempt_id, @sequence, @type, @raw_json, @normalized_json, @created_at",
+            ")"
+          ].join(" ")
+        )
+        .run({
+          attempt_id: input.attemptId,
+          created_at: createdAt,
+          normalized_json: JSON.stringify(input.normalized),
+          raw_json: JSON.stringify(input.raw),
+          run_id: input.runId,
+          sequence: input.sequence,
+          type: input.normalized.type
+        });
+      this.insertProviderStreamReceipt(input);
+    });
+    apply();
+  }
+
+  recordProviderStreamReceipt(input: ProviderStreamReceiptInput): void {
+    const apply = this.database.transaction(() => {
+      this.insertProviderStreamReceipt(input);
+    });
+    apply();
+  }
+
+  private insertProviderStreamReceipt(input: ProviderStreamReceiptInput): void {
+    const receivedAt = input.receivedAt;
+    const previous = this.getProviderStreamReceipt(input.attemptId);
+    // Only a gap between two receipts is transport silence. The wait before an
+    // Attempt's first event is workspace preparation and provider startup, so
+    // recording it here would corrupt the very duration distribution this
+    // evidence exists to measure. The page still labels that quiet window as
+    // stalled from the Attempt's creation time; it just is not durable
+    // stall evidence. See ADR 0090.
+    if (previous !== undefined) {
+      const durationMs =
+        Date.parse(receivedAt) - Date.parse(previous.lastEventAt);
+      if (durationMs >= PROVIDER_STREAM_STALL_THRESHOLD_MS) {
+        this.database
+          .prepare(
+            [
+              "insert or ignore into provider_stream_stalls (",
+              "run_id, attempt_id, last_event_sequence, resumed_with_sequence,",
+              "gap_started_at, resumed_at, duration_ms",
+              ") values (",
+              "@run_id, @attempt_id, @last_event_sequence, @resumed_with_sequence,",
+              "@gap_started_at, @resumed_at, @duration_ms",
+              ")"
+            ].join(" ")
+          )
+          .run({
+            attempt_id: input.attemptId,
+            duration_ms: Math.floor(durationMs),
+            gap_started_at: previous.lastEventAt,
+            last_event_sequence: previous.lastEventSequence,
+            resumed_at: receivedAt,
+            resumed_with_sequence: input.sequence,
+            run_id: input.runId
+          });
+      }
+    }
+
     this.database
       .prepare(
         [
-          "insert into provider_events (",
-          "run_id, attempt_id, sequence, type, raw_json, normalized_json, created_at",
-          ") values (",
-          "@run_id, @attempt_id, @sequence, @type, @raw_json, @normalized_json, @created_at",
-          ")"
+          "insert into provider_stream_receipts (",
+          "run_id, attempt_id, last_event_sequence, last_event_at",
+          ") values (@run_id, @attempt_id, @last_event_sequence, @last_event_at)",
+          "on conflict(attempt_id) do update set",
+          "run_id = excluded.run_id,",
+          "last_event_sequence = excluded.last_event_sequence,",
+          "last_event_at = excluded.last_event_at"
         ].join(" ")
       )
       .run({
         attempt_id: input.attemptId,
-        created_at: timestamp(),
-        normalized_json: JSON.stringify(input.normalized),
-        raw_json: JSON.stringify(input.raw),
-        run_id: input.runId,
-        sequence: input.sequence,
-        type: input.normalized.type
+        last_event_at: receivedAt,
+        last_event_sequence: input.sequence,
+        run_id: input.runId
       });
   }
 
@@ -4209,6 +4356,34 @@ export class RunStore {
       .all(params) as ProviderEventRow[];
 
     return rows.map((row) => mapProviderEventRow(row));
+  }
+
+  listProviderStreamStalls(runId: string): ProviderStreamStallRecord[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select run_id, attempt_id, last_event_sequence, resumed_with_sequence,",
+          "gap_started_at, resumed_at, duration_ms",
+          "from provider_stream_stalls where run_id = ?",
+          "order by resumed_at asc, id asc"
+        ].join(" ")
+      )
+      .all(runId) as ProviderStreamStallRow[];
+    return rows.map((row) => mapProviderStreamStallRow(row));
+  }
+
+  getProviderStreamReceipt(
+    attemptId: string
+  ): ProviderStreamReceipt | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select run_id, attempt_id, last_event_sequence, last_event_at",
+          "from provider_stream_receipts where attempt_id = ?"
+        ].join(" ")
+      )
+      .get(attemptId) as ProviderStreamReceiptRow | undefined;
+    return row === undefined ? undefined : mapProviderStreamReceiptRow(row);
   }
 
   // Provider event `sequence` resets to 1 on every attempt, so an unscoped
@@ -5060,6 +5235,32 @@ export class RunStore {
         foreign key (attempt_id) references attempts(id)
       );
 
+      create table if not exists provider_stream_receipts (
+        attempt_id text primary key,
+        run_id text not null,
+        last_event_sequence integer not null,
+        last_event_at text not null,
+        foreign key (run_id) references runs(id),
+        foreign key (attempt_id) references attempts(id)
+      );
+
+      create table if not exists provider_stream_stalls (
+        id integer primary key autoincrement,
+        run_id text not null,
+        attempt_id text not null,
+        last_event_sequence integer not null,
+        resumed_with_sequence integer not null,
+        gap_started_at text not null,
+        resumed_at text not null,
+        duration_ms integer not null,
+        unique(attempt_id, resumed_with_sequence),
+        foreign key (run_id) references runs(id),
+        foreign key (attempt_id) references attempts(id)
+      );
+
+      create index if not exists provider_stream_stalls_run_resumed_idx
+        on provider_stream_stalls(run_id, resumed_at);
+
       create table if not exists tracked_pull_requests (
         id integer primary key autoincrement,
         project_name text not null,
@@ -5566,7 +5767,47 @@ export class RunStore {
       from watchdog_samples;
     `);
 
+    // provider_events is the largest append-only table in the schema — one row
+    // per normalized stream event, with no retention sweep and no index beyond
+    // its rowid. backfillProviderStreamReceipts' newest-per-attempt lookup,
+    // listProviderEvents and getLastFailureEvent all filter or group by
+    // attempt_id, so without this they scan the whole table and build a temp
+    // b-tree. Created before the backfill below so the one-shot migration
+    // reads it.
+    this.database.exec(`
+      create index if not exists provider_events_attempt_idx
+      on provider_events(attempt_id, id);
+    `);
+
+    this.backfillProviderStreamReceipts();
     this.backfillAttemptMetadataPaths();
+  }
+
+  // Seeds one receipt per Attempt from the newest normalized event a database
+  // recorded before raw receipts became durable. Raw-only activity from before
+  // this evidence existed cannot be reconstructed, so this is a floor, not a
+  // replay. Guarded because it scans all of provider_events: once any receipt
+  // exists the table is authoritative and re-running it on every open would
+  // buy nothing. See ADR 0090.
+  private backfillProviderStreamReceipts(): void {
+    const seeded = this.database
+      .prepare("select 1 from provider_stream_receipts limit 1")
+      .get();
+    if (seeded !== undefined) {
+      return;
+    }
+    this.database.exec(`
+      insert or ignore into provider_stream_receipts (
+        run_id, attempt_id, last_event_sequence, last_event_at
+      )
+      select event.run_id, event.attempt_id, event.sequence, event.created_at
+      from provider_events event
+      inner join (
+        select attempt_id, max(id) as id
+        from provider_events
+        group by attempt_id
+      ) latest on latest.id = event.id;
+    `);
   }
 
   private backfillRunIssueRepositories(): void {

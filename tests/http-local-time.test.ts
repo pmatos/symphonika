@@ -79,6 +79,7 @@ it("renders Run timestamps in the viewer's local time with the UTC value as a fa
       attemptId: "run-local-time-attempt-1",
       normalized: { message: "working", type: "message" },
       raw: { message: "working", type: "message" },
+      receivedAt: new Date().toISOString(),
       runId: "run-local-time",
       sequence: 1
     });

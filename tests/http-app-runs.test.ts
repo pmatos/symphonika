@@ -80,6 +80,44 @@ function withClaimTime(instant: string, create: () => void): void {
   }
 }
 
+// The createRun + running transition + attempt-1 preamble every provider
+// stream fixture needs before it can record events. Branch and attempt ids
+// are derived from the run id so a caller only has to name the run; returns
+// the attempt id the events are recorded against.
+function seedRunningAttempt(
+  runStore: RunStore,
+  runId: string,
+  workspacePath: string
+): string {
+  runStore.createRun({
+    id: runId,
+    issue: sampleIssue({ number: 591 }),
+    projectName: "alpha",
+    providerCommand: "x",
+    providerName: "codex"
+  });
+  runStore.updateRunState(runId, "running");
+  const attemptId = `${runId}-attempt-1`;
+  runStore.createAttempt({
+    attemptNumber: 1,
+    branchName: `sym/${runId}`,
+    branchRef: `refs/heads/sym/${runId}`,
+    id: attemptId,
+    issueSnapshotPath: "",
+    metadataPath: "",
+    normalizedLogPath: "",
+    promptPath: "",
+    providerCommand: "x",
+    providerName: "codex",
+    rawLogPath: "",
+    runId,
+    state: "running",
+    workflowGraphPath: "",
+    workspacePath
+  });
+  return attemptId;
+}
+
 describe("HTTP app — runs API and pages", () => {
   it("shows each Run's current workflow state on /runs", async () => {
     const test = await setup();
@@ -571,6 +609,325 @@ describe("HTTP app — runs API and pages", () => {
       };
       expect(body.run.id).toBe("have-run");
       expect(body.run.state).toBe("running");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("exposes the current provider-event gap on /api/runs/:id", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        seedRunningAttempt(
+          test.runStore,
+          "provider-stream-detail",
+          test.stateRoot
+        );
+        test.runStore.recordProviderEvent({
+          attemptId: "provider-stream-detail-attempt-1",
+          normalized: { type: "session_started" },
+          raw: {},
+          receivedAt: new Date().toISOString(),
+          runId: "provider-stream-detail",
+          sequence: 1
+        });
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:06:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/runs/provider-stream-detail");
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(body.providerStream).toEqual({
+        lastEventAgeMs: 360_000,
+        lastEventAt: "2026-08-28T13:00:00.000Z",
+        recoveredStalls: [],
+        stalled: true,
+        stalledForMs: 360_000,
+        thresholdMs: 300_000
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("clears a recovered stream stall and preserves its duration as run evidence", async () => {
+    const stateRoot = await makeTempRoot();
+    let runStore = openRunStore({ stateRoot });
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        seedRunningAttempt(runStore, "provider-stream-recovered", stateRoot);
+        runStore.recordProviderEvent({
+          attemptId: "provider-stream-recovered-attempt-1",
+          normalized: { type: "message", message: "before retry" },
+          raw: {},
+          receivedAt: new Date().toISOString(),
+          runId: "provider-stream-recovered",
+          sequence: 1
+        });
+      });
+      withClaimTime("2026-08-28T13:46:00.000Z", () => {
+        runStore.recordProviderEvent({
+          attemptId: "provider-stream-recovered-attempt-1",
+          normalized: { type: "tool_call", command: "pwd" },
+          raw: {},
+          receivedAt: new Date().toISOString(),
+          runId: "provider-stream-recovered",
+          sequence: 2
+        });
+      });
+
+      runStore.close();
+      runStore = openRunStore({ stateRoot });
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:46:00.000Z"),
+        runStore,
+        stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/runs/provider-stream-recovered");
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(body.providerStream).toEqual({
+        lastEventAgeMs: 0,
+        lastEventAt: "2026-08-28T13:46:00.000Z",
+        recoveredStalls: [
+          {
+            attemptId: "provider-stream-recovered-attempt-1",
+            durationMs: 2_760_000,
+            gapStartedAt: "2026-08-28T13:00:00.000Z",
+            lastEventSequence: 1,
+            resumedAt: "2026-08-28T13:46:00.000Z",
+            resumedWithSequence: 2,
+            runId: "provider-stream-recovered"
+          }
+        ],
+        stalled: false,
+        stalledForMs: null,
+        thresholdMs: 300_000
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not record the wait for an attempt's first event as stall evidence", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        seedRunningAttempt(
+          test.runStore,
+          "provider-stream-first-event",
+          test.stateRoot
+        );
+      });
+      withClaimTime("2026-08-28T13:06:00.000Z", () => {
+        test.runStore.recordProviderEvent({
+          attemptId: "provider-stream-first-event-attempt-1",
+          normalized: { type: "session_started" },
+          raw: {},
+          receivedAt: new Date().toISOString(),
+          runId: "provider-stream-first-event",
+          sequence: 1
+        });
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:06:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request(
+        "/api/runs/provider-stream-first-event"
+      );
+      const body = (await response.json()) as {
+        providerStream: {
+          lastEventAt: string | null;
+          recoveredStalls: unknown[];
+        };
+      };
+
+      // The six minutes before the first event are workspace preparation and
+      // provider startup, not transport silence, so they must not enter the
+      // measured stall distribution — while the receipt itself is still
+      // recorded.
+      expect(body.providerStream.lastEventAt).toBe("2026-08-28T13:06:00.000Z");
+      expect(body.providerStream.recoveredStalls).toEqual([]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("uses raw-only provider activity when reporting the latest stream event", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        seedRunningAttempt(
+          test.runStore,
+          "provider-stream-raw-activity",
+          test.stateRoot
+        );
+        test.runStore.recordProviderEvent({
+          attemptId: "provider-stream-raw-activity-attempt-1",
+          normalized: { type: "session_started" },
+          raw: {},
+          receivedAt: new Date().toISOString(),
+          runId: "provider-stream-raw-activity",
+          sequence: 1
+        });
+      });
+      withClaimTime("2026-08-28T13:04:00.000Z", () => {
+        test.runStore.recordProviderStreamReceipt({
+          attemptId: "provider-stream-raw-activity-attempt-1",
+          receivedAt: new Date().toISOString(),
+          runId: "provider-stream-raw-activity",
+          sequence: 2
+        });
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:06:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request(
+        "/api/runs/provider-stream-raw-activity"
+      );
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(body.providerStream).toEqual({
+        lastEventAgeMs: 120_000,
+        lastEventAt: "2026-08-28T13:04:00.000Z",
+        recoveredStalls: [],
+        stalled: false,
+        stalledForMs: null,
+        thresholdMs: 300_000
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("measures stream gaps from receipt time, not evidence-write time", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        seedRunningAttempt(
+          test.runStore,
+          "provider-stream-slow-writes",
+          test.stateRoot
+        );
+        test.runStore.recordProviderEvent({
+          attemptId: "provider-stream-slow-writes-attempt-1",
+          normalized: { type: "session_started" },
+          raw: {},
+          receivedAt: "2026-08-28T13:00:00.000Z",
+          runId: "provider-stream-slow-writes",
+          sequence: 1
+        });
+      });
+      // The provider yielded its second event one minute later; the evidence
+      // appends that precede the Run Store write took forty more. Only the
+      // former is transport silence, so no stall may be recorded.
+      withClaimTime("2026-08-28T13:41:00.000Z", () => {
+        test.runStore.recordProviderEvent({
+          attemptId: "provider-stream-slow-writes-attempt-1",
+          normalized: { type: "message", message: "still here" },
+          raw: {},
+          receivedAt: "2026-08-28T13:01:00.000Z",
+          runId: "provider-stream-slow-writes",
+          sequence: 2
+        });
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:02:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request(
+        "/api/runs/provider-stream-slow-writes"
+      );
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(body.providerStream).toEqual({
+        lastEventAgeMs: 60_000,
+        lastEventAt: "2026-08-28T13:01:00.000Z",
+        recoveredStalls: [],
+        stalled: false,
+        stalledForMs: null,
+        thresholdMs: 300_000
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("freezes a terminal run's provider age no earlier than its last event", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        seedRunningAttempt(
+          test.runStore,
+          "provider-stream-terminal",
+          test.stateRoot
+        );
+      });
+      test.runStore.upsertWatchdogSample({
+        idleSince: null,
+        lastMessageAt: null,
+        lastProgressAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath: "",
+        outputTokensTotal: 0,
+        runId: "provider-stream-terminal",
+        // Sampled before the attempt's final process_exit, which is the normal
+        // ordering: sampling stops the moment the Run leaves `running`.
+        sampledAt: "2026-08-28T13:05:00.000Z",
+        turnIdSetSize: 0,
+        workspaceDigest: "",
+        workspaceMtimeMax: 0
+      });
+      test.runStore.recordProviderEvent({
+        attemptId: "provider-stream-terminal-attempt-1",
+        normalized: { type: "process_exit", exitCode: 0 },
+        raw: {},
+        receivedAt: "2026-08-28T13:07:00.000Z",
+        runId: "provider-stream-terminal",
+        sequence: 1
+      });
+      withClaimTime("2026-08-28T13:08:00.000Z", () => {
+        test.runStore.updateRunState("provider-stream-terminal", "succeeded");
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:20:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/runs/provider-stream-terminal");
+      const body = (await response.json()) as {
+        providerStream: { lastEventAgeMs: number; lastEventAt: string };
+      };
+
+      // Not 0: the watchdog sample predates the event, and clamping there
+      // would report the run's own last event as arriving in the future.
+      expect(body.providerStream.lastEventAgeMs).toBe(60_000);
+      expect(body.providerStream.lastEventAt).toBe("2026-08-28T13:07:00.000Z");
+
+      const page = await app.request("/runs/provider-stream-terminal");
+      const html = await page.text();
+      expect(html).toContain("1m ago");
+      expect(html).not.toContain("in 2m");
     } finally {
       test.cleanup();
     }
@@ -1126,6 +1483,63 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("labels a running Codex stream after five minutes without provider events", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:50:12.000Z", () => {
+        test.runStore.createRun({
+          id: "run-stream-stalled",
+          issue: sampleIssue({ number: 591, title: "Visible stream stall" }),
+          projectName: "alpha",
+          providerCommand: "x",
+          providerName: "codex"
+        });
+        test.runStore.updateRunState("run-stream-stalled", "running");
+        test.runStore.createAttempt({
+          attemptNumber: 1,
+          branchName: "sym/run-stream-stalled",
+          branchRef: "refs/heads/sym/run-stream-stalled",
+          id: "run-stream-stalled-attempt-1",
+          issueSnapshotPath: "",
+          metadataPath: "",
+          normalizedLogPath: "",
+          promptPath: "",
+          providerCommand: "x",
+          providerName: "codex",
+          rawLogPath: "",
+          runId: "run-stream-stalled",
+          state: "running",
+          workflowGraphPath: "",
+          workspacePath: test.stateRoot
+        });
+        test.runStore.recordProviderEvent({
+          attemptId: "run-stream-stalled-attempt-1",
+          normalized: { type: "message", message: "still working" },
+          raw: {},
+          receivedAt: new Date().toISOString(),
+          runId: "run-stream-stalled",
+          sequence: 1
+        });
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T14:36:12.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-stream-stalled");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("Stream stalled, provider retrying (46m)");
+      expect(body).toContain("Last provider event");
+      expect(body).toContain("46m ago");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders Codex thinking boundaries and reasoning summaries on the run page", async () => {
     const test = await setup();
     try {
@@ -1166,6 +1580,7 @@ describe("HTTP app — runs API and pages", () => {
           type: "thinking"
         },
         raw: {},
+        receivedAt: new Date().toISOString(),
         runId: "run-thinking",
         sequence: 1
       });
@@ -1181,6 +1596,7 @@ describe("HTTP app — runs API and pages", () => {
           type: "thinking"
         },
         raw: {},
+        receivedAt: new Date().toISOString(),
         runId: "run-thinking",
         sequence: 2
       });

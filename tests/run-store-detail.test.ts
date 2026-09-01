@@ -720,6 +720,7 @@ describe("RunStore detail queries", () => {
           attemptId: "r-events-attempt-1",
           normalized: { type: "message", message: `m${i}` },
           raw: { kind: "message", body: `m${i}` },
+          receivedAt: new Date().toISOString(),
           runId: "r-events",
           sequence: i
         });
@@ -728,6 +729,7 @@ describe("RunStore detail queries", () => {
         attemptId: "r-events-attempt-2",
         normalized: { type: "message", message: "retry started" },
         raw: { kind: "message", body: "retry started" },
+        receivedAt: new Date().toISOString(),
         runId: "r-events",
         sequence: 1
       });
@@ -792,6 +794,7 @@ describe("RunStore detail queries", () => {
         attemptId: "r-fail-attempt-1",
         normalized: { type: "turn_failed", message: "attempt-1 refusal" },
         raw: { kind: "turn_failed" },
+        receivedAt: new Date().toISOString(),
         runId: "r-fail",
         sequence: 5
       });
@@ -799,6 +802,7 @@ describe("RunStore detail queries", () => {
         attemptId: "r-fail-attempt-2",
         normalized: { type: "turn_failed", message: "attempt-2 crash" },
         raw: { kind: "turn_failed" },
+        receivedAt: new Date().toISOString(),
         runId: "r-fail",
         sequence: 1
       });

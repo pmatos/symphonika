@@ -186,6 +186,13 @@ so it is testable without spawning the provider. One per provider adapter (`code
 `claude-events`).
 _Avoid_: parser, event mapper
 
+**Provider Stream Stall**:
+A non-terminal observability state for a running Attempt whose raw Provider Event Log has received
+nothing for at least five minutes. The next raw event clears the state and records the recovered
+gap duration as Run Store evidence. It describes provider transport silence, not Watchdog idleness
+or a dead Coding Agent.
+_Avoid_: Watchdog timeout, failed Run, retry
+
 **Thinking Marker**:
 A timestamped normalized event recording that provider reasoning started or completed. It may carry
 a provider-authored reasoning summary for observability, but never raw reasoning content, and counts
@@ -463,6 +470,8 @@ _Avoid_: chat session
   under both the invoking process environment and an installed daemon unit's frozen PATH
 - A **Provider Event Log** belongs to one coding-agent run
 - A **Normalized Event Log** is derived from a **Provider Event Log**
+- A **Provider Stream Stall** is derived from raw provider-event receipt times and never terminates
+  a **Run**
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
 - A **Routine** targets one or more explicitly named **Projects** and materializes one **Routine

@@ -30,12 +30,18 @@ export type ProcessQueueControlItem =
       message: string;
     };
 
-export type ProcessQueueItem =
+type QueuedPayload =
   | ProcessQueueControlItem
   | {
       kind: "message";
       raw: unknown;
     };
+
+// receivedAt is stamped in push(), not by the consumer: push() runs
+// synchronously off the child's stdout/error/close events, so the stamp
+// reflects true transport-ingestion time regardless of how long the
+// consumer takes to call next() for a prior item. See ADR 0090.
+export type ProcessQueueItem = QueuedPayload & { receivedAt: string };
 
 export type ProcessQueue = {
   next: () => Promise<ProcessQueueItem>;
@@ -48,7 +54,12 @@ export function createJsonlProcessQueue(
   let waiting: ((item: ProcessQueueItem) => void) | undefined;
   let stdoutBuffer = "";
 
-  const push = (item: ProcessQueueItem): void => {
+  const push = (payload: QueuedPayload): void => {
+    const item: ProcessQueueItem = {
+      ...payload,
+      receivedAt: new Date().toISOString()
+    };
+
     if (waiting !== undefined) {
       const resolve = waiting;
       waiting = undefined;
@@ -105,7 +116,7 @@ export function createJsonlProcessQueue(
   };
 }
 
-function pushLine(line: string, push: (item: ProcessQueueItem) => void): void {
+function pushLine(line: string, push: (item: QueuedPayload) => void): void {
   if (line.trim().length === 0) {
     return;
   }

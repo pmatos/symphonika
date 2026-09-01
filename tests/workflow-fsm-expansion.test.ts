@@ -1249,6 +1249,125 @@ describe("state machine workflow definitions", () => {
     );
   });
 
+  it("lets provider_success: true alongside a pull request signal cover a parked wait", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: agent_success_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "            provider_success: true",
+        "        - to: done",
+        "          when:",
+        "            checks: failure",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("does not require wait transitions to cover signals complete_when already excludes", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("rejects a wait transition that gates on a positive unresolved_review_threads count", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: exact_count_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: failed",
+        "          when:",
+        "            pr_open: false",
+        "        - to: merge",
+        "          when:",
+        "            checks: success",
+        "            mergeable: true",
+        "            unresolved_review_threads: 0",
+        "        - to: repair",
+        "          when:",
+        "            mergeable: false",
+        "        - to: repair",
+        "          when:",
+        "            checks: failure",
+        "        - to: autofix",
+        "          when:",
+        "            unresolved_review_threads: 1",
+        "    merge:",
+        "      terminal: success",
+        "    repair:",
+        "      terminal: blocked",
+        "    autofix:",
+        "      terminal: blocked",
+        "    failed:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // Every enumerated signal combination is otherwise matched by some
+    // transition (pr_open: false, mergeable: false, checks: failure, or the
+    // unresolved_review_threads: 0/1 pair cover the full product), so the
+    // enumeration-based coverage check alone finds nothing wrong here -- a
+    // real PR with two or more unresolved threads would still match no
+    // transition and park forever. Only the dedicated exact-count rejection
+    // catches it.
+    expect(result.errors).toContainEqual(
+      `workflow state holding at ${workflowPath} transition to autofix gates on unresolved_review_threads: 1, which cannot cover every unresolved-thread count; use has_unresolved_reviews: true instead`
+    );
+  });
+
   it("accepts Oh My Pi for an agent action provider", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

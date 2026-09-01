@@ -524,7 +524,13 @@ function validateWaitStateCoverage(
 ): string[] {
   const errors: string[] = [];
   for (const state of states) {
-    if (state.action?.kind !== "wait" || !observesPullRequestSignals(state)) {
+    if (state.action?.kind !== "wait") {
+      continue;
+    }
+
+    errors.push(...rejectUnboundedReviewThreadCounts(state, workflowPath));
+
+    if (!observesPullRequestSignals(state)) {
       continue;
     }
 
@@ -532,6 +538,32 @@ function validateWaitStateCoverage(
     if (uncovered !== undefined) {
       errors.push(
         `workflow state ${state.id} at ${workflowPath} is a wait with no transition matching pull request signals ${formatPredicateMap(uncovered)}`
+      );
+    }
+  }
+  return errors;
+}
+
+// unresolved_review_threads is documented (docs/workflows.md) as "exact count
+// only": it matches one specific non-negative integer. Zero is a sound thing
+// to route on -- there is exactly one way for the count to be zero -- but any
+// positive value is not: a transition gating on `unresolved_review_threads: 1`
+// matches a PR sitting at exactly one unresolved thread and nothing else, so a
+// real PR with two or more parks forever even though this validator's
+// enumeration (which only samples one positive count) would call the state
+// covered. has_unresolved_reviews is the derived boolean built for this --
+// equality on it is exhaustive by construction. Reject the unsound form
+// outright rather than trying to enumerate every count.
+function rejectUnboundedReviewThreadCounts(
+  state: ExpandedWorkflowState,
+  workflowPath: string
+): string[] {
+  const errors: string[] = [];
+  for (const transition of state.transitions) {
+    const value = transition.when.unresolved_review_threads;
+    if (typeof value === "number" && value > 0) {
+      errors.push(
+        `workflow state ${state.id} at ${workflowPath} transition to ${transition.to} gates on unresolved_review_threads: ${value}, which cannot cover every unresolved-thread count; use has_unresolved_reviews: true instead`
       );
     }
   }
@@ -560,28 +592,70 @@ function gatesOn(
 function firstUncoveredPullRequestSignals(
   state: ExpandedWorkflowState
 ): WorkflowPredicateMap | undefined {
-  return enumerateActionablePullRequestSignals().find(
-    (signals) =>
-      !state.transitions.some((transition) =>
-        transitionMatchesSignals(transition, signals)
-      )
-  );
+  return enumerateActionablePullRequestSignals()
+    .filter((signals) => reachesTransitions(state.completeWhen, signals))
+    .find(
+      (signals) =>
+        !state.transitions.some((transition) =>
+          transitionMatchesSignals(transition, signals)
+        )
+    );
+}
+
+// decideNextStep (state-machine-dispatch.ts) checks complete_when before ever
+// consulting transitions: a signal combination that fails it comes back
+// "blocked" without the transitions loop running at all, so that combination
+// needs no matching transition and is not an uncovered wait state. A
+// complete_when made only of pr_signal predicates can be evaluated against
+// the same synthetic maps the enumeration already builds. A complete_when
+// that also names a predicate this validator cannot resolve statically (an
+// artifact probe, an agent signal) is left unfiltered instead of assumed
+// satisfied, so the coverage check keeps its full strength rather than risk
+// exempting a case it cannot actually reason about.
+function reachesTransitions(
+  completeWhen: WorkflowPredicateMap,
+  signals: WorkflowPredicateMap
+): boolean {
+  const entries = Object.entries(completeWhen);
+  if (
+    entries.some(([key]) => workflowPredicateEvaluation(key) !== "pr_signal")
+  ) {
+    return true;
+  }
+  return entries.every(([key, expected]) => signals[key] === expected);
 }
 
 // A parked wait is re-evaluated from projected pull request signals alone, so a
 // predicate answered any other way -- an artifact probe, an agent signal --
 // cannot carry the state out and must not count as covering a combination.
 // Asking for the evaluation kind says that outright, rather than leaning on
-// those keys happening to be absent from the projected map.
+// those keys happening to be absent from the projected map. provider_success
+// is the one exception: observeWaitPullRequestSignals (run-controller.ts)
+// unconditionally sets it true alongside every real PR-signal observation it
+// makes, so a transition combining the two is genuinely coverable at runtime.
+// A bare provider_success predicate with no pr_signal predicate alongside it
+// is not treated as observing pull request signals at all -- it says nothing
+// about which PR-signal case it covers -- and provider_success: false never
+// occurs for a PR-observing wait, so it still correctly never matches.
 function transitionMatchesSignals(
   transition: WorkflowTransition,
   signals: WorkflowPredicateMap
 ): boolean {
-  return Object.entries(transition.when).every(
-    ([key, expected]) =>
+  const entries = Object.entries(transition.when);
+  if (
+    !entries.some(([key]) => workflowPredicateEvaluation(key) === "pr_signal")
+  ) {
+    return false;
+  }
+  return entries.every(([key, expected]) => {
+    if (key === "provider_success") {
+      return expected === true;
+    }
+    return (
       workflowPredicateEvaluation(key) === "pr_signal" &&
       signals[key] === expected
-  );
+    );
+  });
 }
 
 export function resolveWorkflowFormat(

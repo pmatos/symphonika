@@ -95,3 +95,16 @@ those combinations. A wait whose every pull-request-observing transition is arte
 because an absent artefact intentionally keeps it parked; gating one transition among several does
 not exempt the rest. This turns an otherwise silent permanent PR-signal park into a `workflow validate`,
 `doctor`, and reload error.
+
+The enumeration samples exactly one positive `unresolved_review_threads` value, so a transition
+gating on a specific positive count (`unresolved_review_threads: 1`) can read as "covered" while a
+real PR sitting at a different positive count still matches nothing. That predicate is rejected
+outright wherever it appears with a positive value in a wait transition; `has_unresolved_reviews`
+is the derived boolean built for routing on "some thread is unresolved" and is exhaustive by
+construction, so it has no equivalent gap. Coverage checking also treats `provider_success: true`
+as satisfied whenever it appears alongside a genuine PR-signal predicate — the wait poll's
+`observeWaitPullRequestSignals` always sets it true on every real PR-signal observation, so a mixed
+transition is coverable in practice even though the projection itself never emits agent signals — and
+excludes any signal combination a state's own `complete_when` gate already keeps from ever reaching
+the transitions loop (`decideNextStep` checks `complete_when` first), so such a combination does not
+need a matching transition of its own.

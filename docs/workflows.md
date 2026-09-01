@@ -307,7 +307,7 @@ The parser recognizes the following keys:
 | `checks` | `success`, `failure`, `pending` | no | omitted while unknown | supported |
 | `review_decision` | `approved`, `changes_requested`, `review_required`, `none` | no | always | supported |
 | `has_unresolved_reviews` | `true`, `false` | no | always | supported |
-| `unresolved_review_threads` | non-negative integer | no | always | supported, exact count only |
+| `unresolved_review_threads` | non-negative integer | no | always | supported, exact count only; a wait transition may only gate on `0` — a positive value fails `workflow validate` (issue #632), use `has_unresolved_reviews: true` |
 | `artifact_exists` | path, or a sequence of paths | yes | yes | supported, existence only |
 
 `branch_ahead_of_base` counts commits ahead of `origin/<base_branch>`, not ahead of the commit the

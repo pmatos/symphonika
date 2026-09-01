@@ -2029,7 +2029,7 @@ describe("doctor", () => {
       expect(warning).toContain("36 GiB");
     });
 
-    it.each(["bogus", "0"])(
+    it.each(["bogus", "0", "10garbage", "32GB"])(
       "falls back to the last valid MemoryMax= when a later drop-in is invalid (%s)",
       async (invalidValue) => {
         const report = await runProviderCapacityDoctor({
@@ -2045,17 +2045,34 @@ describe("doctor", () => {
       }
     );
 
-    it("does not fall back past a MemoryMax= form it cannot parse but systemd accepts", async () => {
+    it.each(["50%", "1024B", "2P", "1G 500M"])(
+      "does not fall back past a MemoryMax= form it cannot parse but systemd accepts (%s)",
+      async (unparseableButValid) => {
+        const report = await runProviderCapacityDoctor({
+          dropInMemoryMax: unparseableButValid,
+          hostParallelism: 24
+        });
+
+        expect(
+          report.warnings.some((entry) =>
+            entry.includes("provider build memory estimate")
+          )
+        ).toBe(false);
+      }
+    );
+
+    it("parses a MemoryMax= with whitespace before the suffix", async () => {
       const report = await runProviderCapacityDoctor({
-        dropInMemoryMax: "50%",
+        dropInMemoryMax: "32 G",
         hostParallelism: 24
       });
 
-      expect(
-        report.warnings.some((entry) =>
-          entry.includes("provider build memory estimate")
-        )
-      ).toBe(false);
+      const warning = report.warnings.find((entry) =>
+        entry.includes("provider build memory estimate")
+      );
+      expect(warning).toContain("MemoryMax=32 G");
+      expect(warning).toContain("(32 GiB)");
+      expect(warning).toContain("36 GiB");
     });
 
     // `service install --force` never reaches a host that doesn't re-run it,

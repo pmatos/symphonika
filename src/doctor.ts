@@ -978,16 +978,47 @@ function winningByteSizeAssignment(
 
 const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
 
-// systemd's own memory-limit grammar (plain bytes, K/M/G/T/P/E suffixes, an
-// explicit "B" suffix, percentages, and space-separated compound sums)
-// always begins with a digit, and config_parse_memory_limit() also rejects
-// a magnitude of zero as out of range — both cases make systemd ignore the
-// assignment and keep whatever was previously in force. Everything else
-// (including a value this parser's narrower grammar merely fails to match)
-// might still be a systemd-valid form outside that narrower grammar, so it
-// is never treated as skippable here.
+// One component of a systemd compound memory value: a magnitude, optional
+// whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both tolerate "32 G"),
+// then an optional single-letter K/M/G/T/P/E suffix or an explicit "B"
+// (bytes) marker — never both combined ("32GB" is not a valid systemd unit,
+// only "32G" or "32000000000B" are).
+const SYSTEMD_MEMORY_VALUE_TERM = /^\d+(?:\.\d+)?\s*(?:[KMGTPE]|B)?$/i;
+const SYSTEMD_MEMORY_PERCENTAGE = /^\d+(?:\.\d+)?%$/;
+
+// Whether `value` has the general SHAPE of a systemd memory-limit
+// assignment — a percentage, or a sum of magnitudes each carrying at most
+// one K/M/G/T/P/E-or-"B" suffix — regardless of whether this file's
+// narrower K/M/G/T-only parser can compute its byte value. Used only to
+// tell "might still be genuinely in force, so decline to evaluate rather
+// than warn against the wrong value" (shape matches, e.g. "1024B", "2P",
+// "50%", "1G 500M", "32 G") apart from "systemd itself would never have
+// accepted this text in the first place" (shape doesn't match at all, e.g.
+// "bogus", "32GB", "10garbage" — confirmed against systemd's
+// `systemd-analyze verify`, which logs each as invalid and ignored). Splits
+// only on whitespace immediately before a digit, so a single spaced-out
+// term ("32 G") stays one component while a compound sum ("1G 500M") still
+// splits into its parts. A compact, no-separator compound like "1G500M" is
+// a known systemd-valid form this shape check doesn't recognize either —
+// modeling it needs a full tokenizer, out of proportion for this check.
+function looksLikeSystemdMemoryValue(value: string): boolean {
+  if (SYSTEMD_MEMORY_PERCENTAGE.test(value)) {
+    return true;
+  }
+  return value
+    .split(/\s+(?=\d)/)
+    .every((term) => SYSTEMD_MEMORY_VALUE_TERM.test(term));
+}
+
+// config_parse_memory_limit() ignores an assignment whose text isn't a
+// systemd memory value at all, and separately rejects a magnitude of zero
+// as out of range — both cases make systemd keep whatever was previously in
+// force. Everything else (a value this parser's narrower K/M/G/T-only
+// grammar merely fails to compute a byte count for) is still shaped like a
+// systemd-valid form outside that narrower grammar, so it is never treated
+// as skippable here.
 function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
-  if (!/^\d/.test(value)) {
+  if (!looksLikeSystemdMemoryValue(value)) {
     return true;
   }
   const match = SYSTEMD_BYTE_SIZE_PATTERN.exec(value);

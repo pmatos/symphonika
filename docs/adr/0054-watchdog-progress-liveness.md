@@ -1,5 +1,10 @@
 # Watchdog: progress-based liveness for active runs
 
+**Amendment note (ADR 0091):** the same Progress Signal and Project grace policy now sample
+`running` Routine Firings through firing-keyed tables. A no-progress firing settles as
+`failed / no_progress`; the Run-only convergence budget, wall-clock cap, retry generation, and
+stale-label workflow do not extend to firings.
+
 **Amended by ADR-0093**, which scopes the wall-clock verdict to slot ownership rather than to
 `state = 'running'` and the attempt-scoped `watchdog_generation`.
 

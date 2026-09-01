@@ -41,8 +41,8 @@ acceptance requires.
 Fourth, **`autofix-until-clean` is predicate-bounded, not count-bounded**. The FSM has no
 iteration-counter primitive (ADRs 0047 and 0048 deliberately omit one), so the built-in cannot
 declare "loop at most N times." The loop's `waiting` state transitions to `done` when
-`checks: success` AND `unresolved_review_threads: 0`, to `autofix` when there is one unresolved
-review thread, and to `failed` when `checks: failure`. The project-wide
+`checks: success` AND `unresolved_review_threads: 0`, to `autofix` when
+`has_unresolved_reviews: true`, and to `failed` when `checks: failure`. The project-wide
 `pull_requests.maxReviewDispatchesPerPr` cap belongs to the separate PR follow-up loop in
 `runPullRequestFollowup` and does *not* bound the FSM autofix re-entry — operators who need a
 hard ceiling override the built-in with a local template, or cancel the waiting run.

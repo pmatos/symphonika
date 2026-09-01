@@ -29,10 +29,16 @@ would fabricate an expiry from configuration the operator never supplied. That s
 Run in the first place, since a daemon without a snapshot has no Projects to dispatch.
 
 The slot is held open only for the teardown the deadline can actually drive. Workspace preparation
-is awaited after an abort so its Git process groups and owned-path cleanup settle; the setup that
-follows it — workflow loading, evidence persistence, log-file creation — carries no signal, so it is
-abandoned rather than awaited. Waiting on a non-abortable await would reintroduce the unbounded
-slot ownership this ADR removes.
+therefore exposes a full result and a separate abort-cleanup promise. After an abort, the lifecycle
+awaits only abort cleanup: active Git promises include process-group shutdown, and an owned clone
+staging-path removal is included once cleanup starts. Ordinary filesystem operations such as
+`stat`, `mkdir`, `realpath`, and `rename` carry no cancellation mechanism and are not part of that
+promise. The full cache-turn operation remains the shared-cache serialization tail, so a later
+caller cannot bypass a still-active cache owner; signal checks prevent the abandoned operation from
+starting new Git work when a stalled filesystem call eventually returns. The setup that
+follows preparation — workflow loading, evidence persistence, log-file creation — is likewise
+abandoned rather than awaited. Waiting on either class of non-abortable await would reintroduce the
+unbounded slot ownership this ADR removes. This paragraph is amended by issue #640.
 
 The pre-Run claim write is bounded by the same policy but measured from now, because the Run's
 origin is not yet recorded. When that write neither confirms nor fails cleanly the Issue may already
@@ -48,7 +54,8 @@ as surely as an unbounded claim write would.
 Before provider attachment, the in-flight registry binds cancellation to the deadline's abort
 handler instead of a no-op. The same signal is threaded through issue Workspace preparation and
 every Git command it starts. On POSIX, the existing process-group teardown sends SIGTERM and then
-SIGKILL and is awaited before the lifecycle releases the slot. Retry `sym:claimed` writes and
+SIGKILL; the abort-cleanup promise waits for it and any owned staging removal before the lifecycle
+releases the slot. Retry `sym:claimed` writes and
 pre-provider `sym:running` writes carry the signal into Octokit. Local setup awaits that cannot
 accept a signal are raced against the deadline so they cannot retain capacity. After provider
 attachment, expiry also uses the existing provider cancellation path.
@@ -81,8 +88,9 @@ Run rows and therefore new origins, matching ADR 0089.
 `global.max_in_flight` and per-Project capacity can no longer be retained indefinitely by a Run
 wedged after reservation but before provider execution, provided its wall-clock cap is enabled.
 Workspace Git processes are actually stopped rather than merely accompanied by a stale database
-row. Slot release still happens in the lifecycle's unconditional `finally`, after cancellable
-workspace preparation has settled, so capacity and cleanup evidence remain aligned.
+row. Slot release still happens in the lifecycle's unconditional `finally`, after the preparation's
+abort cleanup has settled. Non-Git preparation I/O can remain pending without retaining capacity,
+while shared-cache serialization remains intact independently of slot ownership.
 
 The sampled Watchdog stays `running`-only. Its Progress Signal, convergence budget, and sampled
 wall-clock verdict remain attempt-generation-fenced as described by ADR 0054 and ADR 0089. The
@@ -112,7 +120,8 @@ a newer retry must not invalidate an already-expired deadline.
 
 **Release the slot immediately when the timer fires.** Rejected because the Git process group and
 owned staging-path cleanup may still be running. The deadline aborts work; the lifecycle releases
-capacity after that work settles.
+capacity after the separate abort-cleanup promise settles, without waiting for the full preparation
+result.
 
 ## Status
 
@@ -127,7 +136,7 @@ Accepted.
 - ADR 0071: durable issue-Run notification delivery
 - ADR 0089: Watchdog Run wall-clock cap
 - ADR 0092: Watchdog policy unavailable without a runtime snapshot
-- Issues #605, #608, and #611
+- Issues #605, #608, #611, and #640
 
 ## Numbering
 

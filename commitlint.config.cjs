@@ -5,8 +5,9 @@ module.exports = {
   // commitlint's defaultIgnores also skips amend!/fixup!/squash! commits, which would let an
   // unsquashed autosquash commit land on main without being linted. Disable defaultIgnores and
   // replace it with the same list minus that one entry (and minus the semver/release-version
-  // matcher, since this repo has no version-bump or release tooling), keeping the merge/revert
-  // exceptions this repo's history actually relies on.
+  // matcher: semantic-release's own release commits are full Conventional Commits messages —
+  // "chore(release): X.Y.Z [skip ci]" — not bare version strings, so they don't need it),
+  // keeping the merge/revert exceptions this repo's history actually relies on.
   defaultIgnores: false,
   ignores: [
     /** @param {string} message */

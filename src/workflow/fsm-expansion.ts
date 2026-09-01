@@ -615,22 +615,13 @@ function firstUncoveredPullRequestSignals(
   // provably excluded from ever reaching the transitions loop when *any*
   // resolvable predicate proves it unmet, regardless of whether other
   // completeWhen predicates are statically resolvable at all -- see
-  // reachesTransitions. Whether completeWhen itself supplies the state's
-  // only pull-request predicate also has to reach transitionMatchesSignals:
-  // a transition matching purely on provider_success is only a genuine
-  // catch-all once completeWhen has already narrowed the combinations down
-  // to a PR-relevant subset.
-  const completeWhenGatesPrSignal = gatesOn(state.completeWhen, "pr_signal");
+  // reachesTransitions.
   return enumerateActionablePullRequestSignals()
     .filter((signals) => reachesTransitions(state.completeWhen, signals))
     .find(
       (signals) =>
         !state.transitions.some((transition) =>
-          transitionMatchesSignals(
-            transition,
-            signals,
-            completeWhenGatesPrSignal
-          )
+          transitionMatchesSignals(transition, signals)
         )
     );
 }
@@ -669,39 +660,31 @@ function reachesTransitions(
 // cannot carry the state out and must not count as covering a combination.
 // Asking for the evaluation kind says that outright, rather than leaning on
 // those keys happening to be absent from the projected map. An unconditional
-// transition (no predicates at all) is the one exception below that rule
-// rather than an instance of it: decideNextStep's own unmetPredicate treats
-// an empty when map as vacuously satisfied, so an unconditional transition is
-// a real runtime catch-all and must count as covering every combination, the
-// same way it already does outside PR-signal states. provider_success is the
-// other exception: observeWaitPullRequestSignals (run-controller.ts)
-// unconditionally sets it true alongside every real PR-signal observation it
-// makes, so a transition combining the two is genuinely coverable at runtime.
-// A bare, non-empty provider_success predicate with no pr_signal predicate
-// alongside it is not treated as observing pull request signals at all -- it
-// says nothing about which PR-signal case it covers -- and
-// provider_success: false never occurs for a PR-observing wait, so it still
-// correctly never matches. When complete_when itself supplies the state's
-// only pull-request predicate (completeWhenGatesPrSignal), the enumeration
-// this runs against has already been narrowed by reachesTransitions to
-// combinations that satisfy it -- so a transition matching purely on
-// provider_success is a genuine catch-all for that narrowed set, the same
-// way an unconditional transition is, and does not need a pr_signal
-// predicate of its own to justify counting as coverage.
+// transition (no predicates at all) is one exception to that rule rather than
+// an instance of it: decideNextStep's own unmetPredicate treats an empty when
+// map as vacuously satisfied, so an unconditional transition is a real
+// runtime catch-all and must count as covering every combination, the same
+// way it already does outside PR-signal states. A bare provider_success:
+// true predicate is the other exception, for the same reason:
+// observeWaitPullRequestSignals (run-controller.ts) is the only builder of a
+// parked wait's signal map, and it unconditionally sets provider_success:
+// true on every real observation it makes -- so a transition naming only
+// provider_success: true also matches every combination, whether or not it
+// shares a transition with a pr_signal predicate or complete_when narrows the
+// enumeration first; declaration order (state-machine-dispatch.ts evaluates
+// transitions in order, first match wins) only decides which transition a
+// combination lands on, never whether one matches. provider_success: false
+// never occurs for a PR-observing wait, so it still correctly never matches,
+// and every other evaluation kind (artifact, another agent signal such as
+// branch_ahead_of_base) is never emitted into the signals map at all, so it
+// can never satisfy the equality check below.
 function transitionMatchesSignals(
   transition: WorkflowTransition,
-  signals: WorkflowPredicateMap,
-  completeWhenGatesPrSignal: boolean
+  signals: WorkflowPredicateMap
 ): boolean {
   const entries = Object.entries(transition.when);
   if (entries.length === 0) {
     return true;
-  }
-  if (
-    !completeWhenGatesPrSignal &&
-    !entries.some(([key]) => workflowPredicateEvaluation(key) === "pr_signal")
-  ) {
-    return false;
   }
   return entries.every(([key, expected]) => {
     if (key === "provider_success") {

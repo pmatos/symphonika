@@ -1233,7 +1233,7 @@ describe("state machine workflow definitions", () => {
         "            checks: failure",
         "        - to: done",
         "          when:",
-        "            provider_success: true",
+        "            branch_ahead_of_base: true",
         "    done:",
         "      terminal: success",
         ""
@@ -1242,11 +1242,53 @@ describe("state machine workflow definitions", () => {
 
     const result = await loadExpandedWorkflow(workflowPath);
 
+    // branch_ahead_of_base is never emitted into a parked wait's signal map
+    // (unlike provider_success, which observeWaitPullRequestSignals always
+    // sets true), so this transition can never actually match and must not
+    // count as coverage.
     expect(result.errors).toContainEqual(
       expect.stringContaining(
         `workflow state holding at ${workflowPath} is a wait with no transition matching pull request signals pr_open=true`
       )
     );
+  });
+
+  it("lets a bare provider_success transition cover every other combination", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: provider_success_fallback",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: failure",
+        "        - to: retry",
+        "          when:",
+        "            provider_success: true",
+        "    done:",
+        "      terminal: success",
+        "    retry:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // observeWaitPullRequestSignals always sets provider_success: true
+    // alongside every real observation, so a bare provider_success: true
+    // transition is a genuine runtime catch-all for whatever the earlier,
+    // more specific transition doesn't match -- it does not need to share a
+    // transition with a pull-request signal to be coverable.
+    expect(result.errors).toEqual([]);
   });
 
   it("lets provider_success: true alongside a pull request signal cover a parked wait", async () => {
@@ -1611,10 +1653,10 @@ describe("state machine workflow definitions", () => {
     // complete_when already narrows every combination this state has to
     // cover down to checks: success, and provider_success is always true on
     // a real observation, so the bare provider_success transition is a
-    // genuine catch-all for that narrowed set -- unlike the case where a
-    // transition (not complete_when) is what makes the state PR-observing,
-    // where a bare provider_success predicate still must not count (see
-    // "does not let an agent-signal transition cover a parked wait" above).
+    // genuine catch-all for that narrowed set (the same holds regardless of
+    // whether complete_when or a sibling transition is what makes the state
+    // PR-observing -- see "lets a bare provider_success transition cover
+    // every other combination" above).
     expect(result.errors).toEqual([]);
   });
 

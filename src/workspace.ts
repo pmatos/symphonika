@@ -23,6 +23,11 @@ const execFileAsync = promisify(execFile);
 const GIT_ABORT_GRACE_MS = 1_000;
 const GIT_GROUP_POLL_MS = 10;
 const GIT_MAX_BUFFER_BYTES = 1024 * 1024;
+// Bounds each cleanup Git command's own run time (not its termination, which
+// GIT_ABORT_GRACE_MS already covers) so a wedged `git worktree remove`/
+// `prune`/`list` cannot hold the Run Slot Deadline's abort-cleanup promise —
+// and therefore the slot — open indefinitely. See codex review on PR #656.
+const GIT_CLEANUP_TIMEOUT_MS = 10_000;
 
 export type WorkspaceProject = {
   name: string;
@@ -264,6 +269,13 @@ async function prepareIssueWorkspaceResult(
   }
 
   await mkdir(path.dirname(plan.workspacePath), { recursive: true });
+  // Proves this invocation actually attempts `git worktree add` below: no
+  // await sits between this check and workspaceGit's own signal check, so
+  // passing here means the add is tracked by abortCleanup before any abort
+  // can settle it. Otherwise an abort that only raced the untracked mkdir
+  // above would still fall into the catch and clean up a path a retry may
+  // already own. See codex review on PR #656.
+  input.signal?.throwIfAborted();
   try {
     await workspaceGit(
       [
@@ -390,6 +402,24 @@ async function worktreePathForBranch(
   ).find((entry) => entry.branch === expectedBranch)?.path;
 }
 
+// Cleanup Git commands run after input.signal has already fired, so they
+// must not reuse it — an already-aborted signal passed to spawn() never
+// starts the process (see gitInProcessGroup). A fresh, initially-unaborted
+// timeout signal still routes through gitInProcessGroup's bounded
+// SIGTERM/SIGKILL teardown, but caps this command's own run time too, so a
+// wedged remove/prune/list cannot hold the abort-cleanup promise open
+// indefinitely. See codex review on PR #656.
+function cleanupGit(
+  args: string[],
+  abortCleanup: WorkspaceAbortCleanup
+): Promise<string> {
+  return workspaceGit(
+    args,
+    AbortSignal.timeout(GIT_CLEANUP_TIMEOUT_MS),
+    abortCleanup
+  );
+}
+
 async function cleanupAbortedIssueWorktree(
   cachePath: string,
   workspacePath: string,
@@ -400,19 +430,16 @@ async function cleanupAbortedIssueWorktree(
     cleanupErrors.push(error);
   };
 
-  await workspaceGit(
+  await cleanupGit(
     ["-C", cachePath, "worktree", "remove", "--force", workspacePath],
-    undefined,
     abortCleanup
   ).catch(recordError);
   await abortCleanup
     .track(rm(workspacePath, { force: true, recursive: true }))
     .catch(recordError);
-  await workspaceGit(
-    ["-C", cachePath, "worktree", "prune"],
-    undefined,
-    abortCleanup
-  ).catch(recordError);
+  await cleanupGit(["-C", cachePath, "worktree", "prune"], abortCleanup).catch(
+    recordError
+  );
 
   const markRemainsOnError = (error: unknown): true => {
     recordError(error);
@@ -437,7 +464,11 @@ async function isWorktreeRegistered(
   abortCleanup: WorkspaceAbortCleanup
 ): Promise<boolean> {
   const entries = parseWorktreeEntries(
-    await worktreeListLines(cachePath, undefined, abortCleanup)
+    await worktreeListLines(
+      cachePath,
+      AbortSignal.timeout(GIT_CLEANUP_TIMEOUT_MS),
+      abortCleanup
+    )
   );
   const [expectedPath, entryPaths] = await Promise.all([
     canonicalizePath(workspacePath),

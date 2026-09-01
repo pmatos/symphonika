@@ -427,6 +427,94 @@ exec "${realGit}" "$@"
     }
   });
 
+  it("bounds a wedged cleanup Git command instead of hanging forever", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "symphonika");
+    const workspacePath = path.join(
+      workspaceRoot,
+      "issues",
+      "642-clean-up-partially-created-worktrees"
+    );
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const startedPath = path.join(root, "worktree-started");
+    const interruptNextAddPath = path.join(root, "interrupt-next-add");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    const realGit = realGitOutput.trim();
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(interruptNextAddPath, "interrupt\n");
+    // `worktree remove` hangs instead of failing, so it must be terminated
+    // by GIT_CLEANUP_TIMEOUT_MS rather than blocking cleanup forever;
+    // `worktree prune` still fails immediately so the registration survives
+    // cleanup, matching the "incomplete cleanup" outcome asserted below.
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ -f "${interruptNextAddPath}" ] && [ "$3" = "worktree" ] && [ "$4" = "add" ] && [ "$5" = "${workspacePath}" ]; then
+  rm -f "${interruptNextAddPath}"
+  "${realGit}" "$@"
+  touch "${startedPath}"
+  sleep infinity
+fi
+if [ "$3" = "worktree" ] && [ "$4" = "remove" ]; then
+  sleep infinity
+fi
+if [ "$3" = "worktree" ] && [ "$4" = "prune" ]; then
+  exit 1
+fi
+exec "${realGit}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+
+    try {
+      const preparation = rejectionOf(
+        prepareIssueWorkspace({
+          issue: {
+            number: 642,
+            title: "Clean up partially-created worktrees"
+          },
+          project: {
+            name: "symphonika",
+            workspace: {
+              git: { base_branch: "main", remote: remotePath },
+              root: workspaceRoot
+            }
+          },
+          signal: controller.signal
+        })
+      );
+      await waitForPath(startedPath);
+      controller.abort(new Error("run timeout"));
+
+      const startedWaitingAt = Date.now();
+      const error = await preparation;
+      // Well under the 35s vitest testTimeout, and well above what a
+      // single bounded wedge (GIT_CLEANUP_TIMEOUT_MS plus SIGTERM/SIGKILL
+      // teardown grace) needs — an unbounded wedge would never resolve.
+      expect(Date.now() - startedWaitingAt).toBeLessThan(20_000);
+
+      expect(error).toBeInstanceOf(Error);
+      if (!(error instanceof Error)) {
+        throw new Error("expected workspace cleanup to reject with an Error");
+      }
+      expect(error.name).toBe("WorkspacePreparationCleanupError");
+      expect(error.message).toContain(
+        `failed to clean aborted issue worktree ${workspacePath}`
+      );
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
   it("surfaces incomplete cleanup when the workspace root traverses a symlink", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

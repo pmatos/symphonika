@@ -318,6 +318,11 @@ type RunRuntime = {
   attemptId: string;
   attemptNumber: number;
   events: NormalizedProviderEvent[];
+  // Resolved once at attempt start and reused for every evidence boundary
+  // (stderr tee, each event, the terminal-reason classification) so a
+  // Service Config reload mid-attempt cannot leave one boundary scrubbing a
+  // different credential set than another. See SPEC.md §6.
+  redactSecrets: readonly string[];
 };
 
 type StartedAttempt = {
@@ -2929,7 +2934,8 @@ export class RunController {
     const runtime: RunRuntime = {
       attemptId,
       attemptNumber: input.attemptNumber,
-      events: []
+      events: [],
+      redactSecrets: this.redactionInventory(input.repository.token)
     };
     let attemptCreated = false;
     let started: StartedAttempt | undefined;
@@ -3165,7 +3171,6 @@ export class RunController {
         provider: input.provider,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
-        repositoryToken: input.repository.token,
         runId: input.runId,
         runtime
       });
@@ -3254,7 +3259,7 @@ export class RunController {
           cancelRequested,
           ...(caughtError === undefined ? {} : { error: caughtError }),
           events: runtime.events,
-          redactSecrets: this.redactionInventory(input.repository.token),
+          redactSecrets: runtime.redactSecrets,
           ...(started === undefined
             ? {}
             : {
@@ -3732,7 +3737,6 @@ export class RunController {
     provider: AgentProvider;
     providerCommand: string;
     providerName: AgentProviderName;
-    repositoryToken: string;
     runId: string;
     runtime: RunRuntime;
   }): Promise<void> {
@@ -3748,8 +3752,6 @@ export class RunController {
       scratchIdentity
     );
     let sequence = 0;
-    const redactSecrets = (): string[] =>
-      this.redactionInventory(input.repositoryToken);
     try {
       for await (const event of input.provider.runAttempt({
         branchName: input.evidence.branchName,
@@ -3767,8 +3769,9 @@ export class RunController {
         // (provider-process.ts spawns with `{ ...process.env }`), so an agent
         // that echoes its GitHub token would otherwise persist it verbatim
         // into an artifact the dashboard serves. Use the same complete
-        // inventory as the JSONL and terminal-reason boundaries. SPEC.md §6.
-        stderrRedactSecrets: redactSecrets(),
+        // inventory as the JSONL and terminal-reason boundaries, snapshotted
+        // once for the whole attempt (runtime.redactSecrets). SPEC.md §6.
+        stderrRedactSecrets: input.runtime.redactSecrets,
         workspacePath: input.evidence.workspacePath
       })) {
         sequence += 1;
@@ -3777,7 +3780,7 @@ export class RunController {
           event,
           normalizedLogPath: input.evidence.normalizedLogPath,
           rawLogPath: input.evidence.rawLogPath,
-          redactSecrets: redactSecrets(),
+          redactSecrets: input.runtime.redactSecrets,
           runId: input.runId,
           sequence
         });
@@ -3809,33 +3812,43 @@ export class RunController {
     sequence: number;
   }): Promise<NormalizedProviderEvent | undefined> {
     const raw = redactValueDeep(input.event.raw, input.redactSecrets);
-    const normalized =
+    // Redact only the copies that get persisted (JSONL + SQLite). The
+    // returned value feeds runtime.events for classifyFailure's lifecycle
+    // interpretation, which matches on protocol discriminators like
+    // `type: "process_exit"`; deep-redacting that object in place could
+    // rewrite a discriminator into something unmatchable if a configured
+    // secret happens to be a substring of it (e.g. an SMTP password of
+    // "process"). classifyFailure already redacts its derived terminal
+    // reason before that reason is persisted, so nothing unredacted reaches
+    // evidence through this path.
+    const redactedNormalized =
       input.event.normalized === undefined
         ? undefined
         : redactValueDeep(input.event.normalized, input.redactSecrets);
     await Promise.all([
       appendJsonl(input.rawLogPath, raw),
-      ...(normalized === undefined
+      ...(redactedNormalized === undefined
         ? []
-        : [appendJsonl(input.normalizedLogPath, normalized)])
+        : [appendJsonl(input.normalizedLogPath, redactedNormalized)])
     ]);
-    if (normalized === undefined) {
+    if (redactedNormalized === undefined) {
       return undefined;
     }
     this.runStore.recordProviderEvent({
       attemptId: input.attemptId,
-      normalized,
+      normalized: redactedNormalized,
       raw,
       runId: input.runId,
       sequence: input.sequence
     });
-    return normalized;
+    return input.event.normalized;
   }
 
   // The Project credential inventory for one execution: the effective tracker
   // token plus the resolved SMTP password when an email sink is configured
-  // (SPEC.md §6). Resolved per use rather than stored, so a Service Config
-  // reload is picked up mid-Run.
+  // (SPEC.md §6). Resolved once per attempt (see RunRuntime.redactSecrets) so
+  // every evidence boundary scrubs the same execution-time credentials even
+  // if a Service Config reload changes the inventory mid-attempt.
   private redactionInventory(repositoryToken: string): string[] {
     // Not deduped here: every consumer funnels through secretSpans, which
     // already collapses duplicates.

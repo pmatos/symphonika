@@ -3644,6 +3644,18 @@ export class RunStore {
     );
   }
 
+  private toRoutineDeferralStatus(
+    row: ReturnType<RunStore["routineTargetDeferralRow"]>
+  ): RoutineDeferralStatus | undefined {
+    return row === undefined
+      ? undefined
+      : {
+          attempts: row.deferred_attempts,
+          reason: row.deferred_reason,
+          since: row.deferred_since
+        };
+  }
+
   // The live capacity deferral parking a Routine Target's due clock event, if
   // it has one. Dispatch consults this to decide whether a pending event is
   // still retryable or has outlived its own clock; operator surfaces use the
@@ -3654,17 +3666,24 @@ export class RunStore {
     projectName: string;
     scheduledAt: string;
   }): RoutineDeferralStatus | undefined {
-    const row = this.routineTargetDeferralRow(
-      input,
-      LIVE_ROUTINE_DEFERRAL_PREDICATE
+    return this.toRoutineDeferralStatus(
+      this.routineTargetDeferralRow(input, LIVE_ROUTINE_DEFERRAL_PREDICATE)
     );
-    return row === undefined
-      ? undefined
-      : {
-          attempts: row.deferred_attempts,
-          reason: row.deferred_reason,
-          since: row.deferred_since
-        };
+  }
+
+  // The parked deferral (pending, or held while still retaining its
+  // evidence) backing a due clock event's deadline check. A provider-held
+  // leg is not a live capacity deferral for dispatch/operator surfaces, but
+  // it still owes ADR 0093's deadline promise: once its bound passes, it
+  // settles as missed rather than firing late whenever the provider returns.
+  getParkedRoutineTargetDeferral(input: {
+    name: string;
+    projectName: string;
+    scheduledAt: string;
+  }): RoutineDeferralStatus | undefined {
+    return this.toRoutineDeferralStatus(
+      this.routineTargetDeferralRow(input, PARKED_ROUTINE_DEFERRAL_PREDICATE)
+    );
   }
 
   // Admission priority needs only an existence check. Avoid listRoutines(),

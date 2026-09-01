@@ -7480,6 +7480,106 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("records a provider-held deferral as missed once its own clock deadline passes", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const activeRuns = new ActiveRunRegistry();
+    activeRuns.reserveSlot({
+      issueNumber: 42,
+      projectName: "alpha",
+      respectsIssueLabels: true,
+      runId: "issue-run"
+    });
+    const provider = quietProvider();
+    const routine = minuteRoutine(root);
+    runStore.syncRoutines([{ ...routine, projectName: "alpha" }], {
+      now: new Date("2026-05-22T09:59:30.000Z")
+    });
+
+    try {
+      const deferred = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        createFanoutId: () => "provider-held-deadline"
+      });
+      expect(deferred.deferred).toEqual([
+        {
+          projectName: "alpha",
+          reason: "concurrency_cap",
+          routineName: "minute-report"
+        }
+      ]);
+
+      const held = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        agentProviders: {},
+        createFanoutId: () => "fanout-must-not-be-created",
+        now: new Date("2026-05-22T10:00:15.000Z")
+      });
+      expect(held.skipped).toEqual([
+        {
+          projectName: "alpha",
+          reason: "provider_not_registered: codex",
+          routineName: "minute-report"
+        }
+      ]);
+
+      // The held leg is never re-admitted (agentProviders stays empty), so
+      // reaching `missed` here can only come from the deadline check reading
+      // the parked (pending-or-held) predicate — the live-only read used to
+      // return undefined for a held leg and never expire it (issue raised on
+      // PR #660).
+      const afterDeadline = await dispatchDueRoutinesAndDrain({
+        ...recurringDispatchInput({
+          activeRuns,
+          provider,
+          root,
+          routine,
+          runStore
+        }),
+        agentProviders: {},
+        createFanoutId: () => "fanout-must-not-be-created",
+        now: new Date("2026-05-22T10:01:00.000Z")
+      });
+
+      expect(afterDeadline.missed).toEqual([
+        {
+          projectName: "alpha",
+          reason: "concurrency_cap",
+          routineName: "minute-report"
+        }
+      ]);
+      expect(afterDeadline.fired).toEqual([]);
+      expect(
+        runStore.listRoutines({ now: new Date("2026-05-22T10:01:00.000Z") })[0]
+      ).toMatchObject({
+        deferral: null,
+        nextFireAt: "2026-05-22T10:01:00.000Z"
+      });
+      expect(
+        runStore.getRoutineFanout("provider-held-deadline")?.targets[0]
+      ).toMatchObject({
+        disposition: "missed",
+        holdReason: null
+      });
+    } finally {
+      activeRuns.unregister("issue-run");
+      runStore.close();
+    }
+  });
+
   it("records a one-shot Routine as missed once its deferral horizon passes", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

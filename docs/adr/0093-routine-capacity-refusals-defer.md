@@ -42,9 +42,9 @@ it. `overlap`, `catch_up_window` and the provider-hold path keep ADR 0058 and AD
 unchanged.
 
 Restart catch-up does not settle a parked event. `recompute_recurring` advances a recurring clock
-past events the daemon slept through, but skips a Target whose current event carries a live
-deferral; the dispatcher then either fires it or records it as missed on the deadline it already
-had.
+past events the daemon slept through, but skips a Target whose current event carries a parked
+deferral — pending, or held while still retaining its deferral evidence; the dispatcher then either
+fires it or records it as missed on the deadline it already had.
 
 ## Consequences
 

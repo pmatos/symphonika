@@ -3469,6 +3469,35 @@ export class RunStore {
     return this.runIfClaimable(apply) ?? false;
   }
 
+  private routineTargetDeferralRow(
+    input: { name: string; projectName: string; scheduledAt: string },
+    predicate: string
+  ):
+    | {
+        deferred_attempts: number;
+        deferred_reason: RoutineDeferralReason;
+        deferred_since: string;
+      }
+    | undefined {
+    return this.database
+      .prepare(
+        [
+          "select t.deferred_reason, t.deferred_since, t.deferred_attempts",
+          DEFERRED_FANOUT_TARGET_SOURCE,
+          "where f.routine_name = ? and f.scheduled_at = ?",
+          "and t.project_name = ? and",
+          predicate
+        ].join(" ")
+      )
+      .get(input.name, input.scheduledAt, input.projectName) as
+      | {
+          deferred_attempts: number;
+          deferred_reason: RoutineDeferralReason;
+          deferred_since: string;
+        }
+      | undefined;
+  }
+
   // Whether restart schedule recomputation must preserve this clock event.
   // A provider-held leg is not a live capacity deferral for dispatch or
   // operator surfaces, but retained deferral evidence still means restart
@@ -3479,17 +3508,10 @@ export class RunStore {
     scheduledAt: string;
   }): boolean {
     return (
-      this.database
-        .prepare(
-          [
-            "select 1",
-            DEFERRED_FANOUT_TARGET_SOURCE,
-            "where f.routine_name = ? and f.scheduled_at = ?",
-            "and t.project_name = ? and",
-            PARKED_ROUTINE_DEFERRAL_PREDICATE
-          ].join(" ")
-        )
-        .get(input.name, input.scheduledAt, input.projectName) !== undefined
+      this.routineTargetDeferralRow(
+        input,
+        PARKED_ROUTINE_DEFERRAL_PREDICATE
+      ) !== undefined
     );
   }
 
@@ -3503,23 +3525,10 @@ export class RunStore {
     projectName: string;
     scheduledAt: string;
   }): RoutineDeferralStatus | undefined {
-    const row = this.database
-      .prepare(
-        [
-          "select t.deferred_reason, t.deferred_since, t.deferred_attempts",
-          DEFERRED_FANOUT_TARGET_SOURCE,
-          "where f.routine_name = ? and f.scheduled_at = ?",
-          "and t.project_name = ? and",
-          LIVE_ROUTINE_DEFERRAL_PREDICATE
-        ].join(" ")
-      )
-      .get(input.name, input.scheduledAt, input.projectName) as
-      | {
-          deferred_attempts: number;
-          deferred_reason: RoutineDeferralReason;
-          deferred_since: string;
-        }
-      | undefined;
+    const row = this.routineTargetDeferralRow(
+      input,
+      LIVE_ROUTINE_DEFERRAL_PREDICATE
+    );
     return row === undefined
       ? undefined
       : {

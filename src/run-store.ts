@@ -91,6 +91,14 @@ export const WATCHDOG_TERMINAL_REASONS = [
 
 export type WatchdogTerminalReason = (typeof WATCHDOG_TERMINAL_REASONS)[number];
 
+// Makes the Watchdog verdicts first-winner: a row that already carries one
+// refuses a competing verdict, while a transient attempt reason stays
+// replaceable. Derived from WATCHDOG_TERMINAL_REASONS so a new verdict cannot
+// be added without joining the guard.
+const UNCLAIMED_WATCHDOG_VERDICT_GUARD = `and (terminal_reason is null or terminal_reason not in (${WATCHDOG_TERMINAL_REASONS.map(
+  (reason) => `'${reason}'`
+).join(", ")}))`;
+
 // Once stop() records daemon_shutdown, later cancellation writers (an
 // in-flight reconcile or a UI cancel during the shutdown drain) must not
 // overwrite it — the shutdown contract requires the reason to stick for
@@ -1558,7 +1566,7 @@ export class RunStore {
           "where id = @id",
           "and state = 'running'",
           "and cancel_requested = 0",
-          "and (terminal_reason is null or terminal_reason not in ('no_progress', 'no_convergence', 'run_timeout'))",
+          UNCLAIMED_WATCHDOG_VERDICT_GUARD,
           generationGuard
         ].join(" ")
       )
@@ -1596,7 +1604,7 @@ export class RunStore {
           "updated_at = @updated_at",
           "where id = @id",
           "and cancel_requested = 0",
-          "and (terminal_reason is null or terminal_reason not in ('no_progress', 'no_convergence', 'run_timeout'))"
+          UNCLAIMED_WATCHDOG_VERDICT_GUARD
         ].join(" ")
       )
       .run({ id: runId, updated_at: updatedAt });

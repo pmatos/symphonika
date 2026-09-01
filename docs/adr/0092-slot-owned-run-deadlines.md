@@ -51,7 +51,8 @@ delivery state. This covers `queued -> stale -> preparing_workspace` and `stale 
 clobbers without allowing a later Watchdog reason to replace the winner or re-enqueueing an
 already-sent notification.
 
-Disabled Watchdog policy, `max_run_minutes: 0`, and an unparseable `created_at` arm no timer. A Run
+Disabled Watchdog policy, `max_run_minutes: 0`, a missing Run row, and an unparseable `created_at`
+arm no timer. A Run
 Slot Deadline is Run-scoped but not Run-chain-scoped: continuations and State Advances create new
 Run rows and therefore new origins, matching ADR 0089.
 
@@ -69,9 +70,12 @@ Run Slot Deadline is the deliberate exception to ADR 0054's former statement tha
 mutation is `running`- and generation-conditional: it protects a Run-scoped in-memory resource,
 and its state-independent CAS is safe only while the caller synchronously proves slot ownership.
 
-The initial fresh `sym:claimed` write still precedes Run-row creation and slot reservation, so it is
-outside this deadline. It cannot retain concurrency capacity. Retry claim writes occur after
-reservation and are covered.
+The initial fresh `sym:claimed` write still precedes Run-row creation and slot reservation, so it has
+no Run origin to measure from and sits outside the Run-scoped deadline. It cannot retain concurrency
+capacity, but it is not therefore harmless: it runs while `dispatchMutex` is held, so a hung request
+stalls every dispatch rather than one slot. It carries its own bound under the same policy, measured
+from the write rather than from the Run's origin, which the Run row records moments later. Retry
+claim writes occur after reservation and are covered by the Run-scoped deadline itself.
 
 ## Alternatives considered
 

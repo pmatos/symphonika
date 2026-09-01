@@ -45,6 +45,7 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
+import type { WatchdogConfig } from "../reload.js";
 import type { CancelReason, ProgressEdge, RunStore } from "../run-store.js";
 import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
@@ -81,6 +82,7 @@ import {
   RegistryShutdownError,
   type LifecyclePolicy
 } from "./active-runs.js";
+import { raceAbortSignal } from "../abort-race.js";
 import { probeStateArtifacts, statePredicateKeys } from "./artifact-probe.js";
 import {
   buildEdgeBudgetExhaustedReason,
@@ -280,9 +282,7 @@ export type RunControllerOptions = {
   stateRoot: string;
   // Resolves the effective daemon + Project Watchdog policy at slot claim.
   // Omitted by one-shot/unit callers that do not run the daemon Watchdog.
-  watchdogConfigLoader?: (
-    projectName: string
-  ) => Promise<{ enabled: boolean; maxRunMinutes: number }>;
+  watchdogConfigLoader?: (projectName: string) => Promise<RunDeadlinePolicy>;
 };
 
 export type DispatchOneFreshResult =
@@ -460,9 +460,11 @@ class FreshClaimDeferredError extends Error {
   readonly name = "FreshClaimDeferredError";
 }
 
-class RunTimeoutError extends Error {
-  readonly terminalReason = "run_timeout";
+// The Watchdog policy slice a Run Slot Deadline needs: whether the cap is on
+// at all, and how many wall-clock minutes it allows from the Run's claim.
+type RunDeadlinePolicy = Pick<WatchdogConfig, "enabled" | "maxRunMinutes">;
 
+class RunTimeoutError extends Error {
   constructor() {
     super(
       "run exceeded its wall-clock timeout while owning a concurrency slot"
@@ -488,18 +490,12 @@ const NO_RUN_SLOT_DEADLINE: RunSlotDeadline = {
 };
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
-
-function abortSignalError(signal: AbortSignal): Error {
-  const reason: unknown = signal.reason;
-  return reason instanceof Error
-    ? reason
-    : new Error("Run slot deadline aborted", { cause: reason });
-}
+const RUN_SLOT_DEADLINE_ABORT_MESSAGE = "Run slot deadline aborted";
 
 function runSlotDeadline(input: {
   createdAt: string;
   maxRunMinutes: number;
-  onExpire: (error: RunTimeoutError) => void;
+  onExpire: () => void;
 }): RunSlotDeadline {
   const createdAtMs = Date.parse(input.createdAt);
   if (input.maxRunMinutes <= 0 || Number.isNaN(createdAtMs)) {
@@ -521,9 +517,8 @@ function runSlotDeadline(input: {
     if (cleared || controller.signal.aborted) {
       return;
     }
-    const error = new RunTimeoutError();
-    controller.abort(error);
-    input.onExpire(error);
+    controller.abort(new RunTimeoutError());
+    input.onExpire();
   };
   const schedule = (): void => {
     if (cleared || controller.signal.aborted) {
@@ -547,23 +542,12 @@ function runSlotDeadline(input: {
     abortPreparation,
     arm: schedule,
     clear,
-    race: async <T>(operation: Promise<T>): Promise<T> => {
-      if (controller.signal.aborted) {
-        throw abortSignalError(controller.signal);
-      }
-      let removeAbortListener = (): void => undefined;
-      const aborted = new Promise<never>((_resolve, reject) => {
-        const onAbort = (): void => reject(abortSignalError(controller.signal));
-        controller.signal.addEventListener("abort", onAbort, { once: true });
-        removeAbortListener = () =>
-          controller.signal.removeEventListener("abort", onAbort);
-      });
-      try {
-        return await Promise.race([operation, aborted]);
-      } finally {
-        removeAbortListener();
-      }
-    },
+    race: <T>(operation: Promise<T>): Promise<T> =>
+      raceAbortSignal(
+        operation,
+        controller.signal,
+        RUN_SLOT_DEADLINE_ABORT_MESSAGE
+      ),
     signal: controller.signal
   };
 }
@@ -609,7 +593,7 @@ export class RunController {
   private readonly stateRoot: string;
   private readonly watchdogConfigLoader: (
     projectName: string
-  ) => Promise<{ enabled: boolean; maxRunMinutes: number }>;
+  ) => Promise<RunDeadlinePolicy>;
 
   constructor(options: RunControllerOptions) {
     this.activeRuns = options.activeRuns;
@@ -650,12 +634,12 @@ export class RunController {
     this.stateRoot = options.stateRoot;
     this.watchdogConfigLoader =
       options.watchdogConfigLoader ??
-      ((): Promise<{ enabled: boolean; maxRunMinutes: number }> =>
+      ((): Promise<RunDeadlinePolicy> =>
         Promise.resolve({ enabled: false, maxRunMinutes: 0 }));
   }
 
   private createRunSlotDeadline(input: {
-    config: { enabled: boolean; maxRunMinutes: number };
+    config: RunDeadlinePolicy;
     issueNumber: number;
     projectName: string;
     runId: string;
@@ -678,6 +662,18 @@ export class RunController {
         if (!marked) {
           return;
         }
+        // The sampled Watchdog logs its own verdict; without this the only
+        // trace of a deadline win is the row and the health notification.
+        this.logger?.warn(
+          {
+            issueNumber: input.issueNumber,
+            maxRunMinutes: input.config.maxRunMinutes,
+            project: input.projectName,
+            runId: input.runId,
+            terminalReason: "run_timeout"
+          },
+          "symphonika Run slot deadline marked run stale"
+        );
         void this.activeRuns
           .requestCancel(input.runId, CANCEL_REASONS.RUN_TIMEOUT)
           .catch((error: unknown) => {
@@ -3003,14 +2999,28 @@ export class RunController {
     let claimed = false;
     let deadline = NO_RUN_SLOT_DEADLINE;
     let runCreated = false;
+    // This write predates the Run row, so it cannot use the Run-scoped
+    // deadline armed further down, and it runs while dispatchMutex is held --
+    // a hung request would stall every other dispatch, not merely this slot.
+    // Bound it under the same policy, measured from now because the Run's
+    // origin is recorded moments later. See ADR 0092.
+    const claimSignal =
+      watchdogConfig.enabled && watchdogConfig.maxRunMinutes > 0
+        ? AbortSignal.timeout(
+            Math.min(watchdogConfig.maxRunMinutes * 60_000, MAX_TIMER_DELAY_MS)
+          )
+        : undefined;
     try {
-      await (
-        this.githubIssuesApi as LabelWritingGitHubIssuesApi
-      ).addLabelsToIssue({
-        ...input.repository,
-        issueNumber: input.issue.number,
-        labels: ["sym:claimed"]
-      });
+      await raceAbortSignal(
+        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
+          ...input.repository,
+          issueNumber: input.issue.number,
+          labels: ["sym:claimed"],
+          ...(claimSignal === undefined ? {} : { signal: claimSignal })
+        }),
+        claimSignal,
+        RUN_SLOT_DEADLINE_ABORT_MESSAGE
+      );
       claimed = true;
       this.logger?.info(
         {

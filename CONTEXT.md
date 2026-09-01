@@ -248,12 +248,6 @@ continued progress, cancels active workspace preparation or provider work, and f
 terminal reason `firing_timeout` after that work settles.
 _Avoid_: Watchdog timeout, no-progress grace
 
-**Run Slot Deadline**:
-The Run-scoped absolute wall-clock enforcement of `watchdog.max_run_minutes` while an issue Run owns
-in-flight capacity. It begins at the original Run claim, aborts pre-provider preparation or active
-provider work, and persists `run_timeout` independently of the Run row's current lifecycle state.
-_Avoid_: attempt timeout, Watchdog sample
-
 **Routine Skip**:
 An operator-visible clock attempt that did not create a Routine Firing because of a catch-up window,
 an overlapping non-terminal firing, a concurrency cap, or **Host Pressure**. It updates the Routine's latest skip
@@ -304,6 +298,12 @@ _Avoid_: daemon log line, issue Run digest
 The stateful progression of one Run from dispatch selection through provider execution, scheduling,
 waiting, cancellation, or terminal labels.
 _Avoid_: daemon loop when referring to Run-local progression
+
+**Run Slot Deadline**:
+The Run-scoped absolute wall-clock enforcement of `watchdog.max_run_minutes` while an issue Run owns
+in-flight capacity. It begins at the original Run claim, aborts pre-provider preparation or active
+provider work, and persists `run_timeout` independently of the Run row's current lifecycle state.
+_Avoid_: attempt timeout, Watchdog sample
 
 **Watchdog**:
 A daemon reconciliation component that samples active Runs for observable progress and marks wedged

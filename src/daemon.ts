@@ -92,6 +92,7 @@ import {
   computeReferencedRealPaths,
   resolveConfinedWritePath
 } from "./path-safety.js";
+import type { WatchdogConfig } from "./reload.js";
 import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
@@ -491,6 +492,14 @@ export async function startDaemon(
       ? {}
       : { readPressure: options.readHostPressure })
   });
+  const watchdogConfigFor = (
+    projectName: string
+  ): WatchdogConfig | undefined => {
+    const serviceConfig = runtimeConfig.watchdogServiceConfig();
+    return serviceConfig === undefined
+      ? undefined
+      : resolveWatchdogConfig(serviceConfig, projectName);
+  };
   const enqueueScheduledWork = (work: () => Promise<void>): void => {
     scheduledWork = scheduledWork.then(work, work);
     void scheduledWork;
@@ -545,10 +554,7 @@ export async function startDaemon(
     stateRoot: state.stateRoot,
     watchdogConfigLoader: (projectName) =>
       Promise.resolve(
-        resolveWatchdogConfig(
-          runtimeConfig.watchdogServiceConfig(),
-          projectName
-        )
+        watchdogConfigFor(projectName) ?? { enabled: false, maxRunMinutes: 0 }
       ),
     ...(options.createRunId === undefined
       ? {}
@@ -1719,12 +1725,7 @@ export async function startDaemon(
       }
     },
     getRuns: () => runStore.listRuns(),
-    getWatchdogConfig: (projectName) => {
-      const serviceConfig = runtimeConfig.watchdogServiceConfig();
-      return serviceConfig === undefined
-        ? undefined
-        : resolveWatchdogConfig(serviceConfig, projectName);
-    },
+    getWatchdogConfig: watchdogConfigFor,
     getScheduled: () => activeRuns.peekDelayed(),
     getStatusSnapshot: () =>
       buildStatusSnapshot({

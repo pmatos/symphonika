@@ -7,16 +7,21 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import { RunController } from "../src/lifecycle/run-controller.js";
+import type {
+  RunControllerOptions,
+  RunControllerProjectConfig
+} from "../src/lifecycle/run-controller.js";
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import { RuntimeConfigReloader } from "../src/reload.js";
+import type { RunStore } from "../src/run-store.js";
 import { openRunStore } from "../src/run-store.js";
 import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "../src/workspace.js";
+import { abortSignalMatcher } from "./helpers/abort-signal.js";
 
 const tempRoots: string[] = [];
-const abortSignalMatcher = expect.any(AbortSignal) as unknown as AbortSignal;
 
 afterEach(async () => {
   vi.useRealTimers();
@@ -60,32 +65,10 @@ describe("Run slot deadline", () => {
       validate: vi.fn().mockResolvedValue(undefined)
     };
     const onTerminated = vi.fn();
-    const controller = new RunController({
-      activeRuns,
-      agentProviders: { codex: provider },
-      configDir: root,
-      createRunId: () => "run-queued-timeout",
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubIssuesApi: {
-        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
-        listOpenIssues: vi.fn().mockResolvedValue([]),
-        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
-      },
-      lifecyclePolicy: {
-        continuation: { cap: 0, delayMs: 0 },
-        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
-      },
-      logger: pino({ enabled: false }),
-      onWatchdogTerminated: onTerminated,
-      prepareIssueWorkspace: vi.fn().mockResolvedValue(preparedWorkspace(root)),
-      projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
-      providersLoader: () => Promise.resolve(reloader.providersConfig()),
-      runStore,
-      schedule: () => undefined,
-      stateRoot: path.join(root, ".symphonika"),
-      watchdogConfigLoader: () =>
-        Promise.resolve({ enabled: true, maxRunMinutes: 1 })
-    });
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      { createRunId: () => "run-queued-timeout" }
+    );
 
     try {
       await expect(controller.dispatchOneFresh(pollStatus())).resolves.toEqual({
@@ -184,32 +167,13 @@ describe("Run slot deadline", () => {
       });
     };
     const onTerminated = vi.fn();
-    const controller = new RunController({
-      activeRuns,
-      agentProviders: { codex: provider },
-      configDir: root,
-      createRunId: () => "run-preparation-timeout",
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubIssuesApi: {
-        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
-        listOpenIssues: vi.fn().mockResolvedValue([]),
-        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
-      },
-      lifecyclePolicy: {
-        continuation: { cap: 0, delayMs: 0 },
-        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
-      },
-      logger: pino({ enabled: false }),
-      onWatchdogTerminated: onTerminated,
-      prepareIssueWorkspace,
-      projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
-      providersLoader: () => Promise.resolve(reloader.providersConfig()),
-      runStore,
-      schedule: () => undefined,
-      stateRoot: path.join(root, ".symphonika"),
-      watchdogConfigLoader: () =>
-        Promise.resolve({ enabled: true, maxRunMinutes: 1 })
-    });
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-preparation-timeout",
+        prepareIssueWorkspace
+      }
+    );
 
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T10:00:00.000Z"));
@@ -298,42 +262,27 @@ describe("Run slot deadline", () => {
     };
     const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
     const onTerminated = vi.fn();
-    const controller = new RunController({
-      activeRuns,
-      agentProviders: { codex: provider },
-      configDir: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubIssuesApi: {
-        addLabelsToIssue,
-        getIssue: vi.fn().mockResolvedValue({
-          body: issue.body,
-          created_at: issue.created_at,
-          html_url: issue.url,
-          id: issue.id,
-          labels: ["agent-ready", "sym:claimed"],
-          number: issue.number,
-          state: "open",
-          title: issue.title,
-          updated_at: issue.updated_at
-        }),
-        listOpenIssues: vi.fn().mockResolvedValue([]),
-        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
-      },
-      lifecyclePolicy: {
-        continuation: { cap: 0, delayMs: 0 },
-        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
-      },
-      logger: pino({ enabled: false }),
-      onWatchdogTerminated: onTerminated,
-      prepareIssueWorkspace: vi.fn().mockResolvedValue(preparedWorkspace(root)),
-      projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
-      providersLoader: () => Promise.resolve(reloader.providersConfig()),
-      runStore,
-      schedule: () => undefined,
-      stateRoot: path.join(root, ".symphonika"),
-      watchdogConfigLoader: () =>
-        Promise.resolve({ enabled: true, maxRunMinutes: 1 })
-    });
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        githubIssuesApi: {
+          addLabelsToIssue,
+          getIssue: vi.fn().mockResolvedValue({
+            body: issue.body,
+            created_at: issue.created_at,
+            html_url: issue.url,
+            id: issue.id,
+            labels: ["agent-ready", "sym:claimed"],
+            number: issue.number,
+            state: "open",
+            title: issue.title,
+            updated_at: issue.updated_at
+          }),
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+        }
+      }
+    );
 
     // The Run-scoped deadline started at the original claim, not when this
     // newer attempt reserved another slot.
@@ -422,32 +371,17 @@ describe("Run slot deadline", () => {
       validate: vi.fn().mockResolvedValue(undefined)
     };
     const onTerminated = vi.fn();
-    const controller = new RunController({
-      activeRuns,
-      agentProviders: { codex: provider },
-      configDir: root,
-      createRunId: () => "run-running-label-timeout",
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubIssuesApi: {
-        addLabelsToIssue,
-        listOpenIssues: vi.fn().mockResolvedValue([]),
-        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
-      },
-      lifecyclePolicy: {
-        continuation: { cap: 0, delayMs: 0 },
-        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
-      },
-      logger: pino({ enabled: false }),
-      onWatchdogTerminated: onTerminated,
-      prepareIssueWorkspace: vi.fn().mockResolvedValue(preparedWorkspace(root)),
-      projectsLoader: () => Promise.resolve(new Map([[project.name, project]])),
-      providersLoader: () => Promise.resolve(reloader.providersConfig()),
-      runStore,
-      schedule: () => undefined,
-      stateRoot: path.join(root, ".symphonika"),
-      watchdogConfigLoader: () =>
-        Promise.resolve({ enabled: true, maxRunMinutes: 1 })
-    });
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-running-label-timeout",
+        githubIssuesApi: {
+          addLabelsToIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+        }
+      }
+    );
 
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T11:00:00.000Z"));
@@ -481,7 +415,215 @@ describe("Run slot deadline", () => {
       runStore.close();
     }
   });
+
+  it("cancels an attached provider when the deadline wins mid-attempt", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    let attemptStarted = false;
+    let releaseAttempt: () => void = () => undefined;
+    const attemptStalled = new Promise<void>((resolve) => {
+      releaseAttempt = resolve;
+    });
+    // eslint-disable-next-line require-yield
+    async function* stalledAttempt(): AsyncGenerator<ProviderEvent> {
+      attemptStarted = true;
+      await attemptStalled;
+    }
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockImplementation(() => {
+        releaseAttempt();
+        return Promise.resolve();
+      }),
+      name: "codex",
+      runAttempt: vi.fn(stalledAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      { createRunId: () => "run-attached-timeout" }
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const dispatch = controller.dispatchOneFresh(pollStatus());
+    try {
+      await vi.waitFor(() => {
+        expect(attemptStarted).toBe(true);
+      });
+      // attachProvider has replaced the preparation handler by now, so the
+      // deadline must reach the provider rather than the abort controller.
+      expect(runStore.getRun("run-attached-timeout")?.state).toBe("running");
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushPromises();
+      await dispatch;
+
+      expect(provider.cancel).toHaveBeenCalledOnce();
+      expect(activeRuns.countInFlight()).toBe(0);
+      expect(runStore.getRun("run-attached-timeout")).toMatchObject({
+        failureClassification: "deterministic",
+        state: "stale",
+        terminalReason: "run_timeout"
+      });
+      expect(onTerminated).toHaveBeenCalledOnce();
+    } finally {
+      releaseAttempt();
+      await dispatch.catch(() => undefined);
+      runStore.close();
+    }
+  });
+
+  it.each([
+    { config: { enabled: false, maxRunMinutes: 1 }, label: "disabled policy" },
+    { config: { enabled: true, maxRunMinutes: 0 }, label: "a zero cap" }
+  ])("arms no timer under $label", async ({ config }) => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const onTerminated = vi.fn();
+    const controller = makeRunController(
+      { activeRuns, onTerminated, project, provider, reloader, root, runStore },
+      {
+        createRunId: () => "run-uncapped",
+        watchdogConfigLoader: () => Promise.resolve(config)
+      }
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T13:00:00.000Z"));
+    try {
+      const dispatch = controller.dispatchOneFresh(pollStatus());
+      // Far past any cap the policy would have applied had one been armed.
+      await vi.advanceTimersByTimeAsync(600_000);
+      await expect(dispatch).resolves.toEqual({
+        dispatched: true,
+        runId: "run-uncapped"
+      });
+
+      expect(provider.runAttempt).toHaveBeenCalledOnce();
+      expect(runStore.getRun("run-uncapped")?.terminalReason).not.toBe(
+        "run_timeout"
+      );
+      expect(onTerminated).not.toHaveBeenCalled();
+      expect(activeRuns.countInFlight()).toBe(0);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("refuses the timeout CAS once cancellation is requested", async () => {
+    const root = await makeTempRoot();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    try {
+      runStore.createRun({
+        evidenceIgnore: [],
+        id: "run-cancelled",
+        issue: pollStatus().candidateIssues[0]!.issue,
+        projectName: "symphonika",
+        providerCommand: "codex",
+        providerName: "codex"
+      });
+      runStore.markCancelRequested("run-cancelled", "operator");
+
+      expect(runStore.markSlotOwnedRunTimedOut("run-cancelled")).toBe(false);
+      expect(runStore.getRun("run-cancelled")).toMatchObject({
+        state: "queued",
+        terminalReason: null
+      });
+      expect(
+        runStore.reassertRunWatchdogStale("run-cancelled", "run_timeout")
+      ).toBe(false);
+      expect(runStore.listPendingRunNotifications()).toEqual([]);
+    } finally {
+      runStore.close();
+    }
+  });
 });
+
+function makeRunController(
+  deps: {
+    activeRuns: ActiveRunRegistry;
+    onTerminated: NonNullable<RunControllerOptions["onWatchdogTerminated"]>;
+    project: RunControllerProjectConfig;
+    provider: AgentProvider;
+    reloader: RuntimeConfigReloader;
+    root: string;
+    runStore: RunStore;
+  },
+  overrides: {
+    createRunId?: RunControllerOptions["createRunId"];
+    githubIssuesApi?: RunControllerOptions["githubIssuesApi"];
+    prepareIssueWorkspace?: RunControllerOptions["prepareIssueWorkspace"];
+    watchdogConfigLoader?: RunControllerOptions["watchdogConfigLoader"];
+  } = {}
+): RunController {
+  return new RunController({
+    activeRuns: deps.activeRuns,
+    agentProviders: { codex: deps.provider },
+    configDir: deps.root,
+    env: { GITHUB_TOKEN: "secret-token" },
+    ...(overrides.createRunId === undefined
+      ? {}
+      : { createRunId: overrides.createRunId }),
+    githubIssuesApi: overrides.githubIssuesApi ?? {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    },
+    lifecyclePolicy: {
+      continuation: { cap: 0, delayMs: 0 },
+      retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+    },
+    logger: pino({ enabled: false }),
+    onWatchdogTerminated: deps.onTerminated,
+    prepareIssueWorkspace:
+      overrides.prepareIssueWorkspace ??
+      vi.fn().mockResolvedValue(preparedWorkspace(deps.root)),
+    projectsLoader: () =>
+      Promise.resolve(new Map([[deps.project.name, deps.project]])),
+    providersLoader: () => Promise.resolve(deps.reloader.providersConfig()),
+    runStore: deps.runStore,
+    schedule: () => undefined,
+    stateRoot: path.join(deps.root, ".symphonika"),
+    watchdogConfigLoader:
+      overrides.watchdogConfigLoader ??
+      (() => Promise.resolve({ enabled: true, maxRunMinutes: 1 }))
+  });
+}
 
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-run-deadline-"));

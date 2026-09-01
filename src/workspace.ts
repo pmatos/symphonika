@@ -13,6 +13,7 @@ import {
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { raceAbortSignal } from "./abort-race.js";
 import {
   planWorkspacePaths,
   type WorkspacePathPlan
@@ -285,38 +286,10 @@ export async function ensureRepositoryCache(
   // Git and then releases the tail. Clearing it at caller-abort time would let
   // a third fetch bypass a predecessor that still owns the cache.
   void next.then(releaseLock, releaseLock);
-  await waitForAbortableOperation(turnStarted, signal);
+  await raceAbortSignal(turnStarted, signal, "Workspace preparation aborted");
   // Once this invocation owns the cache turn, await its Git process-group
   // teardown and staging-path cleanup rather than returning on signal alone.
   await next;
-}
-
-async function waitForAbortableOperation<T>(
-  operation: Promise<T>,
-  signal?: AbortSignal
-): Promise<T> {
-  if (signal === undefined) {
-    return await operation;
-  }
-  signal.throwIfAborted();
-  let removeAbortListener = (): void => undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    const onAbort = (): void => {
-      const reason: unknown = signal.reason;
-      reject(
-        reason instanceof Error
-          ? reason
-          : new Error("Workspace preparation aborted", { cause: reason })
-      );
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-  });
-  try {
-    return await Promise.race([operation, aborted]);
-  } finally {
-    removeAbortListener();
-  }
 }
 
 async function createRepositoryCache(

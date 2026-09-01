@@ -602,12 +602,26 @@ function gatesOn(
 function firstUncoveredPullRequestSignals(
   state: ExpandedWorkflowState
 ): WorkflowPredicateMap | undefined {
+  // completeWhen is an AND of every predicate it names: a combination is
+  // provably excluded from ever reaching the transitions loop when *any*
+  // resolvable predicate proves it unmet, regardless of whether other
+  // completeWhen predicates are statically resolvable at all -- see
+  // reachesTransitions. Whether completeWhen itself supplies the state's
+  // only pull-request predicate also has to reach transitionMatchesSignals:
+  // a transition matching purely on provider_success is only a genuine
+  // catch-all once completeWhen has already narrowed the combinations down
+  // to a PR-relevant subset.
+  const completeWhenGatesPrSignal = gatesOn(state.completeWhen, "pr_signal");
   return enumerateActionablePullRequestSignals()
     .filter((signals) => reachesTransitions(state.completeWhen, signals))
     .find(
       (signals) =>
         !state.transitions.some((transition) =>
-          transitionMatchesSignals(transition, signals)
+          transitionMatchesSignals(
+            transition,
+            signals,
+            completeWhenGatesPrSignal
+          )
         )
     );
 }
@@ -616,34 +630,28 @@ function firstUncoveredPullRequestSignals(
 // consulting transitions: a signal combination that fails it comes back
 // "blocked" without the transitions loop running at all, so that combination
 // needs no matching transition and is not an uncovered wait state. A
-// complete_when made only of pr_signal predicates (plus provider_success,
-// which observeWaitPullRequestSignals always sets true on a real PR-signal
-// observation -- same reasoning as transitionMatchesSignals below) can be
-// evaluated against the same synthetic maps the enumeration already builds.
-// A complete_when that also names a predicate this validator cannot resolve
-// statically (an artifact probe, another agent signal) is left unfiltered
-// instead of assumed satisfied, so the coverage check keeps its full
-// strength rather than risk exempting a case it cannot actually reason
-// about.
+// resolvable predicate (pr_signal, or provider_success which
+// observeWaitPullRequestSignals always sets true on a real PR-signal
+// observation) that this combination fails proves the combination is
+// excluded on its own, regardless of whether complete_when also names a
+// predicate this validator cannot resolve statically (an artifact probe,
+// another agent signal) -- complete_when is an AND, so one proven-unmet
+// predicate is enough. An unresolvable predicate can never prove a
+// combination excluded, so it never removes one from the coverage
+// requirement; that keeps the check from exempting a case it cannot
+// actually reason about.
 function reachesTransitions(
   completeWhen: WorkflowPredicateMap,
   signals: WorkflowPredicateMap
 ): boolean {
-  const entries = Object.entries(completeWhen);
-  if (
-    entries.some(
-      ([key]) =>
-        key !== "provider_success" &&
-        workflowPredicateEvaluation(key) !== "pr_signal"
-    )
-  ) {
-    return true;
-  }
-  return entries.every(([key, expected]) => {
+  return !Object.entries(completeWhen).some(([key, expected]) => {
     if (key === "provider_success") {
-      return expected === true;
+      return expected !== true;
     }
-    return signals[key] === expected;
+    if (workflowPredicateEvaluation(key) === "pr_signal") {
+      return signals[key] !== expected;
+    }
+    return false;
   });
 }
 
@@ -664,16 +672,24 @@ function reachesTransitions(
 // alongside it is not treated as observing pull request signals at all -- it
 // says nothing about which PR-signal case it covers -- and
 // provider_success: false never occurs for a PR-observing wait, so it still
-// correctly never matches.
+// correctly never matches. When complete_when itself supplies the state's
+// only pull-request predicate (completeWhenGatesPrSignal), the enumeration
+// this runs against has already been narrowed by reachesTransitions to
+// combinations that satisfy it -- so a transition matching purely on
+// provider_success is a genuine catch-all for that narrowed set, the same
+// way an unconditional transition is, and does not need a pr_signal
+// predicate of its own to justify counting as coverage.
 function transitionMatchesSignals(
   transition: WorkflowTransition,
-  signals: WorkflowPredicateMap
+  signals: WorkflowPredicateMap,
+  completeWhenGatesPrSignal: boolean
 ): boolean {
   const entries = Object.entries(transition.when);
   if (entries.length === 0) {
     return true;
   }
   if (
+    !completeWhenGatesPrSignal &&
     !entries.some(([key]) => workflowPredicateEvaluation(key) === "pr_signal")
   ) {
     return false;

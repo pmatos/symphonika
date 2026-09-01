@@ -1469,6 +1469,80 @@ describe("state machine workflow definitions", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("excludes only the combinations a resolvable complete_when predicate proves unmet, even alongside an unresolvable one", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: mixed_complete_when_gate",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "        artifact_exists: DONE",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            checks: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // checks: failure combinations are provably excluded on their own --
+    // complete_when is an AND, so that one resolvable predicate failing is
+    // enough regardless of whether artifact_exists can be resolved
+    // statically. checks: success combinations cannot be proven excluded
+    // (the artifact might exist), so they still need transition coverage,
+    // and the sole `checks: success` transition provides it.
+    expect(result.errors).toEqual([]);
+  });
+
+  it("lets a bare provider_success transition cover a wait whose only pull request predicate lives in complete_when", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: complete_when_only_provider_success",
+        "  initial: holding",
+        "  states:",
+        "    holding:",
+        "      action:",
+        "        kind: wait",
+        "      complete_when:",
+        "        checks: success",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            provider_success: true",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    // complete_when already narrows every combination this state has to
+    // cover down to checks: success, and provider_success is always true on
+    // a real observation, so the bare provider_success transition is a
+    // genuine catch-all for that narrowed set -- unlike the case where a
+    // transition (not complete_when) is what makes the state PR-observing,
+    // where a bare provider_success predicate still must not count (see
+    // "does not let an agent-signal transition cover a parked wait" above).
+    expect(result.errors).toEqual([]);
+  });
+
   it("accepts Oh My Pi for an agent action provider", async () => {
     const root = await makeTempRoot();
     const workflowPath = path.join(root, "workflow.yml");

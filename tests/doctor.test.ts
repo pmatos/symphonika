@@ -2029,7 +2029,18 @@ describe("doctor", () => {
       expect(warning).toContain("36 GiB");
     });
 
-    it.each(["bogus", "0", "10garbage", "32GB", "0%", "200%", "0B", "0 0"])(
+    it.each([
+      "bogus",
+      "0",
+      "10garbage",
+      "32GB",
+      "0%",
+      "200%",
+      "0B",
+      "0 0",
+      "Infinity",
+      "INFINITY"
+    ])(
       "falls back to the last valid MemoryMax= when a later drop-in is invalid (%s)",
       async (invalidValue) => {
         const report = await runProviderCapacityDoctor({
@@ -2073,6 +2084,19 @@ describe("doctor", () => {
       expect(warning).toContain("MemoryMax=32 G");
       expect(warning).toContain("(32 GiB)");
       expect(warning).toContain("36 GiB");
+    });
+
+    it("does not fall back past a lowercase MemoryMax=infinity reset", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "infinity",
+        hostParallelism: 24
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
     });
 
     // `service install --force` never reaches a host that doesn't re-run it,

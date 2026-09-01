@@ -962,10 +962,14 @@ function winningByteSizeAssignment(
     if (assignment.name !== name) {
       continue;
     }
-    if (
-      assignment.value.length === 0 ||
-      assignment.value.toLowerCase() === "infinity"
-    ) {
+    // Unlike winningAssignment (used for drift auditing, where any casing
+    // reads as an operator's intentional reset), systemd's own parser only
+    // recognizes the exact lowercase spelling — confirmed on systemd 261,
+    // where `MemoryMax=Infinity`/`INFINITY` are rejected and the previous
+    // assignment stays in force. A miscased spelling here falls through to
+    // isDefinitelyInvalidSystemdMemoryValue below and is treated as invalid
+    // text, exactly like "bogus".
+    if (assignment.value.length === 0 || assignment.value === "infinity") {
       return undefined;
     }
     if (isDefinitelyInvalidSystemdMemoryValue(assignment.value)) {

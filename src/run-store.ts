@@ -599,12 +599,18 @@ export type ProviderEventMetadataInput = {
   attemptId: string;
   normalized: NormalizedProviderEvent;
   raw: unknown;
+  receivedAt: string;
   runId: string;
   sequence: number;
 };
 
+// receivedAt is the caller's, not the store's: it must be captured when the
+// provider yields the event, before the evidence logs are appended. Deriving
+// it here would time the write instead of the transport, so a slow state root
+// would fabricate stalls out of its own latency. See ADR 0090.
 export type ProviderStreamReceiptInput = {
   attemptId: string;
+  receivedAt: string;
   runId: string;
   sequence: number;
 };
@@ -3997,7 +4003,7 @@ export class RunStore {
   }
 
   recordProviderEvent(input: ProviderEventMetadataInput): void {
-    const createdAt = timestamp();
+    const createdAt = input.receivedAt;
     const apply = this.database.transaction(() => {
       this.database
         .prepare(
@@ -4018,22 +4024,20 @@ export class RunStore {
           sequence: input.sequence,
           type: input.normalized.type
         });
-      this.insertProviderStreamReceipt(input, createdAt);
+      this.insertProviderStreamReceipt(input);
     });
     apply();
   }
 
   recordProviderStreamReceipt(input: ProviderStreamReceiptInput): void {
     const apply = this.database.transaction(() => {
-      this.insertProviderStreamReceipt(input, timestamp());
+      this.insertProviderStreamReceipt(input);
     });
     apply();
   }
 
-  private insertProviderStreamReceipt(
-    input: ProviderStreamReceiptInput,
-    receivedAt: string
-  ): void {
+  private insertProviderStreamReceipt(input: ProviderStreamReceiptInput): void {
+    const receivedAt = input.receivedAt;
     const previous = this.getProviderStreamReceipt(input.attemptId);
     // Only a gap between two receipts is transport silence. The wait before an
     // Attempt's first event is workspace preparation and provider startup, so

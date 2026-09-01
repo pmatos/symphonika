@@ -627,6 +627,7 @@ describe("HTTP app — runs API and pages", () => {
           attemptId: "provider-stream-detail-attempt-1",
           normalized: { type: "session_started" },
           raw: {},
+          receivedAt: new Date().toISOString(),
           runId: "provider-stream-detail",
           sequence: 1
         });
@@ -664,6 +665,7 @@ describe("HTTP app — runs API and pages", () => {
           attemptId: "provider-stream-recovered-attempt-1",
           normalized: { type: "message", message: "before retry" },
           raw: {},
+          receivedAt: new Date().toISOString(),
           runId: "provider-stream-recovered",
           sequence: 1
         });
@@ -673,6 +675,7 @@ describe("HTTP app — runs API and pages", () => {
           attemptId: "provider-stream-recovered-attempt-1",
           normalized: { type: "tool_call", command: "pwd" },
           raw: {},
+          receivedAt: new Date().toISOString(),
           runId: "provider-stream-recovered",
           sequence: 2
         });
@@ -727,6 +730,7 @@ describe("HTTP app — runs API and pages", () => {
           attemptId: "provider-stream-first-event-attempt-1",
           normalized: { type: "session_started" },
           raw: {},
+          receivedAt: new Date().toISOString(),
           runId: "provider-stream-first-event",
           sequence: 1
         });
@@ -772,6 +776,7 @@ describe("HTTP app — runs API and pages", () => {
           attemptId: "provider-stream-raw-activity-attempt-1",
           normalized: { type: "session_started" },
           raw: {},
+          receivedAt: new Date().toISOString(),
           runId: "provider-stream-raw-activity",
           sequence: 1
         });
@@ -779,6 +784,7 @@ describe("HTTP app — runs API and pages", () => {
       withClaimTime("2026-08-28T13:04:00.000Z", () => {
         test.runStore.recordProviderStreamReceipt({
           attemptId: "provider-stream-raw-activity-attempt-1",
+          receivedAt: new Date().toISOString(),
           runId: "provider-stream-raw-activity",
           sequence: 2
         });
@@ -803,6 +809,125 @@ describe("HTTP app — runs API and pages", () => {
         stalledForMs: null,
         thresholdMs: 300_000
       });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("measures stream gaps from receipt time, not evidence-write time", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        seedRunningAttempt(
+          test.runStore,
+          "provider-stream-slow-writes",
+          test.stateRoot
+        );
+        test.runStore.recordProviderEvent({
+          attemptId: "provider-stream-slow-writes-attempt-1",
+          normalized: { type: "session_started" },
+          raw: {},
+          receivedAt: "2026-08-28T13:00:00.000Z",
+          runId: "provider-stream-slow-writes",
+          sequence: 1
+        });
+      });
+      // The provider yielded its second event one minute later; the evidence
+      // appends that precede the Run Store write took forty more. Only the
+      // former is transport silence, so no stall may be recorded.
+      withClaimTime("2026-08-28T13:41:00.000Z", () => {
+        test.runStore.recordProviderEvent({
+          attemptId: "provider-stream-slow-writes-attempt-1",
+          normalized: { type: "message", message: "still here" },
+          raw: {},
+          receivedAt: "2026-08-28T13:01:00.000Z",
+          runId: "provider-stream-slow-writes",
+          sequence: 2
+        });
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:02:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request(
+        "/api/runs/provider-stream-slow-writes"
+      );
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(body.providerStream).toEqual({
+        lastEventAgeMs: 60_000,
+        lastEventAt: "2026-08-28T13:01:00.000Z",
+        recoveredStalls: [],
+        stalled: false,
+        stalledForMs: null,
+        thresholdMs: 300_000
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("freezes a terminal run's provider age no earlier than its last event", async () => {
+    const test = await setup();
+    try {
+      withClaimTime("2026-08-28T13:00:00.000Z", () => {
+        seedRunningAttempt(
+          test.runStore,
+          "provider-stream-terminal",
+          test.stateRoot
+        );
+      });
+      test.runStore.upsertWatchdogSample({
+        idleSince: null,
+        lastMessageAt: null,
+        lastProgressAt: null,
+        lastToolCallAt: null,
+        normalizedLogOffset: 0,
+        normalizedLogPath: "",
+        outputTokensTotal: 0,
+        runId: "provider-stream-terminal",
+        // Sampled before the attempt's final process_exit, which is the normal
+        // ordering: sampling stops the moment the Run leaves `running`.
+        sampledAt: "2026-08-28T13:05:00.000Z",
+        turnIdSetSize: 0,
+        workspaceDigest: "",
+        workspaceMtimeMax: 0
+      });
+      test.runStore.recordProviderEvent({
+        attemptId: "provider-stream-terminal-attempt-1",
+        normalized: { type: "process_exit", exitCode: 0 },
+        raw: {},
+        receivedAt: "2026-08-28T13:07:00.000Z",
+        runId: "provider-stream-terminal",
+        sequence: 1
+      });
+      withClaimTime("2026-08-28T13:08:00.000Z", () => {
+        test.runStore.updateRunState("provider-stream-terminal", "succeeded");
+      });
+
+      const app = createHttpApp({
+        now: () => Date.parse("2026-08-28T13:20:00.000Z"),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/api/runs/provider-stream-terminal");
+      const body = (await response.json()) as {
+        providerStream: { lastEventAgeMs: number; lastEventAt: string };
+      };
+
+      // Not 0: the watchdog sample predates the event, and clamping there
+      // would report the run's own last event as arriving in the future.
+      expect(body.providerStream.lastEventAgeMs).toBe(60_000);
+      expect(body.providerStream.lastEventAt).toBe("2026-08-28T13:07:00.000Z");
+
+      const page = await app.request("/runs/provider-stream-terminal");
+      const html = await page.text();
+      expect(html).toContain("1m ago");
+      expect(html).not.toContain("in 2m");
     } finally {
       test.cleanup();
     }
@@ -1391,6 +1516,7 @@ describe("HTTP app — runs API and pages", () => {
           attemptId: "run-stream-stalled-attempt-1",
           normalized: { type: "message", message: "still working" },
           raw: {},
+          receivedAt: new Date().toISOString(),
           runId: "run-stream-stalled",
           sequence: 1
         });
@@ -1454,6 +1580,7 @@ describe("HTTP app — runs API and pages", () => {
           type: "thinking"
         },
         raw: {},
+        receivedAt: new Date().toISOString(),
         runId: "run-thinking",
         sequence: 1
       });
@@ -1469,6 +1596,7 @@ describe("HTTP app — runs API and pages", () => {
           type: "thinking"
         },
         raw: {},
+        receivedAt: new Date().toISOString(),
         runId: "run-thinking",
         sequence: 2
       });

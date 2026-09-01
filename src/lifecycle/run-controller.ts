@@ -3792,6 +3792,10 @@ export class RunController {
     runId: string;
     sequence: number;
   }): Promise<void> {
+    // Stamped before the log appends, not after: the receipt is stall evidence
+    // about the provider transport, and awaiting two writes to a slow state
+    // root first would charge that latency to the provider. See ADR 0090.
+    const receivedAt = new Date().toISOString();
     await Promise.all([
       appendJsonl(input.rawLogPath, input.event.raw),
       ...(input.event.normalized === undefined
@@ -3801,6 +3805,7 @@ export class RunController {
     if (input.event.normalized === undefined) {
       this.runStore.recordProviderStreamReceipt({
         attemptId: input.attemptId,
+        receivedAt,
         runId: input.runId,
         sequence: input.sequence
       });
@@ -3810,6 +3815,7 @@ export class RunController {
       attemptId: input.attemptId,
       normalized: input.event.normalized,
       raw: input.event.raw,
+      receivedAt,
       runId: input.runId,
       sequence: input.sequence
     });

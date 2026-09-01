@@ -18,7 +18,16 @@ Every raw event advances one per-attempt `provider_stream_receipts` row containi
 raw sequence, and orchestrator receipt timestamp. It is a watermark, not a log: one row per Attempt,
 overwritten in place, which is why it is named for the receipt rather than for the events it counts.
 A normalized event advances the same row inside the transaction that writes `provider_events`; a
-raw-only event advances it without fabricating a Normalized Event Log entry. On upgrade, the newest
+raw-only event advances it without fabricating a Normalized Event Log entry.
+
+The receipt timestamp is captured where the provider yields the event, not where the Run Store
+writes it. Persisting an event first appends to the raw and normalized evidence logs, so deriving
+the timestamp inside the store would time the state root's writes rather than the provider's
+transport: a five-minute append would be persisted as a five-minute recovered stall, and slower
+writes would inflate every later gap. `receivedAt` is therefore a required input to both Run Store
+receipt methods; the store never invents this clock.
+
+On upgrade, the newest
 existing normalized event per Attempt seeds the receipt row, once, on the first open that finds the
 table empty. Raw-only activity from before this evidence existed cannot be reconstructed.
 
@@ -73,8 +82,15 @@ grace window without shortening a Run's life.
 
 ADR `0087` (Watchdog provider progress markers) decides what counts as a Progress Signal. Raw
 receipt activity is not added to that set: a keep-alive frame proves the transport is up, not that
-the Coding Agent is making progress. Both surfaces read the same effective clock
-(`resolveWatchdogNowMs`) so a terminal Run renders one consistent set of ages.
+the Coding Agent is making progress.
+
+Both surfaces freeze their ages on a terminal Run rather than drifting against a Run that stopped
+moving, but they freeze on different clocks because they rest on different evidence. The Watchdog
+freezes on its own latest sample (`resolveWatchdogNowMs`). Provider stream cannot: sampling stops
+the moment a Run leaves `running`, so the Attempt's final `process_exit` normally arrives after the
+last sample, and that sample would describe the Run's own last event as arriving "in 5m". The
+provider-stream clock (`resolveProviderStreamNowMs`) freezes on the terminal transition instead,
+floored at the latest receipt.
 
 ## Alternatives considered
 
@@ -91,4 +107,6 @@ termination would turn normal provider retry behavior into data loss.
 
 ## Numbering
 
-ADR `0089` is the most recent number in tree; this ADR is `0090`.
+ADR `0089` was the most recent number in tree when this ADR was written. `0090`-`0092` have since
+landed on `main`; duplicate numbers are already the tree's convention (`0087`-`0089` each name more
+than one decision), so this ADR keeps `0090`.

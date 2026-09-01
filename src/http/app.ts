@@ -594,9 +594,11 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       }
       const events = runStore.listProviderEvents(detail.id, { limit: 100 });
       const { attempts, transitions, ...run } = detail;
-      // Both observability sections read the same effective clock so a
-      // terminal Run does not pair a frozen Watchdog age with an ever-drifting
-      // provider-event age. See resolveWatchdogNowMs in watchdog-status.ts.
+      // A terminal Run must not pair a frozen Watchdog age with an
+      // ever-drifting provider-event age, so both sections freeze — each on
+      // the clock its own evidence supports. See resolveWatchdogNowMs in
+      // watchdog-status.ts and resolveProviderStreamNowMs in
+      // provider-stream-status.ts.
       const detailNowMs = resolveWatchdogNowMs({
         liveNowMs: now(),
         runId: run.id,
@@ -616,7 +618,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         events,
         providerStream: buildProviderStreamStatus({
           attempt: attempts.at(-1),
-          nowMs: detailNowMs,
+          liveNowMs: now(),
           runId: run.id,
           runState: run.state,
           runStore

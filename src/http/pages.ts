@@ -696,7 +696,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           });
     const providerStream = buildProviderStreamStatus({
       attempt: terminalAttempt,
-      nowMs: detailNowMs,
+      liveNowMs: now(),
       runId: detail.id,
       runState: detail.state,
       runStore: options.runStore
@@ -715,7 +715,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       renderPullRequestFollowupAttention(pullRequestFollowup),
       renderWorkflowProgressAttention(buildWorkflowProgressAttention(detail)),
       renderRunSummary(detail, capContext),
-      renderProviderStreamSection(providerStream, detailNowMs),
+      renderProviderStreamSection(providerStream),
       renderWatchdogSection(watchdog, outputTokenGrowth5m, detailNowMs),
       renderWorkflowGraphSummary(detail.id, workflowGraph),
       renderCancelForm(detail, csrfToken),
@@ -6824,10 +6824,7 @@ function renderWatchdogSection(
 </dl></section>`;
 }
 
-function renderProviderStreamSection(
-  status: ProviderStreamStatus,
-  nowMs: number
-): string {
+function renderProviderStreamSection(status: ProviderStreamStatus): string {
   const threshold = escapeHtml(formatWatchdogDuration(status.thresholdMs));
   const stalledBanner =
     status.stalledForMs === null
@@ -6836,7 +6833,7 @@ function renderProviderStreamSection(
   const lastEvent =
     status.lastEventAt === null
       ? `<span class="muted">none recorded</span>`
-      : `<code>${renderTimestamp(status.lastEventAt)}</code> <span class="muted">(${escapeHtml(formatAge(status.lastEventAt, nowMs))})</span>`;
+      : `<code>${renderTimestamp(status.lastEventAt)}</code> <span class="muted">(${escapeHtml(formatWatchdogDuration(status.lastEventAgeMs ?? 0))} ago)</span>`;
   const latestStall = status.recoveredStalls.at(-1);
   const recoveredStalls =
     latestStall === undefined

@@ -2526,9 +2526,10 @@ non-terminal observation, not an idle-kill timer or a Watchdog Progress Signal. 
 clears it and, when the gap fell between two receipts, durably records the gap's start, prior and
 resuming sequences, resume timestamp, and duration for distribution measurement. The wait before an
 Attempt's first receipt is workspace preparation rather than transport silence, so it is never
-recorded as a stall. Both the Run-detail page and `GET /api/runs/:id` read the same effective clock
-the Watchdog uses, so a terminal Run does not pair a frozen Watchdog age with a drifting
-provider-event age. See ADR 0090.
+recorded as a stall. Both the Run-detail page and `GET /api/runs/:id` freeze this age on a terminal
+Run rather than letting it drift, but on the terminal transition floored at the latest receipt
+rather than on the Watchdog's own last sample — sampling stops when a Run leaves `running`, so the
+Attempt's final `process_exit` normally arrives after it. See ADR 0090.
 
 The server-rendered dashboard and `/runs` list surface the same idle/grace state as a small
 "watchdog idle since X (Y remaining)" badge next to the state pill, shown only for active

@@ -10,7 +10,6 @@ import {
 import { availableParallelism, homedir } from "node:os";
 import path from "node:path";
 import { stdin, stdout } from "node:process";
-import { createInterface as createLineInterface } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import { Octokit } from "@octokit/rest";
 import { isSeq, parse, parseDocument } from "yaml";
@@ -152,6 +151,10 @@ type InitProjectPromptInput = {
 };
 
 type InitProjectPrompt = (input: InitProjectPromptInput) => Promise<string>;
+
+function formatInitProjectPromptLabel(input: InitProjectPromptInput): string {
+  return `${input.message} [${input.defaultValue}]: `;
+}
 
 type InitProjectProjectReport = {
   createdEligibilityLabels: string[];
@@ -1578,12 +1581,14 @@ export async function runInitProject(
     }
   }
 
+  const promptOption = prompt === undefined ? {} : { prompt };
+
   let settings: ProjectInitSettings;
   try {
     settings = await collectProjectSettings({
       metadata,
       mode,
-      ...(prompt === undefined ? {} : { prompt }),
+      ...promptOption,
       yes: options.yes === true
     });
   } catch (error) {
@@ -1725,7 +1730,7 @@ export async function runInitProject(
       ...(options.onWarning === undefined
         ? {}
         : { onWarning: options.onWarning }),
-      ...(prompt === undefined ? {} : { prompt }),
+      ...promptOption,
       project: dispatchProject,
       validation: accessValidation,
       warnings,
@@ -1892,7 +1897,7 @@ async function collectProjectSettings(input: {
 
 async function createPipedInitProjectPrompt(): Promise<InitProjectPrompt> {
   const answers: string[] = [];
-  const lines = createLineInterface({
+  const lines = createInterface({
     crlfDelay: Number.POSITIVE_INFINITY,
     input: stdin
   });
@@ -1901,15 +1906,16 @@ async function createPipedInitProjectPrompt(): Promise<InitProjectPrompt> {
   }
 
   return (input) => {
-    stdout.write(`${input.message} [${input.defaultValue}]: `);
-    if (answers.length === 0) {
+    stdout.write(formatInitProjectPromptLabel(input));
+    const answer = answers.shift();
+    if (answer === undefined) {
       return Promise.reject(
         new Error(
           "interactive input ended before all prompts were answered; pass --yes to accept defaults"
         )
       );
     }
-    return Promise.resolve(answers.shift() ?? "");
+    return Promise.resolve(answer);
   };
 }
 
@@ -1937,7 +1943,7 @@ function createInitProjectPromptController(
   return {
     ask: async (input) => {
       const answer = await readline.question(
-        `${input.message} [${input.defaultValue}]: `
+        formatInitProjectPromptLabel(input)
       );
       return answer.trim().length === 0 ? input.defaultValue : answer.trim();
     },

@@ -728,7 +728,7 @@ async function runCliWithInput(
   args: string[],
   input: string,
   cwd: string,
-  scriptPath = path.join(repoRoot, "src", "cli.ts")
+  scriptPath: string
 ): Promise<{ exitCode: number | null; stderr: string; stdout: string }> {
   const child = spawn(
     process.execPath,

@@ -299,6 +299,35 @@ describe("Project initialization", () => {
     expect(result.exitCode).toBe(0);
   });
 
+  it("exits once prompting completes even if the piped stdin is kept open", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "new-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    const cliHarnessPath = path.join(
+      repoRoot,
+      "tests",
+      "helpers",
+      "init-project-cli-harness.ts"
+    );
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/new-project.git"
+    );
+    await writeEmptyConfig(configPath, root);
+
+    const result = await runCliWithoutClosingStdin(
+      ["init-project", "--config", configPath],
+      ["", "", "main", "agent-ready", "", "", "WORKFLOW.md", "yes", "yes"].join(
+        "\n"
+      ) + "\n",
+      repositoryRoot,
+      cliHarnessPath
+    );
+
+    expect(result.stdout).toContain("init-project ok: registered 1 Project");
+    expect(result.exitCode).toBe(0);
+  });
+
   it("force replaces only the matching Project instead of adding a duplicate", async () => {
     const root = await makeTempRoot();
     const repositoryRoot = path.join(root, "new-project");
@@ -853,6 +882,68 @@ async function runCliWithLockStepInput(
     child.once("close", resolve);
   });
   return { exitCode, stderr, stdout };
+}
+
+async function runCliWithoutClosingStdin(
+  args: string[],
+  input: string,
+  cwd: string,
+  scriptPath: string
+): Promise<{ exitCode: number | null; stderr: string; stdout: string }> {
+  const child = spawn(
+    process.execPath,
+    [
+      "--import",
+      path.join(repoRoot, "node_modules", "tsx", "dist", "loader.mjs"),
+      scriptPath,
+      ...args
+    ],
+    {
+      cwd,
+      env: { ...process.env, GITHUB_TOKEN: "unused-test-token" },
+      stdio: ["pipe", "pipe", "pipe"]
+    }
+  );
+  let stderr = "";
+  let stdout = "";
+  child.stderr.setEncoding("utf8");
+  child.stdout.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+
+  // Deliberately do not end stdin here: a writer that keeps the pipe open
+  // until it observes the child has finished (e.g. `docker exec -i`) must
+  // not deadlock waiting for the process to exit on its own.
+  child.stdin.write(input);
+
+  try {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(
+          new Error(
+            `process did not exit within 10s after prompting completed; stdout so far: ${stdout}`
+          )
+        );
+      }, 10_000);
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      child.once("close", (code) => {
+        clearTimeout(timeout);
+        resolve(code);
+      });
+    });
+    return { exitCode, stderr, stdout };
+  } finally {
+    if (!child.killed) {
+      child.kill();
+    }
+  }
 }
 
 async function createGitHubRepository(

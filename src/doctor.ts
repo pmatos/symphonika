@@ -1572,192 +1572,213 @@ export async function runInitProject(
   }
 
   let prompt = options.prompt;
+  let closePipedPrompt: (() => void) | undefined;
   if (prompt === undefined && options.yes !== true && stdin.isTTY !== true) {
     try {
-      prompt = createPipedInitProjectPrompt();
+      const piped = createPipedInitProjectPrompt();
+      prompt = piped.ask;
+      closePipedPrompt = piped.close;
     } catch (error) {
       errors.push(errorMessage(error));
       return initProjectReport(configPath, errors, warnings, projects);
     }
   }
 
-  const promptOption = prompt === undefined ? {} : { prompt };
-
-  let settings: ProjectInitSettings;
   try {
-    settings = await collectProjectSettings({
-      metadata,
-      mode,
-      ...promptOption,
-      yes: options.yes === true
-    });
-  } catch (error) {
-    errors.push(errorMessage(error));
-    return initProjectReport(configPath, errors, warnings, projects);
-  }
+    const promptOption = prompt === undefined ? {} : { prompt };
 
-  let stateRoot: string;
-  try {
-    stateRoot = resolveStateRoot({ configPath, cwd, env }).stateRoot;
-  } catch (error) {
-    errors.push(errorMessage(error));
-    return initProjectReport(configPath, errors, warnings, projects);
-  }
+    let settings: ProjectInitSettings;
+    try {
+      settings = await collectProjectSettings({
+        metadata,
+        mode,
+        ...promptOption,
+        yes: options.yes === true
+      });
+    } catch (error) {
+      errors.push(errorMessage(error));
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
 
-  const project = buildProjectConfig({ metadata, settings, stateRoot });
-  const rawProjects = projectsNode.toJSON();
-  const matchingIndexes = rawProjects.reduce<number[]>(
-    (indexes, entry, index) => {
-      const rawName =
-        typeof entry === "object" && entry !== null && "name" in entry
-          ? (entry as { name?: unknown }).name
-          : undefined;
-      if (
-        typeof rawName === "string" &&
-        rawName.trim() === settings.projectName
-      ) {
-        indexes.push(index);
+    let stateRoot: string;
+    try {
+      stateRoot = resolveStateRoot({ configPath, cwd, env }).stateRoot;
+    } catch (error) {
+      errors.push(errorMessage(error));
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+
+    const project = buildProjectConfig({ metadata, settings, stateRoot });
+    const rawProjects = projectsNode.toJSON();
+    const matchingIndexes = rawProjects.reduce<number[]>(
+      (indexes, entry, index) => {
+        const rawName =
+          typeof entry === "object" && entry !== null && "name" in entry
+            ? (entry as { name?: unknown }).name
+            : undefined;
+        if (
+          typeof rawName === "string" &&
+          rawName.trim() === settings.projectName
+        ) {
+          indexes.push(index);
+        }
+        return indexes;
+      },
+      []
+    );
+    if (matchingIndexes.length > 1) {
+      errors.push(
+        `project ${settings.projectName} appears ${matchingIndexes.length} times in ${configPath}; remove the duplicate Projects before running init-project`
+      );
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+    const existingIndex = matchingIndexes[0] ?? -1;
+    if (existingIndex >= 0 && options.force !== true) {
+      errors.push(
+        `project ${settings.projectName} already exists in ${configPath}; pass --force to replace that Project`
+      );
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+    if (existingIndex >= 0) {
+      document.setIn(["projects", existingIndex], project);
+    } else {
+      projectsNode.add(project);
+    }
+
+    const parsedConfig = parseServiceConfig(document.toJS(), errors);
+    if (parsedConfig === undefined) {
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+
+    const registeredProject = parsedConfig.projects.find(
+      (entry) => entry.name === settings.projectName
+    );
+    if (registeredProject === undefined) {
+      errors.push(
+        `registered Project ${settings.projectName} could not be read`
+      );
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+
+    if (settings.mode === "routine_host") {
+      // A Routine Host has no workflow, no GitHub access check, no sym:*
+      // labels. Write the config directly. See ADR 0062.
+      try {
+        await writeFile(configPath, document.toString(), "utf8");
+      } catch (error) {
+        errors.push(
+          `service config could not be written at ${configPath}: ${errorMessage(error)}`
+        );
       }
-      return indexes;
-    },
-    []
-  );
-  if (matchingIndexes.length > 1) {
-    errors.push(
-      `project ${settings.projectName} appears ${matchingIndexes.length} times in ${configPath}; remove the duplicate Projects before running init-project`
+      const github = asGitHubMetadata(metadata);
+      projects.push({
+        createdEligibilityLabels: [],
+        createdOperationalLabels: [],
+        missingEligibilityLabels: [],
+        missingOperationalLabels: [],
+        name: settings.projectName,
+        repository:
+          github === undefined
+            ? metadata.remote
+            : `${github.owner}/${github.repo}`
+      });
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+    if (registeredProject.mode !== "dispatch") {
+      errors.push(
+        `registered Project ${settings.projectName} is not a dispatch project; dispatch init requires mode: dispatch`
+      );
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+    const dispatchProject: DispatchProjectConfig = registeredProject;
+
+    const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
+    const accessValidation = await validateProjectGitHubAccess({
+      env,
+      errors,
+      githubApi,
+      project: dispatchProject
+    });
+    if (accessValidation === undefined) {
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+
+    let createdWorkflow = false;
+    if (!(await fileExists(settings.workflowPath))) {
+      const resolvedFormat = resolveWorkflowFormat(
+        dispatchProject.workflow.format,
+        settings.workflowPath
+      );
+      if (resolvedFormat.kind !== "markdown") {
+        errors.push(
+          resolvedFormat.kind === "error"
+            ? `starter Workflow Contract could not be created at ${settings.workflowPath}: ${resolvedFormat.error}`
+            : `starter Workflow Contract could not be created at ${settings.workflowPath}: the path resolves to the raw_fsm workflow format; init-project only scaffolds Markdown contracts, so create this file manually or choose a path ending in .md`
+        );
+        return initProjectReport(configPath, errors, warnings, projects);
+      }
+      try {
+        await mkdir(path.dirname(settings.workflowPath), { recursive: true });
+        await writeFile(
+          settings.workflowPath,
+          defaultWorkflowContract(),
+          "utf8"
+        );
+        createdWorkflow = true;
+      } catch (error) {
+        errors.push(
+          `starter Workflow Contract could not be created at ${settings.workflowPath}: ${errorMessage(error)}`
+        );
+        return initProjectReport(configPath, errors, warnings, projects);
+      }
+    }
+
+    projects.push(
+      await createProjectLabels({
+        errors,
+        githubApi,
+        ...(options.onWarning === undefined
+          ? {}
+          : { onWarning: options.onWarning }),
+        ...promptOption,
+        project: dispatchProject,
+        validation: accessValidation,
+        warnings,
+        yes: options.yes === true
+      })
     );
-    return initProjectReport(configPath, errors, warnings, projects);
-  }
-  const existingIndex = matchingIndexes[0] ?? -1;
-  if (existingIndex >= 0 && options.force !== true) {
-    errors.push(
-      `project ${settings.projectName} already exists in ${configPath}; pass --force to replace that Project`
-    );
-    return initProjectReport(configPath, errors, warnings, projects);
-  }
-  if (existingIndex >= 0) {
-    document.setIn(["projects", existingIndex], project);
-  } else {
-    projectsNode.add(project);
-  }
+    if (errors.length > 0) {
+      await removeCreatedWorkflow(
+        settings.workflowPath,
+        createdWorkflow,
+        errors
+      );
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
 
-  const parsedConfig = parseServiceConfig(document.toJS(), errors);
-  if (parsedConfig === undefined) {
-    return initProjectReport(configPath, errors, warnings, projects);
-  }
-
-  const registeredProject = parsedConfig.projects.find(
-    (entry) => entry.name === settings.projectName
-  );
-  if (registeredProject === undefined) {
-    errors.push(`registered Project ${settings.projectName} could not be read`);
-    return initProjectReport(configPath, errors, warnings, projects);
-  }
-
-  if (settings.mode === "routine_host") {
-    // A Routine Host has no workflow, no GitHub access check, no sym:*
-    // labels. Write the config directly. See ADR 0062.
     try {
       await writeFile(configPath, document.toString(), "utf8");
     } catch (error) {
       errors.push(
         `service config could not be written at ${configPath}: ${errorMessage(error)}`
       );
-    }
-    const github = asGitHubMetadata(metadata);
-    projects.push({
-      createdEligibilityLabels: [],
-      createdOperationalLabels: [],
-      missingEligibilityLabels: [],
-      missingOperationalLabels: [],
-      name: settings.projectName,
-      repository:
-        github === undefined
-          ? metadata.remote
-          : `${github.owner}/${github.repo}`
-    });
-    return initProjectReport(configPath, errors, warnings, projects);
-  }
-  if (registeredProject.mode !== "dispatch") {
-    errors.push(
-      `registered Project ${settings.projectName} is not a dispatch project; dispatch init requires mode: dispatch`
-    );
-    return initProjectReport(configPath, errors, warnings, projects);
-  }
-  const dispatchProject: DispatchProjectConfig = registeredProject;
-
-  const githubApi = options.githubApi ?? DEFAULT_GITHUB_API;
-  const accessValidation = await validateProjectGitHubAccess({
-    env,
-    errors,
-    githubApi,
-    project: dispatchProject
-  });
-  if (accessValidation === undefined) {
-    return initProjectReport(configPath, errors, warnings, projects);
-  }
-
-  let createdWorkflow = false;
-  if (!(await fileExists(settings.workflowPath))) {
-    const resolvedFormat = resolveWorkflowFormat(
-      dispatchProject.workflow.format,
-      settings.workflowPath
-    );
-    if (resolvedFormat.kind !== "markdown") {
-      errors.push(
-        resolvedFormat.kind === "error"
-          ? `starter Workflow Contract could not be created at ${settings.workflowPath}: ${resolvedFormat.error}`
-          : `starter Workflow Contract could not be created at ${settings.workflowPath}: the path resolves to the raw_fsm workflow format; init-project only scaffolds Markdown contracts, so create this file manually or choose a path ending in .md`
+      await removeCreatedWorkflow(
+        settings.workflowPath,
+        createdWorkflow,
+        errors
       );
-      return initProjectReport(configPath, errors, warnings, projects);
     }
-    try {
-      await mkdir(path.dirname(settings.workflowPath), { recursive: true });
-      await writeFile(settings.workflowPath, defaultWorkflowContract(), "utf8");
-      createdWorkflow = true;
-    } catch (error) {
-      errors.push(
-        `starter Workflow Contract could not be created at ${settings.workflowPath}: ${errorMessage(error)}`
-      );
-      return initProjectReport(configPath, errors, warnings, projects);
-    }
-  }
 
-  projects.push(
-    await createProjectLabels({
+    return initProjectReport(
+      configPath,
       errors,
-      githubApi,
-      ...(options.onWarning === undefined
-        ? {}
-        : { onWarning: options.onWarning }),
-      ...promptOption,
-      project: dispatchProject,
-      validation: accessValidation,
       warnings,
-      yes: options.yes === true
-    })
-  );
-  if (errors.length > 0) {
-    await removeCreatedWorkflow(settings.workflowPath, createdWorkflow, errors);
-    return initProjectReport(configPath, errors, warnings, projects);
-  }
-
-  try {
-    await writeFile(configPath, document.toString(), "utf8");
-  } catch (error) {
-    errors.push(
-      `service config could not be written at ${configPath}: ${errorMessage(error)}`
+      projects,
+      createdWorkflow && errors.length === 0 ? settings.workflowPath : null
     );
-    await removeCreatedWorkflow(settings.workflowPath, createdWorkflow, errors);
+  } finally {
+    closePipedPrompt?.();
   }
-
-  return initProjectReport(
-    configPath,
-    errors,
-    warnings,
-    projects,
-    createdWorkflow && errors.length === 0 ? settings.workflowPath : null
-  );
 }
 
 type ProjectInitSettings = {
@@ -1895,22 +1916,28 @@ async function collectProjectSettings(input: {
   }
 }
 
-function createPipedInitProjectPrompt(): InitProjectPrompt {
+function createPipedInitProjectPrompt(): {
+  ask: InitProjectPrompt;
+  close: () => void;
+} {
   const lines = createInterface({
     crlfDelay: Number.POSITIVE_INFINITY,
     input: stdin
   });
   const answers = lines[Symbol.asyncIterator]();
 
-  return async (input) => {
-    stdout.write(formatInitProjectPromptLabel(input));
-    const next = await answers.next();
-    if (next.done === true) {
-      throw new Error(
-        "interactive input ended before all prompts were answered; pass --yes to accept defaults"
-      );
-    }
-    return next.value;
+  return {
+    ask: async (input) => {
+      stdout.write(formatInitProjectPromptLabel(input));
+      const next = await answers.next();
+      if (next.done === true) {
+        throw new Error(
+          "interactive input ended before all prompts were answered; pass --yes to accept defaults"
+        );
+      }
+      return next.value;
+    },
+    close: () => lines.close()
   };
 }
 

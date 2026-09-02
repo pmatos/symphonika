@@ -2,7 +2,13 @@
 set -euo pipefail
 
 input=$(cat)
-file_path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')
+file_path=$(printf '%s' "$input" | node -e '
+  let data = "";
+  process.stdin.on("data", (chunk) => { data += chunk; });
+  process.stdin.on("end", () => {
+    process.stdout.write(JSON.parse(data).tool_input?.file_path ?? "");
+  });
+')
 
 if [[ -z "$file_path" || ! -f "$file_path" ]]; then
   exit 0

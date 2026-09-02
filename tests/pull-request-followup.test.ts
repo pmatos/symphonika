@@ -387,7 +387,7 @@ describe("pull request follow-up", () => {
           Promise.resolve(new Map([[project.name, project]])),
         providersLoader: () => Promise.resolve(providersConfig()),
         runStore: store,
-        schedule: () => undefined,
+        schedule: () => true,
         stateRoot: path.join(root, ".symphonika")
       });
 
@@ -605,6 +605,7 @@ describe("pull request follow-up", () => {
           if (kind === "retry") {
             scheduledRetries.push(fire);
           }
+          return true;
         },
         workspacePath
       });
@@ -794,6 +795,7 @@ describe("pull request follow-up", () => {
           if (scheduleInput.kind === "retry") {
             scheduledRetries.push(scheduleInput.fire);
           }
+          return true;
         },
         stateRoot: path.join(root, ".symphonika")
       });
@@ -950,6 +952,7 @@ describe("pull request follow-up", () => {
           if (input.kind === "continuation") {
             scheduledContinuations.push(input.fire);
           }
+          return true;
         },
         workspacePath
       });
@@ -1803,7 +1806,7 @@ describe("pull request follow-up", () => {
           Promise.resolve(new Map([[project.name, project]])),
         providersLoader: () => Promise.resolve(providersConfig()),
         runStore: store,
-        schedule: (item) => {
+        schedule: (item) =>
           activeRuns.scheduleDelayed({
             delayMs: 60_000,
             fire: item.fire,
@@ -1811,8 +1814,7 @@ describe("pull request follow-up", () => {
             kind: item.kind,
             projectName: item.projectName,
             runId: item.runId
-          });
-        },
+          }),
         stateRoot: path.join(root, ".symphonika")
       });
 
@@ -1930,7 +1932,7 @@ function runController(input: {
       Promise.resolve(new Map([[input.project.name, input.project]])),
     providersLoader: () => Promise.resolve(providersConfig()),
     runStore: input.runStore,
-    schedule: input.schedule ?? (() => undefined),
+    schedule: input.schedule ?? (() => true),
     stateRoot: path.join(input.root, ".symphonika")
   });
 }

@@ -156,7 +156,7 @@ describe("resumeShutdownCancelledRuns", () => {
         currentStateId: "implement"
       });
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const removeLabelsFromIssue = vi.fn().mockResolvedValue(undefined);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
@@ -206,7 +206,7 @@ describe("resumeShutdownCancelledRuns", () => {
     await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, { currentStateId: "implement" });
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const removeLabelsFromIssue = vi.fn().mockResolvedValue(undefined);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
@@ -248,7 +248,7 @@ describe("resumeShutdownCancelledRuns", () => {
     await withRunStore(async (store, root) => {
       const runId = seedShutdownCancelledRun(store);
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const removeLabelsFromIssue = vi.fn().mockResolvedValue(undefined);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
@@ -298,7 +298,7 @@ describe("resumeShutdownCancelledRuns", () => {
     await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store);
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
       const githubIssuesApi: GitHubIssuesApi = {
         addLabelsToIssue,
@@ -342,7 +342,7 @@ describe("resumeShutdownCancelledRuns", () => {
   it("defers the resume when clearing an earlier sym:stale fails, and retries next pass", async () => {
     await withRunStore(async (store, root) => {
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const removeLabelsFromIssue = vi
         .fn()
         .mockRejectedValueOnce(new Error("boom"))
@@ -393,7 +393,7 @@ describe("resumeShutdownCancelledRuns", () => {
     await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store);
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
         removeLabelsFromIssue: vi.fn().mockRejectedValue(new Error("boom"))
@@ -431,7 +431,7 @@ describe("resumeShutdownCancelledRuns", () => {
         projectName: project.name,
         runId: "run-live"
       });
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
         removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
@@ -463,7 +463,7 @@ describe("resumeShutdownCancelledRuns", () => {
     await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, { currentStateId: "implement" });
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
         removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
@@ -496,7 +496,7 @@ describe("resumeShutdownCancelledRuns", () => {
     await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, { currentStateId: "implement" });
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
         removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
@@ -532,7 +532,7 @@ describe("resumeShutdownCancelledRuns", () => {
         url: "https://github.com/pmatos/some-other-repo/issues/7"
       });
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const removeLabelsFromIssue = vi.fn().mockResolvedValue(undefined);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
@@ -583,7 +583,7 @@ describe("resumeShutdownCancelledRuns", () => {
       });
 
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
         removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
@@ -626,7 +626,7 @@ describe("resumeShutdownCancelledRuns", () => {
         url: "https://github.com/PMatos/Symphonika/issues/7"
       });
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
         removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
@@ -666,6 +666,7 @@ describe("resumeShutdownCancelledRuns", () => {
       const fires: Array<() => Promise<void>> = [];
       const schedule = vi.fn((item: { fire: () => Promise<void> }) => {
         fires.push(item.fire);
+        return true;
       });
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
@@ -713,7 +714,7 @@ describe("resumeShutdownCancelledRuns", () => {
         url: "https://github.com/pmatos/symphonika/issues/7"
       });
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const removeLabelsFromIssue = vi.fn().mockResolvedValue(undefined);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
@@ -778,6 +779,7 @@ describe("resumeShutdownCancelledRuns", () => {
       const fires: Array<() => Promise<void>> = [];
       const schedule = vi.fn((item: { fire: () => Promise<void> }) => {
         fires.push(item.fire);
+        return true;
       });
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
@@ -820,7 +822,7 @@ describe("resumeShutdownCancelledRuns", () => {
     await withRunStore(async (store, root) => {
       seedShutdownCancelledRun(store, { currentStateId: "implement" });
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const githubIssuesApi: GitHubIssuesApi = {
         listOpenIssues: vi.fn().mockResolvedValue([]),
         removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)

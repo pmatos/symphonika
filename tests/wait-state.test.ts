@@ -617,7 +617,7 @@ function buildController(input: {
   project: RunControllerProjectConfig;
   root: string;
   runStore: ReturnType<typeof openRunStore>;
-  schedule?: (item: ScheduledWorkInput) => void;
+  schedule?: (item: ScheduledWorkInput) => boolean;
 }): RunController {
   let nextRun = 0;
   return new RunController({
@@ -656,7 +656,7 @@ function buildController(input: {
         codex: { command: DEFAULT_CODEX_COMMAND }
       }),
     runStore: input.runStore,
-    schedule: input.schedule ?? (() => undefined),
+    schedule: input.schedule ?? (() => true),
     stateRoot: path.join(input.root, ".symphonika")
   });
 }
@@ -2095,7 +2095,7 @@ describe("wait state lifecycle", () => {
         listOpenIssues: vi.fn().mockResolvedValue([])
       };
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const controller = buildController({
         activeRuns,
         githubIssuesApi,
@@ -2334,7 +2334,7 @@ describe("wait state lifecycle", () => {
         removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
       };
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const controller = buildController({
         activeRuns,
         githubIssuesApi,

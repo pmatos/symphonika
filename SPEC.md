@@ -1900,11 +1900,15 @@ pass. Every Run persists the repository its Issue lived in when it was created; 
 cannot be determined (a legacy row, a non-GitHub tracker) proves no mismatch and is treated as
 before. See ADR 0088 and ADR 0089.
 Delayed-work registration closes with cancellation: the scheduler refuses timers armed after
-that point, so nothing fires against a store that is closing. A Run that was about to park
-into a wait state when cancellation latched is classified `cancelled` instead of flipping to
-`waiting`, and an in-flight wait re-evaluation stops before mutating rows — durable waiting
-rows are left untouched for the next daemon's reconciliation. Only after those requests have
-been awaited does it wait for in-flight dispatches to unwind. This explicit
+that point, so nothing fires against a store that is closing. Registration reports whether the
+timer was accepted. If shutdown refuses a retry, Continuation, or State Advance after its outcome
+was computed, the owning Run is converted to `cancelled` with
+`cancel_reason = "daemon_shutdown"` and pending notification evidence; a retry consumes budget
+only after registration succeeds. A Run that was about to park into a wait state when cancellation
+latched is classified `cancelled` instead of flipping to `waiting`, and an in-flight wait
+re-evaluation stops before mutating rows — durable waiting rows are left untouched for the next
+daemon's reconciliation. Only after those requests have been awaited does it wait for in-flight
+dispatches to unwind. This explicit
 shutdown path is required because provider processes may run in a cgroup outside the daemon's
 own process tree (ADR 0064).
 

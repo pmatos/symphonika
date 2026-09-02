@@ -529,7 +529,7 @@ export async function startDaemon(
     providersLoader,
     pullRequestPolicyLoader,
     runStore,
-    schedule: (item: ScheduledWorkInput) => {
+    schedule: (item: ScheduledWorkInput) =>
       activeRuns.scheduleDelayed({
         delayMs: item.delayMs,
         fire: async () => {
@@ -555,8 +555,7 @@ export async function startDaemon(
         kind: item.kind,
         projectName: item.projectName,
         runId: item.runId
-      });
-    },
+      }),
     stateRoot: state.stateRoot,
     // An unavailable policy (no valid runtime snapshot ever loaded) arms no
     // deadline rather than falling back to the default cap. See ADR 0092.

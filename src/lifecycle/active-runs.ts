@@ -174,8 +174,8 @@ export class ActiveRunRegistry {
     await this.inFlightRuns.requestCancel(runId, reason);
   }
 
-  scheduleDelayed(input: ScheduledWorkInput): void {
-    this.scheduledWork.scheduleDelayed(input);
+  scheduleDelayed(input: ScheduledWorkInput): boolean {
+    return this.scheduledWork.scheduleDelayed(input);
   }
 
   peekDelayed(): ScheduledWorkSnapshot[] {

@@ -232,6 +232,102 @@ const fastRetryPolicy: LifecyclePolicy = {
 };
 
 describe("dispatch retry policy", () => {
+  it("records shutdown cancellation when delayed retry registration is refused", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(prepared.workspacePath, { recursive: true });
+    await writeProject(root);
+
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    let terminalLabelWriteStarted!: () => void;
+    const terminalLabelWrite = new Promise<void>((resolve) => {
+      terminalLabelWriteStarted = resolve;
+    });
+    let releaseTerminalLabelWrite!: () => void;
+    const terminalLabelWriteReleased = new Promise<void>((resolve) => {
+      releaseTerminalLabelWrite = resolve;
+    });
+    let listCalls = 0;
+    const claimedIssue = {
+      ...baseIssue,
+      labels: ["agent-ready", "sym:claimed"]
+    };
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(claimedIssue),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        return Promise.resolve(
+          listCalls === 1
+            ? [{ ...baseIssue, labels: ["agent-ready"] }]
+            : [claimedIssue]
+        );
+      }),
+      removeLabelsFromIssue: vi.fn((input: { labels: string[] }) => {
+        if (input.labels[0] === "sym:running") {
+          terminalLabelWriteStarted();
+          return terminalLabelWriteReleased;
+        }
+        return Promise.resolve();
+      })
+    };
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-retry-shutdown-refusal",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: fastRetryPolicy,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: vi.fn((): Promise<PreparedIssueWorkspace> =>
+        Promise.resolve(prepared)
+      )
+    });
+
+    await terminalLabelWrite;
+    const stopped = daemon.stop();
+    releaseTerminalLabelWrite();
+    await stopped;
+
+    const database = new Database(
+      path.join(root, ".symphonika", "symphonika.db"),
+      { readonly: true }
+    );
+    try {
+      const stored = database
+        .prepare(
+          "select state, cancel_reason, terminal_reason, retry_count, notification_state from runs where id = ?"
+        )
+        .get("run-retry-shutdown-refusal") as Record<string, unknown>;
+      expect(stored).toMatchObject({
+        cancel_reason: "daemon_shutdown",
+        // The daemon immediately settles pending notifications as skipped
+        // when no email sink is configured. The controller-level post-create
+        // regression observes the pre-drain pending state.
+        notification_state: "skipped",
+        retry_count: 0,
+        state: "cancelled",
+        terminal_reason: "daemon_shutdown"
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it("retries transient failures up to the cap and records retry_count", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);

@@ -26,12 +26,12 @@ export class ScheduledWorkRegistry {
   private readonly scheduled = new Map<string, ScheduledItem>();
   private cancelled = false;
 
-  scheduleDelayed(input: ScheduledWorkInput): void {
+  scheduleDelayed(input: ScheduledWorkInput): boolean {
     // Refused after cancelAll (daemon shutdown): an armed timer would fire
-    // against a store that stop() is closing. Callers gate their row
-    // mutations on the shutdown latch before reaching here. See ADR 0052.
+    // against a store that stop() is closing. The result lets callers turn
+    // work that lost this race into durable shutdown evidence.
     if (this.cancelled) {
-      return;
+      return false;
     }
     const key = issueKey(input.projectName, input.issueNumber);
     if (this.scheduled.has(key)) {
@@ -59,6 +59,7 @@ export class ScheduledWorkRegistry {
     };
     timeout.unref?.();
     this.scheduled.set(key, item);
+    return true;
   }
 
   peekDelayed(): ScheduledWorkSnapshot[] {

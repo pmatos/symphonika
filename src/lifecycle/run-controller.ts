@@ -1875,10 +1875,7 @@ export class RunController {
           runId
         });
         if (!scheduled) {
-          this.logger?.debug(
-            { runId: nextWaitingRunId },
-            "symphonika wait re-evaluation registration refused: daemon shutting down"
-          );
+          this.logWaitReevaluationRefused(nextWaitingRunId);
         }
         return;
       }
@@ -3200,6 +3197,13 @@ export class RunController {
     );
   }
 
+  private logWaitReevaluationRefused(runId: string): void {
+    this.logger?.debug(
+      { runId },
+      "symphonika wait re-evaluation registration refused: daemon shutting down"
+    );
+  }
+
   private async claimAndPersistRun(input: {
     claimGuard?: () => boolean;
     isContinuation: boolean;
@@ -3675,10 +3679,7 @@ export class RunController {
         // runs the unconditional unregister that releases the in-flight slot.
         parkedAsWaiting = scheduled;
         if (!scheduled) {
-          this.logger?.debug(
-            { runId: input.runId },
-            "symphonika wait re-evaluation registration refused: daemon shutting down"
-          );
+          this.logWaitReevaluationRefused(input.runId);
         }
         return;
       }
@@ -4771,10 +4772,7 @@ export class RunController {
         runId: input.runId
       });
       if (!scheduled) {
-        this.logger?.debug(
-          { runId: waitingRunId },
-          "symphonika wait re-evaluation registration refused: daemon shutting down"
-        );
+        this.logWaitReevaluationRefused(waitingRunId);
       }
       return;
     }

@@ -32,23 +32,15 @@ export class IssueRunNotificationCoordinator {
 
   schedulePending(): void {
     try {
-      if (
-        this.timer !== undefined ||
-        this.input.runStore.listPendingRunNotifications().length === 0
-      ) {
+      if (this.timer !== undefined) {
         return;
       }
-      const config = this.input.resolveConfig();
-      if (
-        config === undefined ||
-        !emailNotificationSourceEnabled(config, "issue_runs")
-      ) {
-        this.input.runStore.completeRunNotifications({
-          runIds: this.input.runStore
-            .listPendingRunNotifications()
-            .map((run) => run.id),
-          state: "skipped"
-        });
+      const pending = this.input.runStore.listPendingRunNotifications();
+      if (pending.length === 0) {
+        return;
+      }
+      const config = this.skipPendingIfSinkUnavailable(pending);
+      if (config === undefined) {
         return;
       }
       const delayMs = config.digestWindowMs ?? DEFAULT_DIGEST_WINDOW_MS;
@@ -88,17 +80,27 @@ export class IssueRunNotificationCoordinator {
     if (pending.length === 0) {
       return;
     }
+    this.skipPendingIfSinkUnavailable(pending);
+  }
+
+  // Shared by schedulePending/flush/settleUndeliverableOnShutdown: marks
+  // `pending` as skipped and returns undefined when no sink is configured
+  // for issue Run notifications, otherwise returns the enabled config.
+  private skipPendingIfSinkUnavailable(
+    pending: readonly RunStatus[]
+  ): EmailNotificationConfig | undefined {
     const config = this.input.resolveConfig();
     if (
       config !== undefined &&
       emailNotificationSourceEnabled(config, "issue_runs")
     ) {
-      return;
+      return config;
     }
     this.input.runStore.completeRunNotifications({
       runIds: pending.map((run) => run.id),
       state: "skipped"
     });
+    return undefined;
   }
 
   private async flush(): Promise<void> {
@@ -106,15 +108,8 @@ export class IssueRunNotificationCoordinator {
     if (pending.length === 0) {
       return;
     }
-    const config = this.input.resolveConfig();
-    if (
-      config === undefined ||
-      !emailNotificationSourceEnabled(config, "issue_runs")
-    ) {
-      this.input.runStore.completeRunNotifications({
-        runIds: pending.map((run) => run.id),
-        state: "skipped"
-      });
+    const config = this.skipPendingIfSinkUnavailable(pending);
+    if (config === undefined) {
       return;
     }
     const selected = pending.filter((run) =>

@@ -642,6 +642,11 @@ export function registerPages(options: RegisterPagesOptions): void {
     const isFailure =
       FAILURE_STATES.has(detail.state) || BLOCKED_STATES.has(detail.state);
     const terminalAttempt = detail.attempts[detail.attempts.length - 1];
+    const currentPlanEvent = options.runStore.getLatestProviderEvent(
+      id,
+      "plan_updated",
+      terminalAttempt?.id
+    );
     const failureEvent = isFailure
       ? options.runStore.getLastFailureEvent(id, terminalAttempt?.id)
       : undefined;
@@ -717,6 +722,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       renderRunSummary(detail, capContext),
       renderProviderStreamSection(providerStream),
       renderWatchdogSection(watchdog, outputTokenGrowth5m, detailNowMs),
+      renderCurrentPlan(currentPlanEvent),
       renderWorkflowGraphSummary(detail.id, workflowGraph),
       renderCancelForm(detail, csrfToken),
       renderAttemptsTable(detail.attempts),
@@ -2948,6 +2954,65 @@ td code { color: var(--ink-2); }
 .fields dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
 .fields dd code { color: var(--ink-2); }
 .field-note { grid-column: 1 / -1; color: var(--ink-2); font-size: var(--fs-meta); }
+
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.plan-item {
+  display: grid;
+  grid-template-columns: 0.9rem minmax(0, 1fr) max-content;
+  gap: var(--sp-2);
+  align-items: start;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.plan-marker {
+  position: relative;
+  width: 0.78rem;
+  height: 0.78rem;
+  margin-top: 0.2rem;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  color: var(--ink-muted);
+}
+.plan-status {
+  color: var(--ink-muted);
+  font-size: var(--fs-label);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.plan-item--completed .plan-marker { background: var(--ink-muted); }
+.plan-item--completed .plan-marker::after {
+  content: "";
+  position: absolute;
+  left: 0.2rem;
+  top: 0.08rem;
+  width: 0.22rem;
+  height: 0.42rem;
+  border: solid var(--surface);
+  border-width: 0 0.1rem 0.1rem 0;
+  transform: rotate(45deg);
+}
+.plan-item--completed .plan-step { color: var(--ink-muted); text-decoration: line-through; }
+.plan-item--in_progress { border-color: var(--accent); background: var(--accent-quiet); }
+.plan-item--in_progress .plan-marker,
+.plan-item--in_progress .plan-status { color: var(--accent-ink); }
+.plan-item--in_progress .plan-marker::after {
+  content: "";
+  position: absolute;
+  inset: 0.18rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+.plan-item--unknown .plan-marker { border-style: dashed; }
 
 .files { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .files a {
@@ -6951,6 +7016,57 @@ type CoalesceableProviderEvent = {
   sequence: number | null;
   type: string;
 };
+
+type PlanStatus = "completed" | "in_progress" | "pending" | "unknown";
+
+function renderCurrentPlan(event: ProviderEventRecord | undefined): string {
+  if (event === undefined || !Array.isArray(event.normalized.plan)) {
+    return "";
+  }
+  const plan: unknown[] = event.normalized.plan;
+  const items = plan.flatMap((item) => {
+    if (typeof item !== "object" || item === null) {
+      return [];
+    }
+    const step = "step" in item ? item.step : undefined;
+    if (typeof step !== "string") {
+      return [];
+    }
+    const rawStatus = "status" in item ? item.status : undefined;
+    const status = planStatus(rawStatus);
+    return [
+      `<li class="plan-item plan-item--${status}"><span class="plan-marker" aria-hidden="true"></span><span class="plan-step">${escapeHtml(step)}</span><span class="plan-status">${planStatusLabel(status)}</span></li>`
+    ];
+  });
+  if (items.length === 0) {
+    return "";
+  }
+  const explanation =
+    typeof event.normalized.explanation === "string" &&
+    event.normalized.explanation.trim().length > 0
+      ? `<p class="hint">${escapeHtml(event.normalized.explanation.trim())}</p>`
+      : "";
+  return `<section>${sectionHead("Current plan", items.length)}${explanation}<ol class="plan-list">${items.join("")}</ol><p class="note">Updated ${renderTimestamp(event.createdAt)}</p></section>`;
+}
+
+function planStatus(value: unknown): PlanStatus {
+  return value === "completed" || value === "in_progress" || value === "pending"
+    ? value
+    : "unknown";
+}
+
+function planStatusLabel(status: PlanStatus): string {
+  switch (status) {
+    case "completed":
+      return "Completed";
+    case "in_progress":
+      return "In progress";
+    case "pending":
+      return "Pending";
+    case "unknown":
+      return "Unknown";
+  }
+}
 
 function renderEventsTable(
   events: CoalesceableProviderEvent[],

@@ -1623,6 +1623,85 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("renders the current plan even when its update is older than the transcript tail", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-plan",
+        issue: sampleIssue({ number: 589, title: "Show the current plan" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-plan", "running");
+      test.runStore.createAttempt({
+        attemptNumber: 1,
+        branchName: "sym/run-plan",
+        branchRef: "refs/heads/sym/run-plan",
+        id: "run-plan-attempt-1",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        providerCommand: "x",
+        providerName: "codex",
+        rawLogPath: "",
+        runId: "run-plan",
+        state: "running",
+        workflowGraphPath: "",
+        workspacePath: test.stateRoot
+      });
+      test.runStore.recordProviderEvent({
+        attemptId: "run-plan-attempt-1",
+        normalized: {
+          explanation: "Repository context is confirmed.",
+          plan: [
+            { status: "completed", step: "Inspect the repository" },
+            { status: "in_progress", step: "Implement the fix" },
+            { status: "pending", step: "Run <all> checks" }
+          ],
+          threadId: "thread-589",
+          turnId: "turn-589",
+          type: "plan_updated"
+        },
+        raw: { method: "turn/plan/updated" },
+        receivedAt: new Date().toISOString(),
+        runId: "run-plan",
+        sequence: 1
+      });
+      for (let sequence = 2; sequence <= 502; sequence += 1) {
+        test.runStore.recordProviderEvent({
+          attemptId: "run-plan-attempt-1",
+          normalized: { signal: "command_output", type: "progress" },
+          raw: { method: "item/commandExecution/outputDelta" },
+          receivedAt: new Date().toISOString(),
+          runId: "run-plan",
+          sequence
+        });
+      }
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-plan");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("Current plan");
+      expect(body).toContain("Repository context is confirmed.");
+      expect(body).toContain("Inspect the repository");
+      expect(body).toContain("Implement the fix");
+      expect(body).toContain("Run &lt;all&gt; checks");
+      expect(body).toContain('class="plan-item plan-item--completed"');
+      expect(body).toContain('class="plan-item plan-item--in_progress"');
+      expect(body).toContain('class="plan-item plan-item--pending"');
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders the workflow graph summary and link on the run-detail page", async () => {
     const test = await setup();
     try {

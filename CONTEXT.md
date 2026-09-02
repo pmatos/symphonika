@@ -211,6 +211,11 @@ a provider-authored reasoning summary for observability, but never raw reasoning
 as provider progress for the Watchdog.
 _Avoid_: tool call, chain of thought
 
+**Run Plan**:
+The latest provider-neutral `plan_updated` checklist for one Run attempt, rendered as ordered steps
+with explicit status on the Run-detail page and also counted as Watchdog progress (ADR 0096).
+_Avoid_: Workflow Contract or Expanded Workflow Graph when referring to the Coding Agent's live todo list
+
 **Run Store**:
 The SQLite-backed durable record of projects, runs, attempts, retry state, event metadata, and workspace paths.
 _Avoid_: event log when referring to scheduler state
@@ -376,9 +381,9 @@ _Avoid_: heartbeat checker, liveness probe
 
 **Progress Signal**:
 The tuple of observed active-provider progress evidence the Watchdog samples — most recent
-tool-call timestamp, provider progress timestamp (including Thinking Markers), Workspace Digest,
-distinct turn-id count, output-token growth since the last sample, and most recent streamed
-assistant-message timestamp.
+tool-call timestamp, provider progress timestamp (including Thinking Markers and Run Plan updates),
+Workspace Digest, distinct turn-id count, output-token growth since the last sample, and most recent
+streamed assistant-message timestamp.
 Advance of any one signal counts as progress.
 _Avoid_: heartbeat when describing observable side-effects — rate-limit events are excluded from
 the Progress Signal outright, and the bare presence of usage events is not progress, though the
@@ -527,6 +532,8 @@ _Avoid_: chat session
 - A **Normalized Event Log** is derived from a **Provider Event Log**
 - A **Provider Stream Stall** is derived from raw provider-event receipt times and never terminates
   a **Run**
+- A **Run Plan** is preserved in the **Normalized Event Log** and contributes to the Watchdog's
+  **Progress Signal**
 - A **Run Store** records durable orchestration state across process restarts
 - A **Run** can succeed even when its **Issue** remains open
 - A **Routine** targets one or more explicitly named **Projects** and materializes one **Routine

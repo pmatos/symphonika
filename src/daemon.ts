@@ -461,7 +461,7 @@ export async function startDaemon(
   // launchWork is explicitly re-entrant per tick (see comment at its
   // definition), so a retention pass that outlives one polling interval
   // would otherwise overlap with the next tick's pass, running concurrent
-  // `git worktree remove`/`prune`/branch-delete against the same cache.
+  // `git worktree remove`/branch-delete against the same cache.
   // Narrow skip-if-in-flight guard, consistent with ADR 0052's per-operation
   // (not whole-tick) locking scope.
   const retentionMutex = createAsyncMutex();

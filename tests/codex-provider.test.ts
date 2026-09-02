@@ -561,6 +561,81 @@ describe("Codex JSON-RPC provider", () => {
     ).toHaveLength(4);
   });
 
+  it("normalizes Codex plan updates into a provider-neutral checklist", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} --scenario=plan-update app-server`,
+          name: "codex"
+        },
+        workspacePath
+      })
+    );
+
+    expect(
+      events
+        .map((event) => event.normalized)
+        .filter((normalized) => normalized?.type === "plan_updated")
+    ).toEqual([
+      {
+        explanation: "Repository context is confirmed.",
+        plan: [
+          { status: "completed", step: "Inspect the repository" },
+          { status: "in_progress", step: "Implement the fix" },
+          { status: "pending", step: "Run the quality gate" }
+        ],
+        threadId: "thread-9",
+        turnId: "turn-9",
+        type: "plan_updated"
+      }
+    ]);
+  });
+
+  it("maps terminal interactions to payload-free progress markers", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} --scenario=terminal-interaction app-server`,
+          name: "codex"
+        },
+        workspacePath
+      })
+    );
+
+    const progressEvent = events.find(
+      (event) => event.normalized?.type === "progress"
+    );
+    expect(progressEvent?.normalized).toEqual({
+      signal: "terminal_interaction",
+      threadId: "thread-9",
+      turnId: "turn-9",
+      type: "progress"
+    });
+    expect(progressEvent?.normalized).not.toHaveProperty("processId");
+    expect(progressEvent?.normalized).not.toHaveProperty("stdin");
+    expect(progressEvent?.raw).toMatchObject({
+      params: { processId: "41761", stdin: "" }
+    });
+  });
+
   it("rate-limits progress markers so a chatty build cannot flood the log", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1496,6 +1571,16 @@ async function writeFakeCodexAppServer(
       "    }",
       "    if (scenario === 'wait' || scenario === 'term-exit') {",
       "      continue;",
+      "    }",
+      "    if (scenario === 'terminal-interaction') {",
+      "      send({ method: 'item/commandExecution/terminalInteraction', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'exec-1', processId: '41761', stdin: '' } });",
+      "      send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
+      "      process.exit(0);",
+      "    }",
+      "    if (scenario === 'plan-update') {",
+      "      send({ method: 'turn/plan/updated', params: { threadId: 'thread-9', turnId: 'turn-9', explanation: 'Repository context is confirmed.', plan: [{ step: 'Inspect the repository', status: 'completed' }, { step: 'Implement the fix', status: 'inProgress' }, { step: 'Run the quality gate', status: 'pending' }] } });",
+      "      send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
+      "      process.exit(0);",
       "    }",
       "    if (scenario === 'long-build') {",
       "      send({ method: 'item/started', params: { threadId: 'thread-9', turnId: 'turn-9', item: { type: 'commandExecution', id: 'exec-1', command: 'cargo test', cwd: '/workspace', status: 'inProgress' } } });",

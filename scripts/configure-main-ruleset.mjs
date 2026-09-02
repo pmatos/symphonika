@@ -12,7 +12,7 @@ const rulesetConfig = JSON.parse(
 );
 
 try {
-  const rulesets = JSON.parse(gh("api", `repos/${repository}/rulesets`));
+  const rulesets = JSON.parse(gh(["api", `repos/${repository}/rulesets`]));
   const matches = rulesets.filter(
     (ruleset) =>
       ruleset.name === rulesetConfig.name &&
@@ -33,15 +33,15 @@ try {
   }
 
   gh(
-    "api",
-    "--method",
-    "PUT",
-    `repos/${repository}/rulesets/${rulesetId}`,
-    "--input",
-    "-",
-    {
-      input: JSON.stringify(rulesetConfig)
-    }
+    [
+      "api",
+      "--method",
+      "PUT",
+      `repos/${repository}/rulesets/${rulesetId}`,
+      "--input",
+      "-"
+    ],
+    { input: JSON.stringify(rulesetConfig) }
   );
   console.log(`Updated ${rulesetConfig.name} ruleset ${rulesetId}.`);
 } catch (error) {
@@ -49,13 +49,6 @@ try {
   process.exitCode = 1;
 }
 
-function gh(...args) {
-  const options = typeof args.at(-1) === "object" ? args.pop() : {};
-  return execFileSync("gh", args, {
-    encoding: "utf8",
-    stdio: options.input
-      ? ["pipe", "pipe", "pipe"]
-      : ["ignore", "pipe", "pipe"],
-    ...options
-  });
+function gh(args, options = {}) {
+  return execFileSync("gh", args, { encoding: "utf8", ...options });
 }

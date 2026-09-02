@@ -17,7 +17,8 @@ import {
 // default), so markers are rate-limited well below that (ADR 0087).
 const PROGRESS_MARKER_MIN_INTERVAL_MS = 5_000;
 
-type CodexProgressSignal = "command_output" | "stream_retry" | "workspace_diff";
+type CodexProgressSignal =
+  "command_output" | "stream_retry" | "terminal_interaction" | "workspace_diff";
 
 // The thread/turn identity the *provider* owns: written by session/turn setup
 // and read back by `cancel()`. The reducer only ever reads it, so it crosses
@@ -149,22 +150,41 @@ export function createCodexEventReducer(deps: {
       };
     }
 
-    // Codex reports a running command's stdout/stderr and the evolving workspace
-    // diff as notifications rather than items. Both are direct evidence the Run
-    // is alive during a long build or test suite, which is exactly the window in
-    // which no `item/started`, `agentMessage` delta, or token update arrives —
-    // the Watchdog was blind to it (ADR 0087). Only a timestamped marker is
-    // normalized: the command output and the diff stay in the raw log, matching
-    // how `codexToolCallInput` already strips them from tool calls.
+    if (method === "turn/plan/updated") {
+      // Unlike command output, the plan is compact operator-facing state worth
+      // preserving in the Normalized Event Log. Status spelling is normalized
+      // here so operator surfaces never depend on Codex wire values (ADR 0096).
+      return {
+        normalized: {
+          explanation: stringField(params, "explanation") ?? null,
+          plan: codexPlan(params?.plan),
+          threadId: stringField(params, "threadId") ?? session.threadId,
+          turnId: stringField(params, "turnId") ?? session.turnId,
+          type: "plan_updated"
+        },
+        raw
+      };
+    }
+
+    // Codex reports a running command's stdout/stderr, terminal interaction,
+    // and the evolving workspace diff as notifications rather than items. All
+    // three are direct evidence the Run is alive during a long build or test
+    // suite. Only a timestamped marker is normalized; command and terminal
+    // payloads plus the diff stay in the raw log (ADRs 0087 and 0096).
     if (
       method === "item/commandExecution/outputDelta" ||
+      method === "item/commandExecution/terminalInteraction" ||
       method === "turn/diff/updated"
     ) {
       return progressMarkerEvent(
         raw,
         params,
         session,
-        method === "turn/diff/updated" ? "workspace_diff" : "command_output"
+        method === "turn/diff/updated"
+          ? "workspace_diff"
+          : method === "item/commandExecution/terminalInteraction"
+            ? "terminal_interaction"
+            : "command_output"
       );
     }
 
@@ -374,4 +394,32 @@ function codexToolCallInput(
   }
 
   return undefined;
+}
+
+function codexPlan(value: unknown): Array<{ status: string; step: string }> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    const step = stringField(item, "step");
+    if (step === undefined) {
+      return [];
+    }
+    return [
+      {
+        status: codexPlanStatus(stringField(item, "status")),
+        step
+      }
+    ];
+  });
+}
+
+function codexPlanStatus(status: string | undefined): string {
+  if (status === "inProgress") {
+    return "in_progress";
+  }
+  if (status === "completed" || status === "pending") {
+    return status;
+  }
+  return "unknown";
 }

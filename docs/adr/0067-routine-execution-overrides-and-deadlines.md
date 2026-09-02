@@ -128,9 +128,11 @@ transports, hooks, and helpers; non-POSIX hosts retain direct-child abort behavi
 clones to an invocation-owned sibling staging directory, applies the direct-clone mode derived from
 the process umask, and atomically publishes a complete bare repository; abort removes the staging
 directory, while an interrupted fetch preserves the already-validated shared cache. Cleanup likewise
-removes only a newly-owned firing branch/worktree, never a reused one, verifies no owned directory or
-worktree registration remains, and surfaces any incomplete cleanup in logs while preserving
-`firing_timeout` as the terminal reason.
+removes only a newly-owned firing branch/worktree, never a reused one. Worktree cleanup uses
+path-scoped `git worktree remove --force --force <path>` to override an owned registration's
+SIGKILL-surviving `initializing` lock without running cache-wide `git worktree prune`. It verifies no
+owned directory or worktree registration remains and surfaces any incomplete cleanup in logs while
+preserving `firing_timeout` as the terminal reason.
 
 ## Consequences
 

@@ -2,6 +2,12 @@
 
 Status: Accepted
 
+**Amendment note:** reclamation is path-scoped. `git worktree remove --force <path>` already removes
+the selected checkout and its registration, so retention no longer follows it with cache-wide
+`git worktree prune`. Prune has no path filter and could deregister an unrelated worktree whose
+directory is temporarily unavailable. Candidate locks retain their original meaning and are not
+overridden by retention.
+
 ## Context
 
 Every Routine Firing creates a registered Git worktree under
@@ -46,25 +52,24 @@ yet persist a separate publication transition, so the conservative policy retain
 indefinitely; a future verified publication signal or explicit destructive override may release
 the protection.
 
-Reclamation uses
-`git worktree remove --force <path>` and then `git worktree prune` against the Project's shared bare
-cache. Force is required because report firings and failed Coding Agents can legitimately leave
-dirty or untracked files. A locked worktree remains an error and is retried on a later daemon tick;
-the Orchestrator does not bypass the lock or fall back to plain directory deletion. For a `kind: git`
-firing, reclamation also deletes its deterministic local branch from the shared bare cache once the
-worktree is gone, since that branch otherwise has no further purpose and would otherwise grow the
-same shared cache this ADR bounds. A `kind: report` firing was never given a branch, so this step is
-a no-op for it. The firing persists its execution-time kind so a later declaration edit cannot
-change branch ownership during cleanup. Ref deletion uses `git branch -D`, preserving Git's refusal
-to delete a branch checked out by another registered worktree. That refusal is part of the deletion
-operation rather than a separate preflight check, so a colliding firing that checks out the branch
-while retention is deciding does not lose its ref. If deletion fails because a concurrent daemon or
-manual pass has already removed the ref, cleanup still succeeds and records reclamation; a ref now
-held by another firing is preserved. Historical firings without trustworthy kind and local-ref
-evidence do not delete a derived branch. When workspace preparation failed before creating either
-the planned workspace or a usable bare cache, retention treats the absent workspace as already
-reclaimed and records that outcome; an existing workspace with an absent or unusable cache remains
-an error and is never removed as a plain directory.
+Reclamation uses path-scoped `git worktree remove --force <path>` and does not run cache-wide
+`git worktree prune`. Force is required because report firings and failed Coding Agents can
+legitimately leave dirty or untracked files. A locked worktree remains an error and is retried on a
+later daemon tick; the Orchestrator does not bypass the lock or fall back to plain directory
+deletion. For a `kind: git` firing, reclamation also deletes its deterministic local branch from the
+shared bare cache once the worktree is gone, since that branch otherwise has no further purpose and
+would otherwise grow the same shared cache this ADR bounds. A `kind: report` firing was never given
+a branch, so this step is a no-op for it. The firing persists its execution-time kind so a later
+declaration edit cannot change branch ownership during cleanup. Ref deletion uses `git branch -D`,
+preserving Git's refusal to delete a branch checked out by another registered worktree. That refusal
+is part of the deletion operation rather than a separate preflight check, so a colliding firing that
+checks out the branch while retention is deciding does not lose its ref. If deletion fails because
+a concurrent daemon or manual pass has already removed the ref, cleanup still succeeds and records
+reclamation; a ref now held by another firing is preserved. Historical firings without trustworthy
+kind and local-ref evidence do not delete a derived branch. When workspace preparation failed before
+creating either the planned workspace or a usable bare cache, retention treats the absent workspace
+as already reclaimed and records that outcome; an existing workspace with an absent or unusable
+cache remains an error and is never removed as a plain directory.
 
 The Run Store retains `workspace_path` and records `workspace_pruned_at`. Operator surfaces can
 therefore show the historical path as `pruned` rather than interpreting a missing path as damage.

@@ -2039,17 +2039,18 @@ that bit only after the firing becomes terminal, reports the firing only when it
 `terminal_reason` is `no_progress`, and suppresses the pending alert when `firing_timeout` or any
 other verdict wins. Pending confirmation therefore survives daemon restart, never blocks the
 current tick waiting for settlement, and may delay a legitimate grouped alert until the next
-Watchdog reconciliation pass. Reconciliation is attempted on every daemon tick — the regular poll
-schedule, a manual poll trigger, or the startup pass — gated so it proceeds only on the first tick
-at or after `sample_interval_seconds` has elapsed since the previous pass. Under a steady poll
-cadence with no manual triggers, consecutive automatic passes are
+Watchdog reconciliation pass. Reconciliation is attempted on daemon ticks — the regular poll
+schedule, a manual poll trigger, or the startup pass — whenever a config with at least one project
+is loaded, gated on an in-memory clock that advances on each pass and resets to daemon start on
+restart, so a restart can wait a full `sample_interval_seconds` before the first pass. Under a
+steady poll cadence with no manual triggers, consecutive automatic passes nominally land
 `ceil(sample_interval_seconds / (polling.interval_ms / 1000)) * (polling.interval_ms / 1000)`
-seconds apart — never less than the larger of the two intervals, and strictly less than their sum.
-A manual poll trigger can settle a pending alert sooner than this nominal figure; slow in-tick
-work ahead of the gate can push an individual pass later than it. Terminal pending entries are
-drained even when Watchdog sampling has subsequently been disabled. The outcome and commits-ahead
-evidence that completion gathered is retained either way, because Workspace retention depends on
-it.
+seconds apart, which can approach the sum of the two intervals when they aren't multiples of each
+other; a manual poll trigger can settle a pending alert sooner than this nominal figure, and
+in-tick work ahead of the gate means an individual pass can land before or after it. Terminal
+pending entries are drained even when Watchdog sampling has subsequently been disabled. The
+outcome and commits-ahead evidence that completion gathered is retained either way, because
+Workspace retention depends on it.
 
 Independently of that liveness clock, the Watchdog enforces a **convergence budget**: when a
 sampled Run's cumulative `output_tokens_total` reaches `watchdog.output_token_budget` (default

@@ -7,7 +7,7 @@ import {
   rm,
   writeFile
 } from "node:fs/promises";
-import { homedir } from "node:os";
+import { availableParallelism, homedir } from "node:os";
 import path from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -16,6 +16,7 @@ import { isSeq, parse, parseDocument } from "yaml";
 import { z } from "zod";
 
 import type { WorkflowFormat } from "./config-schemas.js";
+import { resolveProjectMaxInFlight } from "./lifecycle/concurrency-capacity.js";
 import {
   pathStringSchema,
   projectDispatchSchema,
@@ -73,6 +74,9 @@ export type DoctorOptions = {
   githubApi?: GitHubApi;
   githubIssuesApi?: GitHubIssuesApi;
   homeDir?: string;
+  // Test seam for the host fact used by the installed providers-slice
+  // capacity estimate. Production callers use os.availableParallelism().
+  hostParallelism?: number;
   // Opt-in: spawns providers.<name>.command for real with a trivial prompt
   // and waits for a reply, instead of only the static protocol checks every
   // doctor run already does. Not run by default — it is a real billed call
@@ -337,6 +341,7 @@ const dispatchProjectSchema = z
     mode: z.literal("dispatch").default("dispatch"),
     disabled: z.boolean().optional(),
     weight: z.number().int().positive().optional(),
+    max_in_flight: z.number().int().positive().optional(),
     dispatch: projectDispatchSchema.optional(),
     tracker: trackerSchema,
     issue_filters: issueFiltersSchema,
@@ -432,6 +437,12 @@ const serviceConfigSchema = z
       })
       .passthrough()
       .optional(),
+    global: z
+      .object({
+        max_in_flight: z.number().int().positive().optional()
+      })
+      .passthrough()
+      .optional(),
     providers: z
       .object({
         codex: providerCommandSchema,
@@ -496,14 +507,24 @@ export async function runDoctor(
     return report({ configPath, environment, errors, projects, warnings });
   }
 
-  const configuredEnvironment = await inspectConfiguredDoctorEnvironment({
-    cwd,
-    env,
-    environment,
-    homeDir,
-    projects: parsedConfig.projects,
-    providers: parsedConfig.providers
-  });
+  const [buildMemoryWarnings, configuredEnvironment] = await Promise.all([
+    serviceContent !== undefined
+      ? checkProviderBuildMemoryCapacity(
+          path.join(unitDir, "symphonika-providers.slice"),
+          parsedConfig,
+          options.hostParallelism ?? availableParallelism()
+        )
+      : Promise.resolve([]),
+    inspectConfiguredDoctorEnvironment({
+      cwd,
+      env,
+      environment,
+      homeDir,
+      projects: parsedConfig.projects,
+      providers: parsedConfig.providers
+    })
+  ]);
+  warnings.push(...buildMemoryWarnings);
   environment = configuredEnvironment.environment;
   errors.push(...configuredEnvironment.errors);
   warnings.push(...configuredEnvironment.warnings);
@@ -838,6 +859,195 @@ async function checkSliceDrift(
 }
 
 type SliceAssignment = { name: string; source: string; value: string };
+
+const GIBIBYTE_BYTES = 1024 ** 3;
+const PEAK_COMPILER_RSS_BYTES = 1.5 * GIBIBYTE_BYTES;
+const PROVIDER_MEMORY_WARNING_RATIO = 1.1;
+
+async function checkProviderBuildMemoryCapacity(
+  slicePath: string,
+  config: ServiceConfig,
+  hostParallelism: number
+): Promise<string[]> {
+  if (!Number.isInteger(hostParallelism)) {
+    return [];
+  }
+
+  const memoryMax = await winningSliceAssignment(slicePath, "MemoryMax");
+  if (memoryMax === undefined) {
+    return [];
+  }
+  const memoryMaxBytes = parseSystemdByteSize(memoryMax.value);
+  if (memoryMaxBytes === undefined) {
+    return [];
+  }
+
+  const projectCaps = config.projects
+    .filter((project) => project.disabled !== true)
+    .map((project) => ({
+      maxInFlight: resolveProjectMaxInFlight(project.max_in_flight),
+      name: project.name
+    }));
+  const projectCapTotal = projectCaps.reduce(
+    (total, project) => total + project.maxInFlight,
+    0
+  );
+  const globalMaxInFlight = config.global?.max_in_flight;
+  const effectiveMaxInFlight = Math.min(
+    globalMaxInFlight ?? Number.POSITIVE_INFINITY,
+    projectCapTotal
+  );
+
+  const estimatedBytes =
+    hostParallelism * PEAK_COMPILER_RSS_BYTES * effectiveMaxInFlight;
+  if (estimatedBytes <= memoryMaxBytes * PROVIDER_MEMORY_WARNING_RATIO) {
+    return [];
+  }
+
+  const globalCap = `global.max_in_flight=${globalMaxInFlight ?? "unbounded"}`;
+  const projectCapSummary = projectCaps
+    .map((project) => `${project.name} max_in_flight=${project.maxInFlight}`)
+    .join(", ");
+  const warningMarginPercent = Math.round(
+    (PROVIDER_MEMORY_WARNING_RATIO - 1) * 100
+  );
+  return [
+    `provider build memory estimate: host parallelism=${hostParallelism} × ` +
+      `${formatGibibytes(PEAK_COMPILER_RSS_BYTES)} GiB/compiler × effective ` +
+      `max_in_flight=${effectiveMaxInFlight} (${globalCap}; Project caps: ` +
+      `${projectCapSummary}) = ${formatGibibytes(estimatedBytes)} GiB, ` +
+      `exceeding ${memoryMax.source} MemoryMax=${memoryMax.value} ` +
+      `(${formatGibibytes(memoryMaxBytes)} GiB) by more than the ` +
+      `${warningMarginPercent}% warning margin; lower max_in_flight, raise ` +
+      "MemoryMax=, or configure the build-parallelism ceiling from #643"
+  ];
+}
+
+async function winningSliceAssignment(
+  slicePath: string,
+  name: string
+): Promise<SliceAssignment | undefined> {
+  const baseContent = await readFileIfExists(slicePath);
+  if (baseContent === undefined) {
+    return undefined;
+  }
+  const baseAssignments = sliceAssignments(baseContent, slicePath);
+  if (baseAssignments === undefined) {
+    return undefined;
+  }
+  return winningByteSizeAssignment(
+    await effectiveSliceAssignments(slicePath, baseAssignments),
+    name
+  );
+}
+
+// Like winningAssignment, but falls back past a later assignment systemd
+// itself would reject (see isDefinitelyInvalidSystemdMemoryValue) to the
+// last one still in force. Treating "this parser can't use the text" the
+// same as "no directive is set" would silently swallow a real capacity
+// warning behind an operator typo in a drop-in. A value systemd accepts but
+// this narrower K/M/G/T-only grammar doesn't understand (a percentage,
+// "1024B", "2P", a compound sum) is deliberately NOT treated as skippable:
+// it IS the effective assignment, so skipping past it would warn against
+// the wrong, no-longer-effective value instead of just declining to
+// evaluate. Only used for MemoryMax=; checkSliceDrift's obsolete-directive
+// audit keeps using winningAssignment, which reports the literal last value
+// regardless of validity — correct for a drift report, not for computing
+// the value systemd is actually enforcing.
+function winningByteSizeAssignment(
+  assignments: SliceAssignment[],
+  name: string
+): SliceAssignment | undefined {
+  for (const assignment of [...assignments].reverse()) {
+    if (assignment.name !== name) {
+      continue;
+    }
+    // Unlike winningAssignment (used for drift auditing, where any casing
+    // reads as an operator's intentional reset), systemd's own parser only
+    // recognizes the exact lowercase spelling — confirmed on systemd 261,
+    // where `MemoryMax=Infinity`/`INFINITY` are rejected and the previous
+    // assignment stays in force. A miscased spelling here falls through to
+    // isDefinitelyInvalidSystemdMemoryValue below and is treated as invalid
+    // text, exactly like "bogus".
+    if (assignment.value.length === 0 || assignment.value === "infinity") {
+      return undefined;
+    }
+    if (isDefinitelyInvalidSystemdMemoryValue(assignment.value)) {
+      continue;
+    }
+    return assignment;
+  }
+  return undefined;
+}
+
+const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
+
+// One component of a systemd compound memory value: a magnitude, optional
+// whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both tolerate "32 G"),
+// then an optional single-letter K/M/G/T/P/E suffix or an explicit "B"
+// (bytes) marker — never both combined ("32GB" is not a valid systemd unit,
+// only "32G" or "32000000000B" are).
+const SYSTEMD_MEMORY_VALUE_TERM = /^(\d+(?:\.\d+)?)\s*(?:[KMGTPE]|B)?$/i;
+const SYSTEMD_MEMORY_PERCENTAGE = /^(\d+(?:\.\d+)?)%$/;
+
+// config_parse_memory_limit() drops an assignment two different ways, both
+// of which make systemd keep whatever limit was previously in force:
+//
+//   - "Invalid memory limit ..., ignoring" when the text is not a memory
+//     value at all — neither a percentage of at most two decimal places nor
+//     a sum of magnitudes each carrying at most one K/M/G/T/P/E-or-"B"
+//     suffix. Covers "bogus", "32GB", "10garbage", and a percentage above
+//     100 ("101%", "200%"), which overflows parse_permyriad and then fails
+//     parse_size because of the "%".
+//   - "Memory limit ... out of range, ignoring" when the text parses but
+//     resolves to zero bytes — "0", "0B", "0P", "0K", and "0%".
+//
+// Both verified against `systemd-analyze verify` (systemd 261), which also
+// confirms the inclusive upper bound: "100%" is accepted, "100.01%" is not.
+//
+// A value systemd accepts that this file's narrower K/M/G/T-only
+// parseSystemdByteSize merely cannot compute a byte count for ("50%",
+// "1024B", "2P", "1G 500M") is never treated as skippable here: it IS the
+// effective assignment, so skipping past it would warn against the wrong,
+// no-longer-effective value instead of just declining to evaluate. Splits
+// a compound sum only on whitespace immediately before a digit, so a single
+// spaced-out term ("32 G") stays one component. Two systemd-valid forms
+// this deliberately misreads as invalid are the compact, no-separator
+// compound ("1G500M") and an explicitly-signed magnitude ("+5G");
+// recognizing them needs a full tokenizer, out of proportion for a check
+// whose only job is to decide which drop-in line to read a ceiling from.
+function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
+  const percentage = SYSTEMD_MEMORY_PERCENTAGE.exec(value);
+  if (percentage !== null) {
+    const percent = Number(percentage[1]);
+    return !(percent > 0 && percent <= 100);
+  }
+  const magnitudes: number[] = [];
+  for (const term of value.split(/\s+(?=\d)/)) {
+    const match = SYSTEMD_MEMORY_VALUE_TERM.exec(term);
+    if (match === null) {
+      return true;
+    }
+    magnitudes.push(Number(match[1]));
+  }
+  return magnitudes.every((magnitude) => magnitude === 0);
+}
+
+function parseSystemdByteSize(value: string): number | undefined {
+  const match = SYSTEMD_BYTE_SIZE_PATTERN.exec(value.trim());
+  if (match === null) {
+    return undefined;
+  }
+  const amount = Number(match[1]);
+  const suffix = (match[2] ?? "").toUpperCase();
+  const exponent = suffix === "" ? 0 : "KMGT".indexOf(suffix) + 1;
+  const bytes = amount * 1024 ** exponent;
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : undefined;
+}
+
+function formatGibibytes(bytes: number): string {
+  return (bytes / GIBIBYTE_BYTES).toFixed(1).replace(/\.0$/, "");
+}
 
 // A drop-in can carry the directive the slice is supposed to have shed, and
 // `service install --force` rewrites only the base unit (see

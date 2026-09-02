@@ -5916,15 +5916,25 @@ export class RunStore {
     });
   }
 
+  // Deliberately leaves updated_at untouched, unlike most setters in this
+  // file: listRoutineWorkspacePruneCandidates keys retention entirely off
+  // updated_at for terminal firings, and this setter is called on every
+  // daemon restart for any row still marked cleanup-pending (see
+  // findLeakedRoutineFirings). Bumping updated_at here would push a
+  // succeeded/failed/cancelled firing's retention window forward on every
+  // restart -- indefinitely, if the scope can never be confirmed stopped --
+  // even though its real terminal transition (completeRoutineFiring /
+  // markRoutineFiringsFailed) already stamped the timestamp retention should
+  // use.
   setRoutineFiringProviderScopeCleanupPending(
     firingId: string,
     pending: boolean
   ): void {
     this.database
       .prepare(
-        "update routine_firings set provider_scope_cleanup_pending = ?, updated_at = ? where id = ?"
+        "update routine_firings set provider_scope_cleanup_pending = ? where id = ?"
       )
-      .run(pending ? 1 : 0, timestamp(), firingId);
+      .run(pending ? 1 : 0, firingId);
   }
 
   markRoutineFiringsFailed(

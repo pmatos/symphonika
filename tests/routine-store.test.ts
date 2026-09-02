@@ -3251,6 +3251,80 @@ describe("RunStore routines", () => {
     }
   });
 
+  // Regression: setRoutineFiringProviderScopeCleanupPending is called on
+  // every daemon restart for any row still marked cleanup-pending
+  // (findLeakedRoutineFirings re-selects it). listRoutineWorkspacePruneCandidates
+  // keys retention entirely off updated_at for terminal firings, so if the
+  // setter bumped it, a cleanup retry (successful or not) would push a
+  // failed/succeeded/cancelled firing's retention window forward on every
+  // restart -- indefinitely, if the scope can never be confirmed stopped.
+  it("does not delay workspace retention when toggling provider-scope cleanup pending", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "retention-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringWorkspace({
+        id: "retention-fire",
+        workspacePath: "/tmp/retention-workspace"
+      });
+      store.completeRoutineFiring({
+        id: "retention-fire",
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+      const terminalUpdatedAt =
+        store.getRoutineFiring("retention-fire")?.updatedAt;
+
+      store.setRoutineFiringProviderScopeCleanupPending("retention-fire", true);
+      store.setRoutineFiringProviderScopeCleanupPending(
+        "retention-fire",
+        false
+      );
+
+      expect(store.getRoutineFiring("retention-fire")).toMatchObject({
+        providerScopeCleanupPending: false,
+        updatedAt: terminalUpdatedAt
+      });
+
+      // The retention cutoff is derived from the real terminal transition,
+      // not from the moment the daemon last swept this row's cleanup flag.
+      const justAfterTerminal = new Date(
+        Date.parse(terminalUpdatedAt as string) + 1
+      ).toISOString();
+      expect(
+        store.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: justAfterTerminal,
+          failedBefore: justAfterTerminal,
+          succeededBefore: justAfterTerminal
+        })
+      ).toEqual([
+        expect.objectContaining({
+          id: "retention-fire",
+          workspacePath: "/tmp/retention-workspace"
+        })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("protects an uninspected git workspace after its routine kind changes", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

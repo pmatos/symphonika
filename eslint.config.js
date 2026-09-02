@@ -20,7 +20,12 @@ export default tseslint.config(
     languageOptions: {
       parserOptions: {
         projectService: {
-          allowDefaultProject: ["*.mjs", "fuzz/*.mjs", "commitlint.config.cjs"]
+          allowDefaultProject: [
+            "*.mjs",
+            ".github/semantic-release/*.mjs",
+            "fuzz/*.mjs",
+            "commitlint.config.cjs"
+          ]
         },
         tsconfigRootDir: import.meta.dirname
       }

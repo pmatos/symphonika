@@ -533,6 +533,14 @@ describe("startDaemon", () => {
       expect(filteredEntry?.reasons).toEqual([
         expect.stringContaining("no_workspace_changes")
       ]);
+      // Regression guard (#691 review): latestRunSuppressesFreshDispatch
+      // looks only at the newest Run row, never at the Issue's own
+      // revision -- the reason string must not promise that editing the
+      // Issue lifts the suppression, since it does not.
+      expect(filteredEntry?.reasons[0]).not.toContain(
+        "until the issue changes"
+      );
+      expect(filteredEntry?.reasons[0]).toContain("newer run");
 
       // Regression guard (#691 review): the persisted /issues triage
       // snapshot (fed from the raw, unfiltered nextStatus) used to keep

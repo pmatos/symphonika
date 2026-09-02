@@ -2031,8 +2031,13 @@ export async function startDaemon(
 // suppressResolvedFreshDispatchCandidates -- distinguishes it from the
 // pure label-based reasons issueFilterReasons produces (see
 // evaluateProjectEligibility), which never mention Run history.
+// latestRunSuppressesFreshDispatch (run-store.ts) looks only at the newest
+// Run row for this (Project, repository, Issue), never at the Issue's own
+// revision/updated_at -- so this string must not promise that editing the
+// Issue (title, body, or any label short of closing/reopening) lifts the
+// suppression, since it does not (#691 review).
 const FRESH_DISPATCH_SUPPRESSED_REASON =
-  "a newer run's terminal outcome (no_workspace_changes) suppresses fresh dispatch until the issue changes";
+  "a newer run's terminal outcome (no_workspace_changes) suppresses fresh dispatch until a newer run for this issue changes the verdict";
 
 // #683/#691: reclassifies candidates whose newest Run already suppresses
 // fresh dispatch (RunStore.latestRunSuppressesFreshDispatch) as filtered

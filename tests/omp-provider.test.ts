@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ProcessCommand,
@@ -999,48 +999,66 @@ describe("Oh My Pi RPC provider", () => {
     expect(kinds).toEqual(Array.from({ length: 10 }, () => "message"));
   });
 
-  it("defers process exit until a latched backlog drains", async () => {
-    const { close, queue, stdout } = await createQueueHarness({
-      emitReady: false,
-      queueOptions: { maxPendingItems: 3 }
-    });
-    const frame = JSON.stringify({ type: "notice" });
-    stdout.write(
-      `${JSON.stringify({ type: "ready" })}\n${`${frame}\n`.repeat(5)}`
-    );
-    stdout.end();
-    close(0, null);
+  it("preserves process close time while a full queue delays exit", async () => {
+    vi.useFakeTimers();
+    try {
+      const { close, queue, stdout } = await createQueueHarness({
+        limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+        queueOptions: { maxPendingItems: 3 }
+      });
+      const frame = `${JSON.stringify({ type: "notice" })}\n`;
+      // All three frames are parsed before close, leaving stdoutBuffer empty
+      // while the pending queue itself defers the exit item.
+      stdout.write(frame.repeat(3));
+      expect(queue.size).toBe(3);
+      stdout.end();
+      const closeAt = "2026-09-02T10:00:00.000Z";
+      vi.setSystemTime(closeAt);
+      close(0, null);
 
-    expect(await queue.next()).toMatchObject({ kind: "message" });
-    queue.setFrameLimits(1024, 8192);
-    const kinds: string[] = [];
-    for (let index = 0; index < 6; index += 1) {
-      kinds.push((await queue.next()).kind);
+      vi.setSystemTime("2026-09-02T10:05:00.000Z");
+      const items = [];
+      for (let index = 0; index < 4; index += 1) {
+        items.push(await queue.next());
+      }
+      expect(items.map((item) => item.kind)).toEqual([
+        "message",
+        "message",
+        "message",
+        "exit"
+      ]);
+      expect(items.at(-1)?.receivedAt).toBe(closeAt);
+    } finally {
+      vi.useRealTimers();
     }
-    expect(kinds).toEqual([
-      "message",
-      "message",
-      "message",
-      "message",
-      "message",
-      "exit"
-    ]);
   });
 
-  it("enqueues a stored exit after discard when limits never install", async () => {
-    const { close, queue, stdout } = await createQueueHarness({
-      emitReady: false
-    });
-    stdout.write(
-      `${JSON.stringify({ type: "ready" })}\n${JSON.stringify({ type: "notice" })}\n`
-    );
-    stdout.end();
-    close(0, null);
+  it("preserves process close time when discard releases a stored exit", async () => {
+    vi.useFakeTimers();
+    try {
+      const { close, queue, stdout } = await createQueueHarness({
+        emitReady: false
+      });
+      stdout.write(
+        `${JSON.stringify({ type: "ready" })}\n${JSON.stringify({ type: "notice" })}\n`
+      );
+      stdout.end();
+      const closeAt = "2026-09-02T11:00:00.000Z";
+      vi.setSystemTime(closeAt);
+      close(0, null);
 
-    expect(await queue.next()).toMatchObject({ kind: "message" });
-    queue.discardBeforeFrameLimits();
-    expect(await queue.next()).toMatchObject({ exitCode: 0, kind: "exit" });
-    queue.discardBeforeFrameLimits();
+      vi.setSystemTime("2026-09-02T11:05:00.000Z");
+      expect(await queue.next()).toMatchObject({ kind: "message" });
+      queue.discardBeforeFrameLimits();
+      expect(await queue.next()).toMatchObject({
+        exitCode: 0,
+        kind: "exit",
+        receivedAt: closeAt
+      });
+      queue.discardBeforeFrameLimits();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("pauses stdout when the queue fills with an unterminated remainder buffered", async () => {

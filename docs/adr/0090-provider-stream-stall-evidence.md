@@ -105,12 +105,10 @@ operators can measure duration distributions without parsing logs.
   behavior. Frames already sitting in `stdoutBuffer` when the backpressure gate engages keep the
   arrival time of the stdout chunk that produced them, even though parsing them is deferred to a
   later drain — a chunk the child writes while stdout is paused is stamped once the readable
-  resumes, which is genuinely when the orchestrator received it, not a gap. The one residual this
-  round does not close: an exit item deferred by the same backpressure gate at process close is
-  still stamped at drain time rather than close time, tracked as a separate follow-up rather than
-  bundled here, since it is safe to land independently once the buffered-frame case above is
-  accurate (fixing the exit time alone, while frames were still drain-stamped, would have risked
-  moving the receipt watermark backward — that risk does not apply the other way around).
+  resumes, which is genuinely when the orchestrator received it, not a gap. Follow-up #664 closes
+  the remaining deferred-exit gap: the close callback's timestamp is retained through both normal
+  EOF draining and pre-limit output discard. This landed after deferred frames had accurate arrival
+  times, preserving their order before the accurately stamped process exit.
 
 ## Interaction with existing decisions
 

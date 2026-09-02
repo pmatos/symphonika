@@ -203,4 +203,93 @@ in the backlog as `proposed` with its benign-drift finding. `run-slot-lease` (19
 
 ## Design
 
-Written in step 4, after this report was first committed.
+Design-it-twice: three sub-agents each produced a *radically different* interface for the deepened
+module; a fourth adjudicator that authored none of them picked the winner against depth → locality →
+seam placement → test surface → blast radius.
+
+### Winner — Design C: a `WatchdogSubjectPort<C>` + `driveWatchdogSubject` driver in a new module
+
+New `src/lifecycle/watchdog-subject.ts` exports a 9-member port and a generic driver; `watchdog.ts`
+imports them, builds two adapters closing over its existing `ReconcileWatchdogInput`, and calls the
+driver twice sharing one `cancellations` array and summing the counts.
+
+```ts
+export type WatchdogSubjectPort<C> = {
+  candidates(): Iterable<C>;
+  id(subject: C): string;
+  projectName(subject: C): string;
+  loadPrevious(subject: C): WatchdogProgressSample | undefined;
+  sample(subject: C, input: WatchdogSampleInput): Promise<WatchdogProgressSample | undefined>;
+  persist(subject: C, sample: WatchdogProgressSample): boolean;        // false = lost race, skip
+  terminalReason(subject: C, decision: WatchdogDecisionInput): WatchdogTerminalReason | undefined;
+  markStale(subject: C, reason: WatchdogTerminalReason, sampledAt: string): boolean;
+  announce(subject: C, outcome: WatchdogTerminationOutcome): void;     // observer + audit log
+};
+export async function driveWatchdogSubject<C>(
+  port: WatchdogSubjectPort<C>, ctx: WatchdogSubjectContext
+): Promise<{ sampled: number; terminated: number }>;
+```
+
+The driver is generic over `WatchdogProgressSample` only — the id (`runId`/`firingId`) never enters
+the driver; `loadPrevious` strips it and `persist` re-attaches it. `ctx` carries the shared
+`cancellations` array, `now`, `sampledAt`, a `resolveConfig(projectName)` closure, and a
+`requestCancel(id, reason)` closure (chosen over passing `ActiveRunRegistry` because `requestCancel`
+no-ops silently on an unregistered id, so a spy closure is directly observable in the fake).
+`watchdogIdleClock` and `WATCHDOG_CANCEL_REASONS` move into the new module (the idle clock is
+co-located with the ADR-0054 ordering it enforces).
+
+- **What it hides**: the whole `sample → idle-clock → persist → terminal → markStale → cancel → tally
+  → announce` sequence and its four `continue` skip points; the id round-trip; the generation-CAS vs
+  unfenced store handshakes (as `boolean` returns); the ADR-0091 terminal-policy split (behind
+  `terminalReason`); and the two divergent observer+log shapes (behind `announce`).
+- **Dependency strategy**: closure injection at the composition root — the two adapters capture
+  `RunStore`, `evidenceIgnoreForProject`, the observers, `sampleRun`/`sampleRoutineFiring`; the driver
+  imports none of them. Config resolution and cancellation cross as closures, so the fake needs no
+  `RunStore`, db, or filesystem.
+- **Why it won**: deepest by *shared behaviour captured* (the full sequence, including the terminal
+  half, sits behind one driver) rather than by raw member count; best **locality** (a liveness rule
+  change lands in the co-located idle clock, a terminal-bound change in one adapter's `terminalReason`
+  leaf); best **seam placement** (every member sits on a variance that exists *today* — the ADR-0091
+  policy split, the generation CAS, the two log shapes); best **test surface** (every skip branch and
+  the ADR-0054 ordering are individually fakeable). It concedes only **blast radius** (the
+  lowest-priority axis): it moves two helpers, widens the `sampleRun`/`sampleRoutineFiring` `previous`
+  param to `WatchdogProgressSample | undefined`, and adds a benign two-module function-declaration
+  cycle (no `import/no-cycle` rule in `eslint.config.js`; both imports are call-time only).
+
+### Runner-up design — Design A: a 4-member `WatchdogSubject` with a single `terminate` member
+
+`{ candidates, sample→{previous,next}, persist, terminate→Promise<void>|undefined }`, idle clock
+injected via `deps`, no helpers moved (smallest diff, no import cycle). **Why it lost**: it folds the
+terminal-policy + markStale + cancel + observer + both log lines into one `terminate` member, so the
+*decide → markStale → cancel → log* skeleton is re-implemented in **both** adapters (only the leaves
+differ) and the fake cannot reach the terminal decision or the markStale-race branch — they are
+indistinguishable behind `terminate`'s `Promise<void> | undefined` return, which itself conflates
+"not terminal" with "lost the markStale race". Config is resolved twice per candidate. It wins raw
+member count and blast radius, but loses locality, seam placement, and test surface — the axes that
+rank above blast radius. A's fat single seam is drawn in the wrong place.
+
+### Out — Design B: ports-and-adapters with a separable `TerminalPolicy` + `TFacts` generic
+
+A ~13-member port plus a `TerminalPolicy<TFacts>` strategy and a third type parameter, built so a
+*third* subject kind could slot in with zero driver change. The `TerminalPolicy` extraction is a real
+seam (which C already captures via `terminalReason`), but the `TFacts` generic and the third-subject
+flexibility are **speculative** — the rule of three is unmet (two subjects exist, not three) — and the
+design grows net LOC with ~9 of ~13 members being one-line pass-throughs. Its own author conceded that
+"extracting only the `TerminalPolicy` and collapsing the two loops with a smaller, non-generic helper
+would likely be the better trade unless a third subject is imminent." Penalised on seam placement and
+blast radius.
+
+### Implementation risks the adjudicator flagged (carried into step 5)
+
+1. **`announce` ordering** — the original runs `try { observer } catch { warn "observer failed" }`
+   then an **unconditional** terminal log. Folding as `try { observer; log }` would swallow the
+   terminal log when the observer throws — a behaviour change the existing 36 tests do **not** catch
+   (they seed a non-throwing `vi.fn()`). Preserve by construction and add a fake-test assertion for
+   the throw path.
+2. **knip on exported types** — annotate the adapters `const runPort: WatchdogSubjectPort<...> = {…}`
+   so the exported type names are imported by `src`, not inferred (an unused exported type fails CI).
+3. **`watchdogGeneration` CAS threads into all three run sites** — `upsertWatchdogSample`,
+   `markRunWatchdogStale`, and `rememberWatchdogTurnIds` (inside `sampleRun`); the run adapter's
+   `persist`/`markStale`/`sample` must each close over it; the firing adapter passes none.
+4. The two-module cycle is safe (call-time-only imports); keep no top-level calls across the boundary.
+

@@ -31,7 +31,7 @@ export type SavePipelineInput = {
   // The logical path validators should use for resolving relative
   // references. filePath can be a symlink-resolved target so atomic rename
   // updates the referenced file without replacing the symlink; reload still
-  // resolves workflow-relative paths from the configured, logical path.
+  // resolves relative paths from the selected, logical path.
   // Defaults to filePath for non-symlinked saves and other content kinds.
   validationPath?: string;
   // kind: "workflow_contract" only -- the project's own resolved format

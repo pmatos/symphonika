@@ -1,5 +1,15 @@
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -334,6 +344,45 @@ describe("service config editor (#307 part 3, ADR 0076)", () => {
       });
       expect(response.status).toBe(303);
       expect(await readFile(test.configPath, "utf8")).toBe(editedContent);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("confirm validates relative paths from a symlinked config's logical directory", async () => {
+    const test = await setup();
+    const targetDir = path.join(test.stateRoot, "shared");
+    const targetConfigPath = path.join(targetDir, "symphonika.yml");
+    await mkdir(targetDir);
+    await rename(test.configPath, targetConfigPath);
+    await symlink(targetConfigPath, test.configPath);
+
+    try {
+      const app = appFor(test, {
+        resolveWritePath: (candidatePath) => realpath(candidatePath),
+        triggerReload: () => Promise.resolve({ errors: [], ok: true })
+      });
+      const editedContent = validConfig().replace(
+        "interval_ms: 1000",
+        "interval_ms: 2000"
+      );
+      const response = await app.request("/config/edit/confirm", {
+        body: formBody({
+          content: editedContent,
+          csrf_token: VALID_TOKEN,
+          expected_content_hash: contentHash(validConfig())
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+
+      expect(response.status).toBe(303);
+      expect(await readFile(targetConfigPath, "utf8")).toBe(editedContent);
+      expect((await lstat(test.configPath)).isSymbolicLink()).toBe(true);
     } finally {
       test.cleanup();
     }

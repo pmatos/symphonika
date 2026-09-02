@@ -193,6 +193,14 @@ so relative raw-FSM prompt references must be validated from its directory. Vali
 resolved target's directory would let preview and reload agree while confirm alone rejects (or
 accepts) the same submitted contract against a different filesystem base.
 
+For a symlinked Service Config, confirm deliberately keeps two paths: `resolveWritePath`'s real
+target is used for the stale check and atomic rename so the save updates the target without
+replacing the symlink, while the selected logical Service Config path is passed separately as
+`runSavePipeline.validationPath`. `RuntimeConfigReloader` derives its `configDir` from that same
+selected path, so relative `routines:` and `projects[].workflow` references must be validated from
+its directory. Validating from the resolved target's directory would make confirm disagree with
+both preview and the real reload.
+
 ### Ambiguous name resolution reuses the existing disambiguation page
 
 A routine name can resolve to more than one declaration (`groupRoutinesByName`'s documented "stale

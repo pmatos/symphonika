@@ -991,9 +991,9 @@ const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
 // (no "i" flag where this is compiled below) because systemd's parse_size()
 // suffix table only recognizes the uppercase letters — "1G500m" is
 // rejected by systemd and must fail to tokenize here too, not silently
-// normalize "m" to "M". A leading "+" sign applies once to the whole
-// assignment (e.g. "+64G", "+64G512M"), not per term, so it is stripped
-// before tokenizing rather than matched here — "64G+512M" must still fail.
+// normalize "m" to "M". An optional leading "+" may prefix each term
+// (e.g. "+64G", "64G+512M") and must be immediately followed by that
+// term's magnitude, so it is matched inside each token.
 // Whitespace between terms is skipped by hand in the tokenizing loop below
 // rather than folded into this pattern: an earlier version matched runs of
 // terms with `(?:TERM_SOURCE)+` against the whole string, which is
@@ -1001,11 +1001,17 @@ const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
 // repetition can be split ambiguously across the outer `+`), letting a
 // single typo'd local MemoryMax= drop-in hang the doctor check
 // indefinitely.
-const SYSTEMD_MEMORY_VALUE_TERM_SOURCE = "(\\d+(?:\\.\\d+)?)\\s*([KMGTPE]|B)?";
-// A leading "+" is meaningful for a percentage too — systemd's parse_permyriad()
-// goes through the same strtol()-based sign handling as parse_size(), so
-// "+50%" and "+100%" are accepted the same as unsigned "50%"/"100%".
-const SYSTEMD_MEMORY_PERCENTAGE = /^\+?(\d+(?:\.\d+)?)%$/;
+const SYSTEMD_MEMORY_VALUE_TERM_SOURCE =
+  "\\+?(\\d+(?:\\.\\d*)?)\\s*([KMGTPE]|B)?";
+// A leading "+" is meaningful for relative values too — systemd's
+// parse_permyriad() goes through the same strtol()-based sign handling as
+// parse_size(). The accepted precision depends on the symbol: hundredths for
+// percent, tenths for permille, and whole permyriads.
+const SYSTEMD_MEMORY_RELATIVE_PATTERNS = [
+  { maximum: 100, pattern: /^\+?(\d+(?:\.\d{1,2})?)%$/ },
+  { maximum: 1_000, pattern: /^\+?(\d+(?:\.\d)?)‰$/ },
+  { maximum: 10_000, pattern: /^\+?(\d+)‱$/ }
+] as const;
 // Explicit-suffix rank, smallest first — systemd's parse_size() requires
 // each compound term's unit to be strictly smaller than the one before it,
 // so "1G500M" is accepted but "1G2G" (repeated) and "500M1G" (increasing)
@@ -1017,26 +1023,23 @@ const SYSTEMD_MEMORY_PERCENTAGE = /^\+?(\d+(?:\.\d+)?)%$/;
 // rank computation in isDefinitelyInvalidSystemdMemoryValue, where a
 // missing suffix gets rank 0 and "B" gets indexOf("B") + 1 = 1.
 const SYSTEMD_MEMORY_UNIT_ORDER = "BKMGTPE";
-// parse_size() accumulates into a uint64_t and rejects anything that would
-// overflow it ("Numerical result out of range"), so a total at or beyond
-// 2^64 — a single huge term ("+16E") or a compound sum that crosses the
-// line ("16E1P") — must be rejected here too, or winningByteSizeAssignment
-// would select a value systemd never applied. A BigInt literal (rather than
-// `2 ** 64`) so the overflow comparison below can stay exact: past 2^53 a
-// JS `number` can no longer represent every integer, so a huge-but-valid
-// bare byte count like "18446744073709551614" (2^64 - 2) would otherwise
-// round up to 2^64 itself and be wrongly rejected as overflowing.
-const SYSTEMD_MEMORY_MAX_BYTES = 2n ** 64n;
+// config_parse_memory_limit() reserves UINT64_MAX (2^64 - 1) as its infinity
+// sentinel and rejects a parsed byte total at or above it. That catches both
+// parse_size() overflow (a single "+16E" or compound "16E1P") and the exact
+// sentinel spelling "18446744073709551615". Keep this as a BigInt so the
+// comparison remains exact past 2^53 and still accepts the largest finite
+// value, 18446744073709551614 (2^64 - 2).
+const SYSTEMD_MEMORY_LIMIT_INFINITY = 2n ** 64n - 1n;
 
 // config_parse_memory_limit() drops an assignment two different ways, both
 // of which make systemd keep whatever limit was previously in force:
 //
 //   - "Invalid memory limit ..., ignoring" when the text is not a memory
-//     value at all — neither a percentage of at most two decimal places nor
-//     a sum of magnitudes each carrying at most one K/M/G/T/P/E-or-"B"
-//     suffix. Covers "bogus", "32GB", "10garbage", and a percentage above
-//     100 ("101%", "200%"), which overflows parse_permyriad and then fails
-//     parse_size because of the "%".
+//     value at all — neither a relative value with parse_permyriad's
+//     symbol-specific precision nor a sum of magnitudes each carrying at
+//     most one K/M/G/T/P/E-or-"B" suffix. Covers "bogus", "32GB",
+//     "10garbage", and a percentage above 100 ("101%", "200%"), which
+//     overflows parse_permyriad and then fails parse_size because of "%".
 //   - "Memory limit ... out of range, ignoring" when the text parses but
 //     resolves to zero bytes — "0", "0B", "0P", "0K", "0%", and a compound
 //     whose terms are individually non-zero but sum to under one byte
@@ -1066,28 +1069,23 @@ const SYSTEMD_MEMORY_MAX_BYTES = 2n ** 64n;
 // "0.6B0.6", where each term is individually a sub-byte fraction systemd
 // discards to zero, would sum to a non-zero 1.2 here and be wrongly
 // accepted as effective when systemd rejects it as a zero-byte limit. The
-// leading "+" sign must be immediately followed by a digit — systemd
-// rejects whitespace between the sign and the first term ("+ 64G") even
-// though whitespace between later terms is fine ("+1G 500M") — so the
-// standard between-terms whitespace skip is suppressed only for the very
-// first term of a signed value.
+// "+" sign on any term must be immediately followed by a digit — systemd
+// accepts "64G +512M" but rejects "+ 64G" and "64G + 512M".
 function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
-  const percentage = SYSTEMD_MEMORY_PERCENTAGE.exec(value);
-  if (percentage !== null) {
-    const percent = Number(percentage[1]);
-    return !(percent > 0 && percent <= 100);
+  for (const relativePattern of SYSTEMD_MEMORY_RELATIVE_PATTERNS) {
+    const relative = relativePattern.pattern.exec(value);
+    if (relative !== null) {
+      const amount = Number(relative[1]);
+      return !(amount > 0 && amount <= relativePattern.maximum);
+    }
   }
-  const signed = value.startsWith("+");
   let totalBytes = 0n;
   let previousRank = Infinity;
-  let isFirstTerm = true;
   const term = new RegExp(SYSTEMD_MEMORY_VALUE_TERM_SOURCE, "y");
-  let offset = signed ? 1 : 0;
+  let offset = 0;
   while (offset < value.length) {
-    if (!(signed && isFirstTerm)) {
-      while (/\s/.test(value[offset] ?? "")) {
-        offset += 1;
-      }
+    while (/\s/.test(value[offset] ?? "")) {
+      offset += 1;
     }
     if (offset === value.length) {
       break;
@@ -1105,23 +1103,32 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
     }
     previousRank = rank;
     const multiplier = 1024n ** BigInt(Math.max(rank - 1, 0));
-    // match[1] is guaranteed by the mandatory capture group `(\d+(?:\.\d+)?)`
+    // match[1] is guaranteed by the mandatory capture group `(\d+(?:\.\d*)?)`
     // in SYSTEMD_MEMORY_VALUE_TERM_SOURCE; the `?? "0"` only satisfies
     // noUncheckedIndexedAccess.
     const [integerDigits = "0", fractionalDigits] = (match[1] ?? "0").split(
       "."
     );
-    const fractionalBytes =
-      fractionalDigits === undefined
-        ? 0n
-        : BigInt(
-            Math.trunc(Number(`0.${fractionalDigits}`) * Number(multiplier))
-          );
-    totalBytes += BigInt(integerDigits) * multiplier + fractionalBytes;
-    if (totalBytes >= SYSTEMD_MEMORY_MAX_BYTES) {
+    const integerMagnitude = BigInt(integerDigits);
+    const fractionalMagnitude = BigInt(fractionalDigits || "0");
+    if (fractionalMagnitude > SYSTEMD_MEMORY_LIMIT_INFINITY) {
       return true;
     }
-    isFirstTerm = false;
+    const fractionalValue =
+      fractionalDigits === undefined ? 0 : Number(`0.${fractionalDigits}`);
+    if (
+      integerMagnitude + (fractionalValue > 0 ? 1n : 0n) >
+      SYSTEMD_MEMORY_LIMIT_INFINITY / multiplier
+    ) {
+      return true;
+    }
+    const fractionalBytes = BigInt(
+      Math.trunc(fractionalValue * Number(multiplier))
+    );
+    totalBytes += integerMagnitude * multiplier + fractionalBytes;
+    if (totalBytes >= SYSTEMD_MEMORY_LIMIT_INFINITY) {
+      return true;
+    }
     offset = term.lastIndex;
   }
   return totalBytes < 1n;

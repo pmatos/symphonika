@@ -9,6 +9,7 @@ import type {
   RawGitHubIssueDependencyRef
 } from "./issue-polling.js";
 import { normalizeProjectWeight } from "./issue-priority.js";
+import { isNoWorkspaceChangesReason } from "./lifecycle/terminal-reason.js";
 import { isPathInside } from "./path-safety.js";
 import {
   decodeJsonArrayColumn,
@@ -2105,10 +2106,11 @@ export class RunStore {
   }): boolean {
     // `sym:*` labels are mutable tracker bookkeeping, so clearing them cannot
     // erase the durable verdict from the newest Run. Scope the lookup by the
-    // Issue's repository identity just like restart resumption: a Project may
-    // be retargeted while retaining same-numbered historical Runs. Rows whose
-    // legacy origin is unknown conservatively belong to the current history.
-    // See ADR 0058's issue #683 amendment.
+    // Issue's repository identity, mirroring restart resumption's rationale
+    // (a Project may be retargeted while retaining same-numbered historical
+    // Runs) though not its null-matching: here a null owner/repo is a
+    // wildcard, so rows whose legacy origin is unknown conservatively belong
+    // to the current history. See ADR 0058's issue #683 amendment.
     const row = this.database
       .prepare(
         [
@@ -2130,7 +2132,8 @@ export class RunStore {
         repo: input.repository.repo
       }) as { state: RunState; terminal_reason: string | null } | undefined;
     return (
-      row?.state === "blocked" && row.terminal_reason === "no_workspace_changes"
+      row?.state === "blocked" &&
+      isNoWorkspaceChangesReason(row.terminal_reason)
     );
   }
 

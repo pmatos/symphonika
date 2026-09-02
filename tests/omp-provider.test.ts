@@ -173,6 +173,40 @@ describe("Oh My Pi RPC provider", () => {
     ]);
   });
 
+  it("timestamps buffered events when they enter the OMP process queue", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-buffered-events-omp.mjs");
+    await writeFakeBufferedEventsOmp(fakeOmpPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+    const iterator = provider
+      .runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+      [Symbol.asyncIterator]();
+
+    const firstMessage = await nextMessageEvent(iterator);
+    const consumerPausedAt = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const secondMessage = await nextMessageEvent(iterator);
+
+    expect(firstMessage.receivedAt).toEqual(expect.any(String));
+    expect(secondMessage.receivedAt).toEqual(expect.any(String));
+    expect(Date.parse(secondMessage.receivedAt ?? "")).toBeLessThanOrEqual(
+      consumerPausedAt
+    );
+
+    while (!(await iterator.next()).done) {
+      // Drain the provider so its process scope is cleaned up.
+    }
+  });
+
   it("does not carry a stale result from an earlier turn into a later textless turn", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -892,6 +926,34 @@ describe("Oh My Pi RPC provider", () => {
     expect(stdout.isPaused()).toBe(false);
   });
 
+  it("stamps backpressure-deferred frames with their chunk's arrival time, not drain time", async () => {
+    const { queue, stdout } = await createQueueHarness({
+      limits: { maxFrameBytes: 1024, maxReassembledBytes: 8192 },
+      queueOptions: { maxPendingItems: 3 }
+    });
+    const frame = `${JSON.stringify({ type: "notice" })}\n`;
+    // One chunk, five frames: only 3 fit before the item high-water mark
+    // pauses the stream; frames 4-5 stay unparsed in stdoutBuffer until a
+    // later drain resumes them.
+    stdout.write(frame.repeat(5));
+    expect(stdout.isPaused()).toBe(true);
+
+    const first = await queue.next();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    // Dequeuing the second item crosses the low-water mark and triggers the
+    // deferred drain of frames 4-5 as a side effect of this call, well after
+    // the delay above.
+    await queue.next();
+    await queue.next();
+    const fourth = await queue.next();
+    const fifth = await queue.next();
+
+    expect(first.receivedAt).toEqual(expect.any(String));
+    expect(fourth.receivedAt).toBe(first.receivedAt);
+    expect(fifth.receivedAt).toBe(first.receivedAt);
+    expect(stdout.isPaused()).toBe(false);
+  });
+
   it("drains a deferred EOF backlog without crossing the high-water marks", async () => {
     const { queue, stdout } = await createQueueHarness({
       emitReady: false,
@@ -1170,14 +1232,14 @@ describe("Oh My Pi RPC provider", () => {
       })
     );
 
-    expect(
-      events
-        .map((event) => event.normalized)
-        .find((event) => event?.type === "turn_failed")
-    ).toMatchObject({
+    const turnFailed = events.find(
+      (event) => event.normalized?.type === "turn_failed"
+    );
+    expect(turnFailed?.normalized).toMatchObject({
       message: "Oh My Pi provider emitted terminal agent_end before prompt",
       type: "turn_failed"
     });
+    expect(turnFailed?.receivedAt).toEqual(expect.any(String));
     expect(
       readJsonl(await readFile(transcriptPath, "utf8")).map((command) =>
         objectField(command, "type")
@@ -1262,14 +1324,14 @@ describe("Oh My Pi RPC provider", () => {
     );
 
     const types = events.map((event) => event.normalized?.type);
-    expect(
-      events
-        .map((event) => event.normalized)
-        .find((event) => event?.type === "turn_failed")
-    ).toMatchObject({
+    const turnFailed = events.find(
+      (event) => event.normalized?.type === "turn_failed"
+    );
+    expect(turnFailed?.normalized).toMatchObject({
       message: "Oh My Pi provider exited before a terminal agent_end",
       type: "turn_failed"
     });
+    expect(turnFailed?.receivedAt).toEqual(expect.any(String));
     expect(events.at(-1)?.normalized).toMatchObject({
       exitCode: 0,
       type: "process_exit"
@@ -1552,14 +1614,14 @@ describe("Oh My Pi RPC provider", () => {
     );
 
     const types = events.map((event) => event.normalized?.type);
-    expect(
-      events
-        .map((event) => event.normalized)
-        .find((event) => event?.type === "turn_failed")
-    ).toMatchObject({
+    const turnFailed = events.find(
+      (event) => event.normalized?.type === "turn_failed"
+    );
+    expect(turnFailed?.normalized).toMatchObject({
       message: "Oh My Pi provider exited before a terminal agent_end",
       type: "turn_failed"
     });
+    expect(turnFailed?.receivedAt).toEqual(expect.any(String));
     expect(events.at(-1)?.normalized).toMatchObject({
       exitCode: 0,
       type: "process_exit"
@@ -2091,6 +2153,19 @@ async function collectProviderEvents(
   return events;
 }
 
+async function nextMessageEvent(
+  iterator: AsyncIterator<ProviderEvent>
+): Promise<ProviderEvent> {
+  while (true) {
+    const next = await iterator.next();
+    expect(next.done).toBe(false);
+    const event = next.value as ProviderEvent;
+    if (event.normalized?.type === "message") {
+      return event;
+    }
+  }
+}
+
 function providerInputFixture(): ProviderRunInput {
   return {
     branchName: "sym/symphonika/335-add-omp-provider",
@@ -2159,6 +2234,34 @@ async function writeFakeOmp(
       "    send({ type: 'message_end', message: { role: 'assistant' } });",
       "    send({ type: 'turn_end', message: { role: 'assistant' }, toolResults: [] });",
       "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeBufferedEventsOmp(filePath: string): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-buffered', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    const frames = [",
+      "      { id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: true } },",
+      "      { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'first' } },",
+      "      { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'second' } },",
+      "      { type: 'turn_end' },",
+      "      { type: 'agent_end', isTerminal: true, messages: [] }",
+      "    ];",
+      "    process.stdout.write(`${frames.map((frame) => JSON.stringify(frame)).join('\\n')}\\n`);",
       "  }",
       "}",
       ""

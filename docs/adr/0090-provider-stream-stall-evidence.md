@@ -98,11 +98,19 @@ operators can measure duration distributions without parsing logs.
 - Existing Normalized Event Log evidence seeds last-receipt state after upgrade, but historical
   recovered durations are not synthesized from normalized rows because raw-only receipts were not
   previously durable.
-- The queue-ingestion `receivedAt` fix covers the Codex and Claude adapters, which share
-  `jsonl-process-queue.ts`. The OMP adapter keeps its own, structurally similar but more complex
-  queue (`createProcessQueue` in `omp.ts`, with its own backpressure and frame-reassembly logic) and
-  was left out of this change's scope; it still derives `receivedAt` from consumption time and so
-  retains the residual gap this ADR describes. Tracked as a follow-up.
+- The original queue-ingestion `receivedAt` fix covered the Codex and Claude adapters through their
+  shared `jsonl-process-queue.ts`. Follow-up #638 closes the deferred OMP gap: its structurally
+  similar but more complex `createProcessQueue` now stamps items in `push()` and threads that stamp
+  through OMP frame mapping while preserving its independent backpressure and frame-reassembly
+  behavior. Frames already sitting in `stdoutBuffer` when the backpressure gate engages keep the
+  arrival time of the stdout chunk that produced them, even though parsing them is deferred to a
+  later drain — a chunk the child writes while stdout is paused is stamped once the readable
+  resumes, which is genuinely when the orchestrator received it, not a gap. The one residual this
+  round does not close: an exit item deferred by the same backpressure gate at process close is
+  still stamped at drain time rather than close time, tracked as a separate follow-up rather than
+  bundled here, since it is safe to land independently once the buffered-frame case above is
+  accurate (fixing the exit time alone, while frames were still drain-stamped, would have risked
+  moving the receipt watermark backward — that risk does not apply the other way around).
 
 ## Interaction with existing decisions
 

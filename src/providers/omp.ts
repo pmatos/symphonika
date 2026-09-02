@@ -16,6 +16,7 @@ import type {
 } from "../provider.js";
 import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import { parseProviderCommand, type ProviderLabel } from "./command-parse.js";
+import { mapProcessQueueControlEvent } from "./jsonl-process-queue.js";
 import {
   providerProcessExitResult,
   shutdownProviderProcess,
@@ -39,7 +40,7 @@ type ActiveOmpRun = {
   sessionId: string | undefined;
 };
 
-type ProcessQueueItem =
+type ProcessQueuePayload =
   | {
       kind: "exit";
       exitCode: number | null;
@@ -60,6 +61,18 @@ type ProcessQueueItem =
       raw: unknown;
     };
 
+// receivedAt is stamped in push(), same mechanism as the sibling queue's
+// ProcessQueueItem in jsonl-process-queue.ts (see ADR 0090). Frames parsed
+// from stdoutBuffer carry lastStdoutDataAt — the arrival time of the chunk
+// that produced them — even when this queue's own backpressure defers
+// parsing them to a later drain; a chunk the child writes while stdout is
+// paused is necessarily stamped once the readable resumes, since that is
+// genuinely when the orchestrator received it. The one remaining residual:
+// an exit item deferred by the same backpressure at close is still stamped
+// at drain time, not close time (tracked separately). See the ADR's
+// Consequences section.
+type ProcessQueueItem = ProcessQueuePayload & { receivedAt: string };
+
 export type ProcessQueue = {
   discardBeforeFrameLimits: () => void;
   next: () => Promise<ProcessQueueItem>;
@@ -78,6 +91,7 @@ type PendingRpcChunks = {
 };
 
 type ResponseReadResult = {
+  receivedAt?: string;
   response?: unknown;
   stopped: boolean;
 };
@@ -192,7 +206,10 @@ export function createOmpProvider(
               message: "Oh My Pi provider emitted an incompatible ready frame",
               type: "turn_failed"
             },
-            raw: ready.response
+            raw: ready.response,
+            ...(ready.receivedAt === undefined
+              ? {}
+              : { receivedAt: ready.receivedAt })
           };
           queue.discardBeforeFrameLimits();
           await shutdownProviderProcess(child);
@@ -276,14 +293,7 @@ export function createOmpProvider(
             // not a successful turn. Cancellation and earlier terminal
             // failures are already classified.
             if (!activeRun.terminalEventSeen && !activeRun.cancelled) {
-              yield {
-                normalized: {
-                  message:
-                    "Oh My Pi provider exited before a terminal agent_end",
-                  type: "turn_failed"
-                },
-                raw: { kind: "missing_terminal_agent_end" }
-              };
+              yield missingTerminalAgentEndEvent(item.receivedAt);
             }
             yield event;
             return;
@@ -294,7 +304,10 @@ export function createOmpProvider(
           if (isTerminalAgentEnd(event.raw)) {
             await markTerminalAgentEnd(activeRun);
             if (terminalAgentEndBeforePrompt(item)) {
-              yield terminalAgentEndBeforePromptEvent(event.raw);
+              yield terminalAgentEndBeforePromptEvent(
+                event.raw,
+                item.receivedAt
+              );
               yield* drainUntilExit(queue, activeRun);
               return;
             }
@@ -329,36 +342,12 @@ function providerEventFromQueueItem(
   item: ProcessQueueItem,
   activeRun: ActiveOmpRun
 ): ProviderEvent {
-  switch (item.kind) {
-    case "error":
-      return {
-        normalized: {
-          message: item.error.message,
-          type: "turn_failed"
-        },
-        raw: {
-          kind: "process_error",
-          message: item.error.message
-        }
-      };
-    case "exit":
-      return processExitEvent(activeRun, item.exitCode, item.signal);
-    case "malformed":
-      return {
-        normalized: {
-          line: item.line,
-          message: item.message,
-          type: "malformed_event"
-        },
-        raw: {
-          kind: "malformed_json",
-          line: item.line,
-          message: item.message
-        }
-      };
-    case "message":
-      return mapOmpFrame(item.raw, activeRun);
-  }
+  const event =
+    item.kind === "message"
+      ? mapOmpFrame(item.raw, activeRun)
+      : mapProcessQueueControlEvent(item, activeRun.cancelled);
+
+  return { ...event, receivedAt: item.receivedAt };
 }
 
 function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
@@ -579,13 +568,7 @@ async function* readUntilFrame(
       // protocol failure, not a successful attempt (same lifecycle class
       // as exiting mid-turn without a terminal agent_end).
       if (!activeRun.cancelled && !activeRun.terminalEventSeen) {
-        yield {
-          normalized: {
-            message: "Oh My Pi provider exited before a terminal agent_end",
-            type: "turn_failed"
-          },
-          raw: { kind: "missing_terminal_agent_end" }
-        };
+        yield missingTerminalAgentEndEvent(item.receivedAt);
       }
       yield event;
       return { stopped: true };
@@ -594,13 +577,17 @@ async function* readUntilFrame(
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
       await markTerminalAgentEnd(activeRun);
       if (terminalAgentEndBeforePrompt(item)) {
-        yield terminalAgentEndBeforePromptEvent(item.raw);
+        yield terminalAgentEndBeforePromptEvent(item.raw, item.receivedAt);
         yield* drainUntilExit(queue, activeRun);
         return { stopped: true };
       }
     }
     if (item.kind === "message" && predicate(item.raw)) {
-      return { response: item.raw, stopped: false };
+      return {
+        receivedAt: item.receivedAt,
+        response: item.raw,
+        stopped: false
+      };
     }
     if (isTerminalFailure(event.normalized?.type)) {
       activeRun.terminalEventSeen = true;
@@ -621,17 +608,11 @@ async function* readUntilResponse(
     const item = await queue.next();
     const event =
       item.kind === "message" && stringField(item.raw, "id") === id
-        ? mapResponse(item.raw, activeRun)
+        ? { ...mapResponse(item.raw, activeRun), receivedAt: item.receivedAt }
         : providerEventFromQueueItem(item, activeRun);
     if (event.normalized?.type === "process_exit") {
       if (!activeRun.cancelled && !activeRun.terminalEventSeen) {
-        yield {
-          normalized: {
-            message: "Oh My Pi provider exited before a terminal agent_end",
-            type: "turn_failed"
-          },
-          raw: { kind: "missing_terminal_agent_end" }
-        };
+        yield missingTerminalAgentEndEvent(item.receivedAt);
       }
       yield event;
       return { stopped: true };
@@ -640,13 +621,17 @@ async function* readUntilResponse(
     if (item.kind === "message" && isTerminalAgentEnd(item.raw)) {
       await markTerminalAgentEnd(activeRun);
       if (terminalAgentEndBeforePrompt(item)) {
-        yield terminalAgentEndBeforePromptEvent(item.raw);
+        yield terminalAgentEndBeforePromptEvent(item.raw, item.receivedAt);
         yield* drainUntilExit(queue, activeRun);
         return { stopped: true };
       }
     }
     if (item.kind === "message" && stringField(item.raw, "id") === id) {
-      return { response: item.raw, stopped: false };
+      return {
+        receivedAt: item.receivedAt,
+        response: item.raw,
+        stopped: false
+      };
     }
     if (isTerminalFailure(event.normalized?.type)) {
       activeRun.terminalEventSeen = true;
@@ -782,8 +767,24 @@ export function createProcessQueue(
   let closeResult:
     { exitCode: number | null; signal: NodeJS.Signals | null } | undefined;
   let exitEnqueued = false;
+  // Set at the top of the stdout "data" handler and read by every push that
+  // originates from parsing stdoutBuffer, so a line that arrived in one chunk
+  // keeps that chunk's arrival time even when backpressure defers parsing it
+  // to a later drain. Safe because stdoutBuffer only accumulates bytes from a
+  // single chunk while the stream is paused: pause() (backpressure or the
+  // ready-frame latch) stops further "data" events, and every drain path
+  // (next(), setFrameLimits) runs before resume().
+  let lastStdoutDataAt: string | undefined;
 
-  const push = (item: ProcessQueueItem, byteSize = 0): void => {
+  const push = (
+    payload: ProcessQueuePayload,
+    byteSize = 0,
+    receivedAt: string = new Date().toISOString()
+  ): void => {
+    const item: ProcessQueueItem = {
+      ...payload,
+      receivedAt
+    };
     if (waiting !== undefined) {
       const resolve = waiting;
       waiting = undefined;
@@ -804,7 +805,8 @@ export function createProcessQueue(
           line: evidence,
           message: "Oh My Pi RPC frame exceeds the physical frame limit"
         },
-        Buffer.byteLength(evidence, "utf8")
+        Buffer.byteLength(evidence, "utf8"),
+        lastStdoutDataAt
       );
       return;
     }
@@ -822,7 +824,8 @@ export function createProcessQueue(
           line: evidence,
           message: "Oh My Pi RPC frame is not valid UTF-8"
         },
-        Buffer.byteLength(evidence, "utf8")
+        Buffer.byteLength(evidence, "utf8"),
+        lastStdoutDataAt
       );
       return;
     }
@@ -837,7 +840,8 @@ export function createProcessQueue(
             message:
               "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
           },
-          lineBytes
+          lineBytes,
+          lastStdoutDataAt
         );
       }
       return;
@@ -853,7 +857,8 @@ export function createProcessQueue(
           line: text,
           message: error instanceof Error ? error.message : String(error)
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
       return;
     }
@@ -867,7 +872,8 @@ export function createProcessQueue(
           line: text,
           message: "Oh My Pi physical RPC frame must be an object"
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
       return;
     }
@@ -880,7 +886,8 @@ export function createProcessQueue(
           line: text,
           message: "Oh My Pi physical RPC frame must have a string type"
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
       return;
     }
@@ -891,7 +898,8 @@ export function createProcessQueue(
         promptDispatched: options.isPromptDispatched?.() === true,
         raw
       },
-      lineBytes
+      lineBytes,
+      lastStdoutDataAt
     );
     // The protocol begins with the versioned ready frame (ADR 0066); any
     // other first nonblank frame is malformed, not evidence to scan past.
@@ -903,7 +911,8 @@ export function createProcessQueue(
           line: text,
           message: "Oh My Pi RPC protocol must begin with a ready frame"
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
       return;
     }
@@ -928,7 +937,8 @@ export function createProcessQueue(
             message:
               "Oh My Pi RPC chunk sequence interrupted by a non-chunk frame"
           },
-          lineBytes
+          lineBytes,
+          lastStdoutDataAt
         );
       }
       return;
@@ -944,7 +954,8 @@ export function createProcessQueue(
           line: text,
           message: "Oh My Pi RPC chunk received before protocol v2 negotiation"
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
       return;
     }
@@ -958,7 +969,8 @@ export function createProcessQueue(
             promptDispatched: options.isPromptDispatched?.() === true,
             raw: logical.frame
           },
-          logical.byteLength
+          logical.byteLength,
+          lastStdoutDataAt
         );
       }
     } catch (error) {
@@ -968,7 +980,8 @@ export function createProcessQueue(
           line: text,
           message: error instanceof Error ? error.message : String(error)
         },
-        lineBytes
+        lineBytes,
+        lastStdoutDataAt
       );
     }
   };
@@ -995,7 +1008,8 @@ export function createProcessQueue(
         line: evidence,
         message: "Oh My Pi RPC frame exceeds the physical frame limit"
       },
-      Buffer.byteLength(evidence, "utf8")
+      Buffer.byteLength(evidence, "utf8"),
+      lastStdoutDataAt
     );
   };
 
@@ -1047,11 +1061,15 @@ export function createProcessQueue(
       stdoutBuffer = Buffer.alloc(0);
     }
     if (frameDecoder.interrupt()) {
-      push({
-        kind: "malformed",
-        line: "",
-        message: "Oh My Pi RPC chunk sequence incomplete at end of stream"
-      });
+      push(
+        {
+          kind: "malformed",
+          line: "",
+          message: "Oh My Pi RPC chunk sequence incomplete at end of stream"
+        },
+        0,
+        lastStdoutDataAt
+      );
     }
     // The exit event goes last: evidence buffered before the close must be
     // consumed before runAttempt can see process_exit.
@@ -1069,6 +1087,7 @@ export function createProcessQueue(
     if (discardingOutput) {
       return;
     }
+    lastStdoutDataAt = new Date().toISOString();
     let data = chunk;
     if (stdoutOverflowed) {
       const frameEndIndex = data.indexOf(0x0a);
@@ -1592,7 +1611,10 @@ function terminalAgentEndBeforePrompt(item: ProcessQueueItem): boolean {
   );
 }
 
-function terminalAgentEndBeforePromptEvent(raw: unknown): ProviderEvent {
+function terminalAgentEndBeforePromptEvent(
+  raw: unknown,
+  receivedAt: string
+): ProviderEvent {
   return {
     normalized: {
       message: "Oh My Pi provider emitted terminal agent_end before prompt",
@@ -1601,7 +1623,19 @@ function terminalAgentEndBeforePromptEvent(raw: unknown): ProviderEvent {
     raw: {
       event: raw,
       kind: "terminal_agent_end_before_prompt"
-    }
+    },
+    receivedAt
+  };
+}
+
+function missingTerminalAgentEndEvent(receivedAt: string): ProviderEvent {
+  return {
+    normalized: {
+      message: "Oh My Pi provider exited before a terminal agent_end",
+      type: "turn_failed"
+    },
+    raw: { kind: "missing_terminal_agent_end" },
+    receivedAt
   };
 }
 

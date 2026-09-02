@@ -58,7 +58,10 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "../workspace.js";
-import { prepareIssueWorkspace as defaultPrepareIssueWorkspace } from "../workspace.js";
+import {
+  prepareIssueWorkspace as defaultPrepareIssueWorkspace,
+  WorkspacePreparationCleanupError
+} from "../workspace.js";
 import { readFile } from "node:fs/promises";
 
 import type { WorkflowReference } from "../config-schemas.js";
@@ -3541,6 +3544,18 @@ export class RunController {
         },
         project: projectForAttempt,
         ...input.deadline.signalOption
+      });
+      // Detached: the deadline race below may already have moved on by the
+      // time this settles, so this must not become something the finally
+      // block awaits (that would reintroduce #640 / violate ADR 0093). It
+      // only observes a rejection reason that would otherwise go unlogged.
+      void workspaceOperation.catch((error: unknown) => {
+        if (error instanceof WorkspacePreparationCleanupError) {
+          this.logger?.warn(
+            { err: error, issue: input.issue.number, runId: input.runId },
+            "issue workspace cleanup did not complete after Run Slot Deadline abort"
+          );
+        }
       });
       workspaceAbortCleanup =
         workspaceOperation.abortCleanup ??

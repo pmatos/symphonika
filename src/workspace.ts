@@ -23,6 +23,11 @@ const execFileAsync = promisify(execFile);
 const GIT_ABORT_GRACE_MS = 1_000;
 const GIT_GROUP_POLL_MS = 10;
 const GIT_MAX_BUFFER_BYTES = 1024 * 1024;
+// Bounds each cleanup Git command's own run time (not its termination, which
+// GIT_ABORT_GRACE_MS already covers) so a wedged `git worktree remove`/
+// `prune`/`list` cannot hold the Run Slot Deadline's abort-cleanup promise —
+// and therefore the slot — open indefinitely. See codex review on PR #656.
+const GIT_CLEANUP_TIMEOUT_MS = 10_000;
 
 export type WorkspaceProject = {
   name: string;
@@ -264,18 +269,43 @@ async function prepareIssueWorkspaceResult(
   }
 
   await mkdir(path.dirname(plan.workspacePath), { recursive: true });
-  await workspaceGit(
-    [
-      "-C",
-      plan.cachePath,
-      "worktree",
-      "add",
-      plan.workspacePath,
-      plan.branchName
-    ],
-    input.signal,
-    abortCleanup
-  );
+  // Proves this invocation actually attempts `git worktree add` below: no
+  // await sits between this check and workspaceGit's own signal check, so
+  // passing here means the add is tracked by abortCleanup before any abort
+  // can settle it. Otherwise an abort that only raced the untracked mkdir
+  // above would still fall into the catch and clean up a path a retry may
+  // already own. See codex review on PR #656.
+  input.signal?.throwIfAborted();
+  try {
+    await workspaceGit(
+      [
+        "-C",
+        plan.cachePath,
+        "worktree",
+        "add",
+        plan.workspacePath,
+        plan.branchName
+      ],
+      input.signal,
+      abortCleanup
+    );
+  } catch (error) {
+    if (input.signal?.aborted === true) {
+      try {
+        await cleanupAbortedIssueWorktree(
+          plan.cachePath,
+          plan.workspacePath,
+          abortCleanup
+        );
+      } catch (cleanupError) {
+        throw new WorkspacePreparationCleanupError(
+          `failed to clean aborted issue worktree ${plan.workspacePath}`,
+          new AggregateError([error, cleanupError])
+        );
+      }
+    }
+    throw error;
+  }
 
   return {
     ...plan,
@@ -326,32 +356,144 @@ async function isWorktreeForCache(
   return actualCommonDirectory === expectedCommonDirectory;
 }
 
+async function worktreeListLines(
+  cachePath: string,
+  signal: AbortSignal | undefined,
+  abortCleanup?: WorkspaceAbortCleanup
+): Promise<string[]> {
+  const output = await workspaceGit(
+    ["-C", cachePath, "worktree", "list", "--porcelain"],
+    signal,
+    abortCleanup
+  );
+  return output.split(/\r?\n/);
+}
+
+type WorktreeEntry = { branch?: string; path: string };
+
+function parseWorktreeEntries(lines: string[]): WorktreeEntry[] {
+  const entries: WorktreeEntry[] = [];
+  let current: WorktreeEntry | undefined;
+
+  for (const line of lines) {
+    if (line.startsWith("worktree ")) {
+      current = { path: line.slice("worktree ".length) };
+      entries.push(current);
+      continue;
+    }
+
+    if (current !== undefined && line.startsWith("branch ")) {
+      current.branch = line.slice("branch ".length);
+    }
+  }
+
+  return entries;
+}
+
 async function worktreePathForBranch(
   cachePath: string,
   branchName: string,
   signal: AbortSignal | undefined,
   abortCleanup: WorkspaceAbortCleanup
 ): Promise<string | undefined> {
-  const output = await workspaceGit(
-    ["-C", cachePath, "worktree", "list", "--porcelain"],
-    signal,
+  const expectedBranch = `refs/heads/${branchName}`;
+  return parseWorktreeEntries(
+    await worktreeListLines(cachePath, signal, abortCleanup)
+  ).find((entry) => entry.branch === expectedBranch)?.path;
+}
+
+// Cleanup Git commands run after input.signal has already fired, so they
+// must not reuse it — an already-aborted signal passed to spawn() never
+// starts the process (see gitInProcessGroup). A fresh, initially-unaborted
+// timeout signal still routes through gitInProcessGroup's bounded
+// SIGTERM/SIGKILL teardown, but caps this command's own run time too, so a
+// wedged remove/prune/list cannot hold the abort-cleanup promise open
+// indefinitely. See codex review on PR #656.
+function cleanupGit(
+  args: string[],
+  abortCleanup: WorkspaceAbortCleanup
+): Promise<string> {
+  return workspaceGit(
+    args,
+    AbortSignal.timeout(GIT_CLEANUP_TIMEOUT_MS),
     abortCleanup
   );
-  let currentWorktreePath: string | undefined;
-  const expectedBranchLine = `branch refs/heads/${branchName}`;
+}
 
-  for (const line of output.split(/\r?\n/)) {
-    if (line.startsWith("worktree ")) {
-      currentWorktreePath = line.slice("worktree ".length);
-      continue;
-    }
+async function cleanupAbortedIssueWorktree(
+  cachePath: string,
+  workspacePath: string,
+  abortCleanup: WorkspaceAbortCleanup
+): Promise<void> {
+  const cleanupErrors: unknown[] = [];
+  const recordError = (error: unknown): void => {
+    cleanupErrors.push(error);
+  };
 
-    if (line === expectedBranchLine) {
-      return currentWorktreePath;
-    }
+  await cleanupGit(
+    ["-C", cachePath, "worktree", "remove", "--force", workspacePath],
+    abortCleanup
+  ).catch(recordError);
+  await abortCleanup
+    .track(rm(workspacePath, { force: true, recursive: true }))
+    .catch(recordError);
+  await cleanupGit(["-C", cachePath, "worktree", "prune"], abortCleanup).catch(
+    recordError
+  );
+
+  const markRemainsOnError = (error: unknown): true => {
+    recordError(error);
+    return true;
+  };
+  const [workspaceRemains, registrationRemains] = await Promise.all([
+    exists(workspacePath).catch(markRemainsOnError),
+    isWorktreeRegistered(cachePath, workspacePath, abortCleanup).catch(
+      markRemainsOnError
+    )
+  ]);
+  if (workspaceRemains || registrationRemains) {
+    throw new Error("issue worktree cleanup remained incomplete", {
+      cause: new AggregateError(cleanupErrors)
+    });
   }
+}
 
-  return undefined;
+async function isWorktreeRegistered(
+  cachePath: string,
+  workspacePath: string,
+  abortCleanup: WorkspaceAbortCleanup
+): Promise<boolean> {
+  const entries = parseWorktreeEntries(
+    await worktreeListLines(
+      cachePath,
+      AbortSignal.timeout(GIT_CLEANUP_TIMEOUT_MS),
+      abortCleanup
+    )
+  );
+  const [expectedPath, entryPaths] = await Promise.all([
+    canonicalizePath(workspacePath),
+    Promise.all(entries.map((entry) => canonicalizePath(entry.path)))
+  ]);
+
+  return entryPaths.includes(expectedPath);
+}
+
+// `git worktree add` records the resolved real path, so `git worktree list`
+// reports a canonical path even when the workspace root was configured through
+// a symlink. Both sides must therefore be canonicalized before comparison.
+// Cleanup runs after the workspace directory has been removed, so `realpath`
+// on the leaf fails; canonicalize the nearest existing ancestor instead of
+// throwing, because a throw here is reported as an incomplete cleanup.
+async function canonicalizePath(target: string): Promise<string> {
+  try {
+    return await realpath(target);
+  } catch {
+    const parent = path.dirname(target);
+    if (parent === target) {
+      return path.resolve(target);
+    }
+    return path.join(await canonicalizePath(parent), path.basename(target));
+  }
 }
 
 // Per-cache-path serialization for ensureRepositoryCache. `git fetch` on the

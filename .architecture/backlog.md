@@ -93,7 +93,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## issue-claim-label-writer
 
-- **Status**: in-flight
+- **Status**: landed
 - **Score**: 21/25 (leverage 4, locality 4, blast radius 2, heat 5)
 - **PR**: #668
 - **Files**: ~3 estimated (new `claim-label-writer.ts`, new test, `run-controller.ts`)
@@ -105,7 +105,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
   `input_required` special-case, cancelled/closed-issue cleanup, best-effort wrappers) out of the
   ~230-line terminal region behind a `ClaimLabelWriter.markTerminal(outcome)`/`.markFailed`/`.markBlocked`/`.release(phase)` seam.
 - **First seen**: 2026-08-31
-- **Reason**: Picked by the 2026-09-02 run (top surviving candidate at 21/25; runner-up `watchdog-subject-port` at 20/25, within 1 point). **Scope corrected this run**: the dispatch-time `sym:claimed`/`sym:running` *add* sites (interleaved with the dispatch mutex/slot logic) and the standalone `shutdown-resume.ts`/`stale-claims.ts` modules are deliberately **out of scope** — they are a different concern (asserting a claim under a lock; resume/stale sweeps with their own availability posture) from resolving a terminal outcome, and the `~3-4 file` estimate only ever fit the terminal cluster. ADR 0002/0077-adjacent but behaviour-preserving, so no contradiction.
+- **Reason**: Picked by the 2026-09-02 run (top surviving candidate at 21/25; runner-up `watchdog-subject-port` at 20/25, within 1 point). **Scope corrected that run**: the dispatch-time `sym:claimed`/`sym:running` *add* sites (interleaved with the dispatch mutex/slot logic) and the standalone `shutdown-resume.ts`/`stale-claims.ts` modules are deliberately **out of scope** — they are a different concern (asserting a claim under a lock; resume/stale sweeps with their own availability posture) from resolving a terminal outcome, and the `~3-4 file` estimate only ever fit the terminal cluster. ADR 0002/0077-adjacent but behaviour-preserving, so no contradiction. PR #668 merged 2026-09-02T05:20:03Z (reconciled from `in-flight` by the 2026-09-03 run).
 
 ### Run 2026-09-02 — complete
 
@@ -149,11 +149,11 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 - **Status**: proposed
 - **Score**: 20/25 (leverage 4, locality 4, blast radius 2, heat 4)
-- **Files**: ~4 estimated
-- **Modules**: `src/lifecycle/watchdog.ts` (run reconcile loop 179-273, firing reconcile loop 275-345, `sampleRun` 475-502, `sampleRoutineFiring` 504-529), twinned run-store method pairs `src/run-store.ts:1558-1688`
-- **Summary**: Collapse the two near-identical ~85-line watchdog reconcile loops (run vs routine-firing, the second added by #622) into one `reconcileSubject` driver behind a `WatchdogSubject` port; run-vs-firing knowledge lands in two thin adapters.
+- **Files**: ~3 estimated (new `watchdog-subject.ts`, new test, `watchdog.ts`)
+- **Modules**: `src/lifecycle/watchdog.ts` (run reconcile loop 179-273, firing reconcile loop 275-345, `sampleRun` 475-502, `sampleRoutineFiring` 504-529); new `src/lifecycle/watchdog-subject.ts` (port + driver)
+- **Summary**: Collapse the two near-identical ~85-line watchdog reconcile loops (run vs routine-firing, the second added by #622) into one `reconcileWatchdogSubjects` driver behind a `WatchdogSubject` port; run-vs-firing knowledge lands in two thin adapters.
 - **First seen**: 2026-09-02
-- **Reason**: Runner-up candidate to `issue-claim-label-writer` this run (within 1 point). Natural next firing. Terminal policy differs (ADR 0091: firings get idle-grace only), so the port must carry a `terminalPolicy` member.
+- **Reason**: **Picked by the 2026-09-03 run** (top surviving candidate at 20/25, tied with `provider-run-harness` at 20/25; won the deterministic tie-break — blast tie, heat tie, then `watchdog.ts` most-recently-touched at #680 15:51 vs providers #672 14:21). Terminal policy differs (ADR 0091: firings get idle-grace only), so the port carries a `terminalReason` member (`watchdogTerminalReason` for runs, idle-grace-only for firings). **Scope refined**: the twinned run-store method pairs (`run-store.ts:1571-1872`) stay put — the adapters call them; unifying their table-specific SQL is `leaked-subject-sweep`'s separate concern.
 
 ## run-slot-lease
 
@@ -174,6 +174,46 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Summary**: Extract the 4-way project_states row-precedence reconciliation into `project-state-projection.ts` (`rawConfig + status + priors → inputs`) so it has a unit seam; `readFile` stays in the daemon.
 - **First seen**: 2026-09-02
 - **Reason**: Clean extraction but coldest of the 2026-09-02 finds — project-poll-state is absent from recent commit themes, so heat caps it.
+
+## provider-run-harness
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 4, locality 4, blast radius 2, heat 4)
+- **Files**: ~5 estimated (three providers + new `provider-session.ts` + test)
+- **Modules**: `src/providers/codex.ts` (`runAttempt` prologue 118-186, `finally` 325-339, `cancel` 83-116), `src/providers/claude.ts` (73-143, 167-180, 54-71), `src/providers/omp.ts` (135-178, 319-328, 108-133); new `src/providers/provider-session.ts`
+- **Summary**: Each provider's `runAttempt` opens with a byte-identical ~55-line ADR-0052 prologue (placeholder `activeRun` before the `wrapForProviderScope` await, cancel-recheck synthetic `process_exit`, spawn+stderr+queue) and closes with an identical ADR-0064 `finally` (delete → `stopProviderScope` → `waitForFlush`); a `runProviderSession(deps, input)` harness owns those once and takes the provider-specific protocol body + cancel-interrupt as hooks.
+- **First seen**: 2026-09-03
+- **Reason**: **Runner-up candidate to `watchdog-subject-port` this run — exactly tied at 20/25**, lost only the deterministic tie-break (provider files last touched at #672 14:21 vs `watchdog.ts` at #680 15:51). Natural next firing. **Divergence surface is wide** (activeRun factory, command transform, spawn env, cancel-interrupt body, synthetic-event shape all differ), so the harness needs ~7 hooks — real but depth-tempering. **Benign-drift finding (do not re-derive):** omp calls `stopProviderScope` on early-cancel (omp.ts:157) and adds a second `shutdownProviderProcess` in `finally` (omp.ts:321) that codex/claude omit, but `wrapForProviderScope` (`process-scope.ts:131`) only *builds* a `systemd-run` command — no durable scope exists pre-spawn — so it is a harmless no-op, not a behaviour decision. The harness can preserve all three via a hook; **not** `live-run-ownership-registry`-style bail territory.
+
+## provider-attempt-runner
+
+- **Status**: proposed
+- **Score**: 18/25 (leverage 3, locality 3, blast radius 2, heat 5)
+- **Files**: ~3-4 estimated
+- **Modules**: `src/lifecycle/run-controller.ts` `iterateAttempt` (4340-4458), `src/routines/dispatcher.ts` (1449-1550), `src/provider-probe.ts` (28-90); possible new `src/lifecycle/provider-attempt.ts`
+- **Summary**: Three sites build the same 15-field `ProviderRunInput` and repeat scratch-lifecycle + ADR-0052 cancel-recheck + per-event redact-and-persist around the `for await`.
+- **First seen**: 2026-09-03
+- **Reason**: Borderline deletion test — the input-builder and scratch/cancel scaffolding concentrate, but the *sink* (`persistProviderEvent` sequence rows vs `appendRoutineEvent` jsonl cursors) and deadline threading differ enough that complexity stays at the call site (same caveat class as `run-slot-lease`). Extract the input-builder + scaffolding, leave the sink injected; revisit after a provider consumer stabilises.
+
+## leaked-subject-sweep
+
+- **Status**: proposed
+- **Score**: 15/25 (leverage 2, locality 3, blast radius 2, heat 4)
+- **Files**: ~2-3 estimated
+- **Modules**: `src/run-store.ts` `findLeakedRuns` (5695-5741) / `findLeakedRoutineFirings` (5779-5819), `markRunsStale` / `markRoutineFiringsFailed`
+- **Summary**: A second run-vs-firing twin pair on the crash-recovery startup-sweep axis, outside `watchdog-subject-port`'s range, cross-referencing each other in comments.
+- **First seen**: 2026-09-03
+- **Reason**: Leans toward *moves* on the deletion test — the SQL differs by table (`runs` has a `stale` state and `leaked_active_run_cleanup_pending`; `routine_firings` settle as `failed` with their own pending marker and `commits_ahead` case), so a shared port pushes differences into adapters rather than concentrating behaviour. Fold into the run-vs-firing duality story that `watchdog-subject-port` opens rather than picking standalone.
+
+## mutate-and-publish
+
+- **Status**: dropped
+- **Score**: n/a (leverage 1)
+- **Files**: ~1 estimated
+- **Modules**: `src/run-store.ts` — 17 of the 32 `this.database.transaction(...)` blocks end in `const apply = …; this.publishAll(apply())` (e.g. 5757-5776, 1272, 1343, 2047, 4487)
+- **Summary**: A repeated transaction-then-publish epilogue that a `mutateAndPublish(fn)` helper could collapse.
+- **First seen**: 2026-09-03
+- **Reason**: Leverage 1 — the helper would be shallow (interface ≈ implementation), concentrating no behaviour. Same character as the dropped `provider-json-field-accessors`: a plain DRY cleanup, not a deepening candidate.
 
 ## github-pr-enum-normalizers
 

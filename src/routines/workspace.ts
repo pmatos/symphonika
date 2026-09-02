@@ -137,6 +137,11 @@ export async function prepareRoutineWorkspace(
   }
   input.signal?.throwIfAborted();
   await mkdir(path.dirname(workspacePath), { recursive: true });
+  const workspaceWasRegistered = await isRoutineWorktreeRegistered(
+    cachePath,
+    workspacePath
+  );
+  input.signal?.throwIfAborted();
   try {
     await git(
       input.kind === "git"
@@ -156,10 +161,12 @@ export async function prepareRoutineWorkspace(
   } catch (error) {
     if (isAbortError(error) || input.signal?.aborted === true) {
       const cleanupErrors: unknown[] = [];
-      try {
-        await cleanupAbortedRoutineWorktree(cachePath, workspacePath);
-      } catch (cleanupError) {
-        cleanupErrors.push(cleanupError);
+      if (!workspaceWasRegistered) {
+        try {
+          await cleanupAbortedRoutineWorktree(cachePath, workspacePath);
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
       }
       if (createdBranch) {
         try {
@@ -224,6 +231,7 @@ async function cleanupAbortedRoutineWorktree(
       "worktree",
       "remove",
       "--force",
+      "--force",
       workspacePath
     ]);
   } catch (error) {
@@ -234,12 +242,6 @@ async function cleanupAbortedRoutineWorktree(
   } catch (error) {
     cleanupErrors.push(error);
   }
-  try {
-    await git(["-C", cachePath, "worktree", "prune"]);
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-
   let workspaceRemains = true;
   let registrationRemains = true;
   try {

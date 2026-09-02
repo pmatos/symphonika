@@ -1167,10 +1167,12 @@ publication, the staging directory receives the mode a direct clone would derive
 umask, preserving group-sharing and restrictive deployments. An interrupted fetch preserves the
 previously validated shared cache and its linked worktrees. If cancellation reaches a
 firing-specific branch or `git worktree add`, cleanup removes only the branch/worktree proved absent
-before this preparation began; a pre-existing reused Routine Workspace is never removed. Cleanup
+before this preparation began; a pre-existing reused Routine Workspace is never removed. It uses
+path-scoped `git worktree remove --force --force <path>` so a SIGKILL-surviving `initializing` lock
+cannot strand the owned registration, and never runs cache-wide `git worktree prune`. Cleanup
 verifies that both the worktree directory and bare-cache registration are gone. An incomplete
-cleanup is surfaced as a typed preparation error and logged even though the deadline still owns the
-terminal `firing_timeout` classification.
+cleanup is surfaced as a typed preparation error and logged even though the deadline still owns
+the terminal `firing_timeout` classification.
 
 For `kind: report`, provider exit code 0 succeeds without requiring commits. For `kind: git`, exit
 code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits fails with
@@ -1412,15 +1414,16 @@ an elapsed one-shot becomes `expired` instead of firing retroactively.
 On every daemon tick, enabled Routine Workspace Retention selects only terminal firings whose
 terminal update time has crossed the configured outcome window and whose persisted commits-ahead
 signal is false. Canonical Routine Outcome does not substitute for this predicate. Reclamation runs
-`git worktree remove --force` followed by `git worktree prune` against the Project cache, so both
-the checkout and its registration are removed; for a `kind: git` firing, reclamation also deletes
-its deterministic local branch ref from the Project cache, since that branch has no other purpose
-once the worktree is gone. Branch ownership follows the firing's persisted execution-time kind
-rather than the mutable Routine declaration. Local branch deletion preserves Git's refusal to
-delete a branch checked out by another registered worktree; this matters when colliding firing ids
-share a truncated branch name. A branch already deleted by a concurrent retention pass counts as
-success, while a branch now held by another firing is preserved. A failed removal remains unmarked
-and is retried on a later tick. The Run Store preserves `workspace_path` and writes
+the path-scoped `git worktree remove --force <path>`, which removes both the candidate checkout and
+its registration without cache-wide `git worktree prune`; for a `kind: git` firing, reclamation also
+deletes its deterministic local branch ref from the Project cache, since that branch has no other
+purpose once the worktree is gone. A locked candidate remains an error and is retried on a later
+tick. Branch ownership follows the firing's persisted execution-time kind rather than the mutable
+Routine declaration. Local branch deletion preserves Git's refusal to delete a branch checked out
+by another registered worktree; this matters when colliding firing ids share a truncated branch
+name. A branch already deleted by a concurrent retention pass counts as success, while a branch now
+held by another firing is preserved. A failed removal remains unmarked and is retried on a later
+tick. The Run Store preserves `workspace_path` and writes
 `workspace_pruned_at`; no state-root provider log, normalized event, or prompt artifact is removed.
 The manual `symphonika prune-workspaces [--dry-run]` command evaluates the same policy even when
 automatic retention is disabled. See ADR 0067.
@@ -1592,9 +1595,11 @@ abort-triggered failure of the `git worktree add` command, including one that on
 after its work has already completed (for example, during a `post-checkout` hook) — the admin
 registration and `HEAD` are written before checkout finishes, so a killed process cannot be trusted
 to distinguish a complete checkout from a partial one, and preserving a possibly-partial checkout
-would be worse than the deterministic branch a retry re-derives it from. Cleanup verifies that both
-the worktree directory and bare-cache registration are gone; an incomplete cleanup is surfaced as
-`WorkspacePreparationCleanupError` and logged even though the deadline still owns the terminal
+would be worse than the deterministic branch a retry re-derives it from. Cleanup uses path-scoped
+`git worktree remove --force --force <path>` so it can override the target registration's transient
+`initializing` lock after SIGKILL, and never runs cache-wide `git worktree prune`. It verifies that
+both the worktree directory and bare-cache registration are gone; an incomplete cleanup is surfaced
+as `WorkspacePreparationCleanupError` and logged even though the deadline still owns the terminal
 `run_timeout` classification.
 
 ## 11. Agent Providers

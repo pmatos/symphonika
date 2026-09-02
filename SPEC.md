@@ -1634,6 +1634,10 @@ Required normalized events:
 - `session_started`
 - `message`
 - `tool_call`
+- `plan_updated` — the provider's current operator-facing checklist, with an optional explanation
+  and ordered `{ step, status }` entries. Provider wire spellings are normalized to
+  `pending`, `in_progress`, or `completed`; unrecognized future values become `unknown` rather
+  than escaping the adapter (ADR 0096).
 - `progress` — a liveness marker with a `signal` naming its source; the provider observed work
   whose content belongs only in the raw log (ADR 0087). Markers are payload-free except
   `signal: "stream_retry"`, which carries the provider's short reconnect `message` — the only
@@ -1925,7 +1929,7 @@ cancellation with `no_progress`.
 
 For each sampled Run, Symphonika records one durable latest `watchdog_samples` row keyed by
 `run_id` and an append-only `watchdog_sample_history` row keyed by `(run_id, sampled_at)`. Both
-contain `sampled_at`, `last_tool_call_at`, `last_message_at`, `workspace_mtime_max`,
+contain `sampled_at`, `last_tool_call_at`, `last_progress_at`, `last_message_at`, `workspace_mtime_max`,
 `workspace_digest`, `turn_id_set_size`, `output_tokens_total`, `normalized_log_offset`,
 `normalized_log_path`, and `idle_since`. The latest row keeps reconciliation reads bounded; the history supports operator
 rolling-window calculations. In particular, `show-run` computes output-token growth over the final
@@ -1978,16 +1982,18 @@ A sampled Run is making progress when any one signal advances since the previous
 
 - `last_tool_call_at` increases (both Claude and Codex emit normalized `tool_call` events; the
   Codex provider maps its `commandExecution`, `fileChange`, and `webSearch` items)
-- `last_progress_at` increases — either a `progress` marker or a `thinking` boundary arrived. The
-  Codex provider emits progress markers for `item/commandExecution/outputDelta` and
-  `turn/diff/updated`, rate-limited so a chatty build cannot flood the Normalized Event Log, and
-  thinking markers for reasoning `item/started` and `item/completed`. It also emits a
+- `last_progress_at` increases — a `progress` marker, `thinking` boundary, or `plan_updated` event
+  arrived. The Codex provider emits rate-limited progress markers for
+  `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`, and
+  `turn/diff/updated`, plus thinking markers for reasoning `item/started` and `item/completed`. It
+  also emits a
   `stream_retry` marker for an `error` notification carrying `willRetry: true` — a transient
   stream drop codex recovers from itself, which is a live Run, not a failed one. That marker is
   not rate-limited: reconnects are bounded by codex's own retry budget, so the throttle would only
-  risk suppressing the one event that explains the gap (ADR 0088). Together these signals cover
-  long tools, model reasoning, and stream recovery even when no assistant message or token update
-  arrives (ADR 0087, ADR 0088, issues #590 and #593).
+  risk suppressing the one event that explains the gap (ADR 0088). A plan update retains its
+  compact checklist payload and advances the same sampled timestamp. Together these signals cover
+  long tools, terminal interaction, model reasoning, planning, and stream recovery even when no
+  assistant message or token update arrives (ADRs 0087, 0088, and 0096; issues #590 and #593).
 - `workspace_digest` changes — a hash over the sorted `relative-path:size` pairs of every
   non-excluded file. A bare `workspace_mtime_max` advance is **not** progress: a build that
   reproduces byte-identical output restamps mtimes without carrying new information (ADR 0086).
@@ -2755,6 +2761,12 @@ showing prior-attempt data. (`runs.updated_at` is not used as the clock: it can 
 termination for unrelated reasons, e.g. pull-request-discovery polling for succeeded Runs.) Both
 HTTP surfaces read the same `watchdog` object and render nothing (badge absent, section hidden) when
 the effective Watchdog policy is disabled.
+
+The Run-detail page renders the latest `plan_updated` event from the Run's newest attempt as the
+current ordered checklist, including the optional explanation and explicit status text. The lookup
+is independent of the bounded provider-event tail, so a plan remains visible after hundreds of
+later progress markers. Runs and attempts without a usable plan omit the section rather than
+inventing an empty checklist (ADR 0096).
 
 For a waiting Run whose tracked PR has unresolved review feedback after the configured dispatch
 cap, `GET /api/runs/:id` also exposes a top-level `pullRequestFollowup` object with

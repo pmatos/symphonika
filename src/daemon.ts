@@ -69,6 +69,7 @@ import {
 } from "./lifecycle/reconcile.js";
 import { reconcileWatchdog } from "./lifecycle/watchdog.js";
 import {
+  isDispatchProject,
   RunController,
   type RunControllerProjectConfig,
   type RunControllerProvidersConfig,
@@ -793,6 +794,32 @@ export async function startDaemon(
           configuredIssueProjectKeys,
           selectedIssueProjectKeysByName
         )
+      );
+      // #683/#691: pickProjectCandidate silently skips a candidate whose
+      // newest Run already suppresses fresh dispatch
+      // (RunStore.latestRunSuppressesFreshDispatch), but pollProject is a
+      // pure label-based check with no RunStore access, so it keeps
+      // resurfacing the same issue as a candidate every tick. Applied to the
+      // merged, shared issuePollStatus (not nextStatus) so the dashboard,
+      // /api/status, and poll-now -- which all read this same object --
+      // never report a suppressed issue as eligible, including one carried
+      // over from a prior tick while its project backs off.
+      const effectiveProjectsByName = new Map(
+        snapshot.projects.map((project) => [project.name, project])
+      );
+      issuePollStatus.candidateIssues = issuePollStatus.candidateIssues.filter(
+        (candidate) => {
+          const project = effectiveProjectsByName.get(candidate.project);
+          return (
+            project === undefined ||
+            !isDispatchProject(project) ||
+            !runStore.latestRunSuppressesFreshDispatch({
+              issueNumber: candidate.issue.number,
+              projectName: candidate.project,
+              repository: candidate.repository
+            })
+          );
+        }
       );
       // Persisted with the polled subset only (not the merged status).
       // Poll outcome and issue-snapshot writes iterate only fresh reports;

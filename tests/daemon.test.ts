@@ -425,6 +425,74 @@ describe("startDaemon", () => {
     }
   });
 
+  it("drops a no_workspace_changes-suppressed issue from candidateIssues (#683/#691)", async () => {
+    const cwd = await makeTempRoot();
+    await writeMinimalProject(cwd);
+    const stateRoot = path.join(cwd, ".symphonika");
+    const seedStore = openRunStore({ stateRoot });
+    seedStore.createRun({
+      id: "run-suppressed",
+      issue: sampleIssue({ number: 42 }),
+      projectName: "symphonika",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    seedStore.recordTerminalReason(
+      "run-suppressed",
+      "no_workspace_changes",
+      "deterministic"
+    );
+    seedStore.updateRunState("run-suppressed", "blocked");
+    seedStore.close();
+
+    // Matches the "symphonika" project's issue_filters (labels_all:
+    // ["agent-ready"]) so pollProject's pure label-based check keeps
+    // resurfacing it as a candidate every tick, same as it would in
+    // production once an operator clears the sym:* labels.
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: () => Promise.resolve(),
+      listOpenIssues: () =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "",
+            id: 42,
+            labels: ["agent-ready"],
+            number: 42,
+            state: "open",
+            title: "issue",
+            updated_at: "",
+            url: ""
+          }
+        ]),
+      removeLabelsFromIssue: () => Promise.resolve()
+    };
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
+        candidateIssues: Array<{ issue: { number: number } }>;
+      };
+      // Regression guard: issueFilterReasons is a pure label-based check and
+      // matches this issue every tick, so without the suppression filter in
+      // refreshIssuePollStatus this list would keep including it forever.
+      expect(status.candidateIssues).toHaveLength(0);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("cleans up the HTTP listener when endpoint descriptor writing fails", async () => {
     const cwd = await makeTempRoot();
     const port = await getFreePort();

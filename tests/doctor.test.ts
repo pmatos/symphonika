@@ -2056,7 +2056,7 @@ describe("doctor", () => {
       }
     );
 
-    it.each(["50%", "100%", "1024B", "2P", "1G 500M"])(
+    it.each(["50%", "100%", "1024B", "2P", "1G 500M", "+64G", "64G512M"])(
       "does not fall back past a MemoryMax= form it cannot parse but systemd accepts (%s)",
       async (unparseableButValid) => {
         const report = await runProviderCapacityDoctor({

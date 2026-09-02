@@ -982,12 +982,12 @@ function winningByteSizeAssignment(
 
 const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
 
-// One component of a systemd compound memory value: a magnitude, optional
-// whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both tolerate "32 G"),
-// then an optional single-letter K/M/G/T/P/E suffix or an explicit "B"
-// (bytes) marker — never both combined ("32GB" is not a valid systemd unit,
-// only "32G" or "32000000000B" are).
-const SYSTEMD_MEMORY_VALUE_TERM = /^(\d+(?:\.\d+)?)\s*(?:[KMGTPE]|B)?$/i;
+// One token of a systemd compound memory value: an optionally signed
+// magnitude, optional whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both
+// tolerate "32 G"), then an optional single-letter K/M/G/T/P/E suffix or an
+// explicit "B" (bytes) marker. The sticky match lets adjacent tokens such as
+// "64G512M" consume the complete value while rejecting trailing garbage.
+const SYSTEMD_MEMORY_VALUE_TERM = /\+?(\d+(?:\.\d+)?)\s*(?:[KMGTPE]|B)?/iy;
 const SYSTEMD_MEMORY_PERCENTAGE = /^(\d+(?:\.\d+)?)%$/;
 
 // config_parse_memory_limit() drops an assignment two different ways, both
@@ -1009,13 +1009,9 @@ const SYSTEMD_MEMORY_PERCENTAGE = /^(\d+(?:\.\d+)?)%$/;
 // parseSystemdByteSize merely cannot compute a byte count for ("50%",
 // "1024B", "2P", "1G 500M") is never treated as skippable here: it IS the
 // effective assignment, so skipping past it would warn against the wrong,
-// no-longer-effective value instead of just declining to evaluate. Splits
-// a compound sum only on whitespace immediately before a digit, so a single
-// spaced-out term ("32 G") stays one component. Two systemd-valid forms
-// this deliberately misreads as invalid are the compact, no-separator
-// compound ("1G500M") and an explicitly-signed magnitude ("+5G");
-// recognizing them needs a full tokenizer, out of proportion for a check
-// whose only job is to decide which drop-in line to read a ceiling from.
+// no-longer-effective value instead of just declining to evaluate. Scan
+// tokens through the complete text because systemd permits compound terms
+// both with whitespace ("1G 500M") and without it ("1G500M").
 function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
   const percentage = SYSTEMD_MEMORY_PERCENTAGE.exec(value);
   if (percentage !== null) {
@@ -1023,12 +1019,21 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
     return !(percent > 0 && percent <= 100);
   }
   const magnitudes: number[] = [];
-  for (const term of value.split(/\s+(?=\d)/)) {
-    const match = SYSTEMD_MEMORY_VALUE_TERM.exec(term);
+  let offset = 0;
+  while (offset < value.length) {
+    while (/\s/.test(value[offset] ?? "")) {
+      offset += 1;
+    }
+    if (offset === value.length) {
+      break;
+    }
+    SYSTEMD_MEMORY_VALUE_TERM.lastIndex = offset;
+    const match = SYSTEMD_MEMORY_VALUE_TERM.exec(value);
     if (match === null) {
       return true;
     }
     magnitudes.push(Number(match[1]));
+    offset = SYSTEMD_MEMORY_VALUE_TERM.lastIndex;
   }
   return magnitudes.every((magnitude) => magnitude === 0);
 }

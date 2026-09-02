@@ -350,6 +350,95 @@ exec "${realGit}" "$@"
     }
   });
 
+  it("preserves a pre-existing worktree registration when add failure races an abort", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "symphonika");
+    const cachePath = path.join(workspaceRoot, ".cache", "repo.git");
+    const branchName = "sym/symphonika/667-preserve-registered-workspace";
+    const workspacePath = path.join(
+      workspaceRoot,
+      "issues",
+      "667-preserve-registered-workspace"
+    );
+    const unrelatedBranchName = "manual/unrelated-worktree";
+    await mkdir(path.dirname(cachePath), { recursive: true });
+    await git(["clone", "--bare", remotePath, cachePath]);
+    await git([
+      "-C",
+      cachePath,
+      "fetch",
+      "origin",
+      "main:refs/remotes/origin/main"
+    ]);
+    await git(["-C", cachePath, "branch", branchName, "origin/main"]);
+    await git([
+      "-C",
+      cachePath,
+      "worktree",
+      "add",
+      "-b",
+      unrelatedBranchName,
+      workspacePath,
+      "origin/main"
+    ]);
+    await rm(workspacePath, { recursive: true });
+    await expect(worktreePaths(cachePath)).resolves.toContain(workspacePath);
+
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const addFailedPath = path.join(root, "worktree-add-failed");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    const realGit = realGitOutput.trim();
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ "$3" = "worktree" ] && [ "$4" = "add" ] && [ "$5" = "${workspacePath}" ]; then
+  "${realGit}" "$@"
+  touch "${addFailedPath}"
+  sleep infinity
+fi
+exec "${realGit}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+
+    try {
+      const pendingPreparation = prepareIssueWorkspace({
+        issue: { number: 667, title: "Preserve registered workspace" },
+        project: {
+          name: "symphonika",
+          workspace: {
+            git: { base_branch: "main", remote: remotePath },
+            root: workspaceRoot
+          }
+        },
+        signal: controller.signal
+      });
+      const preparation = rejectionOf(pendingPreparation);
+      await waitForPath(addFailedPath);
+      controller.abort(new Error("run timeout"));
+
+      await expect(preparation).resolves.toMatchObject({
+        code: "ABORT_ERR",
+        name: "AbortError"
+      });
+      await expect(pendingPreparation.abortCleanup).resolves.toBeUndefined();
+      await expect(pathExists(workspacePath)).resolves.toBe(false);
+      await expect(worktreePaths(cachePath)).resolves.toContain(workspacePath);
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
   it("surfaces incomplete cleanup of an aborted issue worktree", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

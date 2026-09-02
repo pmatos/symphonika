@@ -269,6 +269,12 @@ async function prepareIssueWorkspaceResult(
   }
 
   await mkdir(path.dirname(plan.workspacePath), { recursive: true });
+  const workspaceWasRegistered = await isWorktreeRegistered(
+    plan.cachePath,
+    plan.workspacePath,
+    input.signal,
+    abortCleanup
+  );
   // Proves this invocation actually attempts `git worktree add` below: no
   // await sits between this check and workspaceGit's own signal check, so
   // passing here means the add is tracked by abortCleanup before any abort
@@ -290,7 +296,7 @@ async function prepareIssueWorkspaceResult(
       abortCleanup
     );
   } catch (error) {
-    if (input.signal?.aborted === true) {
+    if (input.signal?.aborted === true && !workspaceWasRegistered) {
       try {
         await cleanupAbortedIssueWorktree(
           plan.cachePath,
@@ -447,9 +453,12 @@ async function cleanupAbortedIssueWorktree(
   };
   const [workspaceRemains, registrationRemains] = await Promise.all([
     exists(workspacePath).catch(markRemainsOnError),
-    isWorktreeRegistered(cachePath, workspacePath, abortCleanup).catch(
-      markRemainsOnError
-    )
+    isWorktreeRegistered(
+      cachePath,
+      workspacePath,
+      AbortSignal.timeout(GIT_CLEANUP_TIMEOUT_MS),
+      abortCleanup
+    ).catch(markRemainsOnError)
   ]);
   if (workspaceRemains || registrationRemains) {
     throw new Error("issue worktree cleanup remained incomplete", {
@@ -461,14 +470,11 @@ async function cleanupAbortedIssueWorktree(
 async function isWorktreeRegistered(
   cachePath: string,
   workspacePath: string,
+  signal: AbortSignal | undefined,
   abortCleanup: WorkspaceAbortCleanup
 ): Promise<boolean> {
   const entries = parseWorktreeEntries(
-    await worktreeListLines(
-      cachePath,
-      AbortSignal.timeout(GIT_CLEANUP_TIMEOUT_MS),
-      abortCleanup
-    )
+    await worktreeListLines(cachePath, signal, abortCleanup)
   );
   const [expectedPath, entryPaths] = await Promise.all([
     canonicalizePath(workspacePath),

@@ -92,8 +92,10 @@ declared firing deadline and progress liveness.
   explicit cancellation (`cancelled`) through `terminal_reason = 'no_progress'`.
 - A Watchdog alert is delayed until terminal settlement confirms `no_progress`, so a declared
   deadline that wins the race cannot produce a misleading Watchdog termination notification.
-- Pending confirmation survives daemon restart and can delay a legitimate grouped notification by
-  up to the configured Watchdog sample interval.
+- Pending confirmation survives daemon restart and can delay a legitimate grouped notification
+  until the next Watchdog reconciliation pass — bounded by whichever of the daemon's poll
+  interval or the configured Watchdog sample interval is larger, since reconciliation only runs
+  from the poll tick.
 - Post-cancellation GitHub and Git evidence is best-effort: a firing whose enrichment is itself
   wedged settles without it rather than holding its slot.
 

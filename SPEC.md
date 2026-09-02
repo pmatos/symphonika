@@ -2038,10 +2038,13 @@ the durable latch and the in-memory cancellation still records `failed / no_prog
 that bit only after the firing becomes terminal, reports the firing only when its authoritative
 `terminal_reason` is `no_progress`, and suppresses the pending alert when `firing_timeout` or any
 other verdict wins. Pending confirmation therefore survives daemon restart, never blocks the
-current tick waiting for settlement, and may delay a legitimate grouped alert by one Watchdog
-sample interval. Terminal pending entries are drained even when Watchdog sampling has subsequently
-been disabled. The outcome and commits-ahead evidence that completion gathered is retained either
-way, because Workspace retention depends on it.
+current tick waiting for settlement, and may delay a legitimate grouped alert until the next
+Watchdog reconciliation pass — which the daemon's poll tick runs at most once per
+`sample_interval_seconds`, so the wait is bounded by whichever of `polling.interval_ms` or
+`sample_interval_seconds` is larger, not by the sample interval alone. Terminal pending entries
+are drained even when Watchdog sampling has subsequently been disabled. The outcome and
+commits-ahead evidence that completion gathered is retained either way, because Workspace
+retention depends on it.
 
 Independently of that liveness clock, the Watchdog enforces a **convergence budget**: when a
 sampled Run's cumulative `output_tokens_total` reaches `watchdog.output_token_budget` (default

@@ -982,26 +982,22 @@ function winningByteSizeAssignment(
 
 const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
 
-// One token of a systemd compound memory value: optional whitespace before
-// it (so terms can run together, "1G500M", or be separated by a space,
-// "1G 500M"), a magnitude, optional whitespace, then an optional
-// single-letter K/M/G/T/P/E suffix or an explicit "B" (bytes) marker. The
-// suffix is captured (group 2) so isDefinitelyInvalidSystemdMemoryValue can
-// check systemd's descending-unit-order rule; a bare magnitude with no
-// suffix ranks as bytes, same as an explicit "B".
-const SYSTEMD_MEMORY_VALUE_TERM_SOURCE =
-  "\\s*(\\d+(?:\\.\\d+)?)\\s*([KMGTPE]|B)?";
-// A leading "+" sign applies once to the whole assignment (e.g. "+64G",
-// "+64G512M"), never per term, so it only appears before the repeated
-// group — "64G+512M" and "64+4G" correctly fail to match to the end.
-const SYSTEMD_MEMORY_COMPOUND_PATTERN = new RegExp(
-  `^\\+?(?:${SYSTEMD_MEMORY_VALUE_TERM_SOURCE})+$`,
-  "i"
-);
-const SYSTEMD_MEMORY_VALUE_TERM = new RegExp(
-  SYSTEMD_MEMORY_VALUE_TERM_SOURCE,
-  "gi"
-);
+// One token of a systemd compound memory value: a magnitude, optional
+// whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both tolerate "32 G"),
+// then an optional single-letter K/M/G/T/P/E suffix or an explicit "B"
+// (bytes) marker, captured so isDefinitelyInvalidSystemdMemoryValue can
+// check systemd's descending-unit-order rule (a bare magnitude with no
+// suffix ranks as bytes, same as an explicit "B"). A leading "+" sign
+// applies once to the whole assignment (e.g. "+64G", "+64G512M"), not per
+// term, so it is stripped before tokenizing rather than matched here —
+// "64G+512M" must still fail. Whitespace between terms is skipped by hand
+// in the tokenizing loop below rather than folded into this pattern: an
+// earlier version matched runs of terms with `(?:TERM_SOURCE)+` against
+// the whole string, which is catastrophically backtracking on a long
+// malformed digit run (each `\d+` repetition can be split ambiguously
+// across the outer `+`), letting a single typo'd local MemoryMax=
+// drop-in hang the doctor check indefinitely.
+const SYSTEMD_MEMORY_VALUE_TERM_SOURCE = "(\\d+(?:\\.\\d+)?)\\s*([KMGTPE]|B)?";
 const SYSTEMD_MEMORY_PERCENTAGE = /^(\d+(?:\.\d+)?)%$/;
 // Byte-magnitude rank of each unit, smallest first — systemd's parse_size()
 // requires each compound term's unit to be strictly smaller than the one
@@ -1028,28 +1024,36 @@ const SYSTEMD_MEMORY_UNIT_ORDER = "BKMGTPE";
 // parseSystemdByteSize merely cannot compute a byte count for ("50%",
 // "1024B", "2P", "1G 500M") is never treated as skippable here: it IS the
 // effective assignment, so skipping past it would warn against the wrong,
-// no-longer-effective value instead of just declining to evaluate. Matches
-// the complete text against the compound pattern because systemd permits
-// compound terms both with whitespace ("1G 500M") and without it
-// ("1G500M") — but only when each term's unit is strictly smaller than the
-// one before it; a repeated or increasing unit ("1G2G", "500M1G") is
-// rejected by systemd's own parser and must be rejected here too, or
-// winningByteSizeAssignment would select a value systemd never applied.
+// no-longer-effective value instead of just declining to evaluate. Scans
+// tokens through the complete text because systemd permits compound terms
+// both with whitespace ("1G 500M") and without it ("1G500M") — but only
+// when each term's unit is strictly smaller than the one before it; a
+// repeated or increasing unit ("1G2G", "500M1G") is rejected by systemd's
+// own parser and must be rejected here too, or winningByteSizeAssignment
+// would select a value systemd never applied.
 function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
   const percentage = SYSTEMD_MEMORY_PERCENTAGE.exec(value);
   if (percentage !== null) {
     const percent = Number(percentage[1]);
     return !(percent > 0 && percent <= 100);
   }
-  if (!SYSTEMD_MEMORY_COMPOUND_PATTERN.test(value)) {
-    return true;
-  }
-  const terms = [...value.matchAll(SYSTEMD_MEMORY_VALUE_TERM)];
-  if (terms.every((match) => Number(match[1]) === 0)) {
-    return true;
-  }
+  const magnitudes: number[] = [];
   let previousRank = Infinity;
-  for (const match of terms) {
+  const term = new RegExp(SYSTEMD_MEMORY_VALUE_TERM_SOURCE, "iy");
+  let offset = value.startsWith("+") ? 1 : 0;
+  while (offset < value.length) {
+    while (/\s/.test(value[offset] ?? "")) {
+      offset += 1;
+    }
+    if (offset === value.length) {
+      break;
+    }
+    term.lastIndex = offset;
+    const match = term.exec(value);
+    if (match === null) {
+      return true;
+    }
+    magnitudes.push(Number(match[1]));
     const rank = SYSTEMD_MEMORY_UNIT_ORDER.indexOf(
       (match[2] ?? "B").toUpperCase()
     );
@@ -1057,8 +1061,9 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
       return true;
     }
     previousRank = rank;
+    offset = term.lastIndex;
   }
-  return false;
+  return magnitudes.every((magnitude) => magnitude === 0);
 }
 
 function parseSystemdByteSize(value: string): number | undefined {

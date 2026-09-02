@@ -2062,6 +2062,21 @@ describe("doctor", () => {
       }
     );
 
+    it("rejects a long malformed digit run without catastrophic backtracking", async () => {
+      const start = Date.now();
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: `${"1".repeat(2000)}x`,
+        hostParallelism: 24
+      });
+      expect(Date.now() - start).toBeLessThan(2000);
+
+      const warning = report.warnings.find((entry) =>
+        entry.includes("provider build memory estimate")
+      );
+      expect(warning).toContain("MemoryMax=32G");
+      expect(warning).toContain("36 GiB");
+    });
+
     it.each(["50%", "100%", "1024B", "2P", "1G 500M", "+64G", "64G512M"])(
       "does not fall back past a MemoryMax= form it cannot parse but systemd accepts (%s)",
       async (unparseableButValid) => {

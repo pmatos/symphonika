@@ -980,17 +980,20 @@ function winningByteSizeAssignment(
   return undefined;
 }
 
-// Shared ASCII whitespace class systemd and SYSTEMD_BYTE_SIZE_PATTERN both
-// tolerate ("32 G") but JavaScript's broader Unicode `\s` set does not
-// exclude; kept as one source string so the byte-size pattern, the compound
-// term pattern, and the tokenizing loop's inter-term skip below all agree.
-// Matches systemd's own WHITESPACE macro (" \t\n\r\f\v"), so a form feed or
-// vertical tab between compact terms ("64G\v512M") is skipped the same way
-// systemd's own tokenizer skips it, rather than falling back to a stale
-// preceding limit.
-const SYSTEMD_WHITESPACE_SOURCE = "[ \\t\\n\\r\\f\\v]";
+// systemd's own WHITESPACE macro (" \t\n\r") — no form feed or vertical
+// tab. Used verbatim for the gap between a magnitude and its suffix within
+// a single term: parse_size()'s `e += strspn(e, WHITESPACE)` there has no
+// fallback if a character isn't in this exact set, so "32 G" (space)
+// parses but "64\vG"/"64\fG" (vertical tab / form feed) do not — confirmed
+// on systemd 261, both rejected with "Invalid memory limit". Also used for
+// systemdTrim() below, matching conf-parser.c's own use of the same macro
+// for line/key/value trimming. See SYSTEMD_TERM_SEPARATOR_SOURCE further
+// down for the different, broader class that applies *between* compound
+// terms — JavaScript's Unicode `\s` set is broader than either and must
+// not be used for either position.
+const SYSTEMD_NARROW_WHITESPACE_SOURCE = "[ \\t\\n\\r]";
 const SYSTEMD_BYTE_SIZE_PATTERN = new RegExp(
-  `^(\\d+(?:\\.\\d+)?)${SYSTEMD_WHITESPACE_SOURCE}*([KMGT]?)$`,
+  `^(\\d+(?:\\.\\d+)?)${SYSTEMD_NARROW_WHITESPACE_SOURCE}*([KMGT]?)$`,
   "i"
 );
 
@@ -1012,12 +1015,24 @@ const SYSTEMD_BYTE_SIZE_PATTERN = new RegExp(
 // repetition can be split ambiguously across the outer `+`), letting a
 // single typo'd local MemoryMax= drop-in hang the doctor check
 // indefinitely.
-const SYSTEMD_MEMORY_VALUE_TERM_SOURCE = `\\+?(\\d+(?:\\.\\d*)?)${SYSTEMD_WHITESPACE_SOURCE}*([KMGTPE]|B)?`;
-// Sticky match against a run of the same whitespace class, used to skip
-// between compound terms in the tokenizing loop below without a per-
-// character regex test.
+const SYSTEMD_MEMORY_VALUE_TERM_SOURCE = `\\+?(\\d+(?:\\.\\d*)?)${SYSTEMD_NARROW_WHITESPACE_SOURCE}*([KMGTPE]|B)?`;
+// The gap *between* compound terms — immediately before the next term's
+// magnitude — is a different position from the magnitude-to-suffix gap
+// above, and tolerates more than systemd's own WHITESPACE macro would
+// suggest: systemd's explicit pre-skip there (`p += strspn(p, WHITESPACE)`)
+// is just as narrow, but the `strtoull()` call that follows has its own
+// independent, C-standard isspace()-based whitespace skip (glibc's
+// isspace() includes form feed and vertical tab), which silently covers
+// whatever the explicit pre-skip missed. Confirmed on systemd 261:
+// "64G\v512M" and "64G\f512M" both resolve to the sum of the two terms,
+// and a leading "\v64G"/"\f64G" before the very first term resolves to
+// plain 64G — both are "about to parse a magnitude" positions, unlike the
+// magnitude-to-suffix gap, which has no such fallback. Sticky match
+// against a run of this class, used to skip between compound terms in the
+// tokenizing loop below without a per-character regex test.
+const SYSTEMD_TERM_SEPARATOR_SOURCE = "[ \\t\\n\\r\\f\\v]";
 const SYSTEMD_MEMORY_WHITESPACE_PATTERN = new RegExp(
-  `${SYSTEMD_WHITESPACE_SOURCE}*`,
+  `${SYSTEMD_TERM_SEPARATOR_SOURCE}*`,
   "y"
 );
 // A leading "+" is meaningful for relative values too — systemd's
@@ -1370,7 +1385,7 @@ async function effectiveSliceAssignments(
 // as systemd sees it, so the byte-size tokenizer below correctly rejects it
 // as trailing garbage instead of silently accepting the NBSP-trimmed "64G".
 const SYSTEMD_TRIM_PATTERN = new RegExp(
-  `^${SYSTEMD_WHITESPACE_SOURCE}+|${SYSTEMD_WHITESPACE_SOURCE}+$`,
+  `^${SYSTEMD_NARROW_WHITESPACE_SOURCE}+|${SYSTEMD_NARROW_WHITESPACE_SOURCE}+$`,
   "g"
 );
 function systemdTrim(value: string): string {

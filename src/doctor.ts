@@ -1574,7 +1574,7 @@ export async function runInitProject(
   let prompt = options.prompt;
   if (prompt === undefined && options.yes !== true && stdin.isTTY !== true) {
     try {
-      prompt = await createPipedInitProjectPrompt();
+      prompt = createPipedInitProjectPrompt();
     } catch (error) {
       errors.push(errorMessage(error));
       return initProjectReport(configPath, errors, warnings, projects);
@@ -1895,27 +1895,22 @@ async function collectProjectSettings(input: {
   }
 }
 
-async function createPipedInitProjectPrompt(): Promise<InitProjectPrompt> {
-  const answers: string[] = [];
+function createPipedInitProjectPrompt(): InitProjectPrompt {
   const lines = createInterface({
     crlfDelay: Number.POSITIVE_INFINITY,
     input: stdin
   });
-  for await (const answer of lines) {
-    answers.push(answer);
-  }
+  const answers = lines[Symbol.asyncIterator]();
 
-  return (input) => {
+  return async (input) => {
     stdout.write(formatInitProjectPromptLabel(input));
-    const answer = answers.shift();
-    if (answer === undefined) {
-      return Promise.reject(
-        new Error(
-          "interactive input ended before all prompts were answered; pass --yes to accept defaults"
-        )
+    const next = await answers.next();
+    if (next.done === true) {
+      throw new Error(
+        "interactive input ended before all prompts were answered; pass --yes to accept defaults"
       );
     }
-    return Promise.resolve(answer);
+    return next.value;
   };
 }
 

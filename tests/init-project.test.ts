@@ -262,6 +262,43 @@ describe("Project initialization", () => {
     ).resolves.toContain("# Implementing issue #{{issue.number}}");
   });
 
+  it("displays each piped prompt before its answer is written, without waiting for EOF", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "new-project");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    const cliHarnessPath = path.join(
+      repoRoot,
+      "tests",
+      "helpers",
+      "init-project-cli-harness.ts"
+    );
+    await createGitHubRepository(
+      repositoryRoot,
+      "https://github.com/acme/new-project.git"
+    );
+    await writeEmptyConfig(configPath, root);
+
+    const result = await runCliWithLockStepInput(
+      ["init-project", "--config", configPath],
+      [
+        { answer: "", waitFor: "Project name" },
+        { answer: "", waitFor: "Agent Provider" },
+        { answer: "main", waitFor: "Base branch" },
+        { answer: "agent-ready", waitFor: "Required issue labels" },
+        { answer: "", waitFor: "Excluded issue labels" },
+        { answer: "", waitFor: "Priority labels" },
+        { answer: "WORKFLOW.md", waitFor: "Workflow Contract path" },
+        { answer: "yes", waitFor: "Create missing operational labels" },
+        { answer: "yes", waitFor: "Create missing required eligibility labels" }
+      ],
+      repositoryRoot,
+      cliHarnessPath
+    );
+
+    expect(result.stdout).toContain("init-project ok: registered 1 Project");
+    expect(result.exitCode).toBe(0);
+  });
+
   it("force replaces only the matching Project instead of adding a duplicate", async () => {
     const root = await makeTempRoot();
     const repositoryRoot = path.join(root, "new-project");
@@ -755,6 +792,61 @@ async function runCliWithInput(
     stdout += chunk;
   });
   child.stdin.end(input);
+
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  return { exitCode, stderr, stdout };
+}
+
+async function runCliWithLockStepInput(
+  args: string[],
+  steps: Array<{ answer: string; waitFor: string }>,
+  cwd: string,
+  scriptPath: string
+): Promise<{ exitCode: number | null; stderr: string; stdout: string }> {
+  const child = spawn(
+    process.execPath,
+    [
+      "--import",
+      path.join(repoRoot, "node_modules", "tsx", "dist", "loader.mjs"),
+      scriptPath,
+      ...args
+    ],
+    {
+      cwd,
+      env: { ...process.env, GITHUB_TOKEN: "unused-test-token" },
+      stdio: ["pipe", "pipe", "pipe"]
+    }
+  );
+  let stderr = "";
+  let stdout = "";
+  let consumed = 0;
+  child.stderr.setEncoding("utf8");
+  child.stdout.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+
+  const deadline = Date.now() + 15_000;
+  for (const step of steps) {
+    while (!stdout.slice(consumed).includes(step.waitFor)) {
+      if (Date.now() > deadline) {
+        child.kill();
+        throw new Error(
+          `timed out waiting for piped prompt "${step.waitFor}" to be displayed; stdout so far: ${stdout}`
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    consumed = stdout.length;
+    child.stdin.write(`${step.answer}\n`);
+  }
+  child.stdin.end();
 
   const exitCode = await new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);

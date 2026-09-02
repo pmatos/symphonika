@@ -10,6 +10,7 @@ import {
 import { availableParallelism, homedir } from "node:os";
 import path from "node:path";
 import { stdin, stdout } from "node:process";
+import { createInterface as createLineInterface } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import { Octokit } from "@octokit/rest";
 import { isSeq, parse, parseDocument } from "yaml";
@@ -1567,12 +1568,22 @@ export async function runInitProject(
     return initProjectReport(configPath, errors, warnings, projects);
   }
 
+  let prompt = options.prompt;
+  if (prompt === undefined && options.yes !== true && stdin.isTTY !== true) {
+    try {
+      prompt = await createPipedInitProjectPrompt();
+    } catch (error) {
+      errors.push(errorMessage(error));
+      return initProjectReport(configPath, errors, warnings, projects);
+    }
+  }
+
   let settings: ProjectInitSettings;
   try {
     settings = await collectProjectSettings({
       metadata,
       mode,
-      ...(options.prompt === undefined ? {} : { prompt: options.prompt }),
+      ...(prompt === undefined ? {} : { prompt }),
       yes: options.yes === true
     });
   } catch (error) {
@@ -1714,7 +1725,7 @@ export async function runInitProject(
       ...(options.onWarning === undefined
         ? {}
         : { onWarning: options.onWarning }),
-      ...(options.prompt === undefined ? {} : { prompt: options.prompt }),
+      ...(prompt === undefined ? {} : { prompt }),
       project: dispatchProject,
       validation: accessValidation,
       warnings,
@@ -1877,6 +1888,29 @@ async function collectProjectSettings(input: {
   } finally {
     promptController.close();
   }
+}
+
+async function createPipedInitProjectPrompt(): Promise<InitProjectPrompt> {
+  const answers: string[] = [];
+  const lines = createLineInterface({
+    crlfDelay: Number.POSITIVE_INFINITY,
+    input: stdin
+  });
+  for await (const answer of lines) {
+    answers.push(answer);
+  }
+
+  return (input) => {
+    stdout.write(`${input.message} [${input.defaultValue}]: `);
+    if (answers.length === 0) {
+      return Promise.reject(
+        new Error(
+          "interactive input ended before all prompts were answered; pass --yes to accept defaults"
+        )
+      );
+    }
+    return Promise.resolve(answers.shift() ?? "");
+  };
 }
 
 function createInitProjectPromptController(

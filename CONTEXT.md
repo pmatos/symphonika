@@ -124,6 +124,15 @@ distinction is decided here, reason-based, without changing the outcome kind (AD
 `no_workspace_changes` outcome still projects `provider_success` so the walk advances (ADR 0046).
 _Avoid_: outcome handling, state mapping
 
+**Claim Label Writer**:
+The effectful application of a Run's terminal outcome to an Issue's Operational Labels: it removes
+`sym:running`, then adds `sym:failed` or `sym:blocked` (each escalating to `sym:human-needed`) — or
+suppresses them when a retry or FSM continuation follows — sweeps the terminal labels on a
+closed-issue cancel, and releases `sym:claimed`. Every write is best-effort, so a terminal path never
+throws. Distinct from Outcome Projection, which is the _pure_ decision of which label an outcome
+implies; the Claim Label Writer is the GitHub-facing counterpart that applies it.
+_Avoid_: outcome projection, label handling
+
 **Issue Reservation**:
 The orchestrator's exclusive claim on a Dispatch Project's Issue, whether currently in flight as an
 executing Run or scheduled for imminent dispatch as a delayed retry, Continuation, State Advance,

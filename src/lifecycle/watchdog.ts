@@ -571,7 +571,7 @@ async function sampleProgress(input: {
     lastProgressAt: latestEventAt(
       input.previous?.lastProgressAt ?? null,
       log.events,
-      ["progress", "thinking"],
+      ["plan_updated", "progress", "thinking"],
       input.sampledAt
     ),
     lastToolCallAt: latestEventAt(
@@ -793,7 +793,9 @@ function collectTurnIds(events: NormalizedProviderEvent[]): Set<string> {
 // text_delta, Codex item/agentMessage/delta) — ADR 0054 signal 5 — and
 // `progress` covers the payload-free provider liveness markers of ADR 0087;
 // `thinking` covers Codex reasoning boundaries even when Codex supplies no
-// summary text (issue #590).
+// summary text (issue #590), while `plan_updated` carries the current
+// operator-facing checklist and proves that the model advanced its work
+// (ADR 0096).
 function latestEventAt(
   previous: string | null,
   events: NormalizedProviderEvent[],

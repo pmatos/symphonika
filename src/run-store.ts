@@ -5083,6 +5083,31 @@ export class RunStore {
     return row === undefined ? undefined : mapProviderStreamReceiptRow(row);
   }
 
+  getLatestProviderEvent(
+    runId: string,
+    type: NormalizedProviderEvent["type"],
+    attemptId?: string
+  ): ProviderEventRecord | undefined {
+    const conditions = ["run_id = @runId", "type = @type"];
+    const params: Record<string, unknown> = { runId, type };
+    if (attemptId !== undefined) {
+      conditions.push("attempt_id = @attemptId");
+      params.attemptId = attemptId;
+    }
+    const row = this.database
+      .prepare(
+        [
+          "select run_id, attempt_id, sequence, type, raw_json, normalized_json, created_at",
+          "from provider_events",
+          `where ${conditions.join(" and ")}`,
+          "order by sequence desc, id desc",
+          "limit 1"
+        ].join(" ")
+      )
+      .get(params) as ProviderEventRow | undefined;
+    return row === undefined ? undefined : mapProviderEventRow(row);
+  }
+
   // Provider event `sequence` resets to 1 on every attempt, so an unscoped
   // `order by sequence desc` would pick whichever attempt produced the most
   // events, not the latest one. Callers pass the terminal attempt id to get the

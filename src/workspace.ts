@@ -24,8 +24,8 @@ const GIT_ABORT_GRACE_MS = 1_000;
 const GIT_GROUP_POLL_MS = 10;
 const GIT_MAX_BUFFER_BYTES = 1024 * 1024;
 // Bounds each cleanup Git command's own run time (not its termination, which
-// GIT_ABORT_GRACE_MS already covers) so a wedged `git worktree remove`/
-// `prune`/`list` cannot hold the Run Slot Deadline's abort-cleanup promise —
+// GIT_ABORT_GRACE_MS already covers) so a wedged `git worktree remove` or
+// `list` cannot hold the Run Slot Deadline's abort-cleanup promise —
 // and therefore the slot — open indefinitely. See codex review on PR #656.
 const GIT_CLEANUP_TIMEOUT_MS = 10_000;
 
@@ -413,7 +413,7 @@ async function worktreePathForBranch(
 // starts the process (see gitInProcessGroup). A fresh, initially-unaborted
 // timeout signal still routes through gitInProcessGroup's bounded
 // SIGTERM/SIGKILL teardown, but caps this command's own run time too, so a
-// wedged remove/prune/list cannot hold the abort-cleanup promise open
+// wedged remove/list cannot hold the abort-cleanup promise open
 // indefinitely. See codex review on PR #656.
 function cleanupGit(
   args: string[],
@@ -437,15 +437,20 @@ async function cleanupAbortedIssueWorktree(
   };
 
   await cleanupGit(
-    ["-C", cachePath, "worktree", "remove", "--force", workspacePath],
+    [
+      "-C",
+      cachePath,
+      "worktree",
+      "remove",
+      "--force",
+      "--force",
+      workspacePath
+    ],
     abortCleanup
   ).catch(recordError);
   await abortCleanup
     .track(rm(workspacePath, { force: true, recursive: true }))
     .catch(recordError);
-  await cleanupGit(["-C", cachePath, "worktree", "prune"], abortCleanup).catch(
-    recordError
-  );
 
   const markRemainsOnError = (error: unknown): true => {
     recordError(error);

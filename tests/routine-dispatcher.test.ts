@@ -7803,11 +7803,9 @@ describe("RoutineFiringDispatcher", () => {
     await mkdir(workspacePath, { recursive: true });
     const runStore = openRunStore({ stateRoot });
     const activeRuns = new ActiveRunRegistry();
+    let firingAtNotification: ReturnType<typeof runStore.getRoutineFiring>;
     const onRoutineTerminated = vi.fn(() => {
-      expect(runStore.getRoutineFiring("wedged-fire")).toMatchObject({
-        state: "failed",
-        terminalReason: "no_progress"
-      });
+      firingAtNotification = runStore.getRoutineFiring("wedged-fire");
     });
     const routine = minuteRoutine(root);
     const firingIds = ["wedged-fire", "replacement-fire"];
@@ -7904,6 +7902,10 @@ describe("RoutineFiringDispatcher", () => {
         firingId: "wedged-fire",
         projectName: "alpha",
         routineName: "minute-report"
+      });
+      expect(firingAtNotification).toMatchObject({
+        state: "failed",
+        terminalReason: "no_progress"
       });
       await reconcileWatchdog({
         activeRuns,

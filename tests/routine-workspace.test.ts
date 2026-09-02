@@ -1121,6 +1121,106 @@ exec "${realGit}" "$@"
     }
   );
 
+  it("preserves a pre-existing worktree registration when add failure races an abort", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const cachePath = path.join(workspaceRoot, ".cache", "repo.git");
+    const firingId = "01KABCDEFGHJKMNPQRSTVWXYZ12";
+    const workspacePath = path.join(
+      workspaceRoot,
+      "routines",
+      "dependency-update",
+      firingId
+    );
+    const project = {
+      name: "alpha",
+      workspace: {
+        git: { base_branch: "main", remote: remotePath },
+        root: workspaceRoot
+      }
+    };
+    const unrelatedBranchName = "manual/unrelated-worktree";
+    await mkdir(path.dirname(cachePath), { recursive: true });
+    await git(["clone", "--bare", remotePath, cachePath]);
+    await git([
+      "-C",
+      cachePath,
+      "fetch",
+      "origin",
+      "main:refs/remotes/origin/main"
+    ]);
+    await git([
+      "-C",
+      cachePath,
+      "worktree",
+      "add",
+      "-b",
+      unrelatedBranchName,
+      workspacePath,
+      "origin/main"
+    ]);
+    await rm(workspacePath, { recursive: true });
+    await expect(worktreePaths(cachePath)).resolves.toContain(workspacePath);
+
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const addFailedPath = path.join(root, "worktree-add-failed");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    const realGit = realGitOutput.trim();
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ "$3" = "worktree" ] && [ "$4" = "add" ] && [ "$5" = "${workspacePath}" ]; then
+  "${realGit}" "$@"
+  touch "${addFailedPath}"
+  sleep infinity
+fi
+exec "${realGit}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+
+    try {
+      const preparation = rejectionOf(
+        prepareRoutineWorkspace({
+          configDir: root,
+          firingId,
+          kind: "git",
+          project,
+          routineName: "dependency-update",
+          signal: controller.signal
+        })
+      );
+      await waitForPath(addFailedPath);
+      controller.abort(new Error("firing timeout"));
+
+      const error = await settleWithin(preparation, 2_500);
+      expect(error).toMatchObject({ code: "ABORT_ERR", name: "AbortError" });
+      await expect(pathExists(workspacePath)).resolves.toBe(false);
+      await expect(worktreePaths(cachePath)).resolves.toContain(workspacePath);
+      await expect(
+        git([
+          "-C",
+          cachePath,
+          "show-ref",
+          "--verify",
+          `refs/heads/sym/alpha/routine/dependency-update/${firingId.slice(0, 10)}`
+        ])
+      ).rejects.toThrow();
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
   it("surfaces incomplete cleanup of an aborted firing-owned worktree", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

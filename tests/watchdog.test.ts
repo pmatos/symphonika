@@ -2106,7 +2106,7 @@ describe("reconcileWatchdog", () => {
     }
   });
 
-  it("counts a Codex progress marker as its own signal", async () => {
+  it("counts a Codex terminal interaction progress marker as its own signal", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
     await mkdir(workspacePath, { recursive: true });
@@ -2119,7 +2119,11 @@ describe("reconcileWatchdog", () => {
         "run-diff-marker"
       );
       await appendNormalizedEvents(normalizedLogPath, [
-        { signal: "workspace_diff", turnId: "turn-1", type: "progress" }
+        {
+          signal: "terminal_interaction",
+          turnId: "turn-1",
+          type: "progress"
+        }
       ]);
 
       await reconcileWatchdog({
@@ -2188,6 +2192,52 @@ describe("reconcileWatchdog", () => {
 
       const sample = store.getWatchdogSample("run-thinking-marker");
       expect(sample?.lastProgressAt).toBe("2026-08-28T13:43:05.000Z");
+      expect(sample?.lastToolCallAt).toBeNull();
+      expect(sample?.idleSince).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("counts a Codex plan update as progress", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const normalizedLogPath = await prepareReplayRun(
+        store,
+        root,
+        workspacePath,
+        "run-plan-update"
+      );
+      await appendNormalizedEvents(normalizedLogPath, [
+        {
+          explanation: "The implementation is underway.",
+          plan: [{ status: "in_progress", step: "Implement the fix" }],
+          turnId: "turn-1",
+          type: "plan_updated"
+        }
+      ]);
+
+      await reconcileWatchdog({
+        activeRuns: new ActiveRunRegistry(),
+        config: {
+          enabled: true,
+          graceMinutes: 30,
+          maxRunMinutes: 0,
+          mtimeIgnore: [],
+          mtimeInclude: [],
+          outputTokenBudget: 0,
+          sampleIntervalSeconds: 60
+        },
+        logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        runStore: store
+      });
+
+      const sample = store.getWatchdogSample("run-plan-update");
+      expect(sample?.lastProgressAt).toBe("2026-05-22T10:00:00.000Z");
       expect(sample?.lastToolCallAt).toBeNull();
       expect(sample?.idleSince).toBeNull();
     } finally {

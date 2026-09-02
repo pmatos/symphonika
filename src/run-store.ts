@@ -4244,43 +4244,28 @@ export class RunStore {
   }
 
   claimSettledRoutineWatchdogTerminations(): SettledRoutineWatchdogTermination[] {
-    const claim = this.database.transaction(() => {
-      const rows = this.database
-        .prepare(
-          [
-            "select id, project_name, routine_name, terminal_reason",
-            "from routine_firings",
-            "where watchdog_notification_pending = 1",
-            "and state in ('succeeded', 'failed', 'cancelled')"
-          ].join(" ")
-        )
-        .all() as Array<{
-        id: string;
-        project_name: string;
-        routine_name: string;
-        terminal_reason: string | null;
-      }>;
-      if (rows.length === 0) {
-        return [];
-      }
-      this.database
-        .prepare(
-          [
-            "update routine_firings set watchdog_notification_pending = 0",
-            "where watchdog_notification_pending = 1",
-            "and state in ('succeeded', 'failed', 'cancelled')"
-          ].join(" ")
-        )
-        .run();
-      return rows
-        .filter((row) => row.terminal_reason === WATCHDOG_NO_PROGRESS_REASON)
-        .map((row) => ({
-          firingId: row.id,
-          projectName: row.project_name,
-          routineName: row.routine_name
-        }));
-    });
-    return claim();
+    const rows = this.database
+      .prepare(
+        [
+          "update routine_firings set watchdog_notification_pending = 0",
+          "where watchdog_notification_pending = 1",
+          "and state in ('succeeded', 'failed', 'cancelled')",
+          "returning id, project_name, routine_name, terminal_reason"
+        ].join(" ")
+      )
+      .all() as Array<{
+      id: string;
+      project_name: string;
+      routine_name: string;
+      terminal_reason: string | null;
+    }>;
+    return rows
+      .filter((row) => row.terminal_reason === WATCHDOG_NO_PROGRESS_REASON)
+      .map((row) => ({
+        firingId: row.id,
+        projectName: row.project_name,
+        routineName: row.routine_name
+      }));
   }
 
   updateRoutineFiringWorkspace(input: {
@@ -6592,6 +6577,18 @@ export class RunStore {
     this.database.exec(`
       create index if not exists routine_firings_watchdog_idx
       on routine_firings(state, cancel_requested, created_at, id);
+    `);
+
+    // claimSettledRoutineWatchdogTerminations runs on every Watchdog tick
+    // (including while the Watchdog is disabled, to drain pending entries).
+    // A partial index keeps that scan cheap even as routine_firings grows,
+    // since watchdog_notification_pending is 1 for at most a handful of rows
+    // at any time — it is cleared the moment a firing's termination is
+    // claimed.
+    this.database.exec(`
+      create index if not exists routine_firings_watchdog_pending_idx
+      on routine_firings(watchdog_notification_pending)
+      where watchdog_notification_pending = 1;
     `);
 
     // run_state_transitions is append-only with no retention sweep and has no

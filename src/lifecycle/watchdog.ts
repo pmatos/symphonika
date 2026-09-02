@@ -174,11 +174,24 @@ function notifySettledRoutineWatchdogTerminations(
   }
 }
 
+// Drains settled routine watchdog notifications on every exit path — the
+// disabled-config early return and the normal completion both need to flush
+// pending entries, so the flush lives in `finally` rather than at each
+// return site.
 export async function reconcileWatchdog(
   input: ReconcileWatchdogInput
 ): Promise<WatchdogReconcileResult> {
-  if (!input.config.enabled) {
+  try {
+    return await sampleAndTerminate(input);
+  } finally {
     notifySettledRoutineWatchdogTerminations(input);
+  }
+}
+
+async function sampleAndTerminate(
+  input: ReconcileWatchdogInput
+): Promise<WatchdogReconcileResult> {
+  if (!input.config.enabled) {
     return { sampled: 0, terminated: 0 };
   }
 
@@ -349,7 +362,6 @@ export async function reconcileWatchdog(
   }
 
   await Promise.all(cancellations);
-  notifySettledRoutineWatchdogTerminations(input);
   return { sampled, terminated };
 }
 

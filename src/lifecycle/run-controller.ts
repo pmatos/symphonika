@@ -2392,26 +2392,6 @@ export class RunController {
   // Only the shutdown path awaits: the isShuttingDown() check at each call
   // site and the createContinuationRun below it are synchronous, so stop()
   // cannot close the gate between check and row creation. See ADR 0052.
-  private async rollbackScheduledRunClaimLabel(input: {
-    issueNumber: number;
-    phase: "continuation" | "state-advance";
-    projectName: string;
-    repository: GitHubIssueRepositoryInput;
-    runId: string;
-  }): Promise<void> {
-    await this.claimLabels.release({
-      issueNumber: input.issueNumber,
-      phase: input.phase,
-      repository: input.repository
-    });
-    this.logger?.debug(
-      { issueNumber: input.issueNumber, runId: input.runId },
-      `symphonika ${
-        input.phase === "state-advance" ? "state advance" : "continuation"
-      } skipped: daemon shutting down`
-    );
-  }
-
   private async failScheduledRunBeforeProvider(input: {
     issue: IssueSnapshot;
     parentRunId: string;
@@ -2424,9 +2404,19 @@ export class RunController {
     runId: string;
   }): Promise<void> {
     // Shutdown gate: every call site returns immediately after this helper,
-    // so skipping here skips the whole exit. The checks are synchronous
-    // with the row creation below — see rollbackScheduledRunClaimLabel.
+    // and no child row (input.runId) is ever created on this path, so the
+    // parent (input.parentRunId) — already "succeeded" from the advance/
+    // continuation decision — is the only durable row that can still carry
+    // shutdown evidence. Without this, the parent is left with no
+    // cancel_reason and the next daemon's resume query ignores it, the same
+    // gap the fired-callback fix (window 3) closed for the try/catch below.
+    // See issue #663 / PR #674 review.
     if (this.activeRuns.isShuttingDown()) {
+      await this.cancelRunAfterScheduleCleared({
+        issueNumber: input.issue.number,
+        repository: input.repository,
+        runId: input.parentRunId
+      });
       this.logger?.debug(
         { issueNumber: input.issue.number, runId: input.runId },
         `symphonika ${
@@ -2452,13 +2442,21 @@ export class RunController {
       }
     );
     if (this.activeRuns.isShuttingDown()) {
-      await this.rollbackScheduledRunClaimLabel({
+      // Unlike the pre-label-write check above, sym:claimed is now applied
+      // — but daemon_shutdown cancellation must KEEP it (ADR 0088's resume
+      // pass relies on the claim staying present), not release it. Cancel
+      // the parent the same way as above rather than rolling the label back.
+      await this.cancelRunAfterScheduleCleared({
         issueNumber: input.issue.number,
-        phase: input.phase,
-        projectName: input.project.name,
         repository: input.repository,
-        runId: input.runId
+        runId: input.parentRunId
       });
+      this.logger?.debug(
+        { issueNumber: input.issue.number, runId: input.runId },
+        `symphonika ${
+          input.phase === "state-advance" ? "state advance" : "continuation"
+        } skipped: daemon shutting down`
+      );
       return;
     }
     this.runStore.createContinuationRun({
@@ -2512,6 +2510,14 @@ export class RunController {
     targetState: ExpandedWorkflowState;
   }): Promise<void> {
     if (this.activeRuns.isShuttingDown()) {
+      // No child row exists yet — cancel the parent so shutdown evidence is
+      // durable. See the matching gate in failScheduledRunBeforeProvider for
+      // the full rationale. See issue #663 / PR #674 review.
+      await this.cancelRunAfterScheduleCleared({
+        issueNumber: input.issue.number,
+        repository: input.repository,
+        runId: input.parentRunId
+      });
       this.logger?.debug(
         { issueNumber: input.issue.number, runId: input.runId },
         "symphonika state advance skipped: daemon shutting down"
@@ -2544,12 +2550,12 @@ export class RunController {
         }
       );
       if (this.activeRuns.isShuttingDown()) {
-        await this.rollbackScheduledRunClaimLabel({
+        // sym:claimed is now applied but must be KEPT for daemon_shutdown
+        // (ADR 0088's resume pass relies on it), not rolled back.
+        await this.cancelRunAfterScheduleCleared({
           issueNumber: input.issue.number,
-          phase: "state-advance",
-          projectName: input.project.name,
           repository: input.repository,
-          runId: input.runId
+          runId: input.parentRunId
         });
         return;
       }

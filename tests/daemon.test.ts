@@ -425,7 +425,7 @@ describe("startDaemon", () => {
     }
   });
 
-  it("drops a no_workspace_changes-suppressed issue from candidateIssues (#683/#691)", async () => {
+  it("reclassifies a no_workspace_changes-suppressed issue as filtered (#683/#691)", async () => {
     const cwd = await makeTempRoot();
     await writeMinimalProject(cwd);
     const stateRoot = path.join(cwd, ".symphonika");
@@ -483,7 +483,11 @@ describe("startDaemon", () => {
       }).then((r) => r.json())) as {
         candidateIssues: number;
         issuePolling: {
-          projects: Array<{ name: string; candidateIssues?: number }>;
+          projects: Array<{
+            name: string;
+            candidateIssues?: number;
+            filteredIssues?: number;
+          }>;
         };
       };
       // Regression guard (#691 review): the suppression filter used to only
@@ -496,16 +500,32 @@ describe("startDaemon", () => {
         (project) => project.name === "symphonika"
       );
       expect(projectReport?.candidateIssues ?? 0).toBe(0);
+      // Regression guard (#691 review): a suppressed candidate must be
+      // reclassified as filtered, not dropped -- otherwise fetched (1) no
+      // longer equals candidate (0) + filtered (0), and the issue vanishes
+      // from /issues triage search instead of showing up with a reason.
+      expect(projectReport?.filteredIssues ?? 0).toBe(1);
 
       const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
         r.json()
       )) as {
         candidateIssues: Array<{ issue: { number: number } }>;
+        filteredIssues: Array<{
+          issue: { number: number };
+          reasons: string[];
+        }>;
       };
       // Regression guard: issueFilterReasons is a pure label-based check and
       // matches this issue every tick, so without the suppression filter in
       // refreshIssuePollStatus this list would keep including it forever.
       expect(status.candidateIssues).toHaveLength(0);
+      const filteredEntry = status.filteredIssues.find(
+        (entry) => entry.issue.number === 42
+      );
+      expect(filteredEntry).toBeDefined();
+      expect(filteredEntry?.reasons).toEqual([
+        expect.stringContaining("no_workspace_changes")
+      ]);
 
       // Regression guard (#691 review): the persisted /issues triage
       // snapshot (fed from the raw, unfiltered nextStatus) used to keep
@@ -516,12 +536,13 @@ describe("startDaemon", () => {
         .getProjectStatesByName()
         .get("symphonika");
       expect(projectState?.lastCandidateIssues ?? 0).toBe(0);
+      expect(projectState?.lastFilteredIssues ?? 0).toBe(1);
       const snapshotRows = verifyStore.listProjectIssueSnapshots("symphonika");
-      expect(
-        snapshotRows.some(
-          (row) => row.issueNumber === 42 && row.kind === "candidate"
-        )
-      ).toBe(false);
+      const snapshotRow = snapshotRows.find((row) => row.issueNumber === 42);
+      expect(snapshotRow?.kind).toBe("filtered");
+      expect(snapshotRow?.reasons).toEqual([
+        expect.stringContaining("no_workspace_changes")
+      ]);
       verifyStore.close();
     } finally {
       await daemon.stop();

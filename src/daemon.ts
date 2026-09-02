@@ -19,6 +19,7 @@ import {
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
 import type {
+  FilteredProjectIssueSnapshot,
   GitHubIssuesApi,
   GitHubRepositoryIdentity,
   PollingProjectConfig
@@ -2026,37 +2027,76 @@ export async function startDaemon(
   };
 }
 
-// #683/#691: filters out candidates whose newest Run already suppresses
-// fresh dispatch (RunStore.latestRunSuppressesFreshDispatch), and keeps the
-// per-project candidateIssues counts in sync with the filtered array --
-// mutates `status` in place so every caller sharing the same IssuePollStatus
-// object (issuePollStatus itself, or the raw nextStatus fed to
-// persistProjectPollState) reflects the same suppressed set.
+// Reason recorded for a candidate reclassified as filtered by
+// suppressResolvedFreshDispatchCandidates -- distinguishes it from the
+// pure label-based reasons issueFilterReasons produces (see
+// evaluateProjectEligibility), which never mention Run history.
+const FRESH_DISPATCH_SUPPRESSED_REASON =
+  "a newer run's terminal outcome (no_workspace_changes) suppresses fresh dispatch until the issue changes";
+
+// #683/#691: reclassifies candidates whose newest Run already suppresses
+// fresh dispatch (RunStore.latestRunSuppressesFreshDispatch) as filtered
+// rather than dropping them, so fetched == candidate + filtered stays true
+// and the issue remains visible in /issues triage search with a reason --
+// see #691 review. Keeps the per-project candidateIssues/filteredIssues
+// counts in sync with the reclassified arrays -- mutates `status` in place
+// so every caller sharing the same IssuePollStatus object (issuePollStatus
+// itself, or the raw nextStatus fed to persistProjectPollState) reflects
+// the same suppressed set.
 function suppressResolvedFreshDispatchCandidates(
   status: import("./issue-polling.js").IssuePollStatus,
   effectiveProjectsByName: ReadonlyMap<string, RunControllerProjectConfig>,
   runStore: ReturnType<typeof openRunStore>
 ): void {
-  status.candidateIssues = status.candidateIssues.filter((candidate) => {
+  const surviving = status.candidateIssues.filter(
+    (candidate) => !isSuppressedFreshDispatchCandidate(candidate)
+  );
+  const suppressed: FilteredProjectIssueSnapshot[] = status.candidateIssues
+    .filter((candidate) => isSuppressedFreshDispatchCandidate(candidate))
+    .map((candidate) => ({
+      ...candidate,
+      reasons: [FRESH_DISPATCH_SUPPRESSED_REASON]
+    }));
+
+  status.candidateIssues = surviving;
+  status.filteredIssues = [...status.filteredIssues, ...suppressed];
+  status.projects = status.projects.map((project) => ({
+    ...project,
+    candidateIssues: matchingProjectCount(surviving, project),
+    filteredIssues:
+      (project.filteredIssues ?? 0) + matchingProjectCount(suppressed, project)
+  }));
+
+  function isSuppressedFreshDispatchCandidate(candidate: {
+    issue: { number: number };
+    project: string;
+    repository: GitHubRepositoryIdentity;
+  }): boolean {
     const project = effectiveProjectsByName.get(candidate.project);
     return (
-      project === undefined ||
-      !isDispatchProject(project) ||
-      !runStore.latestRunSuppressesFreshDispatch({
+      project !== undefined &&
+      isDispatchProject(project) &&
+      runStore.latestRunSuppressesFreshDispatch({
         issueNumber: candidate.issue.number,
         projectName: candidate.project,
         repository: candidate.repository
       })
     );
-  });
-  status.projects = status.projects.map((project) => ({
-    ...project,
-    candidateIssues: status.candidateIssues.filter(
-      (candidate) =>
-        candidate.project === project.name &&
-        sameGitHubRepository(candidate.repository, project.repository)
-    ).length
-  }));
+  }
+}
+
+function matchingProjectCount(
+  candidates: readonly {
+    project: string;
+    repository: GitHubRepositoryIdentity;
+  }[],
+  project: { name: string; repository: GitHubRepositoryIdentity }
+): number {
+  return candidates.filter(
+    (candidate) =>
+      candidate.project === project.name &&
+      sameGitHubRepository(candidate.repository, project.repository)
+  ).length;
 }
 
 function persistProjectPollState(

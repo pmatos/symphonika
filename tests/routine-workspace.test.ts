@@ -1014,6 +1014,113 @@ exec "${realGitOutput.trim()}" "$@"
     }
   });
 
+  it.skipIf(process.platform === "win32")(
+    "cleans a group-killed locked firing worktree without pruning unrelated registrations",
+    async () => {
+      const root = await makeTempRoot();
+      const remotePath = await createRemoteRepository(root);
+      const workspaceRoot = path.join(root, "workspaces", "alpha");
+      const project = {
+        name: "alpha",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      };
+      const unrelated = await prepareRoutineWorkspace({
+        configDir: root,
+        firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12",
+        kind: "git",
+        project,
+        routineName: "unrelated-routine"
+      });
+      await rm(unrelated.workspacePath, { force: true, recursive: true });
+      expect(await worktreePaths(unrelated.cachePath)).toContain(
+        unrelated.workspacePath
+      );
+
+      const firingId = "01KABCDEFGHJKMNPQRSTVWXYZ12";
+      const workspacePath = path.join(
+        workspaceRoot,
+        "routines",
+        "dependency-update",
+        firingId
+      );
+      const wrapperRoot = path.join(root, "git-wrapper");
+      const wrapperPath = path.join(wrapperRoot, "git");
+      const startedPath = path.join(root, "worktree-started");
+      const termPath = path.join(root, "worktree-received-term");
+      const helperPidPath = path.join(root, "worktree-pid");
+      const interruptNextAddPath = path.join(root, "interrupt-next-add");
+      const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+      const realGit = realGitOutput.trim();
+      await mkdir(wrapperRoot, { recursive: true });
+      await writeFile(interruptNextAddPath, "interrupt\n");
+      await writeFile(
+        wrapperPath,
+        `#!/bin/sh
+if [ -f "${interruptNextAddPath}" ] && [ "$3" = "worktree" ] && [ "$4" = "add" ] && [ "$5" = "${workspacePath}" ]; then
+  rm -f "${interruptNextAddPath}"
+  "${realGit}" "$@"
+  rm -f "${workspacePath}/README.md"
+  touch "${workspacePath}/partial-checkout"
+  "${realGit}" -C "$2" worktree lock --reason initializing "$5"
+  echo $$ > "${helperPidPath}"
+  trap 'touch "${termPath}"' TERM
+  touch "${startedPath}"
+  while :; do sleep 0.1; done
+fi
+exec "${realGit}" "$@"
+`
+      );
+      await chmod(wrapperPath, 0o755);
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+      const controller = new AbortController();
+
+      try {
+        const preparation = rejectionOf(
+          prepareRoutineWorkspace({
+            configDir: root,
+            firingId,
+            kind: "git",
+            project,
+            routineName: "dependency-update",
+            signal: controller.signal
+          })
+        );
+        await waitForPath(startedPath);
+        const helperPid = await readPid(helperPidPath);
+        controller.abort(new Error("firing timeout"));
+
+        const error = await settleWithin(preparation, 2_500);
+        expect(error).toMatchObject({ code: "ABORT_ERR", name: "AbortError" });
+        await expect(pathExists(termPath)).resolves.toBe(true);
+        await waitForProcessExit(helperPid);
+        await expect(pathExists(workspacePath)).resolves.toBe(false);
+        const registeredPaths = await worktreePaths(unrelated.cachePath);
+        expect(registeredPaths).not.toContain(workspacePath);
+        expect(registeredPaths).toContain(unrelated.workspacePath);
+
+        const recovered = await prepareRoutineWorkspace({
+          configDir: root,
+          firingId,
+          kind: "git",
+          project,
+          routineName: "dependency-update"
+        });
+        expect(recovered.reused).toBe(false);
+      } finally {
+        await killRecordedProcessGroup(helperPidPath);
+        if (previousPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = previousPath;
+        }
+      }
+    }
+  );
+
   it("surfaces incomplete cleanup of an aborted firing-owned worktree", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);
@@ -1228,6 +1335,20 @@ async function createRemoteRepository(root: string): Promise<string> {
 async function git(args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args);
   return stdout.trim();
+}
+
+async function worktreePaths(cachePath: string): Promise<string[]> {
+  const output = await git([
+    "-C",
+    cachePath,
+    "worktree",
+    "list",
+    "--porcelain"
+  ]);
+  return output
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length));
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

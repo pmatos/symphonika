@@ -224,6 +224,7 @@ async function cleanupAbortedRoutineWorktree(
       "worktree",
       "remove",
       "--force",
+      "--force",
       workspacePath
     ]);
   } catch (error) {
@@ -234,12 +235,6 @@ async function cleanupAbortedRoutineWorktree(
   } catch (error) {
     cleanupErrors.push(error);
   }
-  try {
-    await git(["-C", cachePath, "worktree", "prune"]);
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-
   let workspaceRemains = true;
   let registrationRemains = true;
   try {

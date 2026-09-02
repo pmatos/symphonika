@@ -21,7 +21,10 @@ esac
 
 cd "$CLAUDE_PROJECT_DIR"
 
-"./node_modules/.bin/prettier" --write "$file_path" >/dev/null 2>&1 || true
+format_output=$("./node_modules/.bin/prettier" --write "$file_path" 2>&1) || {
+  printf '%s\n' "$format_output" >&2
+  exit 2
+}
 
 lint_output=$("./node_modules/.bin/eslint" --fix "$file_path" 2>&1) || {
   printf '%s\n' "$lint_output" >&2

@@ -1087,16 +1087,20 @@ type RoutineFanoutTargetRow = {
   skip_reason: RoutineSkipReason | "target_unavailable" | null;
 };
 
-// One definition of "this Routine Target's clock event is parked by a capacity
-// deferral" (ADR 0093), shared by the dispatch read and the restart-recompute
-// guard so the two can never drift apart. Callers supply their own correlation
-// of f.routine_name / f.scheduled_at / t.project_name.
+// Both predicates correlate one Routine Target's clock event with durable
+// capacity-deferral evidence (ADR 0093). Dispatch surfaces report only a live
+// pending deferral; restart recomputation also treats a provider-held leg that
+// retains that evidence as parked, so it cannot consume the clock event as a
+// catch-up skip. Callers supply their own correlation of f.routine_name /
+// f.scheduled_at / t.project_name.
 const DEFERRED_FANOUT_TARGET_SOURCE = [
   "from routine_fanout_targets t",
   "join routine_fanouts f on f.id = t.fanout_id"
 ].join(" ");
-const DEFERRED_FANOUT_TARGET_PREDICATE =
+const LIVE_ROUTINE_DEFERRAL_PREDICATE =
   "t.disposition = 'pending' and t.deferred_reason is not null";
+const PARKED_ROUTINE_DEFERRAL_PREDICATE =
+  "t.disposition in ('pending', 'held') and t.deferred_reason is not null";
 
 const PULL_REQUEST_DISCOVERY_LIMIT = 25;
 const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
@@ -2538,7 +2542,7 @@ export class RunStore {
         `select 1 ${DEFERRED_FANOUT_TARGET_SOURCE}`,
         "where f.routine_name = routines.name and f.scheduled_at = routines.next_fire_at",
         "and t.project_name = routines.project_name and",
-        DEFERRED_FANOUT_TARGET_PREDICATE,
+        PARKED_ROUTINE_DEFERRAL_PREDICATE,
         ") then excluded.next_fire_at",
         "when routines.schedule_at is not excluded.schedule_at or routines.schedule_cron is not excluded.schedule_cron or routines.schedule_tz is not excluded.schedule_tz then excluded.next_fire_at",
         // Un-disabling (front matter disabled: true removed, or the routine's
@@ -3610,24 +3614,24 @@ export class RunStore {
     return this.runIfClaimable(apply) ?? false;
   }
 
-  // The capacity deferral parking a Routine Target's due clock event, if it
-  // has one. Dispatch consults this to decide whether a parked event is
-  // still retryable or has outlived its own clock, and restart catch-up
-  // consults it so it settles genuinely missed events without discarding one
-  // the daemon is still actively retrying.
-  getRoutineTargetDeferral(input: {
-    name: string;
-    projectName: string;
-    scheduledAt: string;
-  }): RoutineDeferralStatus | undefined {
-    const row = this.database
+  private routineTargetDeferralRow(
+    input: { name: string; projectName: string; scheduledAt: string },
+    predicate: string
+  ):
+    | {
+        deferred_attempts: number;
+        deferred_reason: RoutineDeferralReason;
+        deferred_since: string;
+      }
+    | undefined {
+    return this.database
       .prepare(
         [
           "select t.deferred_reason, t.deferred_since, t.deferred_attempts",
           DEFERRED_FANOUT_TARGET_SOURCE,
           "where f.routine_name = ? and f.scheduled_at = ?",
           "and t.project_name = ? and",
-          DEFERRED_FANOUT_TARGET_PREDICATE
+          predicate
         ].join(" ")
       )
       .get(input.name, input.scheduledAt, input.projectName) as
@@ -3637,6 +3641,28 @@ export class RunStore {
           deferred_since: string;
         }
       | undefined;
+  }
+
+  // Whether restart schedule recomputation must preserve this clock event.
+  // A provider-held leg is not a live capacity deferral for dispatch or
+  // operator surfaces, but retained deferral evidence still means restart
+  // catch-up must leave its clock parked for the due-event loop.
+  hasParkedRoutineTargetDeferral(input: {
+    name: string;
+    projectName: string;
+    scheduledAt: string;
+  }): boolean {
+    return (
+      this.routineTargetDeferralRow(
+        input,
+        PARKED_ROUTINE_DEFERRAL_PREDICATE
+      ) !== undefined
+    );
+  }
+
+  private toRoutineDeferralStatus(
+    row: ReturnType<RunStore["routineTargetDeferralRow"]>
+  ): RoutineDeferralStatus | undefined {
     return row === undefined
       ? undefined
       : {
@@ -3646,9 +3672,44 @@ export class RunStore {
         };
   }
 
+  // The live capacity deferral parking a Routine Target's due clock event, if
+  // it has one. Dispatch consults this to decide whether a pending event is
+  // still retryable or has outlived its own clock; operator surfaces use the
+  // same read so a provider-held leg is presented as a hold, not capacity
+  // pressure.
+  getRoutineTargetDeferral(input: {
+    name: string;
+    projectName: string;
+    scheduledAt: string;
+  }): RoutineDeferralStatus | undefined {
+    return this.toRoutineDeferralStatus(
+      this.routineTargetDeferralRow(input, LIVE_ROUTINE_DEFERRAL_PREDICATE)
+    );
+  }
+
+  // The parked deferral (pending, or held while still retaining its
+  // evidence) backing a due clock event's deadline check. A provider-held
+  // leg is not a live capacity deferral for dispatch/operator surfaces, but
+  // it still owes ADR 0093's deadline promise: once its bound passes, it
+  // settles as missed rather than firing late whenever the provider returns.
+  getParkedRoutineTargetDeferral(input: {
+    name: string;
+    projectName: string;
+    scheduledAt: string;
+  }): RoutineDeferralStatus | undefined {
+    return this.toRoutineDeferralStatus(
+      this.routineTargetDeferralRow(input, PARKED_ROUTINE_DEFERRAL_PREDICATE)
+    );
+  }
+
   // Admission priority needs only an existence check. Avoid listRoutines(),
   // whose operator-facing shape enriches every target with counters, latest
-  // outcomes, and pull requests (ADR 0094).
+  // outcomes, and pull requests (ADR 0094). Despite its name, this reads the
+  // LIVE predicate, not PARKED: ADR 0094 gates the priority pre-pass on
+  // capacity having actually refused the Routine right now. A held leg is
+  // blocked on a missing provider (ADR 0084), not capacity — it cannot fire
+  // from the pre-pass either way, so including it would only let it steal
+  // PR follow-up's turn for nothing.
   hasParkedRoutineDeferral(): boolean {
     return (
       this.database
@@ -3657,7 +3718,7 @@ export class RunStore {
             "select 1",
             DEFERRED_FANOUT_TARGET_SOURCE,
             "where",
-            DEFERRED_FANOUT_TARGET_PREDICATE,
+            LIVE_ROUTINE_DEFERRAL_PREDICATE,
             "limit 1"
           ].join(" ")
         )

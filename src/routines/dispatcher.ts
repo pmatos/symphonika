@@ -621,11 +621,11 @@ export async function dispatchDueRoutines(
           // A parked capacity deferral is not a clock event the daemon
           // missed while it was down — it is one it is still retrying, so
           // the due-event loop below owns it (ADR 0093).
-          input.runStore.getRoutineTargetDeferral({
+          input.runStore.hasParkedRoutineTargetDeferral({
             name: persisted.name,
             projectName: project.name,
             scheduledAt: persisted.nextFireAt
-          }) !== undefined
+          })
         ) {
           continue;
         }
@@ -788,8 +788,10 @@ export async function dispatchDueRoutines(
       }
       // A parked event that outlived its own clock never fires late: the
       // successor event supersedes it, so it settles as a missed run
-      // whatever the current capacity looks like (ADR 0093).
-      const deferral = input.runStore.getRoutineTargetDeferral({
+      // whatever the current capacity looks like (ADR 0093). A provider-held
+      // leg still carries this deadline, so the check reads the parked
+      // predicate, not just the live one dispatch elsewhere uses.
+      const deferral = input.runStore.getParkedRoutineTargetDeferral({
         name: routine.name,
         projectName: project.name,
         scheduledAt

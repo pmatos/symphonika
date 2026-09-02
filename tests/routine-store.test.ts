@@ -567,6 +567,57 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("excludes a provider-held leg from ADR 0094 admission priority", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "refactor-audit",
+          prompt: "Audit.",
+          provider: "codex",
+          schedule: { cron: "* * * * *", tz: "Etc/UTC" },
+          sourcePath: "/tmp/refactor-audit.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.ensureRoutineFanout({
+        id: "fanout-1",
+        projectNames: ["alpha"],
+        routineName: "refactor-audit",
+        scheduledAt:
+          store.getRoutine({ name: "refactor-audit", projectName: "alpha" })
+            ?.nextFireAt ?? ""
+      });
+
+      expect(store.hasParkedRoutineDeferral()).toBe(false);
+
+      store.deferRoutineFanoutTarget({
+        deferredAt: "2026-05-22T10:00:00.000Z",
+        fanoutId: "fanout-1",
+        name: "refactor-audit",
+        projectName: "alpha",
+        reason: "concurrency_cap"
+      });
+      // A live capacity refusal outranks PR follow-up admission (ADR 0094).
+      expect(store.hasParkedRoutineDeferral()).toBe(true);
+
+      store.holdRoutineFanoutTarget({
+        fanoutId: "fanout-1",
+        projectName: "alpha",
+        reason: "provider_not_registered: omp"
+      });
+      // A held leg cannot fire from the admission pre-pass either way (its
+      // provider is still missing), so it must not grant Routine dispatch
+      // priority over PR follow-up — only restart recomputation and the
+      // deferral-deadline check treat a held leg as parked.
+      expect(store.hasParkedRoutineDeferral()).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
   it("settles a re-deferred leg whose fan-out summary already went out", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

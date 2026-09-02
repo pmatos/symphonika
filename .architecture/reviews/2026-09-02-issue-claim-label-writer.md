@@ -5,7 +5,7 @@ in the last 60 commits), `run-store.ts` (19), `http/pages.ts` (14), `watchdog.ts
 `daemon.ts`, and `routines/dispatcher.ts` are the churn centres; the persisted backlog
 was reconciled against merged/open PRs first, then a fresh sub-agent pass looked for new
 candidates outside the backlog's coverage.
-**Picked**: `issue-claim-label-writer` — see PR (to be opened) and `.architecture/backlog.md`.
+**Picked**: `issue-claim-label-writer` — see PR #668 and `.architecture/backlog.md`.
 **Degradations**: none. `gh` authenticated; sub-agents available; `codebase-design`
 vocabulary used as defined.
 

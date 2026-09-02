@@ -1002,7 +1002,10 @@ const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
 // single typo'd local MemoryMax= drop-in hang the doctor check
 // indefinitely.
 const SYSTEMD_MEMORY_VALUE_TERM_SOURCE = "(\\d+(?:\\.\\d+)?)\\s*([KMGTPE]|B)?";
-const SYSTEMD_MEMORY_PERCENTAGE = /^(\d+(?:\.\d+)?)%$/;
+// A leading "+" is meaningful for a percentage too — systemd's parse_permyriad()
+// goes through the same strtol()-based sign handling as parse_size(), so
+// "+50%" and "+100%" are accepted the same as unsigned "50%"/"100%".
+const SYSTEMD_MEMORY_PERCENTAGE = /^\+?(\d+(?:\.\d+)?)%$/;
 // Explicit-suffix rank, smallest first — systemd's parse_size() requires
 // each compound term's unit to be strictly smaller than the one before it,
 // so "1G500M" is accepted but "1G2G" (repeated) and "500M1G" (increasing)

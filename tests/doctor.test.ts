@@ -2044,6 +2044,7 @@ describe("doctor", () => {
       "64+4G",
       "1G2G",
       "512M1G",
+      "0G0.1B",
       "Infinity",
       "INFINITY"
     ])(
@@ -2077,7 +2078,16 @@ describe("doctor", () => {
       expect(warning).toContain("36 GiB");
     });
 
-    it.each(["50%", "100%", "1024B", "2P", "1G 500M", "+64G", "64G512M"])(
+    it.each([
+      "50%",
+      "100%",
+      "1024B",
+      "2P",
+      "1G 500M",
+      "+64G",
+      "64G512M",
+      "1K1B1"
+    ])(
       "does not fall back past a MemoryMax= form it cannot parse but systemd accepts (%s)",
       async (unparseableButValid) => {
         const report = await runProviderCapacityDoctor({

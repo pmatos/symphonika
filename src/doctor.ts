@@ -999,10 +999,16 @@ const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
 // drop-in hang the doctor check indefinitely.
 const SYSTEMD_MEMORY_VALUE_TERM_SOURCE = "(\\d+(?:\\.\\d+)?)\\s*([KMGTPE]|B)?";
 const SYSTEMD_MEMORY_PERCENTAGE = /^(\d+(?:\.\d+)?)%$/;
-// Byte-magnitude rank of each unit, smallest first — systemd's parse_size()
-// requires each compound term's unit to be strictly smaller than the one
-// before it, so "1G500M" is accepted but "1G2G" (repeated) and "500M1G"
-// (increasing) are both rejected, keeping the previous MemoryMax= in force.
+// Explicit-suffix rank, smallest first — systemd's parse_size() requires
+// each compound term's unit to be strictly smaller than the one before it,
+// so "1G500M" is accepted but "1G2G" (repeated) and "500M1G" (increasing)
+// are both rejected, keeping the previous MemoryMax= in force. An omitted
+// suffix and an explicit "B" both mean bytes but rank as two DIFFERENT,
+// adjacent steps rather than being collapsed into one: systemd accepts
+// "1K1B1" (K, then explicit B, then a final bare/omitted term), so the
+// omitted form must rank strictly below "B", not equal to it — see the
+// rank computation in isDefinitelyInvalidSystemdMemoryValue, where a
+// missing suffix gets rank 0 and "B" gets indexOf("B") + 1 = 1.
 const SYSTEMD_MEMORY_UNIT_ORDER = "BKMGTPE";
 
 // config_parse_memory_limit() drops an assignment two different ways, both
@@ -1015,7 +1021,9 @@ const SYSTEMD_MEMORY_UNIT_ORDER = "BKMGTPE";
 //     100 ("101%", "200%"), which overflows parse_permyriad and then fails
 //     parse_size because of the "%".
 //   - "Memory limit ... out of range, ignoring" when the text parses but
-//     resolves to zero bytes — "0", "0B", "0P", "0K", and "0%".
+//     resolves to zero bytes — "0", "0B", "0P", "0K", "0%", and a compound
+//     whose terms are individually non-zero but sum to under one byte
+//     ("0G0.1B").
 //
 // Both verified against `systemd-analyze verify` (systemd 261), which also
 // confirms the inclusive upper bound: "100%" is accepted, "100.01%" is not.
@@ -1030,14 +1038,16 @@ const SYSTEMD_MEMORY_UNIT_ORDER = "BKMGTPE";
 // when each term's unit is strictly smaller than the one before it; a
 // repeated or increasing unit ("1G2G", "500M1G") is rejected by systemd's
 // own parser and must be rejected here too, or winningByteSizeAssignment
-// would select a value systemd never applied.
+// would select a value systemd never applied. Accumulates an actual byte
+// total (rather than just checking magnitudes for all-zero) so a compound
+// that resolves to a sub-byte fraction ("0G0.1B") is caught too.
 function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
   const percentage = SYSTEMD_MEMORY_PERCENTAGE.exec(value);
   if (percentage !== null) {
     const percent = Number(percentage[1]);
     return !(percent > 0 && percent <= 100);
   }
-  const magnitudes: number[] = [];
+  let totalBytes = 0;
   let previousRank = Infinity;
   const term = new RegExp(SYSTEMD_MEMORY_VALUE_TERM_SOURCE, "iy");
   let offset = value.startsWith("+") ? 1 : 0;
@@ -1053,17 +1063,19 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
     if (match === null) {
       return true;
     }
-    magnitudes.push(Number(match[1]));
-    const rank = SYSTEMD_MEMORY_UNIT_ORDER.indexOf(
-      (match[2] ?? "B").toUpperCase()
-    );
+    const suffix = match[2];
+    const rank =
+      suffix === undefined
+        ? 0
+        : SYSTEMD_MEMORY_UNIT_ORDER.indexOf(suffix.toUpperCase()) + 1;
     if (rank >= previousRank) {
       return true;
     }
     previousRank = rank;
+    totalBytes += Number(match[1]) * 1024 ** Math.max(rank - 1, 0);
     offset = term.lastIndex;
   }
-  return magnitudes.every((magnitude) => magnitude === 0);
+  return totalBytes < 1;
 }
 
 function parseSystemdByteSize(value: string): number | undefined {

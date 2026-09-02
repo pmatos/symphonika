@@ -478,7 +478,25 @@ describe("startDaemon", () => {
     });
 
     try {
-      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+      const pollNowResult = (await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      }).then((r) => r.json())) as {
+        candidateIssues: number;
+        issuePolling: {
+          projects: Array<{ name: string; candidateIssues?: number }>;
+        };
+      };
+      // Regression guard (#691 review): the suppression filter used to only
+      // touch the top-level candidateIssues array, leaving poll-now's
+      // per-project count (and the raw status fed to persistProjectPollState
+      // below) stale -- poll-now could report a global 0 while still
+      // printing "1 candidate" for the project.
+      expect(pollNowResult.candidateIssues).toBe(0);
+      const projectReport = pollNowResult.issuePolling.projects.find(
+        (project) => project.name === "symphonika"
+      );
+      expect(projectReport?.candidateIssues ?? 0).toBe(0);
+
       const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
         r.json()
       )) as {
@@ -488,6 +506,23 @@ describe("startDaemon", () => {
       // matches this issue every tick, so without the suppression filter in
       // refreshIssuePollStatus this list would keep including it forever.
       expect(status.candidateIssues).toHaveLength(0);
+
+      // Regression guard (#691 review): the persisted /issues triage
+      // snapshot (fed from the raw, unfiltered nextStatus) used to keep
+      // describing the suppressed issue as an eligible candidate even
+      // though the in-memory views above were already fixed.
+      const verifyStore = openRunStore({ stateRoot });
+      const projectState = verifyStore
+        .getProjectStatesByName()
+        .get("symphonika");
+      expect(projectState?.lastCandidateIssues ?? 0).toBe(0);
+      const snapshotRows = verifyStore.listProjectIssueSnapshots("symphonika");
+      expect(
+        snapshotRows.some(
+          (row) => row.issueNumber === 42 && row.kind === "candidate"
+        )
+      ).toBe(false);
+      verifyStore.close();
     } finally {
       await daemon.stop();
     }

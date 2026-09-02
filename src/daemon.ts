@@ -803,23 +803,24 @@ export async function startDaemon(
       // merged, shared issuePollStatus (not nextStatus) so the dashboard,
       // /api/status, and poll-now -- which all read this same object --
       // never report a suppressed issue as eligible, including one carried
-      // over from a prior tick while its project backs off.
+      // over from a prior tick while its project backs off. Also applied to
+      // the per-project candidateIssues counts (issuePollStatus.projects) and
+      // to nextStatus before it's persisted below -- otherwise poll-now can
+      // report a global 0 while still printing a stale per-project count, and
+      // the persisted /issues triage snapshot keeps describing the
+      // suppressed issue as eligible (#691 review).
       const effectiveProjectsByName = new Map(
         snapshot.projects.map((project) => [project.name, project])
       );
-      issuePollStatus.candidateIssues = issuePollStatus.candidateIssues.filter(
-        (candidate) => {
-          const project = effectiveProjectsByName.get(candidate.project);
-          return (
-            project === undefined ||
-            !isDispatchProject(project) ||
-            !runStore.latestRunSuppressesFreshDispatch({
-              issueNumber: candidate.issue.number,
-              projectName: candidate.project,
-              repository: candidate.repository
-            })
-          );
-        }
+      suppressResolvedFreshDispatchCandidates(
+        issuePollStatus,
+        effectiveProjectsByName,
+        runStore
+      );
+      suppressResolvedFreshDispatchCandidates(
+        nextStatus,
+        effectiveProjectsByName,
+        runStore
       );
       // Persisted with the polled subset only (not the merged status).
       // Poll outcome and issue-snapshot writes iterate only fresh reports;
@@ -2023,6 +2024,39 @@ export async function startDaemon(
       }
     }
   };
+}
+
+// #683/#691: filters out candidates whose newest Run already suppresses
+// fresh dispatch (RunStore.latestRunSuppressesFreshDispatch), and keeps the
+// per-project candidateIssues counts in sync with the filtered array --
+// mutates `status` in place so every caller sharing the same IssuePollStatus
+// object (issuePollStatus itself, or the raw nextStatus fed to
+// persistProjectPollState) reflects the same suppressed set.
+function suppressResolvedFreshDispatchCandidates(
+  status: import("./issue-polling.js").IssuePollStatus,
+  effectiveProjectsByName: ReadonlyMap<string, RunControllerProjectConfig>,
+  runStore: ReturnType<typeof openRunStore>
+): void {
+  status.candidateIssues = status.candidateIssues.filter((candidate) => {
+    const project = effectiveProjectsByName.get(candidate.project);
+    return (
+      project === undefined ||
+      !isDispatchProject(project) ||
+      !runStore.latestRunSuppressesFreshDispatch({
+        issueNumber: candidate.issue.number,
+        projectName: candidate.project,
+        repository: candidate.repository
+      })
+    );
+  });
+  status.projects = status.projects.map((project) => ({
+    ...project,
+    candidateIssues: status.candidateIssues.filter(
+      (candidate) =>
+        candidate.project === project.name &&
+        sameGitHubRepository(candidate.repository, project.repository)
+    ).length
+  }));
 }
 
 function persistProjectPollState(

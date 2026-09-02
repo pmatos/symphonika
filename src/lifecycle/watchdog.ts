@@ -174,18 +174,20 @@ function notifySettledRoutineWatchdogTerminations(
   }
 }
 
-// Drains settled routine watchdog notifications on every exit path — the
-// disabled-config early return and the normal completion both need to flush
-// pending entries, so the flush lives in `finally` rather than at each
-// return site.
+// Drains settled routine watchdog notifications after a successful pass — the
+// disabled-config early return and the normal completion both return normally
+// from sampleAndTerminate, so one call after the await covers both without
+// duplicating it at each return site. This must NOT be a `finally`: a thrown
+// sampleAndTerminate (a runStore call, or a rejected cancellation) would still
+// durably clear the pending bit and invoke the observer, but the caller's own
+// rethrow skips forwarding that entry onward — permanently losing an alert
+// that would otherwise have retried claiming it on the next tick.
 export async function reconcileWatchdog(
   input: ReconcileWatchdogInput
 ): Promise<WatchdogReconcileResult> {
-  try {
-    return await sampleAndTerminate(input);
-  } finally {
-    notifySettledRoutineWatchdogTerminations(input);
-  }
+  const result = await sampleAndTerminate(input);
+  notifySettledRoutineWatchdogTerminations(input);
+  return result;
 }
 
 async function sampleAndTerminate(

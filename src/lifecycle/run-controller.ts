@@ -4397,7 +4397,10 @@ export class RunController {
           name: input.providerName
         },
         recordProviderScopeCleanupPending: (pending) => {
-          this.runStore.setRunProviderScopeCleanupPending(input.runId, pending);
+          this.runStore.setAttemptProviderScopeCleanupPending(
+            input.attemptId,
+            pending
+          );
         },
         run: scratchIdentity,
         scratchPath,

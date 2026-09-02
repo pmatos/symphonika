@@ -184,6 +184,7 @@ export type AttemptStatus = {
   id: string;
   providerCommand: string;
   providerName: string;
+  providerScopeCleanupPending: boolean;
   runId: string;
   state: RunState;
   updatedAt: string;
@@ -718,6 +719,7 @@ type AttemptRow = {
   prompt_path: string | null;
   provider_command: string;
   provider_name: string;
+  provider_scope_cleanup_pending: number;
   raw_log_path: string | null;
   run_id: string;
   state: RunState;
@@ -4942,7 +4944,7 @@ export class RunStore {
           "select id, run_id, attempt_number, state, provider_name, provider_command,",
           "workspace_path, branch_name, prompt_path, metadata_path, issue_snapshot_path,",
           "raw_log_path, normalized_log_path, workflow_graph_path,",
-          "created_at, updated_at",
+          "provider_scope_cleanup_pending, created_at, updated_at",
           "from attempts where run_id = ? order by attempt_number asc, id asc"
         ].join(" ")
       )
@@ -4956,6 +4958,7 @@ export class RunStore {
       id: row.id,
       providerCommand: row.provider_command,
       providerName: row.provider_name,
+      providerScopeCleanupPending: row.provider_scope_cleanup_pending === 1,
       runId: row.run_id,
       state: row.state,
       updatedAt: row.updated_at,
@@ -5679,6 +5682,46 @@ export class RunStore {
       .run(pending ? 1 : 0, timestamp(), runId);
   }
 
+  // Per-attempt cleanup obligation. A Run can retry the same runId across
+  // several attempts, each wrapped in its own systemd scope unit
+  // (process-scope.ts's scopeUnitName). Writing the pending flag onto the
+  // owning attempt row -- instead of unconditionally overwriting a single
+  // Run-level column -- means a later attempt's confirmed cleanup can never
+  // silently erase an earlier attempt's still-unconfirmed one: the Run-level
+  // aggregate below is recomputed from every attempt row, not assigned
+  // directly.
+  setAttemptProviderScopeCleanupPending(
+    attemptId: string,
+    pending: boolean
+  ): void {
+    const apply = this.database.transaction(() => {
+      const now = timestamp();
+      this.database
+        .prepare(
+          "update attempts set provider_scope_cleanup_pending = ?, updated_at = ? where id = ?"
+        )
+        .run(pending ? 1 : 0, now, attemptId);
+      const row = this.database
+        .prepare("select run_id from attempts where id = ?")
+        .get(attemptId) as { run_id: string } | undefined;
+      if (row === undefined) {
+        return;
+      }
+      const anyPending =
+        this.database
+          .prepare(
+            "select 1 from attempts where run_id = ? and provider_scope_cleanup_pending = 1 limit 1"
+          )
+          .get(row.run_id) !== undefined;
+      this.database
+        .prepare(
+          "update runs set provider_scope_cleanup_pending = ?, updated_at = ? where id = ?"
+        )
+        .run(anyPending ? 1 : 0, now, row.run_id);
+    });
+    apply();
+  }
+
   findLeakedRuns(): {
     runId: string;
     projectName: string;
@@ -6006,6 +6049,7 @@ export class RunStore {
         issue_snapshot_path text not null,
         raw_log_path text not null,
         normalized_log_path text not null,
+        provider_scope_cleanup_pending integer not null default 0,
         created_at text not null,
         updated_at text not null,
         foreign key (run_id) references runs(id)
@@ -6413,6 +6457,11 @@ export class RunStore {
       ["attempts", "failure_classification", "text"],
       ["attempts", "metadata_path", "text"],
       ["attempts", "workflow_graph_path", "text"],
+      [
+        "attempts",
+        "provider_scope_cleanup_pending",
+        "integer not null default 0"
+      ],
       ["watchdog_samples", "normalized_log_path", "text not null default ''"],
       ["watchdog_samples", "last_message_at", "text"],
       ["watchdog_samples", "workspace_digest", "text not null default ''"],
@@ -6498,6 +6547,7 @@ export class RunStore {
       let addedIssueRepository = false;
       let addedLastSuccessfulPollAt = false;
       let addedProviderScopeCleanupPending = false;
+      let addedAttemptProviderScopeCleanupPending = false;
       for (const [table, column, decl] of additions) {
         const added = this.ensureColumn(table, column, decl);
         if (
@@ -6524,8 +6574,19 @@ export class RunStore {
         ) {
           addedLastSuccessfulPollAt = true;
         }
-        if (added && column === "provider_scope_cleanup_pending") {
+        if (
+          added &&
+          column === "provider_scope_cleanup_pending" &&
+          table !== "attempts"
+        ) {
           addedProviderScopeCleanupPending = true;
+        }
+        if (
+          added &&
+          table === "attempts" &&
+          column === "provider_scope_cleanup_pending"
+        ) {
+          addedAttemptProviderScopeCleanupPending = true;
         }
       }
 
@@ -6543,6 +6604,34 @@ export class RunStore {
           update routine_firings
           set provider_scope_cleanup_pending = 1
           where terminal_reason = 'leaked_routine_firing_cleanup_pending';
+        `);
+      }
+
+      if (addedAttemptProviderScopeCleanupPending) {
+        // The daemon startup sweep now trusts this durable per-attempt flag
+        // alone to decide whether a leaked run needs its scope stopped (see
+        // daemon.ts) instead of inferring a live scope from state='running'
+        // -- that inference false-positived forever on hosts with no
+        // systemd --user manager (the process was never wrapped, so no
+        // scope ever existed to confirm). Attempt rows created before this
+        // column existed carry no such signal, so a running attempt row from
+        // that era is the one place the old inference is still needed:
+        // assume it may have a live wrapped scope and mark it pending so the
+        // sweep still retries it. Derive the run-level aggregate from actual
+        // attempt rows, never from run state directly -- a crash between
+        // updateRunState(running) and createAttempt would otherwise mark a
+        // run with zero attempts, and therefore no scope, as pending
+        // forever.
+        this.database.exec(`
+          update attempts
+          set provider_scope_cleanup_pending = 1
+          where state = 'running';
+
+          update runs
+          set provider_scope_cleanup_pending = 1
+          where id in (
+            select run_id from attempts where provider_scope_cleanup_pending = 1
+          );
         `);
       }
 

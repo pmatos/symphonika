@@ -1738,14 +1738,20 @@ prevent the provider from starting. See ADR 0091.
 
 When a provider command is actually wrapped in a transient systemd scope, its adapter durably marks
 Provider Scope Cleanup pending immediately before spawn and clears that marker only after
-`stopProviderScope` confirms the scope is inactive. The marker is independent of Run or Routine
-Firing state and `terminal_reason`: an ordinary succeeded, failed, or cancelled outcome remains the
-real outcome while the next daemon startup can still retry unconfirmed cleanup. Hosts where the
-user manager is unavailable run the existing process-group fallback unwrapped and do not create a
-scope-cleanup obligation. Legacy `..._cleanup_pending` terminal reasons remain migration input, but
-the startup sweep normalizes them to the ordinary orphan reason and carries retryability only in the
-independent marker. CLI and HTTP detail views render the marker as pending operator-visible cleanup.
-See ADR 0064.
+`stopProviderScope` confirms the scope is inactive. For an issue Run, the marker is per attempt —
+each retried attempt is wrapped in its own scope unit, so tracking it on the attempt row (not the
+Run) means a later attempt's confirmed cleanup can never erase an earlier attempt's still-unconfirmed
+one; the Run row exposes a derived aggregate (pending while any attempt is), and the startup sweep
+retries every attempt still marked pending, not only the latest. A Routine Firing never retries, so
+its marker stays a single boolean. Both are independent of Run or Routine Firing state and
+`terminal_reason`: an ordinary succeeded, failed, or cancelled outcome remains the real outcome while
+the next daemon startup can still retry unconfirmed cleanup. Hosts where the user manager is
+unavailable run the existing process-group fallback unwrapped and do not create a scope-cleanup
+obligation; the startup sweep trusts only the durable marker, never Run/attempt state, to decide
+whether cleanup is required, since such a host reaches "running" without ever wrapping. Legacy
+`..._cleanup_pending` terminal reasons remain migration input, but the startup sweep normalizes them
+to the ordinary orphan reason and carries retryability only in the independent marker. CLI and HTTP
+detail views render the marker as pending operator-visible cleanup. See ADR 0064.
 
 Future sandboxing, if added, should be outside the provider through host, container, VM, network, or
 credential isolation.

@@ -633,6 +633,9 @@ describe("startDaemon orphan sweep logging", () => {
       workspacePath: stateRoot
     });
     store.updateRunState("orphan-run", "running");
+    // Only attempt 2 was actually spawned wrapped in a live scope -- the
+    // sweep now trusts this durable per-attempt marker, not state alone.
+    store.setAttemptProviderScopeCleanupPending("orphan-run-attempt-2", true);
     store.close();
 
     const stopCalls: Array<{ attempt: number; id: string }> = [];
@@ -652,6 +655,179 @@ describe("startDaemon orphan sweep logging", () => {
 
     try {
       expect(stopCalls).toEqual([{ attempt: 2, id: "orphan-run" }]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression for the P1 fix (PR #684 review): a Run-level boolean let a
+  // later attempt's confirmed cleanup silently erase an earlier attempt's
+  // still-unconfirmed obligation, permanently losing it. Cleanup is now
+  // tracked per attempt, so the sweep must retry attempt 1 specifically even
+  // though attempt 2 already confirmed its own scope.
+  it("retries an earlier attempt's unconfirmed cleanup even after a later attempt confirmed its own", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "retried-run",
+      issue: sampleIssue({ number: 56 }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/symphonika/56-fixture",
+      branchRef: "refs/heads/sym/symphonika/56-fixture",
+      id: "retried-run-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "retried-run",
+      state: "failed",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    // Attempt 1's cleanup was never confirmed (e.g. a transient systemd
+    // hiccup) -- its flag stays set.
+    store.setAttemptProviderScopeCleanupPending("retried-run-attempt-1", true);
+    store.createAttempt({
+      attemptNumber: 2,
+      branchName: "sym/symphonika/56-fixture",
+      branchRef: "refs/heads/sym/symphonika/56-fixture",
+      id: "retried-run-attempt-2",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "retried-run",
+      state: "running",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    store.updateRunState("retried-run", "running");
+    // Attempt 2's cleanup was already confirmed and cleared before this
+    // restart -- its own flag is false, unlike attempt 1's.
+    store.close();
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve(true);
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      // Only attempt 1 -- the one still marked pending -- is retried.
+      // Attempt 2 is not re-stopped since its own obligation was already
+      // clear.
+      expect(stopCalls).toEqual([{ attempt: 1, id: "retried-run" }]);
+
+      const verifyStore = openRunStore({ stateRoot });
+      try {
+        expect(verifyStore.getRun("retried-run")).toMatchObject({
+          providerScopeCleanupPending: false
+        });
+        const attempts = verifyStore.listAttempts("retried-run");
+        expect(
+          attempts.map((attempt) => attempt.providerScopeCleanupPending)
+        ).toEqual([false, false]);
+      } finally {
+        verifyStore.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression for the P2 fix (PR #684 review): on a host with no reachable
+  // systemd --user manager, a provider process is never wrapped in a scope,
+  // so providerScopeCleanupPending is never set true for that attempt --
+  // even though the Run legitimately reaches "running". The sweep must not
+  // infer a live scope from state alone (that made stopProviderScope fail
+  // there every time and durably mark cleanup pending forever); it must
+  // trust only the durable marker.
+  it("does not stop or durably mark cleanup pending for a running orphan that was never scope-wrapped", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "unwrapped-run",
+      issue: sampleIssue({ number: 57 }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/symphonika/57-fixture",
+      branchRef: "refs/heads/sym/symphonika/57-fixture",
+      id: "unwrapped-run-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "unwrapped-run",
+      state: "running",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    // Never wrapped -- no systemd --user manager on this host -- so no
+    // provider_scope_cleanup_pending flag was ever set, even though the run
+    // legitimately reached "running".
+    store.updateRunState("unwrapped-run", "running");
+    store.close();
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve(false);
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(stopCalls).toEqual([]);
+
+      const verifyStore = openRunStore({ stateRoot });
+      try {
+        expect(verifyStore.getRun("unwrapped-run")).toMatchObject({
+          providerScopeCleanupPending: false,
+          state: "stale",
+          terminalReason: "leaked_active_run"
+        });
+        expect(verifyStore.findLeakedRuns()).toEqual([]);
+      } finally {
+        verifyStore.close();
+      }
     } finally {
       await daemon.stop();
     }
@@ -718,6 +894,9 @@ describe("startDaemon orphan sweep logging", () => {
       routineName: "nightly-report"
     });
     store.updateRoutineFiringState("leaked-firing", "running");
+    // The sweep now trusts this durable marker, not state alone -- it was
+    // set true synchronously before spawn (process-scope.ts).
+    store.setRoutineFiringProviderScopeCleanupPending("leaked-firing", true);
     store.close();
 
     const stopCalls: Array<{ attempt: number; id: string }> = [];
@@ -825,6 +1004,10 @@ describe("startDaemon orphan sweep logging", () => {
       workspacePath: stateRoot
     });
     store.updateRunState("unconfirmed-run", "running");
+    store.setAttemptProviderScopeCleanupPending(
+      "unconfirmed-run-attempt-1",
+      true
+    );
     store.close();
 
     const { logger, lines } = createCapturingLogger();
@@ -900,6 +1083,10 @@ describe("startDaemon orphan sweep logging", () => {
       routineName: "nightly-report"
     });
     store.updateRoutineFiringState("unconfirmed-firing", "running");
+    store.setRoutineFiringProviderScopeCleanupPending(
+      "unconfirmed-firing",
+      true
+    );
     store.close();
 
     const { logger, lines } = createCapturingLogger();
@@ -1082,6 +1269,7 @@ describe("startDaemon orphan sweep logging", () => {
         workspacePath: stateRoot
       });
       store.updateRunState(runId, "running");
+      store.setAttemptProviderScopeCleanupPending(`${runId}-attempt-1`, true);
     }
     store.close();
 

@@ -235,31 +235,62 @@ export async function startDaemon(
   const leakedRuns = runStore.findLeakedRuns();
   const runOutcomes = await Promise.all(
     leakedRuns.map(async (entry) => {
-      // Only a run that reached "running" ever had a provider spawned —
-      // queued/preparing_workspace orphans have no attempt, and therefore no
-      // scope, to reap. A row re-swept from a prior pending sweep is already
-      // 'stale', not 'running', but still had a live attempt to retry.
-      // Attempts are ordered by attempt_number ascending, so the last one is
-      // the attempt that was actually live when this daemon's predecessor
-      // died.
-      const hadLiveAttempt =
-        entry.previousState === "running" || entry.providerScopeCleanupPending;
-      if (!hadLiveAttempt) {
+      // The durable per-attempt flag is the only signal trusted here for
+      // whether a provider was ever actually wrapped in a systemd scope —
+      // previousState==='running' is not: on a host with no systemd --user
+      // manager, a Run reaches "running" without ever being wrapped, so
+      // inferring a live scope from state alone made stopProviderScope fail
+      // there every time and durably (and falsely) mark cleanup pending
+      // forever. See docs/adr/0064 and process-scope.ts's isAvailable().
+      if (!entry.providerScopeCleanupPending) {
         return { confirmed: true, entry };
       }
+      // Retried Runs reuse the same runId across attempts, each wrapped in
+      // its own scope unit (process-scope.ts's scopeUnitName). Check every
+      // attempt still marked pending, not just the latest, so an earlier
+      // attempt's unconfirmed cleanup is never dropped just because a later
+      // attempt's own cleanup succeeded.
       const attempts = runStore.listAttempts(entry.runId);
-      const latestAttempt = attempts[attempts.length - 1];
-      if (latestAttempt === undefined) {
-        return {
-          confirmed: !entry.providerScopeCleanupPending,
-          entry
-        };
+      const pendingAttempts = attempts.filter(
+        (attempt) => attempt.providerScopeCleanupPending
+      );
+      if (pendingAttempts.length === 0) {
+        // Legacy shape: the Run-level flag is set (e.g. the terminal_reason
+        // backfill, or a row from before the per-attempt column existed) but
+        // no individual attempt agrees. Fall back to the latest attempt, the
+        // only one that could plausibly still hold a live scope.
+        const latestAttempt = attempts[attempts.length - 1];
+        if (latestAttempt === undefined) {
+          return { confirmed: !entry.providerScopeCleanupPending, entry };
+        }
+        const confirmed = await processScope.stopProviderScope({
+          attempt: latestAttempt.attemptNumber,
+          id: entry.runId
+        });
+        if (confirmed) {
+          runStore.setAttemptProviderScopeCleanupPending(
+            latestAttempt.id,
+            false
+          );
+        }
+        return { confirmed, entry };
       }
-      const confirmed = await processScope.stopProviderScope({
-        attempt: latestAttempt.attemptNumber,
-        id: entry.runId
-      });
-      return { confirmed, entry };
+      const attemptResults = await Promise.all(
+        pendingAttempts.map(async (attempt) => {
+          const confirmed = await processScope.stopProviderScope({
+            attempt: attempt.attemptNumber,
+            id: entry.runId
+          });
+          if (confirmed) {
+            runStore.setAttemptProviderScopeCleanupPending(attempt.id, false);
+          }
+          return confirmed;
+        })
+      );
+      return {
+        confirmed: attemptResults.every((value) => value),
+        entry
+      };
     })
   );
   for (const { confirmed, entry } of runOutcomes) {
@@ -329,13 +360,11 @@ export async function startDaemon(
   const leakedFirings = runStore.findLeakedRoutineFirings();
   const firingOutcomes = await Promise.all(
     leakedFirings.map(async (entry) => {
-      // Same gap as the regular-run sweep above, for the separate Routine
-      // Firing subsystem (src/routines/dispatcher.ts). Firings never retry,
-      // so their provider is always spawned as attempt 1 — no listAttempts
-      // lookup needed here.
-      const hadLiveAttempt =
-        entry.previousState === "running" || entry.providerScopeCleanupPending;
-      if (!hadLiveAttempt) {
+      // Same durable-marker-only rule as the regular-run sweep above (see
+      // that sweep's comment), for the separate Routine Firing subsystem
+      // (src/routines/dispatcher.ts). Firings never retry, so their provider
+      // is always spawned as attempt 1 — no listAttempts lookup needed here.
+      if (!entry.providerScopeCleanupPending) {
         return { confirmed: true, entry };
       }
       const confirmed = await processScope.stopProviderScope({

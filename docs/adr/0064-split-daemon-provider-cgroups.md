@@ -55,14 +55,25 @@ the wrapped process exits (verified empirically — a backgrounded `cargo build 
 
 The adapter records a Provider Scope Cleanup obligation in SQLite immediately before spawning an
 actually wrapped command. Its unconditional attempt finalizer clears the obligation only when
-`stopProviderScope` confirms that the scope is inactive. The obligation is a dedicated boolean on
-the owning issue Run or Routine Firing, independent of lifecycle state and `terminal_reason`. This
-separation is required because a finalizer can fail to confirm cleanup after the provider has
-already produced a truthful succeeded, failed, or cancelled outcome; encoding cleanup in that
-outcome would either hide the leak or falsify the execution result. The next daemon startup finds
-the independent obligation and retries the deterministic scope stop. Legacy rows whose
-`terminal_reason` ended in `_cleanup_pending` are migrated to the flag and normalized to the normal
-orphan reason during the sweep.
+`stopProviderScope` confirms that the scope is inactive. For an issue Run, the obligation is a
+dedicated boolean on the owning `attempts` row, not the Run itself: a Run can retry across several
+attempts on the same `runId`, each wrapped in its own scope unit
+(`symphonika-run-<run.id>-attempt-<run.attempt>.scope`), so a single Run-level flag would let a
+later attempt's confirmed cleanup silently erase an earlier attempt's still-unconfirmed one. The
+Run row carries a derived aggregate (true while any of its attempts is pending) for cheap
+liveness queries and operator-facing views; only the per-attempt column is authoritative, and the
+daemon startup sweep stops every attempt still marked pending, not only the latest. A Routine
+Firing never retries, so its obligation stays a single boolean on the firing row. Both are
+independent of lifecycle state and `terminal_reason`. This separation is required because a
+finalizer can fail to confirm cleanup after the provider has already produced a truthful succeeded,
+failed, or cancelled outcome; encoding cleanup in that outcome would either hide the leak or
+falsify the execution result. The next daemon startup finds the independent obligation and retries
+the deterministic scope stop — trusting only that durable marker, never lifecycle state, since a
+host with no reachable systemd `--user` manager legitimately reaches `running` without ever
+wrapping (and therefore without ever setting the obligation). Legacy rows whose `terminal_reason`
+ended in `_cleanup_pending` are migrated to the flag and normalized to the normal orphan reason
+during the sweep; legacy `attempts` rows that predate the per-attempt column and were left in
+`running` are conservatively backfilled to pending, since a real scope may still be live for them.
 
 The wrapper result explicitly reports whether it created a systemd scope. When the user manager is
 unavailable, providers run unwrapped under the process-group fallback and never record a cleanup

@@ -2080,6 +2080,19 @@ describe("doctor", () => {
       }
     );
 
+    it("recognizes MemoryMax= in a drop-in that starts with a UTF-8 BOM", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInBom: true,
+        dropInMemoryMax: "6G",
+        hostParallelism: 24
+      });
+
+      const warning = report.warnings.find((entry) =>
+        entry.includes("provider build memory estimate")
+      );
+      expect(warning).toContain("MemoryMax=6G");
+    });
+
     it("does not overflow-reject a bare MemoryMax= within 2 of the uint64 ceiling", async () => {
       const report = await runProviderCapacityDoctor({
         dropInMemoryMax: "18446744073709551614", // 2^64 - 2
@@ -2542,6 +2555,7 @@ async function runDoctorCommand(
 
 async function runProviderCapacityDoctor(input: {
   dropInMemoryMax?: string;
+  dropInBom?: boolean;
   hostParallelism: number;
 }) {
   const root = await makeTempRoot();
@@ -2578,7 +2592,7 @@ async function runProviderCapacityDoctor(input: {
     await mkdir(dropInDir);
     await writeFile(
       path.join(dropInDir, "20-memory-budget.conf"),
-      `[Slice]\nMemoryMax=${input.dropInMemoryMax}\n`,
+      `${input.dropInBom === true ? "\uFEFF" : ""}[Slice]\nMemoryMax=${input.dropInMemoryMax}\n`,
       "utf8"
     );
   }

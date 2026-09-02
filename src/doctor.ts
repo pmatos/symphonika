@@ -1366,7 +1366,22 @@ function sliceAssignments(
   let inSliceSection = false;
   let sawSliceSection = false;
 
-  for (const line of content.split(/\r?\n/)) {
+  // systemd's config-file reader strips a single leading UTF-8 BOM
+  // (U+FEFF) from the very first line only, before any further parsing
+  // (src/shared/conf-parser.c, gated by a `bom_seen` flag so it never
+  // fires again mid-file). JS `String.prototype.trim()` used to strip
+  // this incidentally (U+FEFF is part of its Unicode whitespace set), but
+  // switching to the ASCII-only systemdTrim() below dropped that
+  // side-effect: a BOM-prefixed "[Slice]" no longer matches the section
+  // regex, sawSliceSection stays false, and this function silently
+  // returns undefined for the entire file — suppressing every directive,
+  // not just MemoryMax=. Stripping it once here, up front, restores that
+  // behavior without needing to track a per-call bom_seen flag.
+  const contentWithoutBom = content.startsWith("\uFEFF")
+    ? content.slice(1)
+    : content;
+
+  for (const line of contentWithoutBom.split(/\r?\n/)) {
     const trimmed = systemdTrim(line);
     const section = /^\[([^\]]+)\]$/.exec(trimmed);
     if (section !== null) {

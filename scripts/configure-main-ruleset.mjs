@@ -19,27 +19,28 @@ try {
       ruleset.target === rulesetConfig.target
   );
 
-  if (matches.length !== 1 || !Number.isInteger(matches[0]?.id)) {
+  if (matches.length !== 1) {
     throw new Error(
       `Expected exactly one ${rulesetConfig.target} ruleset named ${rulesetConfig.name}; found ${matches.length}.`
     );
   }
 
   const rulesetId = matches[0].id;
-  execFileSync(
-    "gh",
-    [
-      "api",
-      "--method",
-      "PUT",
-      `repos/${repository}/rulesets/${rulesetId}`,
-      "--input",
-      "-"
-    ],
+  if (!Number.isInteger(rulesetId)) {
+    throw new Error(
+      `${rulesetConfig.target} ruleset ${rulesetConfig.name} has a non-integer id: ${rulesetId}.`
+    );
+  }
+
+  gh(
+    "api",
+    "--method",
+    "PUT",
+    `repos/${repository}/rulesets/${rulesetId}`,
+    "--input",
+    "-",
     {
-      encoding: "utf8",
-      input: JSON.stringify(rulesetConfig),
-      stdio: ["pipe", "pipe", "pipe"]
+      input: JSON.stringify(rulesetConfig)
     }
   );
   console.log(`Updated ${rulesetConfig.name} ruleset ${rulesetId}.`);
@@ -49,8 +50,12 @@ try {
 }
 
 function gh(...args) {
+  const options = typeof args.at(-1) === "object" ? args.pop() : {};
   return execFileSync("gh", args, {
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: options.input
+      ? ["pipe", "pipe", "pipe"]
+      : ["ignore", "pipe", "pipe"],
+    ...options
   });
 }

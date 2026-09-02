@@ -26,7 +26,7 @@ afterEach(() => {
 });
 
 describe("main branch ruleset configuration", () => {
-  it("requires the GitHub Actions ADR check against the latest base", () => {
+  it("PUTs the configured ruleset payload to the matched ruleset id", () => {
     const root = mkdtempSync(path.join(tmpdir(), "symphonika-ruleset-"));
     const binDirectory = path.join(root, "bin");
     const callsPath = path.join(root, "calls.txt");

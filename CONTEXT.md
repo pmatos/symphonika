@@ -66,7 +66,7 @@ A normalized unit of project work read from the issue tracker.
 _Avoid_: ticket, task
 
 **Eligible Issue**:
-An open issue that matches a Dispatch Project's required labels, avoids excluded labels, is not already claimed by the orchestrator, is not suppressed by the newest Run's durable `no_workspace_changes` verdict, and has no unresolved GitHub-native issue dependency (see Dependency Gate below).
+An open issue that matches a Dispatch Project's required labels, avoids excluded labels, is not already claimed by the orchestrator, and has no unresolved GitHub-native issue dependency (see Dependency Gate below). This is the label-based candidate-list check; it does not consult Run history, so the newest Run's durable `no_workspace_changes` verdict (see Dispatch Eligibility below) can still suppress fresh claim of an issue that appears here.
 _Avoid_: active issue unless referring to tracker state
 
 **Dispatch Eligibility**:

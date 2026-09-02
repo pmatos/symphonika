@@ -101,6 +101,11 @@ describe("dispatch fairness", () => {
       });
 
       expect(result.dispatched).toBe(false);
+      if (!result.dispatched) {
+        expect(result.reason).toBe(
+          "no eligible issue has a registered provider"
+        );
+      }
       expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
       expect(provider.runAttempt).not.toHaveBeenCalled();
     } finally {

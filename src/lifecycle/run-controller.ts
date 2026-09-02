@@ -3196,11 +3196,12 @@ export class RunController {
         `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
       );
     }
-    // Candidate selection applies the same check so a suppressed Issue does
-    // not starve later candidates. Repeat it inside the serialized claim
-    // boundary so no durable verdict can land between selection and the
-    // `sym:claimed` write. Continuations and FSM-owned work are intentionally
-    // outside this fresh-dispatch-only rule.
+    // pickProjectCandidate and failFreshDispatchBeforeProvider apply the same
+    // check so a suppressed Issue does not starve later candidates and a
+    // misconfigured-provider short circuit still honors the guard. Repeat it
+    // here inside the serialized claim boundary so no durable verdict can
+    // land between selection and the `sym:claimed` write. Continuations and
+    // FSM-owned work are intentionally outside this fresh-dispatch-only rule.
     if (
       !input.isContinuation &&
       this.runStore.latestRunSuppressesFreshDispatch({

@@ -114,10 +114,14 @@ An issue is eligible when all are true:
 - it has none of the configured `labels_none` labels
 - it does not have blocking operational labels
 - it is not already running, claimed, failed, blocked, or stale according to the orchestrator
-- its newest Run for the same `(Project, repository, Issue)` did not terminate as `blocked` with
-  `terminal_reason = "no_workspace_changes"`
 - it has no unresolved GitHub-native issue dependency (`blockedBy`): every blocker is `CLOSED`, and
   the dependency fetch was not truncated — see ADR-0081
+
+This list is the label-based candidate check (§9.2 below) and is what the tracker-side candidate
+list and dashboard counts reflect. Fresh dispatch applies one further, non-label-based check on top
+of it: its newest Run for the same `(Project, repository, Issue)` did not terminate as `blocked`
+with `terminal_reason = "no_workspace_changes"` — see §9.2. An issue can appear as an "eligible"
+candidate here and still be suppressed at fresh-dispatch time by that check.
 
 Symphonika does not parse issue body text, task lists, GitHub Projects fields, or linked PRs to infer
 blockers. The one exception is GitHub's own native issue-dependencies feature (`blockedBy`), which is

@@ -2039,12 +2039,15 @@ that bit only after the firing becomes terminal, reports the firing only when it
 `terminal_reason` is `no_progress`, and suppresses the pending alert when `firing_timeout` or any
 other verdict wins. Pending confirmation therefore survives daemon restart, never blocks the
 current tick waiting for settlement, and may delay a legitimate grouped alert until the next
-Watchdog reconciliation pass — which the daemon's poll tick runs at most once per
-`sample_interval_seconds`, so the wait is bounded by whichever of `polling.interval_ms` or
-`sample_interval_seconds` is larger, not by the sample interval alone. Terminal pending entries
-are drained even when Watchdog sampling has subsequently been disabled. The outcome and
-commits-ahead evidence that completion gathered is retained either way, because Workspace
-retention depends on it.
+Watchdog reconciliation pass. Reconciliation runs only from the daemon's poll tick, and only on
+the first tick at or after `sample_interval_seconds` has elapsed since the previous pass, so
+consecutive passes are
+`ceil(sample_interval_seconds / (polling.interval_ms / 1000)) * (polling.interval_ms / 1000)`
+seconds apart — never less than the larger of the two intervals, and strictly less than their sum.
+The two are independent config knobs, so the wait exceeds `sample_interval_seconds` whenever
+`polling.interval_ms` does not evenly divide it. Terminal pending entries are drained even when
+Watchdog sampling has subsequently been disabled. The outcome and commits-ahead evidence that
+completion gathered is retained either way, because Workspace retention depends on it.
 
 Independently of that liveness clock, the Watchdog enforces a **convergence budget**: when a
 sampled Run's cumulative `output_tokens_total` reaches `watchdog.output_token_budget` (default

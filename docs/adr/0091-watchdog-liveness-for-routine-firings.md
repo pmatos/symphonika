@@ -93,9 +93,11 @@ declared firing deadline and progress liveness.
 - A Watchdog alert is delayed until terminal settlement confirms `no_progress`, so a declared
   deadline that wins the race cannot produce a misleading Watchdog termination notification.
 - Pending confirmation survives daemon restart and can delay a legitimate grouped notification
-  until the next Watchdog reconciliation pass — bounded by whichever of the daemon's poll
-  interval or the configured Watchdog sample interval is larger, since reconciliation only runs
-  from the poll tick.
+  until the next Watchdog reconciliation pass. Because reconciliation runs only from the poll
+  tick, consecutive passes are `ceil(sample_interval / poll_interval) * poll_interval` seconds
+  apart — never less than the larger of the two intervals, and strictly less than their sum.
+  Decoupling reconciliation onto its own schedule to restore a true one-sample-interval bound is
+  tracked separately (#690).
 - Post-cancellation GitHub and Git evidence is best-effort: a firing whose enrichment is itself
   wedged settles without it rather than holding its slot.
 

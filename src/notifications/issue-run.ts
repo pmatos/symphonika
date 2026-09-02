@@ -77,6 +77,30 @@ export class IssueRunNotificationCoordinator {
     }
   }
 
+  // stop() clears the poll timer that would otherwise call schedulePending()
+  // on a later tick, so a row marked pending during shutdown can outlive the
+  // process with no sink configured to ever settle it. Call after shutdown
+  // has finished writing pending notification state, before the store
+  // closes. When a sink is configured, delivery isn't attempted here; the
+  // row is picked up by the next daemon start's poll tick instead.
+  settleUndeliverableOnShutdown(): void {
+    const pending = this.input.runStore.listPendingRunNotifications();
+    if (pending.length === 0) {
+      return;
+    }
+    const config = this.input.resolveConfig();
+    if (
+      config !== undefined &&
+      emailNotificationSourceEnabled(config, "issue_runs")
+    ) {
+      return;
+    }
+    this.input.runStore.completeRunNotifications({
+      runIds: pending.map((run) => run.id),
+      state: "skipped"
+    });
+  }
+
   private async flush(): Promise<void> {
     const pending = this.input.runStore.listPendingRunNotifications();
     if (pending.length === 0) {

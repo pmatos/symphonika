@@ -1991,6 +1991,7 @@ export async function startDaemon(
         await stopServer(server, logger);
         await removeDaemonEndpoint(state.stateRoot);
       } finally {
+        issueRunNotifications.settleUndeliverableOnShutdown();
         runStore.close();
       }
     }

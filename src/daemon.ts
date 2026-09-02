@@ -553,6 +553,9 @@ export async function startDaemon(
         },
         issueNumber: item.issueNumber,
         kind: item.kind,
+        ...(item.onShutdown === undefined
+          ? {}
+          : { onShutdown: item.onShutdown }),
         projectName: item.projectName,
         runId: item.runId
       }),

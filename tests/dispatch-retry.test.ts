@@ -202,6 +202,7 @@ async function waitForCondition(
   predicate: (body: {
     runs: Array<Record<string, unknown>>;
     active?: unknown[];
+    scheduled?: Array<Record<string, unknown>>;
   }) => boolean,
   options: { intervalMs?: number; timeoutMs?: number } = {}
 ): Promise<{ runs: Array<Record<string, unknown>> }> {
@@ -214,10 +215,15 @@ async function waitForCondition(
     const body = (await response.json()) as {
       active?: unknown[];
       runs?: Array<Record<string, unknown>>;
+      scheduled?: Array<Record<string, unknown>>;
     };
     if (
       body.runs !== undefined &&
-      predicate({ runs: body.runs, active: body.active ?? [] })
+      predicate({
+        active: body.active ?? [],
+        runs: body.runs,
+        scheduled: body.scheduled ?? []
+      })
     ) {
       return { runs: body.runs };
     }
@@ -229,6 +235,13 @@ async function waitForCondition(
 const fastRetryPolicy: LifecyclePolicy = {
   continuation: { cap: 0, delayMs: 0 },
   retry: { cap: 3, delaysMs: [10, 20, 30], maxBackoffMs: 100 }
+};
+
+// A delay long enough that the test's own polling/shutdown always wins the
+// race against the timer actually firing.
+const slowRetryPolicy: LifecyclePolicy = {
+  continuation: { cap: 0, delayMs: 0 },
+  retry: { cap: 3, delaysMs: [60_000], maxBackoffMs: 60_000 }
 };
 
 describe("dispatch retry policy", () => {
@@ -320,6 +333,96 @@ describe("dispatch retry policy", () => {
         // regression observes the pre-drain pending state.
         notification_state: "skipped",
         retry_count: 0,
+        state: "cancelled",
+        terminal_reason: "daemon_shutdown"
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("records shutdown cancellation when an already-accepted retry timer is cleared", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(prepared.workspacePath, { recursive: true });
+    await writeProject(root);
+
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { exitCode: 1, type: "process_exit" },
+          raw: { code: 1, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    let listCalls = 0;
+    const claimedIssue = {
+      ...baseIssue,
+      labels: ["agent-ready", "sym:claimed"]
+    };
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(claimedIssue),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        return Promise.resolve(
+          listCalls === 1
+            ? [{ ...baseIssue, labels: ["agent-ready"] }]
+            : [claimedIssue]
+        );
+      }),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-retry-shutdown-cleared",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: slowRetryPolicy,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: vi.fn((): Promise<PreparedIssueWorkspace> =>
+        Promise.resolve(prepared)
+      )
+    });
+
+    // Wait for the retry timer to be accepted (visible in /api/status's
+    // `scheduled` list) before shutting down, so the race lands on the
+    // "accepted, then cleared" side rather than the already-covered
+    // "refused" side above. slowRetryPolicy's 60s delay guarantees the timer
+    // is still armed, not fired, when daemon.stop() runs.
+    await waitForCondition(
+      daemon.url,
+      ({ scheduled }) =>
+        (scheduled ?? []).some((item) => item["kind"] === "retry"),
+      { timeoutMs: 5_000 }
+    );
+    await daemon.stop();
+
+    const database = new Database(
+      path.join(root, ".symphonika", "symphonika.db"),
+      { readonly: true }
+    );
+    try {
+      const stored = database
+        .prepare(
+          "select state, cancel_reason, terminal_reason, retry_count, notification_state from runs where id = ?"
+        )
+        .get("run-retry-shutdown-cleared") as Record<string, unknown>;
+      expect(stored).toMatchObject({
+        cancel_reason: "daemon_shutdown",
+        notification_state: "skipped",
+        // Distinguishes this from the refused-registration case above: the
+        // timer was accepted (incrementRetryCount already ran) before
+        // shutdown cleared it.
+        retry_count: 1,
         state: "cancelled",
         terminal_reason: "daemon_shutdown"
       });

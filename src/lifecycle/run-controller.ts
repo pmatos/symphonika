@@ -253,6 +253,9 @@ export type ScheduleHandler = (input: {
   fire: () => Promise<void>;
   issueNumber: number;
   kind: "retry" | "continuation" | "state_advance" | "wait_park";
+  // See ScheduledWorkInput's onShutdown for the contract; forwarded verbatim
+  // by every daemon/CLI wiring of this handler.
+  onShutdown?: () => Promise<void>;
   projectName: string;
   runId: string;
 }) => boolean;
@@ -1258,6 +1261,12 @@ export class RunController {
         fire: () => this.executeRetry(payload),
         issueNumber: refreshed.number,
         kind: "retry",
+        onShutdown: () =>
+          this.cancelRunAfterScheduleCleared({
+            issueNumber: refreshed.number,
+            repository,
+            runId: payload.runId
+          }),
         projectName: project.name,
         runId: payload.runId
       });
@@ -1905,6 +1914,12 @@ export class RunController {
           }),
         issueNumber: refreshed.number,
         kind: "state_advance",
+        onShutdown: () =>
+          this.cancelRunAfterScheduleCleared({
+            issueNumber: refreshed.number,
+            repository,
+            runId
+          }),
         projectName: project.name,
         runId
       });
@@ -2324,6 +2339,12 @@ export class RunController {
           fire: () => this.executeStateAdvance(payload),
           issueNumber: refreshed.number,
           kind: "state_advance",
+          onShutdown: () =>
+            this.cancelRunAfterScheduleCleared({
+              issueNumber: refreshed.number,
+              repository,
+              runId: payload.parentRunId
+            }),
           projectName: project.name,
           runId
         });
@@ -2709,6 +2730,12 @@ export class RunController {
           fire: () => this.executeContinuation(payload),
           issueNumber: refreshed.number,
           kind: "continuation",
+          onShutdown: () =>
+            this.cancelRunAfterScheduleCleared({
+              issueNumber: refreshed.number,
+              repository,
+              runId: payload.parentRunId
+            }),
           projectName: project.name,
           runId
         });
@@ -3194,6 +3221,33 @@ export class RunController {
     this.logger?.debug(
       { issueNumber: input.issueNumber, runId: input.runId },
       "symphonika delayed work refused: daemon shutting down"
+    );
+  }
+
+  // Companion to cancelRunAfterScheduleRefused for the other half of the same
+  // shutdown race: a timer accepted before cancelAll() latched the registry,
+  // then cleared before it fired. Passed as onShutdown to every retry/
+  // continuation/state_advance schedule() call so the registry can invoke it
+  // once the timer is gone — that item never gets its own fire() call, so
+  // this is the only remaining chance to record cancellation evidence. Without
+  // it the row is left "failed" (transient) with sym:claimed and no
+  // cancel_reason, which the restart-resume pass ignores because it requires
+  // cancel_reason=daemon_shutdown (see shutdown-resume.ts / SPEC.md). Not
+  // wired to wait_park: a waiting row is already durable and is meant to
+  // survive shutdown untouched for the next daemon's reconciliation.
+  private async cancelRunAfterScheduleCleared(input: {
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    await this.cancelScheduledLifecycleWork({
+      ...input,
+      reason: CANCEL_REASONS.DAEMON_SHUTDOWN
+    });
+    this.markNotificationPendingIfNeeded(input.runId, false);
+    this.logger?.debug(
+      { issueNumber: input.issueNumber, runId: input.runId },
+      "symphonika accepted delayed work cleared: daemon shutting down"
     );
   }
 
@@ -4697,6 +4751,12 @@ export class RunController {
             }),
           issueNumber: refreshedForAdvance.number,
           kind: "state_advance",
+          onShutdown: () =>
+            this.cancelRunAfterScheduleCleared({
+              issueNumber: input.issue.number,
+              repository: input.repository,
+              runId: input.runId
+            }),
           projectName: input.project.name,
           runId: input.runId
         });
@@ -4811,6 +4871,12 @@ export class RunController {
           }),
         issueNumber: input.issue.number,
         kind: "retry",
+        onShutdown: () =>
+          this.cancelRunAfterScheduleCleared({
+            issueNumber: input.issue.number,
+            repository: input.repository,
+            runId: input.runId
+          }),
         projectName: input.project.name,
         runId: input.runId
       });
@@ -4953,6 +5019,12 @@ export class RunController {
         }),
       issueNumber: refreshed.number,
       kind: "continuation",
+      onShutdown: () =>
+        this.cancelRunAfterScheduleCleared({
+          issueNumber: input.issue.number,
+          repository: input.repository,
+          runId: input.runId
+        }),
       projectName: input.project.name,
       runId: input.runId
     });

@@ -166,6 +166,9 @@ export function projectWorkflowReferences(
       errors.push(`projects.${index} in ${configPath} must be a mapping`);
       continue;
     }
+    if (rawProject.mode === "routine_host") {
+      continue;
+    }
     const name = stringProperty(rawProject, "name");
     if (name === undefined) {
       errors.push(

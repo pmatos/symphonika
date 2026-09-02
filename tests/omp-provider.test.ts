@@ -89,6 +89,7 @@ describe("Oh My Pi RPC provider", () => {
     await writeFakeOmp(fakeOmpPath, transcriptPath);
     const processScope = noopProcessScope();
     const provider = createOmpProvider({ processScope });
+    const cleanupPending: boolean[] = [];
 
     const events = await collectProviderEvents(
       provider.runAttempt({
@@ -96,6 +97,9 @@ describe("Oh My Pi RPC provider", () => {
         provider: {
           command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
           name: "omp"
+        },
+        recordProviderScopeCleanupPending: (pending) => {
+          cleanupPending.push(pending);
         },
         workspacePath
       })
@@ -171,6 +175,7 @@ describe("Oh My Pi RPC provider", () => {
     expect(processScope.stopCalls).toEqual([
       { attempt: 1, id: "run-issue-335" }
     ]);
+    expect(cleanupPending).toEqual([true, false]);
   });
 
   it("timestamps buffered events when they enter the OMP process queue", async () => {
@@ -1756,9 +1761,9 @@ describe("Oh My Pi RPC provider", () => {
         type: "process_exit"
       }
     ]);
-    expect(processScope.stopCalls).toEqual([
-      { attempt: 1, id: "run-issue-335" }
-    ]);
+    // Cancellation won before spawn, so systemd-run never created the scope
+    // unit and there is no cleanup obligation to stop or persist.
+    expect(processScope.stopCalls).toEqual([]);
   });
 
   it("skips the abort write when cancellation arrives after stdin closed", async () => {
@@ -2150,7 +2155,7 @@ function noopProcessScope(): RecordingProcessScope {
     wrapCalls,
     wrapForProviderScope: (run, command) => {
       wrapCalls.push({ command, run });
-      return Promise.resolve(command);
+      return Promise.resolve({ ...command, providerScopeWrapped: true });
     }
   };
 }

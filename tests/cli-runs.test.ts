@@ -1105,6 +1105,7 @@ describe("CLI run commands", () => {
       runId: "show-1",
       sequence: 1
     });
+    store.setRunProviderScopeCleanupPending("show-1", true);
     store.close();
 
     const cfg = path.join(stateRoot, "symphonika.yml");
@@ -1138,6 +1139,9 @@ describe("CLI run commands", () => {
     expect(present.output.stdout).toContain("artifacts:    (none)");
     expect(present.output.stdout).toContain("show-1-attempt-1");
     expect(present.output.stdout).toContain("normalized events");
+    expect(present.output.stdout).toContain(
+      "scope cleanup: pending (retry on daemon restart)"
+    );
     expect(present.output.stdout).toContain("hello from provider");
     expect(present.output.stdout).toContain("<not yet recorded>");
   });

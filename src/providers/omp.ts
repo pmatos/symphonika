@@ -154,11 +154,14 @@ export function createOmpProvider(
       );
       if (activeRun.cancelled) {
         activeRuns.delete(input.run.id);
-        await processScope.stopProviderScope(input.run);
         yield processExitEvent(activeRun, null, null);
         return;
       }
 
+      const providerScopeWrapped = command.providerScopeWrapped === true;
+      if (providerScopeWrapped) {
+        input.recordProviderScopeCleanupPending?.(true);
+      }
       const child = spawnProviderProcess(
         command,
         input.workspacePath,
@@ -319,7 +322,12 @@ export function createOmpProvider(
       } finally {
         activeRuns.delete(input.run.id);
         await shutdownProviderProcess(child);
-        await processScope.stopProviderScope(input.run);
+        if (
+          providerScopeWrapped &&
+          (await processScope.stopProviderScope(input.run))
+        ) {
+          input.recordProviderScopeCleanupPending?.(false);
+        }
         // Last, so scope teardown is never delayed by it: the caller reads
         // the stderr log to explain an unclean exit as soon as this generator
         // returns, and only this await orders that read after the tee's write

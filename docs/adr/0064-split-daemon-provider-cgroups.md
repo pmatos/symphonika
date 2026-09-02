@@ -53,6 +53,22 @@ necessary, not incidental: `systemd-run --user --scope` does not reap detached g
 the wrapped process exits (verified empirically — a backgrounded `cargo build &` left the scope
 `active running` after the wrapped process returned).
 
+The adapter records a Provider Scope Cleanup obligation in SQLite immediately before spawning an
+actually wrapped command. Its unconditional attempt finalizer clears the obligation only when
+`stopProviderScope` confirms that the scope is inactive. The obligation is a dedicated boolean on
+the owning issue Run or Routine Firing, independent of lifecycle state and `terminal_reason`. This
+separation is required because a finalizer can fail to confirm cleanup after the provider has
+already produced a truthful succeeded, failed, or cancelled outcome; encoding cleanup in that
+outcome would either hide the leak or falsify the execution result. The next daemon startup finds
+the independent obligation and retries the deterministic scope stop. Legacy rows whose
+`terminal_reason` ended in `_cleanup_pending` are migrated to the flag and normalized to the normal
+orphan reason during the sweep.
+
+The wrapper result explicitly reports whether it created a systemd scope. When the user manager is
+unavailable, providers run unwrapped under the process-group fallback and never record a cleanup
+obligation. This distinguishes an absent optional facility from a scope whose teardown genuinely
+could not be confirmed and prevents permanent false warnings on non-systemd hosts.
+
 The cgroup is complemented by a process-group lifetime boundary. On POSIX, Node spawns a lightweight
 detached supervisor as the process-group and session leader; the configured provider command (or
 the `systemd-run` wrapper when available) and a stream-free guardian run inside that group. Provider
@@ -93,6 +109,9 @@ cleanup.
 - On systemd hosts, cancellation and normal completion stop the full provider cgroup. On POSIX
   fallback hosts, cancellation still tears down the detached provider process group, fixing the
   orphaned-grandchild leak instead of making cleanup depend on the optional user manager.
+- An unconfirmed scope stop remains discoverable across daemon restarts even after its Run or
+  Routine Firing reaches a normal terminal state. Operator detail views show the pending cleanup
+  separately from the real terminal reason.
 - Operators with an already-installed (single-slice) unit see no benefit until they re-run
   `symphonika service install --force`, consistent with ADR 0055's existing "re-run install after
   upgrading" precedent. This ADR does not add automated migration.

@@ -26,19 +26,24 @@ type RecordingProcessScope = {
 // set) — every existing test here injects this no-op bypass so spawned
 // fake-subprocess commands are never actually wrapped in a real transient
 // systemd scope, regardless of the host running the suite.
-function noopProcessScope(): RecordingProcessScope {
+function noopProcessScope(
+  options: { providerScopeWrapped?: boolean; stopConfirmed?: boolean } = {}
+): RecordingProcessScope {
   const wrapCalls: RecordingProcessScope["wrapCalls"] = [];
   const stopCalls: RecordingProcessScope["stopCalls"] = [];
   return {
     stopCalls,
     stopProviderScope: (run) => {
       stopCalls.push(run);
-      return Promise.resolve(true);
+      return Promise.resolve(options.stopConfirmed ?? true);
     },
     wrapCalls,
     wrapForProviderScope: (run, command) => {
       wrapCalls.push({ command, run });
-      return Promise.resolve(command);
+      return Promise.resolve({
+        ...command,
+        providerScopeWrapped: options.providerScopeWrapped ?? true
+      });
     }
   };
 }
@@ -422,11 +427,15 @@ describe("Codex JSON-RPC provider", () => {
     const processScope = noopProcessScope();
     const provider = createCodexProvider({ processScope });
     const command = `${process.execPath} ${fakeServerPath} app-server`;
+    const cleanupPending: boolean[] = [];
 
     await collectProviderEvents(
       provider.runAttempt({
         ...providerInputFixture(),
         provider: { command, name: "codex" },
+        recordProviderScopeCleanupPending: (pending) => {
+          cleanupPending.push(pending);
+        },
         workspacePath
       })
     );
@@ -445,6 +454,65 @@ describe("Codex JSON-RPC provider", () => {
     // entirely — stopProviderScope must still fire from the unconditional
     // cleanup path, not only on cancellation.
     expect(processScope.stopCalls).toEqual([{ attempt: 1, id: "run-issue-9" }]);
+    expect(cleanupPending).toEqual([true, false]);
+  });
+
+  it("leaves provider-scope cleanup pending when teardown cannot be confirmed", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const processScope = noopProcessScope({ stopConfirmed: false });
+    const provider = createCodexProvider({ processScope });
+    const cleanupPending: boolean[] = [];
+
+    await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} app-server`,
+          name: "codex"
+        },
+        recordProviderScopeCleanupPending: (pending) => {
+          cleanupPending.push(pending);
+        },
+        workspacePath
+      })
+    );
+
+    expect(cleanupPending).toEqual([true]);
+    expect(processScope.stopCalls).toEqual([{ attempt: 1, id: "run-issue-9" }]);
+  });
+
+  it("records no cleanup obligation when provider scopes are unavailable", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const processScope = noopProcessScope({ providerScopeWrapped: false });
+    const provider = createCodexProvider({ processScope });
+    const cleanupPending: boolean[] = [];
+
+    await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} app-server`,
+          name: "codex"
+        },
+        recordProviderScopeCleanupPending: (pending) => {
+          cleanupPending.push(pending);
+        },
+        workspacePath
+      })
+    );
+
+    expect(cleanupPending).toEqual([]);
+    expect(processScope.stopCalls).toEqual([]);
   });
 
   it("maps app-server input requests to input_required and stops the process", async () => {

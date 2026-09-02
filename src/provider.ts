@@ -63,6 +63,11 @@ export type ProviderRunInput = {
     attempt: number;
     id: string;
   };
+  // Synchronous because the SQLite store write must complete before a
+  // wrapped process can be spawned. `true` records the cross-restart cleanup
+  // obligation; providers clear it only after stopProviderScope confirms the
+  // scope is inactive. Omitted for provider probes without durable state.
+  recordProviderScopeCleanupPending?: (pending: boolean) => void;
   // Disk-backed directory this attempt's provider should use for temporary
   // files (TMPDIR). Absent means the provider inherits the daemon's own
   // TMPDIR, which on most hosts is a RAM-backed /tmp. See ADR 0088.

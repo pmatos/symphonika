@@ -68,7 +68,10 @@ describe("createProcessScope.wrapForProviderScope", () => {
 
     const wrapped = await scope.wrapForProviderScope(RUN, COMMAND);
 
-    expect(wrapped).toEqual(COMMAND);
+    expect(wrapped).toEqual({
+      ...COMMAND,
+      providerScopeWrapped: false
+    });
   });
 
   it("wraps the command in a transient scope in the providers slice when available", async () => {
@@ -80,6 +83,7 @@ describe("createProcessScope.wrapForProviderScope", () => {
 
     expect(wrapped).toEqual({
       executable: "systemd-run",
+      providerScopeWrapped: true,
       args: [
         "--user",
         "--scope",

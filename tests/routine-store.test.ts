@@ -3152,9 +3152,11 @@ describe("RunStore routines", () => {
       expect(leaked).toEqual([
         {
           firingId: "leaked-fire",
+          needsTerminalization: true,
           previousState: "running",
           previousTerminalReason: null,
           projectName: "alpha",
+          providerScopeCleanupPending: false,
           routineName: "daily-report"
         }
       ]);
@@ -3192,6 +3194,58 @@ describe("RunStore routines", () => {
           .listRoutineFiringTransitions("leaked-fire")
           .map((entry) => entry.state)
       ).toEqual(["queued", "running", "failed"]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("finds terminal routine firings with provider-scope cleanup pending without replacing their outcome", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "cleanup-pending-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({
+        id: "cleanup-pending-fire",
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+
+      store.setRoutineFiringProviderScopeCleanupPending(
+        "cleanup-pending-fire",
+        true
+      );
+
+      expect(store.findLeakedRoutineFirings()).toEqual([
+        expect.objectContaining({
+          firingId: "cleanup-pending-fire",
+          needsTerminalization: false,
+          previousState: "failed",
+          previousTerminalReason: "provider_process_exit_1",
+          providerScopeCleanupPending: true
+        })
+      ]);
+      expect(store.getRoutineFiring("cleanup-pending-fire")).toMatchObject({
+        providerScopeCleanupPending: true,
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
     } finally {
       store.close();
     }
@@ -3368,9 +3422,11 @@ describe("RunStore routines", () => {
       expect(leaked).toEqual([
         {
           firingId: "pending-fire",
+          needsTerminalization: true,
           previousState: "failed",
           previousTerminalReason: "leaked_routine_firing_cleanup_pending",
           projectName: "alpha",
+          providerScopeCleanupPending: true,
           routineName: "daily-report"
         }
       ]);

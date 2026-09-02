@@ -1016,17 +1016,19 @@ On daemon startup:
 2. Open or initialize SQLite.
 3. Backfill legacy `input_required` Run rows older than 60 seconds to `failed` with
    `terminal_reason = "provider requested input (legacy)"`.
-4. Validate Projects.
-5. Reconcile stale labels and previous run state.
-6. Sweep provider scratch directories left behind by a previous daemon instance.
-7. Start local UI/API if enabled.
-8. Perform an immediate poll.
-9. Schedule interval polling.
+4. Reconcile orphaned issue Runs and Routine Firings, including retrying every independently
+   persisted Provider Scope Cleanup obligation without replacing a terminal lifecycle outcome.
+5. Validate Projects.
+6. Reconcile stale labels and previous run state.
+7. Sweep provider scratch directories left behind by a previous daemon instance.
+8. Start local UI/API if enabled.
+9. Perform an immediate poll.
+10. Schedule interval polling.
 
 Default poll interval: `30000` ms.
 
 After the initial reload and endpoint startup, configured daemon-health delivery emits one daemon
-start event with the orphaned issue-Run and Routine Firing reconciliation counts from steps 3-5.
+start event with the orphaned issue-Run and Routine Firing reconciliation counts from step 4.
 
 Manual poll-now triggers may exist in CLI or UI/API. They run the same daemon reconcile, polling,
 and dispatch gates as interval ticks, and may queue or coalesce when another manual poll is already
@@ -1733,6 +1735,17 @@ configured command. The value is inherited by the complete provider descendant t
 optional `systemd-run --user --scope` wrapper path, while the detached process-group supervisor and
 guardian retain the daemon's inherited score. A failed `/proc/self/oom_score_adj` write does not
 prevent the provider from starting. See ADR 0091.
+
+When a provider command is actually wrapped in a transient systemd scope, its adapter durably marks
+Provider Scope Cleanup pending immediately before spawn and clears that marker only after
+`stopProviderScope` confirms the scope is inactive. The marker is independent of Run or Routine
+Firing state and `terminal_reason`: an ordinary succeeded, failed, or cancelled outcome remains the
+real outcome while the next daemon startup can still retry unconfirmed cleanup. Hosts where the
+user manager is unavailable run the existing process-group fallback unwrapped and do not create a
+scope-cleanup obligation. Legacy `..._cleanup_pending` terminal reasons remain migration input, but
+the startup sweep normalizes them to the ordinary orphan reason and carries retryability only in the
+independent marker. CLI and HTTP detail views render the marker as pending operator-visible cleanup.
+See ADR 0064.
 
 Future sandboxing, if added, should be outside the provider through host, container, VM, network, or
 credential isolation.

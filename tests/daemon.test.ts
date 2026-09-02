@@ -848,8 +848,9 @@ describe("startDaemon orphan sweep logging", () => {
       expect(pendingLines).toHaveLength(1);
       expect(pendingLines[0]).toMatchObject({
         level: pino.levels.values.warn,
+        providerScopeCleanupPending: true,
         runId: "unconfirmed-run",
-        terminalReason: "leaked_active_run_cleanup_pending"
+        terminalReason: "leaked_active_run"
       });
 
       await daemon.stop();
@@ -858,8 +859,9 @@ describe("startDaemon orphan sweep logging", () => {
       const verifyStore = openRunStore({ stateRoot });
       try {
         expect(verifyStore.getRun("unconfirmed-run")).toMatchObject({
+          providerScopeCleanupPending: true,
           state: "stale",
-          terminalReason: "leaked_active_run_cleanup_pending"
+          terminalReason: "leaked_active_run"
         });
         expect(
           verifyStore.findLeakedRuns().map((entry) => entry.runId)
@@ -920,9 +922,10 @@ describe("startDaemon orphan sweep logging", () => {
       );
       expect(pendingLines).toHaveLength(1);
       expect(pendingLines[0]).toMatchObject({
+        providerScopeCleanupPending: true,
         level: pino.levels.values.warn,
         firingId: "unconfirmed-firing",
-        terminalReason: "leaked_routine_firing_cleanup_pending"
+        terminalReason: "leaked_routine_firing"
       });
 
       await daemon.stop();
@@ -933,8 +936,9 @@ describe("startDaemon orphan sweep logging", () => {
         expect(verifyStore.listRoutineFirings()).toEqual([
           expect.objectContaining({
             id: "unconfirmed-firing",
+            providerScopeCleanupPending: true,
             state: "failed",
-            terminalReason: "leaked_routine_firing_cleanup_pending"
+            terminalReason: "leaked_routine_firing"
           })
         ]);
         expect(
@@ -947,6 +951,98 @@ describe("startDaemon orphan sweep logging", () => {
       if (!stopped) {
         await daemon.stop();
       }
+    }
+  });
+
+  it("retries terminal-run scope cleanup without changing the run outcome", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "terminal-cleanup-pending",
+      issue: sampleIssue({ number: 72 }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/symphonika/72-fixture",
+      branchRef: "refs/heads/sym/symphonika/72-fixture",
+      id: "terminal-cleanup-pending-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "terminal-cleanup-pending",
+      state: "failed",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    store.updateRunState("terminal-cleanup-pending", "failed");
+    store.recordTerminalReason(
+      "terminal-cleanup-pending",
+      "provider_process_exit_1",
+      "deterministic"
+    );
+    store.setRunProviderScopeCleanupPending("terminal-cleanup-pending", true);
+    store.close();
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(false),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+    await daemon.stop();
+
+    const verifyStore = openRunStore({ stateRoot });
+    try {
+      expect(verifyStore.getRun("terminal-cleanup-pending")).toMatchObject({
+        providerScopeCleanupPending: true,
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+      expect(verifyStore.findLeakedRuns()).toEqual([
+        expect.objectContaining({
+          needsTerminalization: false,
+          runId: "terminal-cleanup-pending"
+        })
+      ]);
+    } finally {
+      verifyStore.close();
+    }
+
+    const retryDaemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(true),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+    await retryDaemon.stop();
+
+    const cleanedStore = openRunStore({ stateRoot });
+    try {
+      expect(cleanedStore.getRun("terminal-cleanup-pending")).toMatchObject({
+        providerScopeCleanupPending: false,
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+      expect(cleanedStore.findLeakedRuns()).toEqual([]);
+    } finally {
+      cleanedStore.close();
     }
   });
 

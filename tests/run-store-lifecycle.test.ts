@@ -730,6 +730,61 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("findLeakedRuns discovers terminal runs with provider-scope cleanup pending without replacing their outcome", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "cleanup-pending", issueNumber: 7 });
+      store.updateRunState("cleanup-pending", "failed");
+      store.recordTerminalReason(
+        "cleanup-pending",
+        "provider_process_exit_1",
+        "deterministic"
+      );
+
+      store.setRunProviderScopeCleanupPending("cleanup-pending", true);
+
+      expect(store.findLeakedRuns()).toEqual([
+        expect.objectContaining({
+          needsTerminalization: false,
+          previousState: "failed",
+          previousTerminalReason: "provider_process_exit_1",
+          providerScopeCleanupPending: true,
+          runId: "cleanup-pending"
+        })
+      ]);
+      expect(store.getRun("cleanup-pending")).toMatchObject({
+        providerScopeCleanupPending: true,
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("treats cleanup pending on a valid durable wait as cleanup-only", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "waiting-cleanup", issueNumber: 8 });
+      store.updateRunState("waiting-cleanup", "waiting");
+      store.setRunCurrentState("waiting-cleanup", "pr_review");
+      store.setRunProviderScopeCleanupPending("waiting-cleanup", true);
+
+      expect(store.findLeakedRuns()).toEqual([
+        expect.objectContaining({
+          needsTerminalization: false,
+          previousState: "waiting",
+          providerScopeCleanupPending: true,
+          runId: "waiting-cleanup"
+        })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("findLeakedRuns returns previousState per row", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

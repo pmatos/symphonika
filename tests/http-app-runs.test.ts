@@ -327,6 +327,7 @@ describe("HTTP app — runs API and pages", () => {
         projectName: "alpha",
         reason: "cap_reached:no_commits"
       });
+      test.runStore.setRunProviderScopeCleanupPending("cap", true);
 
       const app = createHttpApp({
         runStore: test.runStore,
@@ -338,6 +339,9 @@ describe("HTTP app — runs API and pages", () => {
       const html = await response.text();
       expect(html).toContain("<dt>Terminal reason</dt>");
       expect(html).toContain("cap_reached:no_commits");
+      expect(html).toContain(
+        "<dt>Provider scope cleanup</dt><dd>Pending — retry on daemon restart</dd>"
+      );
       expect(html).toContain(
         "<strong>Cap context:</strong> continuation cap reached after 1 continuation: no commits on issue branch"
       );
@@ -4464,6 +4468,10 @@ describe("HTTP app — firing detail page (#304 part 2/2)", () => {
         state: "failed",
         terminalReason: "provider_exit_nonzero"
       });
+      test.runStore.setRoutineFiringProviderScopeCleanupPending(
+        "fire-failed",
+        true
+      );
 
       const app = createHttpApp({
         runStore: test.runStore,
@@ -4474,6 +4482,9 @@ describe("HTTP app — firing detail page (#304 part 2/2)", () => {
 
       expect(body).toContain("Terminal reason");
       expect(body).toContain("provider_exit_nonzero");
+      expect(body).toContain(
+        "<dt>Provider scope cleanup</dt><dd>Pending — retry on daemon restart</dd>"
+      );
     } finally {
       test.cleanup();
     }

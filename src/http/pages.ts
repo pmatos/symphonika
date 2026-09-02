@@ -6471,6 +6471,9 @@ function renderFiringSummary(
     detail.terminalReason === null
       ? ""
       : `<dt>Terminal reason</dt><dd><code>${escapeHtml(detail.terminalReason)}</code></dd>`;
+  const cleanupRow = detail.providerScopeCleanupPending
+    ? "<dt>Provider scope cleanup</dt><dd>Pending — retry on daemon restart</dd>"
+    : "";
   const cancelLine = detail.cancelRequested
     ? `<div class="field-note"><strong>Cancel requested</strong> (reason: ${escapeHtml(detail.cancelReason ?? "unknown")})</div>`
     : "";
@@ -6486,6 +6489,7 @@ function renderFiringSummary(
   <dt>Workspace</dt><dd><code>${escapeHtml(detail.workspacePath)}</code></dd>
   <dt>Branch</dt><dd><code>${escapeHtml(detail.branchName)}</code></dd>
   ${terminalRow}
+  ${cleanupRow}
   ${cancelLine}
 </dl></section>`;
 }
@@ -6763,6 +6767,9 @@ function renderRunSummary(
     detail.terminalReason !== null
       ? `<dt>Terminal reason</dt><dd><code>${escapeHtml(detail.terminalReason)}</code></dd>`
       : "";
+  const cleanupRow = detail.providerScopeCleanupPending
+    ? "<dt>Provider scope cleanup</dt><dd>Pending — retry on daemon restart</dd>"
+    : "";
   return `<section><dl class="fields">
   <dt>Project</dt><dd>${escapeHtml(detail.project)}</dd>
   <dt>Issue</dt><dd>#${detail.issueNumber} ${escapeHtml(detail.issueTitle)}</dd>
@@ -6775,6 +6782,7 @@ function renderRunSummary(
   <dt>Workspace</dt><dd><code>${escapeHtml(detail.workspacePath)}</code></dd>
   <dt>Retries</dt><dd>${detail.retryCount}${detail.isContinuation ? " (continuation)" : ""}</dd>
   ${terminalRow}
+  ${cleanupRow}
   ${capContextLine}
   ${cancelLine}
 </dl></section>`;

@@ -2042,6 +2042,8 @@ describe("doctor", () => {
       "+0G",
       "64G+512M",
       "64+4G",
+      "1G2G",
+      "512M1G",
       "Infinity",
       "INFINITY"
     ])(

@@ -67,10 +67,8 @@ type ProcessQueuePayload =
 // that produced them — even when this queue's own backpressure defers
 // parsing them to a later drain; a chunk the child writes while stdout is
 // paused is necessarily stamped once the readable resumes, since that is
-// genuinely when the orchestrator received it. The one remaining residual:
-// an exit item deferred by the same backpressure at close is still stamped
-// at drain time, not close time (tracked separately). See the ADR's
-// Consequences section.
+// genuinely when the orchestrator received it. Exit items likewise carry the
+// close callback's time when backpressure defers their eventual push.
 type ProcessQueueItem = ProcessQueuePayload & { receivedAt: string };
 
 export type ProcessQueue = {
@@ -765,7 +763,12 @@ export function createProcessQueue(
   let stdoutEnded = false;
   let discardingOutput = false;
   let closeResult:
-    { exitCode: number | null; signal: NodeJS.Signals | null } | undefined;
+    | {
+        exitCode: number | null;
+        receivedAt: string;
+        signal: NodeJS.Signals | null;
+      }
+    | undefined;
   let exitEnqueued = false;
   // Set at the top of the stdout "data" handler and read by every push that
   // originates from parsing stdoutBuffer, so a line that arrived in one chunk
@@ -1075,11 +1078,15 @@ export function createProcessQueue(
     // consumed before runAttempt can see process_exit.
     if (closeResult !== undefined) {
       exitEnqueued = true;
-      push({
-        exitCode: closeResult.exitCode,
-        kind: "exit",
-        signal: closeResult.signal
-      });
+      push(
+        {
+          exitCode: closeResult.exitCode,
+          kind: "exit",
+          signal: closeResult.signal
+        },
+        0,
+        closeResult.receivedAt
+      );
     }
   };
 
@@ -1118,7 +1125,11 @@ export function createProcessQueue(
     push({ error, kind: "error" });
   });
   child.once("close", (exitCode, signal) => {
-    closeResult = providerProcessExitResult(child, exitCode, signal);
+    const receivedAt = new Date().toISOString();
+    closeResult = {
+      ...providerProcessExitResult(child, exitCode, signal),
+      receivedAt
+    };
     // A destroyed stdout never emits 'end'; treat close as terminal either way.
     stdoutEnded = true;
     finishStdout();
@@ -1140,11 +1151,15 @@ export function createProcessQueue(
       child.stdout.resume();
       if (closeResult !== undefined && !exitEnqueued) {
         exitEnqueued = true;
-        push({
-          exitCode: closeResult.exitCode,
-          kind: "exit",
-          signal: closeResult.signal
-        });
+        push(
+          {
+            exitCode: closeResult.exitCode,
+            kind: "exit",
+            signal: closeResult.signal
+          },
+          0,
+          closeResult.receivedAt
+        );
       }
     },
     get size() {

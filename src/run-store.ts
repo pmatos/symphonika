@@ -6497,6 +6497,7 @@ export class RunStore {
       let addedFiringKind = false;
       let addedIssueRepository = false;
       let addedLastSuccessfulPollAt = false;
+      let addedProviderScopeCleanupPending = false;
       for (const [table, column, decl] of additions) {
         const added = this.ensureColumn(table, column, decl);
         if (
@@ -6523,21 +6524,27 @@ export class RunStore {
         ) {
           addedLastSuccessfulPollAt = true;
         }
+        if (added && column === "provider_scope_cleanup_pending") {
+          addedProviderScopeCleanupPending = true;
+        }
       }
 
-      // Releases before the independent cleanup flag encoded the retry
-      // obligation in terminal_reason. Preserve that obligation during
-      // migration; the daemon's next startup sweep rewrites the legacy reason
-      // to the normal human-facing orphan reason without losing retryability.
-      this.database.exec(`
-        update runs
-        set provider_scope_cleanup_pending = 1
-        where terminal_reason = 'leaked_active_run_cleanup_pending';
+      if (addedProviderScopeCleanupPending) {
+        // Releases before the independent cleanup flag encoded the retry
+        // obligation in terminal_reason. Preserve that obligation during
+        // migration; the daemon's next startup sweep rewrites the legacy
+        // reason to the normal human-facing orphan reason without losing
+        // retryability.
+        this.database.exec(`
+          update runs
+          set provider_scope_cleanup_pending = 1
+          where terminal_reason = 'leaked_active_run_cleanup_pending';
 
-        update routine_firings
-        set provider_scope_cleanup_pending = 1
-        where terminal_reason = 'leaked_routine_firing_cleanup_pending';
-      `);
+          update routine_firings
+          set provider_scope_cleanup_pending = 1
+          where terminal_reason = 'leaked_routine_firing_cleanup_pending';
+        `);
+      }
 
       if (addedIssueRepository) {
         // The repository a Run's Issue lived in was only ever recoverable by

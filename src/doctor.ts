@@ -980,14 +980,20 @@ function winningByteSizeAssignment(
   return undefined;
 }
 
-const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)[ \t\n\r]*([KMGT]?)$/i;
+// Shared ASCII whitespace class systemd and SYSTEMD_BYTE_SIZE_PATTERN both
+// tolerate ("32 G") but JavaScript's broader Unicode `\s` set does not
+// exclude; kept as one source string so the byte-size pattern, the compound
+// term pattern, and the tokenizing loop's inter-term skip below all agree.
+const SYSTEMD_WHITESPACE_SOURCE = "[ \\t\\n\\r]";
+const SYSTEMD_BYTE_SIZE_PATTERN = new RegExp(
+  `^(\\d+(?:\\.\\d+)?)${SYSTEMD_WHITESPACE_SOURCE}*([KMGT]?)$`,
+  "i"
+);
 
 // One token of a systemd compound memory value: a magnitude, optional
-// ASCII whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both tolerate
-// "32 G" but not JavaScript's broader Unicode `\s` set),
-// then an optional single-letter K/M/G/T/P/E suffix or an explicit "B"
-// (bytes) marker, captured so isDefinitelyInvalidSystemdMemoryValue can
-// check systemd's descending-unit-order rule (a bare magnitude with no
+// whitespace, then an optional single-letter K/M/G/T/P/E suffix or an
+// explicit "B" (bytes) marker, captured so isDefinitelyInvalidSystemdMemoryValue
+// can check systemd's descending-unit-order rule (a bare magnitude with no
 // suffix ranks as bytes, same as an explicit "B"). Matched case-sensitively
 // (no "i" flag where this is compiled below) because systemd's parse_size()
 // suffix table only recognizes the uppercase letters — "1G500m" is
@@ -995,15 +1001,21 @@ const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)[ \t\n\r]*([KMGT]?)$/i;
 // normalize "m" to "M". An optional leading "+" may prefix each term
 // (e.g. "+64G", "64G+512M") and must be immediately followed by that
 // term's magnitude, so it is matched inside each token.
-// Whitespace between terms is skipped by hand in the tokenizing loop below
-// rather than folded into this pattern: an earlier version matched runs of
-// terms with `(?:TERM_SOURCE)+` against the whole string, which is
+// Whitespace between terms is skipped separately in the tokenizing loop
+// below rather than folded into this pattern: an earlier version matched
+// runs of terms with `(?:TERM_SOURCE)+` against the whole string, which is
 // catastrophically backtracking on a long malformed digit run (each `\d+`
 // repetition can be split ambiguously across the outer `+`), letting a
 // single typo'd local MemoryMax= drop-in hang the doctor check
 // indefinitely.
-const SYSTEMD_MEMORY_VALUE_TERM_SOURCE =
-  "\\+?(\\d+(?:\\.\\d*)?)[ \\t\\n\\r]*([KMGTPE]|B)?";
+const SYSTEMD_MEMORY_VALUE_TERM_SOURCE = `\\+?(\\d+(?:\\.\\d*)?)${SYSTEMD_WHITESPACE_SOURCE}*([KMGTPE]|B)?`;
+// Sticky match against a run of the same whitespace class, used to skip
+// between compound terms in the tokenizing loop below without a per-
+// character regex test.
+const SYSTEMD_MEMORY_WHITESPACE_PATTERN = new RegExp(
+  `${SYSTEMD_WHITESPACE_SOURCE}*`,
+  "y"
+);
 // A leading "+" is meaningful for relative values too — systemd's
 // parse_permyriad() goes through the same strtol()-based sign handling as
 // parse_size(). The accepted precision depends on the symbol: hundredths for
@@ -1081,9 +1093,8 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
   const term = new RegExp(SYSTEMD_MEMORY_VALUE_TERM_SOURCE, "y");
   let offset = 0;
   while (offset < value.length) {
-    while (/[ \t\n\r]/.test(value[offset] ?? "")) {
-      offset += 1;
-    }
+    SYSTEMD_MEMORY_WHITESPACE_PATTERN.lastIndex = offset;
+    offset += (SYSTEMD_MEMORY_WHITESPACE_PATTERN.exec(value)?.[0] ?? "").length;
     if (offset === value.length) {
       break;
     }

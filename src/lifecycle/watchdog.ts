@@ -159,10 +159,26 @@ function workspaceChanged(
   return next.workspaceDigest !== previous.workspaceDigest;
 }
 
+function notifySettledRoutineWatchdogTerminations(
+  input: ReconcileWatchdogInput
+): void {
+  for (const firing of input.runStore.claimSettledRoutineWatchdogTerminations()) {
+    try {
+      input.onRoutineTerminated?.(firing);
+    } catch (error) {
+      input.logger?.warn(
+        { err: error, firingId: firing.firingId },
+        "symphonika routine watchdog termination observer failed"
+      );
+    }
+  }
+}
+
 export async function reconcileWatchdog(
   input: ReconcileWatchdogInput
 ): Promise<WatchdogReconcileResult> {
   if (!input.config.enabled) {
+    notifySettledRoutineWatchdogTerminations(input);
     return { sampled: 0, terminated: 0 };
   }
 
@@ -322,29 +338,18 @@ export async function reconcileWatchdog(
       )
     );
     terminated += 1;
-    try {
-      input.onRoutineTerminated?.({
-        firingId: firing.firingId,
-        projectName: firing.projectName,
-        routineName: firing.routineName
-      });
-    } catch (error) {
-      input.logger?.warn(
-        { err: error, firingId: firing.firingId },
-        "symphonika routine watchdog termination observer failed"
-      );
-    }
     input.logger?.warn(
       {
         firingId: firing.firingId,
         project: firing.projectName,
         terminalReason: "no_progress"
       },
-      "symphonika watchdog terminated routine firing"
+      "symphonika watchdog requested routine firing cancellation"
     );
   }
 
   await Promise.all(cancellations);
+  notifySettledRoutineWatchdogTerminations(input);
   return { sampled, terminated };
 }
 

@@ -964,8 +964,8 @@ export async function startDaemon(
       const watchdog = serviceConfig.watchdog;
       const nowMs = Date.now();
       if (
-        watchdog.enabled &&
-        nowMs - lastWatchdogSampleAt >= watchdog.sampleIntervalSeconds * 1_000
+        nowMs - lastWatchdogSampleAt >=
+        watchdog.sampleIntervalSeconds * 1_000
       ) {
         lastWatchdogSampleAt = nowMs;
         const watchdogTerminations: WatchdogTermination[] = [];

@@ -348,6 +348,109 @@ describe("sampleWorkspace", () => {
 });
 
 describe("reconcileWatchdog", () => {
+  it("suppresses a routine watchdog notification when the durable deadline verdict wins", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    const normalizedLogPath = path.join(root, "routine.normalized.jsonl");
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(normalizedLogPath, "");
+    const stateRoot = path.join(root, ".symphonika");
+    let store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "symphonika",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "deadline-won-firing",
+        kind: "report",
+        projectName: "symphonika",
+        providerCommand: "codex app-server",
+        providerName: "codex",
+        routineName: "daily-report",
+        workspacePath
+      });
+      store.updateRoutineFiringWorkspace({
+        id: "deadline-won-firing",
+        normalizedLogPath,
+        workspacePath
+      });
+      store.updateRoutineFiringState("deadline-won-firing", "running");
+
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel: vi.fn().mockResolvedValue(undefined),
+        issueNumber: 0,
+        projectName: "symphonika",
+        runId: "deadline-won-firing"
+      });
+      const onRoutineTerminated = vi.fn();
+      const config = {
+        enabled: true,
+        graceMinutes: 1,
+        maxRunMinutes: 0,
+        mtimeIgnore: [],
+        mtimeInclude: [],
+        outputTokenBudget: 0,
+        sampleIntervalSeconds: 60
+      };
+
+      await reconcileWatchdog({
+        activeRuns,
+        config,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        onRoutineTerminated,
+        runStore: store
+      });
+      await reconcileWatchdog({
+        activeRuns,
+        config,
+        now: () => new Date("2026-05-22T10:01:00.000Z"),
+        onRoutineTerminated,
+        runStore: store
+      });
+
+      expect(store.getRoutineFiring("deadline-won-firing")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "running",
+        terminalReason: null
+      });
+      expect(onRoutineTerminated).not.toHaveBeenCalled();
+
+      store.close();
+      store = openRunStore({ stateRoot });
+      store.completeRoutineFiring({
+        firingDeadlineWon: true,
+        id: "deadline-won-firing",
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+      await reconcileWatchdog({
+        activeRuns,
+        config,
+        now: () => new Date("2026-05-22T10:02:00.000Z"),
+        onRoutineTerminated,
+        runStore: store
+      });
+
+      expect(store.getRoutineFiring("deadline-won-firing")).toMatchObject({
+        state: "failed",
+        terminalReason: "firing_timeout"
+      });
+      expect(onRoutineTerminated).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
   it("does nothing when disabled", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });

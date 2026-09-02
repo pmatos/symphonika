@@ -1182,6 +1182,12 @@ type CreateRoutineFiringInput = {
   workspacePath?: string;
 };
 
+type SettledRoutineWatchdogTermination = {
+  firingId: string;
+  projectName: string;
+  routineName: string;
+};
+
 export class RunStore {
   private readonly changeListeners = new Set<(event: ChangeEvent) => void>();
   private readonly database: SqliteDatabase;
@@ -4224,6 +4230,7 @@ export class RunStore {
           "update routine_firings set",
           "cancel_requested = 1,",
           "cancel_reason = @reason,",
+          "watchdog_notification_pending = 1,",
           "updated_at = @updated_at",
           "where id = @id and state = 'running' and cancel_requested = 0"
         ].join(" ")
@@ -4234,6 +4241,46 @@ export class RunStore {
         updated_at: updatedAt
       });
     return result.changes > 0;
+  }
+
+  claimSettledRoutineWatchdogTerminations(): SettledRoutineWatchdogTermination[] {
+    const claim = this.database.transaction(() => {
+      const rows = this.database
+        .prepare(
+          [
+            "select id, project_name, routine_name, terminal_reason",
+            "from routine_firings",
+            "where watchdog_notification_pending = 1",
+            "and state in ('succeeded', 'failed', 'cancelled')"
+          ].join(" ")
+        )
+        .all() as Array<{
+        id: string;
+        project_name: string;
+        routine_name: string;
+        terminal_reason: string | null;
+      }>;
+      if (rows.length === 0) {
+        return [];
+      }
+      this.database
+        .prepare(
+          [
+            "update routine_firings set watchdog_notification_pending = 0",
+            "where watchdog_notification_pending = 1",
+            "and state in ('succeeded', 'failed', 'cancelled')"
+          ].join(" ")
+        )
+        .run();
+      return rows
+        .filter((row) => row.terminal_reason === WATCHDOG_NO_PROGRESS_REASON)
+        .map((row) => ({
+          firingId: row.id,
+          projectName: row.project_name,
+          routineName: row.routine_name
+        }));
+    });
+    return claim();
   }
 
   updateRoutineFiringWorkspace(input: {
@@ -6234,6 +6281,7 @@ export class RunStore {
         notification_error text,
         cancel_requested integer not null default 0,
         cancel_reason text,
+        watchdog_notification_pending integer not null default 0,
         created_at text not null,
         updated_at text not null,
         foreign key (project_name, routine_name) references routines(project_name, name)
@@ -6409,6 +6457,11 @@ export class RunStore {
       ["routine_firings", "branch_ref", "text"],
       ["routine_firings", "cancel_requested", "integer not null default 0"],
       ["routine_firings", "cancel_reason", "text"],
+      [
+        "routine_firings",
+        "watchdog_notification_pending",
+        "integer not null default 0"
+      ],
       ["routine_firings", "notification_state", "text"],
       ["routine_firings", "notification_error", "text"],
       ["routine_firings", "workspace_pruned_at", "text"],

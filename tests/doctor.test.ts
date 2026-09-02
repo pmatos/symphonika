@@ -2047,6 +2047,7 @@ describe("doctor", () => {
       "512M1G",
       "0G0.1B",
       "0.6B0.6",
+      "18446744073709551614B0.9999999999999999",
       "0.18446744073709551616G",
       "0.99999999999999999999K",
       "+16E",
@@ -2109,6 +2110,19 @@ describe("doctor", () => {
     it("accepts a fractional remainder on the uint64 sentinel the way systemd's own overflow guard wraps", async () => {
       const report = await runProviderCapacityDoctor({
         dropInMemoryMax: "18446744073709551615.1K", // wraps to 18446744073709550694
+        hostParallelism: 24
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
+    });
+
+    it("rounds a near-one fractional byte the way systemd's own double-widening does", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "0.9999999999999999B", // widens to exactly 1 byte, not 0
         hostParallelism: 24
       });
 

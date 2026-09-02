@@ -1151,6 +1151,25 @@ const SYSTEMD_UINT64_MODULUS = 2n ** 64n;
 // "0.6B0.6", where each term is individually a sub-byte fraction systemd
 // discards to zero, would sum to a non-zero 1.2 here and be wrongly
 // accepted as effective when systemd rejects it as a zero-byte limit.
+//
+// parse_size() computes a term's fractional contribution by reading the
+// digit run as an unsigned 64-bit integer (`l2 = strtoull(...)`), widening
+// it to a C `double` (`frac = l2;`), then dividing by 10 once per digit —
+// not by parsing the decimal string directly. That widen step is itself
+// lossy above 2^53, so for a long enough digit run this can round UP to a
+// value a direct decimal parse would never produce: "0.9999999999999999"
+// (16 nines) widens 9999999999999999 to the nearest double,
+// 10000000000000000, and sixteen successive divisions by 10 land exactly
+// on 1.0 — confirmed on systemd 261, where standalone
+// "0.9999999999999999B" resolves to exactly 1 byte, not 0.
+function systemdFractionalValue(magnitude: bigint, digitCount: number): number {
+  let frac = Number(magnitude);
+  for (let i = 0; i < digitCount; i++) {
+    frac /= 10;
+  }
+  return frac;
+}
+
 function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
   for (const relativePattern of SYSTEMD_MEMORY_RELATIVE_PATTERNS) {
     const relative = relativePattern.pattern.exec(value);
@@ -1214,7 +1233,9 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
       return true;
     }
     const fractionalValue =
-      fractionalDigits === undefined ? 0 : Number(`0.${fractionalDigits}`);
+      fractionalDigits === undefined
+        ? 0
+        : systemdFractionalValue(fractionalMagnitude, fractionalDigits.length);
     // parse_size()'s own overflow guard — `l + (frac > 0) > UINT64_MAX /
     // factor` — is itself native uint64_t arithmetic: when the whole-number
     // part is exactly UINT64_MAX and a fraction follows, `l + 1` wraps to 0

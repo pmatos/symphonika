@@ -1021,8 +1021,12 @@ const SYSTEMD_MEMORY_UNIT_ORDER = "BKMGTPE";
 // overflow it ("Numerical result out of range"), so a total at or beyond
 // 2^64 — a single huge term ("+16E") or a compound sum that crosses the
 // line ("16E1P") — must be rejected here too, or winningByteSizeAssignment
-// would select a value systemd never applied.
-const SYSTEMD_MEMORY_MAX_BYTES = 2 ** 64;
+// would select a value systemd never applied. A BigInt literal (rather than
+// `2 ** 64`) so the overflow comparison below can stay exact: past 2^53 a
+// JS `number` can no longer represent every integer, so a huge-but-valid
+// bare byte count like "18446744073709551614" (2^64 - 2) would otherwise
+// round up to 2^64 itself and be wrongly rejected as overflowing.
+const SYSTEMD_MEMORY_MAX_BYTES = 2n ** 64n;
 
 // config_parse_memory_limit() drops an assignment two different ways, both
 // of which make systemd keep whatever limit was previously in force:
@@ -1054,7 +1058,14 @@ const SYSTEMD_MEMORY_MAX_BYTES = 2 ** 64;
 // would select a value systemd never applied. Accumulates an actual byte
 // total (rather than just checking magnitudes for all-zero) so a compound
 // that resolves to a sub-byte fraction ("0G0.1B") or one that overflows
-// systemd's uint64_t accumulator ("+16E", "16E1P") is caught too. The
+// systemd's uint64_t accumulator ("+16E", "16E1P") is caught too. Each
+// term's byte contribution is truncated to an integer (matching systemd's
+// own `l * factor + (uint64_t)(frac * factor)` per-term arithmetic in
+// parse_size()) before being added to the BigInt total, rather than summing
+// raw fractional contributions first — otherwise a compound like
+// "0.6B0.6", where each term is individually a sub-byte fraction systemd
+// discards to zero, would sum to a non-zero 1.2 here and be wrongly
+// accepted as effective when systemd rejects it as a zero-byte limit. The
 // leading "+" sign must be immediately followed by a digit — systemd
 // rejects whitespace between the sign and the first term ("+ 64G") even
 // though whitespace between later terms is fine ("+1G 500M") — so the
@@ -1067,7 +1078,7 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
     return !(percent > 0 && percent <= 100);
   }
   const signed = value.startsWith("+");
-  let totalBytes = 0;
+  let totalBytes = 0n;
   let previousRank = Infinity;
   let isFirstTerm = true;
   const term = new RegExp(SYSTEMD_MEMORY_VALUE_TERM_SOURCE, "y");
@@ -1093,14 +1104,27 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
       return true;
     }
     previousRank = rank;
-    totalBytes += Number(match[1]) * 1024 ** Math.max(rank - 1, 0);
+    const multiplier = 1024n ** BigInt(Math.max(rank - 1, 0));
+    // match[1] is guaranteed by the mandatory capture group `(\d+(?:\.\d+)?)`
+    // in SYSTEMD_MEMORY_VALUE_TERM_SOURCE; the `?? "0"` only satisfies
+    // noUncheckedIndexedAccess.
+    const [integerDigits = "0", fractionalDigits] = (match[1] ?? "0").split(
+      "."
+    );
+    const fractionalBytes =
+      fractionalDigits === undefined
+        ? 0n
+        : BigInt(
+            Math.trunc(Number(`0.${fractionalDigits}`) * Number(multiplier))
+          );
+    totalBytes += BigInt(integerDigits) * multiplier + fractionalBytes;
     if (totalBytes >= SYSTEMD_MEMORY_MAX_BYTES) {
       return true;
     }
     isFirstTerm = false;
     offset = term.lastIndex;
   }
-  return totalBytes < 1;
+  return totalBytes < 1n;
 }
 
 function parseSystemdByteSize(value: string): number | undefined {

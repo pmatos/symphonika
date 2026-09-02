@@ -2045,6 +2045,7 @@ describe("doctor", () => {
       "1G2G",
       "512M1G",
       "0G0.1B",
+      "0.6B0.6",
       "+16E",
       "16E1P",
       "+ 64G",
@@ -2066,6 +2067,19 @@ describe("doctor", () => {
         expect(warning).toContain("36 GiB");
       }
     );
+
+    it("does not overflow-reject a bare MemoryMax= within 2 of the uint64 ceiling", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "18446744073709551614", // 2^64 - 2
+        hostParallelism: 24
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
+    });
 
     it("rejects a long malformed digit run without catastrophic backtracking", async () => {
       const start = Date.now();

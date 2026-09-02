@@ -350,6 +350,196 @@ exec "${realGit}" "$@"
     }
   });
 
+  it("preserves a pre-existing worktree registration when add failure races an abort", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "symphonika");
+    const cachePath = path.join(workspaceRoot, ".cache", "repo.git");
+    const branchName = "sym/symphonika/667-preserve-registered-workspace";
+    const workspacePath = path.join(
+      workspaceRoot,
+      "issues",
+      "667-preserve-registered-workspace"
+    );
+    const unrelatedBranchName = "manual/unrelated-worktree";
+    await mkdir(path.dirname(cachePath), { recursive: true });
+    await git(["clone", "--bare", remotePath, cachePath]);
+    await git([
+      "-C",
+      cachePath,
+      "fetch",
+      "origin",
+      "main:refs/remotes/origin/main"
+    ]);
+    await git(["-C", cachePath, "branch", branchName, "origin/main"]);
+    await git([
+      "-C",
+      cachePath,
+      "worktree",
+      "add",
+      "-b",
+      unrelatedBranchName,
+      workspacePath,
+      "origin/main"
+    ]);
+    await rm(workspacePath, { recursive: true });
+    await expect(worktreePaths(cachePath)).resolves.toContain(workspacePath);
+
+    const wrapperRoot = path.join(root, "git-wrapper");
+    const wrapperPath = path.join(wrapperRoot, "git");
+    const addFailedPath = path.join(root, "worktree-add-failed");
+    const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+    const realGit = realGitOutput.trim();
+    await mkdir(wrapperRoot, { recursive: true });
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh
+if [ "$3" = "worktree" ] && [ "$4" = "add" ] && [ "$5" = "${workspacePath}" ]; then
+  "${realGit}" "$@"
+  touch "${addFailedPath}"
+  sleep infinity
+fi
+exec "${realGit}" "$@"
+`
+    );
+    await chmod(wrapperPath, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+
+    try {
+      const pendingPreparation = prepareIssueWorkspace({
+        issue: { number: 667, title: "Preserve registered workspace" },
+        project: {
+          name: "symphonika",
+          workspace: {
+            git: { base_branch: "main", remote: remotePath },
+            root: workspaceRoot
+          }
+        },
+        signal: controller.signal
+      });
+      const preparation = rejectionOf(pendingPreparation);
+      await waitForPath(addFailedPath);
+      controller.abort(new Error("run timeout"));
+
+      await expect(preparation).resolves.toMatchObject({
+        code: "ABORT_ERR",
+        name: "AbortError"
+      });
+      await expect(pendingPreparation.abortCleanup).resolves.toBeUndefined();
+      await expect(pathExists(workspacePath)).resolves.toBe(false);
+      await expect(worktreePaths(cachePath)).resolves.toContain(workspacePath);
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "cleans a group-killed locked issue worktree without pruning unrelated registrations",
+    async () => {
+      const root = await makeTempRoot();
+      const remotePath = await createRemoteRepository(root);
+      const workspaceRoot = path.join(root, "workspaces", "symphonika");
+      const project = {
+        name: "symphonika",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      };
+      const unrelated = await prepareIssueWorkspace({
+        issue: { number: 665, title: "Unrelated workspace" },
+        project
+      });
+      await rm(unrelated.workspacePath, { force: true, recursive: true });
+      expect(await worktreePaths(unrelated.cachePath)).toContain(
+        unrelated.workspacePath
+      );
+
+      const workspacePath = path.join(
+        workspaceRoot,
+        "issues",
+        "666-lock-aware-abort-cleanup"
+      );
+      const wrapperRoot = path.join(root, "git-wrapper");
+      const wrapperPath = path.join(wrapperRoot, "git");
+      const startedPath = path.join(root, "worktree-started");
+      const termPath = path.join(root, "worktree-received-term");
+      const helperPidPath = path.join(root, "worktree-pid");
+      const interruptNextAddPath = path.join(root, "interrupt-next-add");
+      const { stdout: realGitOutput } = await execFileAsync("which", ["git"]);
+      const realGit = realGitOutput.trim();
+      await mkdir(wrapperRoot, { recursive: true });
+      await writeFile(interruptNextAddPath, "interrupt\n");
+      await writeFile(
+        wrapperPath,
+        `#!/bin/sh
+if [ -f "${interruptNextAddPath}" ] && [ "$3" = "worktree" ] && [ "$4" = "add" ] && [ "$5" = "${workspacePath}" ]; then
+  rm -f "${interruptNextAddPath}"
+  "${realGit}" "$@"
+  rm -f "${workspacePath}/README.md"
+  touch "${workspacePath}/partial-checkout"
+  "${realGit}" -C "$2" worktree lock --reason initializing "$5"
+  echo $$ > "${helperPidPath}"
+  trap 'touch "${termPath}"' TERM
+  touch "${startedPath}"
+  while :; do sleep 0.1; done
+fi
+exec "${realGit}" "$@"
+`
+      );
+      await chmod(wrapperPath, 0o755);
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+      const controller = new AbortController();
+
+      try {
+        const preparation = rejectionOf(
+          prepareIssueWorkspace({
+            issue: { number: 666, title: "Lock-aware abort cleanup" },
+            project,
+            signal: controller.signal
+          })
+        );
+        await waitForPath(startedPath);
+        const helperPid = Number.parseInt(
+          await readFile(helperPidPath, "utf8"),
+          10
+        );
+        controller.abort(new Error("run timeout"));
+
+        await expect(preparation).resolves.toMatchObject({
+          code: "ABORT_ERR",
+          name: "AbortError"
+        });
+        await expect(pathExists(termPath)).resolves.toBe(true);
+        expect(processExists(helperPid)).toBe(false);
+        await expect(pathExists(workspacePath)).resolves.toBe(false);
+        const registeredPaths = await worktreePaths(unrelated.cachePath);
+        expect(registeredPaths).not.toContain(workspacePath);
+        expect(registeredPaths).toContain(unrelated.workspacePath);
+
+        const recovered = await prepareIssueWorkspace({
+          issue: { number: 666, title: "Lock-aware abort cleanup" },
+          project
+        });
+        expect(recovered.reused).toBe(false);
+      } finally {
+        await killRecordedProcessGroup(helperPidPath);
+        if (previousPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = previousPath;
+        }
+      }
+    }
+  );
+
   it("surfaces incomplete cleanup of an aborted issue worktree", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);
@@ -376,10 +566,8 @@ if [ -f "${interruptNextAddPath}" ] && [ "$3" = "worktree" ] && [ "$4" = "add" ]
   touch "${startedPath}"
   sleep infinity
 fi
-if [ "$3" = "worktree" ]; then
-  if [ "$4" = "remove" ] || [ "$4" = "prune" ]; then
-    exit 1
-  fi
+if [ "$3" = "worktree" ] && [ "$4" = "remove" ]; then
+  exit 1
 fi
 exec "${realGit}" "$@"
 `
@@ -445,9 +633,8 @@ exec "${realGit}" "$@"
     await mkdir(wrapperRoot, { recursive: true });
     await writeFile(interruptNextAddPath, "interrupt\n");
     // `worktree remove` hangs instead of failing, so it must be terminated
-    // by GIT_CLEANUP_TIMEOUT_MS rather than blocking cleanup forever;
-    // `worktree prune` still fails immediately so the registration survives
-    // cleanup, matching the "incomplete cleanup" outcome asserted below.
+    // by GIT_CLEANUP_TIMEOUT_MS rather than blocking cleanup forever. Its
+    // registration survives, matching the incomplete outcome below.
     await writeFile(
       wrapperPath,
       `#!/bin/sh
@@ -459,9 +646,6 @@ if [ -f "${interruptNextAddPath}" ] && [ "$3" = "worktree" ] && [ "$4" = "add" ]
 fi
 if [ "$3" = "worktree" ] && [ "$4" = "remove" ]; then
   sleep infinity
-fi
-if [ "$3" = "worktree" ] && [ "$4" = "prune" ]; then
-  exit 1
 fi
 exec "${realGit}" "$@"
 `
@@ -536,9 +720,9 @@ exec "${realGit}" "$@"
     const realGit = realGitOutput.trim();
     await mkdir(wrapperRoot, { recursive: true });
     await writeFile(interruptNextAddPath, "interrupt\n");
-    // `worktree remove`/`prune` fail, so the aborted registration survives
-    // cleanup. `git worktree list` reports it under the resolved real path
-    // while the orchestrator only knows the symlinked path.
+    // `worktree remove` fails, so the aborted registration survives cleanup.
+    // `git worktree list` reports it under the resolved real path while the
+    // orchestrator only knows the symlinked path.
     await writeFile(
       wrapperPath,
       `#!/bin/sh
@@ -548,10 +732,8 @@ if [ -f "${interruptNextAddPath}" ] && [ "$3" = "worktree" ] && [ "$4" = "add" ]
   touch "${startedPath}"
   sleep infinity
 fi
-if [ "$3" = "worktree" ]; then
-  if [ "$4" = "remove" ] || [ "$4" = "prune" ]; then
-    exit 1
-  fi
+if [ "$3" = "worktree" ] && [ "$4" = "remove" ]; then
+  exit 1
 fi
 exec "${realGit}" "$@"
 `
@@ -950,6 +1132,33 @@ async function worktreePaths(cachePath: string): Promise<string[]> {
     .split(/\r?\n/)
     .filter((line) => line.startsWith("worktree "))
     .map((line) => line.slice("worktree ".length));
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function killRecordedProcessGroup(filePath: string): Promise<void> {
+  if (!(await pathExists(filePath))) {
+    return;
+  }
+  const pid = Number.parseInt(await readFile(filePath, "utf8"), 10);
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+      return;
+    }
+    throw error;
+  }
 }
 
 async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {

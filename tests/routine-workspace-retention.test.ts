@@ -159,6 +159,80 @@ describe("routine firing workspace retention", () => {
     }
   });
 
+  it("reclaims only the candidate registration when another worktree directory is missing", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const stateRoot = path.join(root, "state");
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const project = alphaProject({ remotePath, workspaceRoot });
+    const candidate = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "fire-retention-candidate",
+      kind: "report",
+      project,
+      routineName: "daily-report"
+    });
+    const unrelated = await prepareRoutineWorkspace({
+      configDir: root,
+      firingId: "fire-unrelated-missing",
+      kind: "report",
+      project,
+      routineName: "unrelated-report"
+    });
+    await rm(unrelated.workspacePath, { force: true, recursive: true });
+    expect(await worktreePaths(candidate.cachePath)).toContain(
+      unrelated.workspacePath
+    );
+
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          projectName: "alpha",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-retention-candidate",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({
+        id: "fire-retention-candidate",
+        state: "succeeded",
+        workspacePath: candidate.workspacePath
+      });
+
+      const report = await pruneRoutineWorkspaces({
+        now: new Date("2100-01-01T00:00:00.000Z"),
+        policy: {
+          cancelledDays: 0,
+          enabled: true,
+          failedDays: 0,
+          succeededDays: 0
+        },
+        runStore: store
+      });
+
+      expect(report.failures).toEqual([]);
+      expect(report.pruned.map((entry) => entry.firingId)).toEqual([
+        "fire-retention-candidate"
+      ]);
+      const registeredPaths = await worktreePaths(candidate.cachePath);
+      expect(registeredPaths).not.toContain(candidate.workspacePath);
+      expect(registeredPaths).toContain(unrelated.workspacePath);
+    } finally {
+      store.close();
+    }
+  });
+
   it("preserves an unrelated branch whose name collides with a report firing", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

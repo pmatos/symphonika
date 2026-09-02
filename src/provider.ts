@@ -7,6 +7,10 @@ type NormalizedProviderEventType =
   | "session_started"
   | "message"
   | "tool_call"
+  // The provider's current operator-facing checklist. Plan content belongs in
+  // the normalized log because it is a compact, provider-neutral progress
+  // summary rather than bulk transcript data (ADR 0096).
+  | "plan_updated"
   // A provider-neutral boundary marker for model reasoning. Providers expose
   // summaries, never raw chain-of-thought content, through this event.
   | "thinking"

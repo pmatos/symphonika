@@ -113,7 +113,6 @@ async function reclaimRegisteredWorktree(
     if (!workspaceExists && !(await isUsableRepositoryCache(cachePath))) {
       return;
     }
-    await git(["-C", cachePath, "worktree", "prune"]);
     const registered = await listRegisteredWorktrees(cachePath);
     if (
       workspaceExists ||
@@ -124,7 +123,6 @@ async function reclaimRegisteredWorktree(
     await deleteRoutineFiringBranch(cachePath, firing);
     return;
   }
-  await git(["-C", cachePath, "worktree", "prune"]);
   await deleteRoutineFiringBranch(cachePath, firing);
 }
 

@@ -1020,9 +1020,7 @@ const SYSTEMD_MEMORY_RELATIVE_PATTERNS = [
 // suffix and an explicit "B" both mean bytes but rank as two DIFFERENT,
 // adjacent steps rather than being collapsed into one: systemd accepts
 // "1K1B1" (K, then explicit B, then a final bare/omitted term), so the
-// omitted form must rank strictly below "B", not equal to it — see the
-// rank computation in isDefinitelyInvalidSystemdMemoryValue, where a
-// missing suffix gets rank 0 and "B" gets indexOf("B") + 1 = 1.
+// omitted form must rank strictly below "B", not equal to it.
 const SYSTEMD_MEMORY_UNIT_ORDER = "BKMGTPE";
 // config_parse_memory_limit() reserves UINT64_MAX (2^64 - 1) as its infinity
 // sentinel and rejects a parsed byte total at or above it. That catches both
@@ -1069,9 +1067,7 @@ const SYSTEMD_MEMORY_LIMIT_INFINITY = 2n ** 64n - 1n;
 // raw fractional contributions first — otherwise a compound like
 // "0.6B0.6", where each term is individually a sub-byte fraction systemd
 // discards to zero, would sum to a non-zero 1.2 here and be wrongly
-// accepted as effective when systemd rejects it as a zero-byte limit. The
-// "+" sign on any term must be immediately followed by a digit — systemd
-// accepts "64G +512M" but rejects "+ 64G" and "64G + 512M".
+// accepted as effective when systemd rejects it as a zero-byte limit.
 function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
   for (const relativePattern of SYSTEMD_MEMORY_RELATIVE_PATTERNS) {
     const relative = relativePattern.pattern.exec(value);

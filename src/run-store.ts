@@ -2098,6 +2098,42 @@ export class RunStore {
     return row?.count ?? 0;
   }
 
+  latestRunSuppressesFreshDispatch(input: {
+    issueNumber: number;
+    projectName: string;
+    repository: { owner: string; repo: string };
+  }): boolean {
+    // `sym:*` labels are mutable tracker bookkeeping, so clearing them cannot
+    // erase the durable verdict from the newest Run. Scope the lookup by the
+    // Issue's repository identity just like restart resumption: a Project may
+    // be retargeted while retaining same-numbered historical Runs. Rows whose
+    // legacy origin is unknown conservatively belong to the current history.
+    // See ADR 0058's issue #683 amendment.
+    const row = this.database
+      .prepare(
+        [
+          "select state, terminal_reason from runs",
+          "where project_name = @projectName",
+          "and issue_number = @issueNumber",
+          "and (issue_owner is null or issue_repo is null or (",
+          "  lower(issue_owner) = lower(@owner)",
+          "  and lower(issue_repo) = lower(@repo)",
+          "))",
+          "order by created_at desc, id desc",
+          "limit 1"
+        ].join(" ")
+      )
+      .get({
+        issueNumber: input.issueNumber,
+        owner: input.repository.owner,
+        projectName: input.projectName,
+        repo: input.repository.repo
+      }) as { state: RunState; terminal_reason: string | null } | undefined;
+    return (
+      row?.state === "blocked" && row.terminal_reason === "no_workspace_changes"
+    );
+  }
+
   syncProjectStates(projects: SyncProjectStateInput[]): void {
     const now = timestamp();
     const normalized = projects.map((project) => ({

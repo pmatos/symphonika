@@ -53,13 +53,13 @@ is already a clean, race-free signal computed at classification time.
 
 ## Consequences
 
-- **Eligibility is unchanged in shape.** `sym:blocked` is a required operational label exactly like
-  `sym:failed`: present, it blocks re-dispatch (`evaluateProjectEligibility` in
-  `src/issue-polling.ts` iterates `REQUIRED_OPERATIONAL_LABELS` uniformly); `init-project` /
-  `doctor` provision it the same way (`OPERATIONAL_LABEL_DESCRIPTIONS` in `src/doctor.ts`). Whatever
-  redispatch behavior an operator observed for `failed` issues today, they now observe for `blocked`
-  issues under the new label — this ADR only renames which label/state represents the outcome, not
-  when re-dispatch can happen.
+- **Eligibility was initially unchanged in shape (superseded for `no_workspace_changes` by issue
+  #683 below).** `sym:blocked` is a required operational label exactly like `sym:failed`: present,
+  it blocks re-dispatch (`evaluateProjectEligibility` in `src/issue-polling.ts` iterates
+  `REQUIRED_OPERATIONAL_LABELS` uniformly); `init-project` / `doctor` provision it the same way
+  (`OPERATIONAL_LABEL_DESCRIPTIONS` in `src/doctor.ts`). The original decision only renamed which
+  label/state represented the outcome. Issue #683 later made one blocked reason durable beyond the
+  lifetime of that label.
 - **Closed-issue cleanup** removes `sym:blocked` alongside `sym:failed` and `sym:claimed`, so a
   blocked issue that gets closed doesn't retain a stale label.
 - **UI**: `stateFamily()` gains a `blocked` family with its own pill color (violet, distinct from
@@ -72,10 +72,11 @@ is already a clean, race-free signal computed at classification time.
   and their own `no_workspace_changes` handling (`SPEC.md` §8). They are a separate concept from
   issue-dispatched Runs and are untouched here; a future ADR can decide whether the same split
   applies there.
-- **Not in scope**: this ADR does not change what counts as eligible, does not auto-close or
-  auto-relabel GitHub issues based on agent verdicts, and does not touch the pre-existing
-  `input_required` RunState (declared in the `RunState` union but never actually written by any
-  code path today — a separate, older gap, out of scope for this issue).
+- **Not in scope (superseded in part by issue #683 below)**: the original decision did not change
+  what counts as eligible. It still does not auto-close or auto-relabel GitHub issues based on agent
+  verdicts, and it does not touch the pre-existing `input_required` RunState (declared in the
+  `RunState` union but never actually written by any code path today — a separate, older gap, out of
+  scope for this issue).
 
 **Amended by issue #635.** A deterministic `merge_pr` refusal is a third blocked outcome. It uses
 the actionable terminal-reason prefix `merge_pr_refused:` and writes `RunState = blocked` plus
@@ -87,6 +88,21 @@ reached only after a bounded, counted retry — not on the first refusal — and
 follow-up loop's own merge attempt is gated on the same `merge_pr_refused:` prefix so it cannot
 undo the terminalization by re-merging. See ADR 0048 for the refusal/defer boundary and both
 mechanisms.
+
+**Amended by issue #683.** A newest Run whose state is `blocked` and whose terminal reason is
+`no_workspace_changes` now suppresses later fresh dispatch for the same `(Project, repository,
+Issue)`, even after an operator or triage pass clears every `sym:*` label while leaving the Required
+Eligibility Labels in place. The original decision relied on `sym:blocked` / `sym:claimed` as the
+only redispatch guard; because those labels are mutable bookkeeping, clearing them erased the
+verdict and created a re-claim/re-block loop for already-resolved Issues.
+
+The guard reads durable classified Run evidence instead of parsing free-form Issue comments. It is
+repository-scoped so a Project retarget cannot let a same-numbered Issue inherit another
+repository's outcome; legacy Runs with unknown origin conservatively match. It changes fresh
+dispatch only. Retries, label-controlled Continuations, raw-FSM State Advances, waiting rows, and
+PR Follow-up keep their existing eligibility rules. Symphonika neither closes the Issue nor removes
+repository-owned labels such as `agent-ready`; those actions remain with the coding agent and
+repository workflow.
 
 ## Numbering
 

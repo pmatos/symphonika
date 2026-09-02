@@ -114,6 +114,8 @@ An issue is eligible when all are true:
 - it has none of the configured `labels_none` labels
 - it does not have blocking operational labels
 - it is not already running, claimed, failed, blocked, or stale according to the orchestrator
+- its newest Run for the same `(Project, repository, Issue)` did not terminate as `blocked` with
+  `terminal_reason = "no_workspace_changes"`
 - it has no unresolved GitHub-native issue dependency (`blockedBy`): every blocker is `CLOSED`, and
   the dependency fetch was not truncated — see ADR-0081
 
@@ -1454,6 +1456,17 @@ Default labels:
 
 Each Project may configure these.
 
+Fresh dispatch also consults durable Run evidence after label-based tracker filtering. When the
+newest Run for the same `(Project, repository, Issue)` is `blocked` with `terminal_reason =
+"no_workspace_changes"`, the Issue is not claimed again even if an operator clears its `sym:*`
+labels while leaving every Required Eligibility Label in place. This guard uses the classified Run
+outcome rather than parsing free-form issue comments, and it does not remove repository-owned
+labels or close the Issue. It applies only to fresh dispatch: retries, label-controlled
+Continuations, raw-FSM State Advances, waiting rows, and PR Follow-up retain their existing
+lifecycle rules. Repository identity is compared case-insensitively; a legacy Run whose origin is
+unknown is treated conservatively as belonging to the current Issue history. See ADR 0058's issue
+#683 amendment.
+
 ### 9.3 Operational Label Writes
 
 On claim:
@@ -1812,7 +1825,10 @@ On provider exit code 0:
    `refs/remotes/origin/<configured-base-branch>..HEAD`.
 2. If the branch has zero commits ahead of base, mark the run `blocked` with deterministic terminal
    reason `no_workspace_changes` and add `sym:blocked`. This covers the agent correctly declining
-   the task (e.g. the target was already superseded) — exit 0, zero commits, nothing broken.
+   the task (e.g. the target was already superseded) — exit 0, zero commits, nothing broken. The
+   durable outcome suppresses a later fresh claim of the same `(Project, repository, Issue)` even
+   if its Operational Labels are cleared; Symphonika does not infer the same verdict from comment
+   text or take ownership of the Issue's workflow labels.
 3. If Workspace inspection fails, mark the run `failed` with deterministic terminal reason
    `workspace_inspection_failed` and add `sym:failed`. This is a real failure (the `git` inspection
    command itself errored), unlike case 2.

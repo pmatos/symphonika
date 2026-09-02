@@ -351,16 +351,15 @@ describe("service config editor (#307 part 3, ADR 0076)", () => {
 
   it("confirm validates relative paths from a symlinked config's logical directory", async () => {
     const test = await setup();
-    const targetDir = path.join(test.stateRoot, "shared");
-    const targetConfigPath = path.join(targetDir, "symphonika.yml");
-    await mkdir(targetDir);
-    await rename(test.configPath, targetConfigPath);
-    await symlink(targetConfigPath, test.configPath);
-
     try {
+      const targetDir = path.join(test.stateRoot, "shared");
+      const targetConfigPath = path.join(targetDir, "symphonika.yml");
+      await mkdir(targetDir);
+      await rename(test.configPath, targetConfigPath);
+      await symlink(targetConfigPath, test.configPath);
+
       const app = appFor(test, {
-        resolveWritePath: (candidatePath) => realpath(candidatePath),
-        triggerReload: () => Promise.resolve({ errors: [], ok: true })
+        resolveWritePath: (candidatePath) => realpath(candidatePath)
       });
       const editedContent = validConfig().replace(
         "interval_ms: 1000",

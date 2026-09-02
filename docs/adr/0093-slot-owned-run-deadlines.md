@@ -51,6 +51,17 @@ The rollback write is itself bounded under the same policy as the claim write it
 runs while `dispatchMutex` is held, so an unbounded rollback would stall every later dispatch just
 as surely as an unbounded claim write would.
 
+Leaving the label alone does not mean leaving the Run row `queued`. `claimAndPersistRun` already
+knows, from its own `runCreated` bookkeeping, whether this call is the one that created the row, so
+it reconciles the post-creation failure itself — still inside the `dispatchMutex` hold `runFreshLifecycle`
+acquired around the whole call — before rethrowing to its caller. It unregisters any partially
+reserved slot and sends the error through the same classification, label, notification, and retry
+policy used by a pre-provider attempt failure. A retryable transient failure therefore becomes
+scheduled work against the same Run row; an exhausted or deterministic failure becomes terminal.
+This determination deliberately stays local to `claimAndPersistRun`'s own `runCreated` flag rather
+than a fresh `getRun` lookup, because `createRun` itself can fail on an id collision with a
+pre-existing row that the failed claim does not own.
+
 Before provider attachment, the in-flight registry binds cancellation to the deadline's abort
 handler instead of a no-op. The same signal is threaded through issue Workspace preparation and
 every Git command it starts. On POSIX, the existing process-group teardown sends SIGTERM and then

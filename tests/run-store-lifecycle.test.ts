@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { databasePath, openRunStore } from "../src/run-store.js";
 
@@ -380,6 +380,52 @@ describe("run-store lifecycle CRUD", () => {
 
       const continuation = store.getRun("cont-no-fsm");
       expect(continuation?.currentStateId).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rolls back the row when state inheritance throws mid-createContinuationRun", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const parentId = seedRun(store, { id: "parent-boom", issueNumber: 13 });
+      store.setRunCurrentState(parentId, "implementing");
+
+      const setRunCurrentStateSpy = vi
+        .spyOn(store, "setRunCurrentState")
+        .mockImplementationOnce(() => {
+          throw new Error("boom: simulated post-insert failure");
+        });
+
+      // claimAndPersistRun's runCreated bookkeeping depends on
+      // createContinuationRun returning without throwing meaning a durable
+      // row now exists — a throw here must roll back the row insert too, not
+      // just skip the state inheritance. See ADR 0093.
+      expect(() =>
+        store.createContinuationRun({
+          id: "cont-boom",
+          issue: {
+            body: "",
+            created_at: "2025-01-01T00:00:00Z",
+            id: 2013,
+            labels: ["agent-ready"],
+            number: 13,
+            priority: 1,
+            state: "open",
+            title: "fixture",
+            updated_at: "2025-01-01T00:00:00Z",
+            url: "https://example/13"
+          },
+          parentRunId: parentId,
+          projectName: "symphonika",
+          providerCommand: "fake",
+          providerName: "codex"
+        })
+      ).toThrow("boom: simulated post-insert failure");
+
+      setRunCurrentStateSpy.mockRestore();
+      expect(store.getRun("cont-boom")).toBeUndefined();
     } finally {
       store.close();
     }

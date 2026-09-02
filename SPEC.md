@@ -1779,6 +1779,15 @@ transient failed attempt remains deferred while a retry is scheduled against the
 becomes pending only when the retry budget is exhausted. Notification state is delivery evidence,
 not Run lifecycle state; see §5.5 and ADR 0071.
 
+If fresh claim persistence fails after the Run row is created but before `runAttemptLifecycle`
+assumes ownership, the controller reconciles the row under the dispatch mutex instead of leaving it
+`queued` without a live slot. It releases any partial slot and routes the error through the normal
+failure policy: a transient failure registers a retry against the same Run row, while an exhausted
+or deterministic failure becomes terminal with notification and operational-label evidence. The
+successful `sym:claimed` write remains in place because the Run or its scheduled retry still owns
+the Issue. Failures before this call creates its Run row retain the pre-Run rollback behavior; the
+controller must not infer creation merely from another row already existing under the same Run id.
+
 ### 12.1 Success
 
 On provider exit code 0:

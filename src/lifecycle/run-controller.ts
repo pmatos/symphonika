@@ -2991,11 +2991,18 @@ export class RunController {
     // streaming runs AFTER mutex release. CapBreachedError and
     // IssueReservedError propagate to the caller, which decides whether to
     // silently no-op (fresh dispatch) or reschedule (continuation / state
-    // advance / PR followup). See ADR 0052 / ADR 0053.
+    // advance / PR followup). See ADR 0052 / ADR 0053. A failure after
+    // claimAndPersistRun's own createRun call reconciles the orphaned Run row
+    // (label writes and scheduleNext included) before rethrowing, so that
+    // reconciliation also runs inside this same mutex hold. See ADR 0093.
     let deadline: RunSlotDeadline;
     await this.dispatchMutex.acquire();
     try {
-      deadline = await this.claimAndPersistRun(input);
+      deadline = await this.claimAndPersistRun({
+        ...input,
+        onPostCreateClaimFailure: (error) =>
+          this.reconcilePostCreateClaimFailure({ ...input, error })
+      });
     } finally {
       this.dispatchMutex.release();
     }
@@ -3020,10 +3027,132 @@ export class RunController {
     });
   }
 
+  private async reconcilePostCreateClaimFailure(input: {
+    attemptNumber: number;
+    error: unknown;
+    extraInstructions?: string;
+    isContinuation: boolean;
+    issue: IssueSnapshot;
+    project: DispatchProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    repository: GitHubIssueRepositoryInput;
+    respectsIssueLabels?: boolean;
+    runId: string;
+  }): Promise<void> {
+    // claimAndPersistRun owns rollback before createRun and shutdown
+    // cancellation after it. This caller owns the remaining case: a Run row
+    // exists, but claimAndPersistRun failed before handing a live slot to
+    // runAttemptLifecycle. Keep the whole repair under dispatchMutex so stale
+    // detection cannot observe a queued row between slot cleanup and its
+    // terminal state.
+    this.activeRuns.unregister(input.runId);
+
+    const terminal = await classifyFailure({
+      error: input.error,
+      events: [],
+      cancelRequested: false,
+      redactSecrets: this.redactionInventory(input.repository.token)
+    });
+    const state = mapOutcomeToRunState(terminal);
+    const willRetry = this.isRetryableTransientFailure(terminal, input.runId);
+    this.runStore.recordTerminalReason(
+      input.runId,
+      terminal.reason,
+      terminal.classification
+    );
+    this.runStore.updateRunState(input.runId, state);
+    this.markNotificationPendingIfNeeded(input.runId, willRetry);
+    await this.claimLabels.applyTerminal({
+      fsmContinuing: false,
+      issueNumber: input.issue.number,
+      outcome: terminal,
+      repository: input.repository,
+      willRetry
+    });
+    try {
+      await this.scheduleNext({
+        ...(input.extraInstructions === undefined
+          ? {}
+          : { extraInstructions: input.extraInstructions }),
+        issue: input.issue,
+        outcome: terminal,
+        project: input.project,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName,
+        repository: input.repository,
+        ...(input.respectsIssueLabels === undefined
+          ? {}
+          : { respectsIssueLabels: input.respectsIssueLabels }),
+        runId: input.runId,
+        runtimeAttemptNumber: input.attemptNumber,
+        willRetry
+      });
+    } catch (scheduleError) {
+      this.logger?.error(
+        { err: scheduleError, runId: input.runId },
+        "symphonika scheduleNext failed"
+      );
+    }
+    this.logger?.warn(
+      {
+        classification: terminal.classification,
+        issueNumber: input.issue.number,
+        project: input.project.name,
+        runId: input.runId,
+        state,
+        terminalReason: terminal.reason,
+        willRetry
+      },
+      "symphonika reconciled Run after claim persistence failed"
+    );
+  }
+
+  // Shared retry-eligibility check: a failed+transient outcome still has
+  // budget left in the retry cap. Used at every point that decides whether a
+  // Run row is reused for a retry or finalized as terminal.
+  private isRetryableTransientFailure(
+    outcome: ClassifiedTerminal,
+    runId: string
+  ): boolean {
+    return (
+      outcome.kind === "failed" &&
+      outcome.classification === "transient" &&
+      this.runStore.runRetryCount(runId) < this.lifecyclePolicy.retry.cap
+    );
+  }
+
+  // Shared by reconcilePostCreateClaimFailure and runAttemptLifecycle's
+  // terminal handling: once the retry budget is spent, this is the point
+  // that makes the attempt visible to the durable notification digest (ADR
+  // 0071); a still-retryable run defers, since the same Run row is reused.
+  private markNotificationPendingIfNeeded(
+    runId: string,
+    willRetry: boolean
+  ): void {
+    if (willRetry) {
+      return;
+    }
+    try {
+      this.runStore.markRunNotificationPending(runId);
+    } catch (error) {
+      this.logger?.warn(
+        { err: error, runId },
+        "symphonika issue Run notification evidence write failed"
+      );
+    }
+  }
+
   private async claimAndPersistRun(input: {
     claimGuard?: () => boolean;
     isContinuation: boolean;
     issue: IssueSnapshot;
+    // Invoked (still under dispatchMutex) when this call's own createRun
+    // succeeded but a later step in the same claim failed. The caller
+    // supplies it because reconciliation needs attemptNumber/extraInstructions
+    // and the DispatchProjectConfig-narrowed project, none of which
+    // claimAndPersistRun itself reads — see ADR 0093.
+    onPostCreateClaimFailure: (error: unknown) => Promise<void>;
     parentRunId: string | null;
     project: RunControllerProjectConfig;
     providerCommand: string;
@@ -3299,6 +3428,21 @@ export class RunController {
         }
       } finally {
         rollbackDeadline.clear();
+      }
+      if (runCreated && !(error instanceof RegistryShutdownError)) {
+        // Guarded so a throw from reconciliation itself (e.g. a busy/corrupt
+        // sqlite write right after a successful claim) can never replace the
+        // original error below — losing it would defeat the caller's
+        // `instanceof CapBreachedError | FileOverlapDetectedError | ...`
+        // classification and leave this exact Run row un-reconciled, silently.
+        try {
+          await input.onPostCreateClaimFailure(error);
+        } catch (reconcileError) {
+          this.logger?.error(
+            { err: reconcileError, runId: input.runId },
+            "symphonika post-create claim reconciliation failed"
+          );
+        }
       }
       throw error;
     } finally {
@@ -3758,11 +3902,10 @@ export class RunController {
         // still evaluate terminal workflow transitions below, because a raw FSM
         // may intentionally map provider_success=false to terminal blocked/failure,
         // but non-terminal advances are deferred until the retry budget is spent.
-        const deferRetryableTransientAdvance =
-          terminal.kind === "failed" &&
-          terminal.classification === "transient" &&
-          this.runStore.runRetryCount(input.runId) <
-            this.lifecyclePolicy.retry.cap;
+        const deferRetryableTransientAdvance = this.isRetryableTransientFailure(
+          terminal,
+          input.runId
+        );
         // loadedWorkflow can be undefined if this.loadWorkflow itself threw
         // before currentState was set; in that case we run the bare
         // classifyFailure outcome without an FSM-driven overlay.
@@ -3813,25 +3956,15 @@ export class RunController {
         try {
           this.runStore.updateRunState(input.runId, outcomeState);
 
-          const willRetry =
-            effectiveOutcome.kind === "failed" &&
-            effectiveOutcome.classification === "transient" &&
-            this.runStore.runRetryCount(input.runId) <
-              this.lifecyclePolicy.retry.cap;
-          if (!willRetry) {
-            // updateRunState deliberately defers transient failures because the
-            // same Run row is reused by retries. Once the budget is exhausted,
-            // this is the point that makes the genuinely-terminal attempt
-            // visible to the durable notification digest (ADR 0071).
-            try {
-              this.runStore.markRunNotificationPending(input.runId);
-            } catch (error) {
-              this.logger?.warn(
-                { err: error, runId: input.runId },
-                "symphonika issue Run notification evidence write failed"
-              );
-            }
-          }
+          const willRetry = this.isRetryableTransientFailure(
+            effectiveOutcome,
+            input.runId
+          );
+          // updateRunState deliberately defers transient failures because the
+          // same Run row is reused by retries. Once the budget is exhausted,
+          // this is the point that makes the genuinely-terminal attempt
+          // visible to the durable notification digest (ADR 0071).
+          this.markNotificationPendingIfNeeded(input.runId, willRetry);
 
           this.logger?.info(
             {

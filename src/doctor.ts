@@ -980,10 +980,11 @@ function winningByteSizeAssignment(
   return undefined;
 }
 
-const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
+const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)[ \t\n\r]*([KMGT]?)$/i;
 
 // One token of a systemd compound memory value: a magnitude, optional
-// whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both tolerate "32 G"),
+// ASCII whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both tolerate
+// "32 G" but not JavaScript's broader Unicode `\s` set),
 // then an optional single-letter K/M/G/T/P/E suffix or an explicit "B"
 // (bytes) marker, captured so isDefinitelyInvalidSystemdMemoryValue can
 // check systemd's descending-unit-order rule (a bare magnitude with no
@@ -1002,7 +1003,7 @@ const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
 // single typo'd local MemoryMax= drop-in hang the doctor check
 // indefinitely.
 const SYSTEMD_MEMORY_VALUE_TERM_SOURCE =
-  "\\+?(\\d+(?:\\.\\d*)?)\\s*([KMGTPE]|B)?";
+  "\\+?(\\d+(?:\\.\\d*)?)[ \\t\\n\\r]*([KMGTPE]|B)?";
 // A leading "+" is meaningful for relative values too — systemd's
 // parse_permyriad() goes through the same strtol()-based sign handling as
 // parse_size(). The accepted precision depends on the symbol: hundredths for
@@ -1084,7 +1085,7 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
   const term = new RegExp(SYSTEMD_MEMORY_VALUE_TERM_SOURCE, "y");
   let offset = 0;
   while (offset < value.length) {
-    while (/\s/.test(value[offset] ?? "")) {
+    while (/[ \t\n\r]/.test(value[offset] ?? "")) {
       offset += 1;
     }
     if (offset === value.length) {
@@ -1111,6 +1112,9 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
     );
     const integerMagnitude = BigInt(integerDigits);
     const fractionalMagnitude = BigInt(fractionalDigits || "0");
+    // parse_size() reads the fractional digit run itself with strtoull()
+    // before scaling it into bytes. A numerator above UINT64_MAX therefore
+    // fails with ERANGE even when the represented fraction would be small.
     if (fractionalMagnitude > SYSTEMD_MEMORY_LIMIT_INFINITY) {
       return true;
     }

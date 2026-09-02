@@ -2038,11 +2038,19 @@ const FRESH_DISPATCH_SUPPRESSED_REASON =
 // fresh dispatch (RunStore.latestRunSuppressesFreshDispatch) as filtered
 // rather than dropping them, so fetched == candidate + filtered stays true
 // and the issue remains visible in /issues triage search with a reason --
-// see #691 review. Keeps the per-project candidateIssues/filteredIssues
-// counts in sync with the reclassified arrays -- mutates `status` in place
-// so every caller sharing the same IssuePollStatus object (issuePollStatus
-// itself, or the raw nextStatus fed to persistProjectPollState) reflects
-// the same suppressed set.
+// see #691 review. Adjusts each report's candidateIssues/filteredIssues
+// counts by the number of ITS OWN candidates reclassified, rather than
+// recomputing from status.candidateIssues -- for a name-shadowed
+// declaration (two Project entries sharing a name, different repository;
+// see the "last declaration wins" comment on selectedIssueProjectKeysByName
+// above), mergeIssuePollStatus's selectedCandidate filter already strips
+// the shadowed repository's own candidates out of the merged array before
+// this runs, so recomputing its count from that array would wrongly reset
+// it to zero instead of leaving its own honestly-polled count untouched
+// (see #691 review). Mutates `status` in place so every caller sharing the
+// same IssuePollStatus object (issuePollStatus itself, or the raw
+// nextStatus fed to persistProjectPollState) reflects the same suppressed
+// set.
 function suppressResolvedFreshDispatchCandidates(
   status: import("./issue-polling.js").IssuePollStatus,
   effectiveProjectsByName: ReadonlyMap<string, RunControllerProjectConfig>,
@@ -2060,12 +2068,14 @@ function suppressResolvedFreshDispatchCandidates(
 
   status.candidateIssues = surviving;
   status.filteredIssues = [...status.filteredIssues, ...suppressed];
-  status.projects = status.projects.map((project) => ({
-    ...project,
-    candidateIssues: matchingProjectCount(surviving, project),
-    filteredIssues:
-      (project.filteredIssues ?? 0) + matchingProjectCount(suppressed, project)
-  }));
+  status.projects = status.projects.map((project) => {
+    const suppressedForProject = matchingProjectCount(suppressed, project);
+    return {
+      ...project,
+      candidateIssues: (project.candidateIssues ?? 0) - suppressedForProject,
+      filteredIssues: (project.filteredIssues ?? 0) + suppressedForProject
+    };
+  });
 
   function isSuppressedFreshDispatchCandidate(candidate: {
     issue: { number: number };

@@ -1,4 +1,11 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -544,6 +551,103 @@ describe("startDaemon", () => {
         expect.stringContaining("no_workspace_changes")
       ]);
       verifyStore.close();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("keeps a name-shadowed project's own candidate count intact (#691 review)", async () => {
+    const cwd = await makeTempRoot();
+    await writeMinimalProject(cwd);
+    // Second declaration reuses the "symphonika" name with a different
+    // repository. selectedIssueProjectKeysByName's "last declaration wins"
+    // rule makes this one (symphonika-other) the winner, so the first
+    // declaration (repo symphonika, from writeMinimalProject) is shadowed:
+    // its own candidates never survive mergeIssuePollStatus's
+    // selectedCandidate filter into the merged candidateIssues array, even
+    // though its own poll still finds them.
+    await appendFile(
+      path.join(cwd, "symphonika.yml"),
+      [
+        "  - name: symphonika",
+        "    disabled: false",
+        "    weight: 1",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika-other",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked", "needs-human"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/symphonika-other",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika-other.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: () => Promise.resolve(),
+      listOpenIssues: (input) =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "",
+            id: input.repo === "symphonika" ? 1 : 2,
+            labels: ["agent-ready"],
+            number: input.repo === "symphonika" ? 1 : 2,
+            state: "open",
+            title: "issue",
+            updated_at: "",
+            url: ""
+          }
+        ]),
+      removeLabelsFromIssue: () => Promise.resolve()
+    };
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const pollNowResult = (await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      }).then((r) => r.json())) as {
+        issuePolling: {
+          projects: Array<{
+            name: string;
+            repository: { owner: string; repo: string };
+            candidateIssues?: number;
+          }>;
+        };
+      };
+      // Regression guard (#691 review): recomputing each project's
+      // candidateIssues count from the globally merged (and
+      // selectedCandidate-filtered) candidateIssues array wrongly reset the
+      // shadowed declaration's own honestly-polled count to zero, even
+      // though nothing here is suppressed.
+      const reports = pollNowResult.issuePolling.projects.filter(
+        (project) => project.name === "symphonika"
+      );
+      expect(reports).toHaveLength(2);
+      for (const project of reports) {
+        expect(project.candidateIssues).toBe(1);
+      }
     } finally {
       await daemon.stop();
     }

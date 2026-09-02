@@ -982,12 +982,14 @@ function winningByteSizeAssignment(
 
 const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
 
-// One token of a systemd compound memory value: an optionally signed
-// magnitude, optional whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both
-// tolerate "32 G"), then an optional single-letter K/M/G/T/P/E suffix or an
-// explicit "B" (bytes) marker. The sticky match lets adjacent tokens such as
-// "64G512M" consume the complete value while rejecting trailing garbage.
-const SYSTEMD_MEMORY_VALUE_TERM = /\+?(\d+(?:\.\d+)?)\s*(?:[KMGTPE]|B)?/iy;
+// One token of a systemd compound memory value: a magnitude, optional
+// whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both tolerate "32 G"),
+// then an optional single-letter K/M/G/T/P/E suffix or an explicit "B"
+// (bytes) marker. A leading "+" sign applies once to the whole assignment
+// (e.g. "+64G", "+64G512M"), not per term, so it is stripped before
+// tokenizing rather than matched here — "64G+512M" must still fail.
+const SYSTEMD_MEMORY_VALUE_TERM_SOURCE =
+  "(\\d+(?:\\.\\d+)?)\\s*(?:[KMGTPE]|B)?";
 const SYSTEMD_MEMORY_PERCENTAGE = /^(\d+(?:\.\d+)?)%$/;
 
 // config_parse_memory_limit() drops an assignment two different ways, both
@@ -1019,7 +1021,8 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
     return !(percent > 0 && percent <= 100);
   }
   const magnitudes: number[] = [];
-  let offset = 0;
+  const term = new RegExp(SYSTEMD_MEMORY_VALUE_TERM_SOURCE, "iy");
+  let offset = value.startsWith("+") ? 1 : 0;
   while (offset < value.length) {
     while (/\s/.test(value[offset] ?? "")) {
       offset += 1;
@@ -1027,13 +1030,13 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
     if (offset === value.length) {
       break;
     }
-    SYSTEMD_MEMORY_VALUE_TERM.lastIndex = offset;
-    const match = SYSTEMD_MEMORY_VALUE_TERM.exec(value);
+    term.lastIndex = offset;
+    const match = term.exec(value);
     if (match === null) {
       return true;
     }
     magnitudes.push(Number(match[1]));
-    offset = SYSTEMD_MEMORY_VALUE_TERM.lastIndex;
+    offset = term.lastIndex;
   }
   return magnitudes.every((magnitude) => magnitude === 0);
 }

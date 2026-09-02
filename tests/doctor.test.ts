@@ -2038,6 +2038,10 @@ describe("doctor", () => {
       "200%",
       "0B",
       "0 0",
+      "0G0M",
+      "+0G",
+      "64G+512M",
+      "64+4G",
       "Infinity",
       "INFINITY"
     ])(

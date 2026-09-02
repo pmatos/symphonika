@@ -2064,6 +2064,8 @@ describe("doctor", () => {
       "-5000\u2031",
       "64\vG",
       "64\fG",
+      "64G\v",
+      "64G\f",
       "1G500m",
       "Infinity",
       "INFINITY"
@@ -2190,7 +2192,9 @@ describe("doctor", () => {
       "1K1B1",
       "+1G 500M",
       "64G\v512M",
-      "64G\f512M"
+      "64G\f512M",
+      "\v50%",
+      "\f50%"
     ])(
       "does not fall back past a MemoryMax= form it cannot parse but systemd accepts (%s)",
       async (unparseableButValid) => {

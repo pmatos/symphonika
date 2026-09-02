@@ -1061,22 +1061,34 @@ const SYSTEMD_MEMORY_WHITESPACE_PATTERN = new RegExp(
 // those with `dot[1] - '0'`, never through safe_atoi().
 const SYSTEMD_RELATIVE_INTEGER_SOURCE =
   "0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|0[0-7]*|[1-9]\\d*";
+// safe_atoi() applies its own narrow pre-skip (`s += strspn(s, WHITESPACE)`)
+// before calling strtol() — but exactly like parse_size()'s strtoull()
+// call, strtol() has its own independent, C-standard isspace()-based skip
+// that silently covers what the narrow pre-skip misses, so a leading form
+// feed or vertical tab before a relative value is tolerated too. Confirmed
+// on systemd 261: "\v50%" and "\f50%" both resolve to 50%. There is no
+// equivalent trailing tolerance — parse_parts_value_whole() requires the
+// symbol ("%"/"‰"/"‱") to be the literal last character via endswith(),
+// so anything at all after it, whitespace included, fails outright; the
+// trailing "$" anchors below already enforce that correctly.
 const SYSTEMD_MEMORY_RELATIVE_PATTERNS = [
   {
     maximum: 100,
     pattern: new RegExp(
-      `^([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})(?:\\.(\\d{1,2}))?%$`
+      `^${SYSTEMD_TERM_SEPARATOR_SOURCE}*([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})(?:\\.(\\d{1,2}))?%$`
     )
   },
   {
     maximum: 1_000,
     pattern: new RegExp(
-      `^([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})(?:\\.(\\d))?‰$`
+      `^${SYSTEMD_TERM_SEPARATOR_SOURCE}*([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})(?:\\.(\\d))?‰$`
     )
   },
   {
     maximum: 10_000,
-    pattern: new RegExp(`^([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})‱$`)
+    pattern: new RegExp(
+      `^${SYSTEMD_TERM_SEPARATOR_SOURCE}*([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})‱$`
+    )
   }
 ] as const;
 
@@ -1210,8 +1222,20 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
   while (offset < value.length) {
     SYSTEMD_MEMORY_WHITESPACE_PATTERN.lastIndex = offset;
     offset += (SYSTEMD_MEMORY_WHITESPACE_PATTERN.exec(value)?.[0] ?? "").length;
+    // A separator run that reaches the end of the string with no term
+    // after it is invalid, not merely "nothing more to parse": the
+    // separator's own tolerance (see SYSTEMD_TERM_SEPARATOR_SOURCE above)
+    // exists only because it is immediately followed by a strtoull() call
+    // that skips it internally while parsing a digit — but per the C
+    // standard, when strtoull() finds no digit to convert, it reports
+    // failure by leaving its output pointer at the *original*, pre-skip
+    // position, not the post-skip one. So a trailing separator with
+    // nothing following it never actually gets consumed by systemd,
+    // exactly as if it weren't whitespace at all. Confirmed on systemd
+    // 261: "64G\v" and "64G\f" are both rejected with "Invalid memory
+    // limit", unlike "64G\v512M" and "64G\f512M".
     if (offset === value.length) {
-      break;
+      return true;
     }
     term.lastIndex = offset;
     const match = term.exec(value);

@@ -2056,6 +2056,11 @@ describe("doctor", () => {
       "+18446744073709551615",
       "+ 64G",
       "+64G\u00a0+512M",
+      "64G\u00a0",
+      "-50%",
+      "-100%",
+      "-500.5\u2030",
+      "-5000\u2031",
       "1G500m",
       "Infinity",
       "INFINITY"
@@ -2088,6 +2093,32 @@ describe("doctor", () => {
       ).toBe(false);
     });
 
+    it("accepts a fractional remainder on the uint64 sentinel the way systemd's own overflow guard wraps", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "18446744073709551615.1K", // wraps to 18446744073709550694
+        hostParallelism: 24
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
+    });
+
+    it("still rejects a whole-number part past UINT64_MAX even with a fractional remainder", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "18446744073709551616.1K", // 2^64, strtoull() itself would ERANGE
+        hostParallelism: 24
+      });
+
+      const warning = report.warnings.find((entry) =>
+        entry.includes("provider build memory estimate")
+      );
+      expect(warning).toContain("MemoryMax=32G");
+      expect(warning).toContain("36 GiB");
+    });
+
     it("rejects a long malformed digit run without catastrophic backtracking", async () => {
       const start = Date.now();
       const report = await runProviderCapacityDoctor({
@@ -2108,8 +2139,11 @@ describe("doctor", () => {
       "100%",
       "+50%",
       "+100%",
+      "-0.01%",
+      "-00.01%",
       "500.5‰",
       "+500.5‰",
+      "-0.1‰",
       "5000‱",
       "+5000‱",
       "1024B",
@@ -2122,7 +2156,9 @@ describe("doctor", () => {
       "64G+512M",
       "+64G+512M",
       "1K1B1",
-      "+1G 500M"
+      "+1G 500M",
+      "64G\v512M",
+      "64G\f512M"
     ])(
       "does not fall back past a MemoryMax= form it cannot parse but systemd accepts (%s)",
       async (unparseableButValid) => {

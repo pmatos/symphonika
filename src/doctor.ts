@@ -1034,11 +1034,60 @@ const SYSTEMD_MEMORY_WHITESPACE_PATTERN = new RegExp(
 // for permille, and whole permyriads (no decimal point at all, so "-0‱"
 // is the only negative form syntactically possible, and it always resolves
 // to zero — already rejected by the amount > 0 check below).
+//
+// safe_atoi()'s integer part is itself base-aware, not decimal-only: it
+// calls mangle_base() (which explicitly recognizes "0b"/"0B" and "0o"/"0O"
+// prefixes) and then glibc strtol() with the resulting base — base 0 when
+// neither prefix matched, which is strtol()'s own auto-detection: a "0x"/
+// "0X" prefix means hex, and a bare leading "0" with more digits means
+// octal. Confirmed on systemd 261: "0x32%" resolves to 50%, "0b1%" to 1%,
+// and "0144%" to 100% (octal). Only the fractional digits after the "."
+// stay plain decimal — parse_parts_value_with_hundredths_place() reads
+// those with `dot[1] - '0'`, never through safe_atoi().
+const SYSTEMD_RELATIVE_INTEGER_SOURCE =
+  "0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|0[0-7]*|[1-9]\\d*";
 const SYSTEMD_MEMORY_RELATIVE_PATTERNS = [
-  { maximum: 100, pattern: /^([+-]?)(\d+)(?:\.(\d{1,2}))?%$/ },
-  { maximum: 1_000, pattern: /^([+-]?)(\d+)(?:\.(\d))?‰$/ },
-  { maximum: 10_000, pattern: /^([+-]?)(\d+)‱$/ }
+  {
+    maximum: 100,
+    pattern: new RegExp(
+      `^([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})(?:\\.(\\d{1,2}))?%$`
+    )
+  },
+  {
+    maximum: 1_000,
+    pattern: new RegExp(
+      `^([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})(?:\\.(\\d))?‰$`
+    )
+  },
+  {
+    maximum: 10_000,
+    pattern: new RegExp(`^([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})‱$`)
+  }
 ] as const;
+
+// Mirrors safe_atoi()'s base-0 strtol() auto-detection for a relative
+// value's whole-number part (see SYSTEMD_MEMORY_RELATIVE_PATTERNS above):
+// "0x"/"0X" is hex, "0b"/"0B" and "0o"/"0O" are binary/octal, and any other
+// leading "0" followed by more digits is octal. Anything else — including
+// bare "0" — is decimal.
+function parseSystemdRelativeWholeNumber(digits: string): number {
+  const hex = /^0[xX]([0-9a-fA-F]+)$/.exec(digits);
+  if (hex !== null) {
+    return Number.parseInt(hex[1] ?? "0", 16);
+  }
+  const binary = /^0[bB]([01]+)$/.exec(digits);
+  if (binary !== null) {
+    return Number.parseInt(binary[1] ?? "0", 2);
+  }
+  const octalWithPrefix = /^0[oO]([0-7]+)$/.exec(digits);
+  if (octalWithPrefix !== null) {
+    return Number.parseInt(octalWithPrefix[1] ?? "0", 8);
+  }
+  if (/^0[0-7]+$/.test(digits)) {
+    return Number.parseInt(digits, 8);
+  }
+  return Number(digits);
+}
 // Explicit-suffix rank, smallest first — systemd's parse_size() requires
 // each compound term's unit to be strictly smaller than the one before it,
 // so "1G500M" is accepted but "1G2G" (repeated) and "500M1G" (increasing)
@@ -1106,16 +1155,17 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
   for (const relativePattern of SYSTEMD_MEMORY_RELATIVE_PATTERNS) {
     const relative = relativePattern.pattern.exec(value);
     if (relative !== null) {
-      const [, sign, wholePart, fractionPart] = relative;
-      // safe_atoi() parses "-00" the same as "-0" — plain 0, not negative —
-      // so any all-zero whole-number part slips the sign past systemd's
-      // `v < 0` guard, not just the single-digit "0" spelling.
-      if (sign === "-" && !/^0+$/.test(wholePart ?? "")) {
+      const [, sign, wholeDigits, fractionPart] = relative;
+      const wholeNumber = parseSystemdRelativeWholeNumber(wholeDigits ?? "0");
+      // safe_atoi() parses any base-prefixed spelling of zero ("-0", "-00",
+      // "-0x0", "-0b0", ...) as plain 0, not negative, so any whole-number
+      // part that numerically evaluates to zero slips the sign past
+      // systemd's `v < 0` guard, not just the literal "0" spelling.
+      if (sign === "-" && wholeNumber !== 0) {
         return true;
       }
-      const amount = Number(
-        `${wholePart}${fractionPart ? `.${fractionPart}` : ""}`
-      );
+      const amount =
+        wholeNumber + (fractionPart ? Number(`0.${fractionPart}`) : 0);
       return !(amount > 0 && amount <= relativePattern.maximum);
     }
   }

@@ -1233,6 +1233,18 @@ export class RunController {
     }
 
     if (shuttingDown) {
+      // The retry timer already fired (this callback is running) but
+      // reserveSlot's shutdown gate refused the claim before any row
+      // mutation — the row is still "failed" (transient) from when the
+      // timer was first accepted, with no cancel_reason. Unlike a refused
+      // or cleared *registration* (handled by cancelRunAfterScheduleRefused/
+      // Cleared before this callback ever started), nothing else will
+      // persist shutdown evidence for it. See issue #663 / PR #674 review.
+      await this.cancelRunAfterScheduleCleared({
+        issueNumber: refreshed.number,
+        repository,
+        runId: payload.runId
+      });
       this.logger?.debug(
         {
           issueNumber: refreshed.number,
@@ -2299,7 +2311,22 @@ export class RunController {
     } catch (error) {
       if (error instanceof RegistryShutdownError) {
         // Skip WITHOUT rescheduling: a rescheduled timer would keep the
-        // shutdown drain alive past stop().
+        // shutdown drain alive past stop(). claimAndPersistRun's own
+        // catch already persists cancellation when it threw AFTER creating
+        // the child row (runId) — touching the parent here would clobber
+        // that already-correct state. But its fast-path throw (shutdown
+        // observed before any row/label mutation) never reaches that catch,
+        // so if no child row exists, the parent (payload.parentRunId,
+        // already "succeeded" from the advance decision) is left with no
+        // shutdown evidence and no walk to resume. See issue #663 / PR #674
+        // review.
+        if (this.runStore.getRun(runId) === undefined) {
+          await this.cancelRunAfterScheduleCleared({
+            issueNumber: refreshed.number,
+            repository,
+            runId: payload.parentRunId
+          });
+        }
         this.logger?.debug(
           {
             issueNumber: refreshed.number,
@@ -2700,7 +2727,17 @@ export class RunController {
     } catch (error) {
       if (error instanceof RegistryShutdownError) {
         // Skip WITHOUT rescheduling: a rescheduled timer would keep the
-        // shutdown drain alive past stop().
+        // shutdown drain alive past stop(). Same fast-path-vs-post-create
+        // distinction as executeStateAdvance: only cancel the parent when
+        // claimAndPersistRun never got far enough to create (and itself
+        // cancel) the child row. See issue #663 / PR #674 review.
+        if (this.runStore.getRun(runId) === undefined) {
+          await this.cancelRunAfterScheduleCleared({
+            issueNumber: refreshed.number,
+            repository,
+            runId: payload.parentRunId
+          });
+        }
         this.logger?.debug(
           {
             issueNumber: refreshed.number,

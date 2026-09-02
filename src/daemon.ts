@@ -2074,7 +2074,17 @@ function suppressResolvedFreshDispatchCandidates(
   status.candidateIssues = surviving;
   status.filteredIssues = [...status.filteredIssues, ...suppressed];
   status.projects = status.projects.map((project) => {
-    const suppressedForProject = matchingProjectCount(suppressed, project);
+    // Two declarations sharing both name and repository are genuinely
+    // indistinguishable by ProjectIssueSnapshot's own identity, so
+    // matchingProjectCount(suppressed, project) counts every duplicate's
+    // suppressed entries against each of them, not just its own -- capped
+    // at this report's own prior candidateIssues so the adjustment can
+    // never exceed (and go negative past) what this report actually had to
+    // give up (#691 review).
+    const suppressedForProject = Math.min(
+      matchingProjectCount(suppressed, project),
+      project.candidateIssues ?? 0
+    );
     return {
       ...project,
       candidateIssues: (project.candidateIssues ?? 0) - suppressedForProject,

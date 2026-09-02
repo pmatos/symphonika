@@ -661,6 +661,121 @@ describe("startDaemon", () => {
     }
   });
 
+  it("never reports a negative candidateIssues count for a fully duplicate project declaration (#691 review)", async () => {
+    const cwd = await makeTempRoot();
+    await writeMinimalProject(cwd);
+    const stateRoot = path.join(cwd, ".symphonika");
+    const seedStore = openRunStore({ stateRoot });
+    seedStore.createRun({
+      id: "run-suppressed",
+      issue: sampleIssue({ number: 42 }),
+      projectName: "symphonika",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    seedStore.recordTerminalReason(
+      "run-suppressed",
+      "no_workspace_changes",
+      "deterministic"
+    );
+    seedStore.updateRunState("run-suppressed", "blocked");
+    seedStore.close();
+
+    // Second declaration duplicates both the name AND the repository of
+    // the first (from writeMinimalProject) -- genuinely indistinguishable
+    // by ProjectIssueSnapshot's own {project, repository} identity, unlike
+    // the name-shadowing test above where the repository differs.
+    await appendFile(
+      path.join(cwd, "symphonika.yml"),
+      [
+        "  - name: symphonika",
+        "    disabled: false",
+        "    weight: 1",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked", "needs-human"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/symphonika-duplicate",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: () => Promise.resolve(),
+      listOpenIssues: () =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "",
+            id: 42,
+            labels: ["agent-ready"],
+            number: 42,
+            state: "open",
+            title: "issue",
+            updated_at: "",
+            url: ""
+          }
+        ]),
+      removeLabelsFromIssue: () => Promise.resolve()
+    };
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+
+      // Asserted against the persisted RunStore project state, not
+      // poll-now's own HTTP response: two declarations that duplicate both
+      // name and repository also produce two rows for the same issue
+      // number in one replaceProjectIssueSnapshots insert batch (a
+      // separate, pre-existing bug in projectIssueSnapshotRows, unrelated
+      // to suppression), which throws a UNIQUE constraint violation that
+      // the outer catch in refreshIssuePollStatus turns into a blanket
+      // issuePollStatus reset -- masking this fix's effect from poll-now's
+      // JSON response. recordProjectPollOutcome (which writes
+      // last_candidate_issues) runs before that throw, so it still
+      // observably captures the unclamped/clamped value.
+      const verifyStore = openRunStore({ stateRoot });
+      const projectState = verifyStore
+        .getProjectStatesByName()
+        .get("symphonika");
+      // Regression guard (#691 review): matchingProjectCount can't tell
+      // the two identical declarations' own suppressed entries apart, so
+      // the raw suppressed count (2, the sum across both declarations) used
+      // to be subtracted from the persisted candidateIssues (1), producing
+      // lastCandidateIssues: -1 and lastFilteredIssues: 2 -- clamping the
+      // adjustment to the report's own prior count keeps it at
+      // lastCandidateIssues: 0, lastFilteredIssues: 1.
+      expect(projectState?.lastCandidateIssues).toBe(0);
+      expect(projectState?.lastFilteredIssues).toBe(1);
+      verifyStore.close();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("cleans up the HTTP listener when endpoint descriptor writing fails", async () => {
     const cwd = await makeTempRoot();
     const port = await getFreePort();

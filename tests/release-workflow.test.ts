@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 describe("release workflow", () => {
-  it("routes release commits through the required check only from main", () => {
+  it("uses the custom release-commit plugin only from main", () => {
     const releaseConfig = parseJson(
       readFileSync(path.join(repoRoot, ".releaserc.json"), "utf8")
     );
@@ -53,16 +53,12 @@ describe("release workflow", () => {
     );
 
     expect({
-      checksPermission: /permissions:\n(?:.*\n)*? {6}checks: write/.test(
-        releaseWorkflow
-      ),
       customPlugin: pluginNames.includes(
         "./.github/semantic-release/push-release-commit.mjs"
       ),
       defaultGitPlugin: pluginNames.includes("@semantic-release/git"),
       mainOnly: releaseWorkflow.includes("if: github.ref == 'refs/heads/main'")
     }).toEqual({
-      checksPermission: true,
       customPlugin: true,
       defaultGitPlugin: false,
       mainOnly: true
@@ -87,66 +83,24 @@ describe("release workflow", () => {
     expect(existsSync(harness.callsPath)).toBe(false);
   });
 
-  it("refuses a required check attributed to another app", async () => {
-    const harness = await makeReleaseHarness("999");
-
-    expect(() => harness.plugin.prepare({}, harness.context)).toThrow(
-      "ADR numbers check was not attributed to GitHub Actions app 15368"
-    );
-
-    const calls = readFileSync(harness.callsPath, "utf8").trim().split("\n");
-    expect({
-      cleanedTemporaryRef: calls.some((call) => call.includes("\tDELETE\t")),
-      updatedMain: calls.some((call) => call.endsWith("HEAD:refs/heads/main"))
-    }).toEqual({ cleanedTemporaryRef: true, updatedMain: false });
-  });
-
-  it("validates and certifies the release commit before updating main", async () => {
+  it("commits and pushes the release straight to main", async () => {
     const harness = await makeReleaseHarness();
 
     harness.plugin.prepare({}, harness.context);
 
     const calls = readFileSync(harness.callsPath, "utf8").trim().split("\n");
-    const validationIndex = calls.indexOf(
-      "npm\trun\tcheck:adr-numbers\t--\t--base\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    );
-    const temporaryPushIndex = calls.findIndex((call) =>
-      call.endsWith("HEAD:refs/heads/semantic-release-check/123-2")
-    );
-    const createCheckIndex = calls.findIndex((call) =>
-      call.includes("\tPOST\trepos/pmatos/symphonika/check-runs")
+    const commitIndex = calls.findIndex((call) =>
+      call.startsWith("git\tcommit\t-m\tchore(release): 0.2.0 [skip ci]")
     );
     const mainPushIndex = calls.findIndex((call) =>
       call.endsWith("HEAD:refs/heads/main")
     );
-    const cleanupIndex = calls.findIndex((call) =>
-      call.includes(
-        "\tDELETE\trepos/pmatos/symphonika/git/refs/heads/semantic-release-check/123-2"
-      )
-    );
 
     expect({
-      checkInput: parseJson(readFileSync(harness.checkInputPath, "utf8")),
-      commandsFound: [
-        validationIndex,
-        temporaryPushIndex,
-        createCheckIndex,
-        mainPushIndex,
-        cleanupIndex
-      ].every((index) => index >= 0),
-      ordered:
-        validationIndex < temporaryPushIndex &&
-        temporaryPushIndex < createCheckIndex &&
-        createCheckIndex < mainPushIndex &&
-        mainPushIndex < cleanupIndex,
+      commandsFound: [commitIndex, mainPushIndex].every((index) => index >= 0),
+      ordered: commitIndex < mainPushIndex,
       tokenExposed: calls.join("\n").includes("test-token")
-    }).toMatchObject({
-      checkInput: {
-        conclusion: "success",
-        head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        name: "ADR numbers",
-        status: "completed"
-      },
+    }).toEqual({
       commandsFound: true,
       ordered: true,
       tokenExposed: false
@@ -154,9 +108,8 @@ describe("release workflow", () => {
   });
 });
 
-async function makeReleaseHarness(checkAppId = "15368"): Promise<{
+async function makeReleaseHarness(): Promise<{
   callsPath: string;
-  checkInputPath: string;
   context: ReleaseContext;
   plugin: ReleasePlugin;
 }> {
@@ -164,11 +117,10 @@ async function makeReleaseHarness(checkAppId = "15368"): Promise<{
   const binDirectory = path.join(root, "bin");
   const callsPath = path.join(root, "calls.txt");
   const committedPath = path.join(root, "committed");
-  const checkInputPath = path.join(root, "check-input.json");
   tempRoots.push(root);
   await writeStubExecutables(
     binDirectory,
-    ["gh", "git", "npm"],
+    ["git"],
     `#!/bin/sh
 command_name="$(basename "$0")"
 printf '%s' "$command_name" >> "$CALLS_PATH"
@@ -177,7 +129,7 @@ for argument in "$@"; do
 done
 printf '\\n' >> "$CALLS_PATH"
 
-if [ "$command_name" = "git" ] && [ "$1" = "rev-parse" ]; then
+if [ "$1" = "rev-parse" ]; then
   if [ "$2" = "HEAD" ] && [ -f "$COMMITTED_PATH" ]; then
     printf '%s\\n' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
   else
@@ -186,24 +138,13 @@ if [ "$command_name" = "git" ] && [ "$1" = "rev-parse" ]; then
   exit 0
 fi
 
-if [ "$command_name" = "git" ] && [ "$1" = "diff" ]; then
+if [ "$1" = "diff" ]; then
   printf '%s\\n' 'CHANGELOG.md' 'package-lock.json' 'package.json'
   exit 0
 fi
 
-if [ "$command_name" = "git" ] && [ "$1" = "commit" ]; then
+if [ "$1" = "commit" ]; then
   : > "$COMMITTED_PATH"
-  exit 0
-fi
-
-if [ "$command_name" = "gh" ] && [ "$3" = "POST" ]; then
-  cat > "$CHECK_INPUT_PATH"
-  printf '{"name":"ADR numbers","head_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","status":"completed","conclusion":"success","app":{"id":%s}}' "$CHECK_APP_ID"
-  exit 0
-fi
-
-if [ "$command_name" = "gh" ] && [ "$3" = "DELETE" ]; then
-  printf '%s' '{}'
   exit 0
 fi
 `
@@ -216,13 +157,9 @@ fi
     env: {
       ...process.env,
       CALLS_PATH: callsPath,
-      CHECK_APP_ID: checkAppId,
-      CHECK_INPUT_PATH: checkInputPath,
       COMMITTED_PATH: committedPath,
       GITHUB_REF: "refs/heads/main",
       GITHUB_REPOSITORY: "pmatos/symphonika",
-      GITHUB_RUN_ATTEMPT: "2",
-      GITHUB_RUN_ID: "123",
       GITHUB_SERVER_URL: "https://github.com",
       GITHUB_TOKEN: "test-token",
       PATH: `${binDirectory}:${process.env.PATH ?? ""}`
@@ -231,7 +168,7 @@ fi
     nextRelease: { notes: "Release notes", version: "0.2.0" }
   };
 
-  return { callsPath, checkInputPath, context, plugin };
+  return { callsPath, context, plugin };
 }
 
 function parseJson(value: string): unknown {

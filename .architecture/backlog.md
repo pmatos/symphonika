@@ -147,13 +147,23 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## watchdog-subject-port
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 20/25 (leverage 4, locality 4, blast radius 2, heat 4)
-- **Files**: ~3 estimated (new `watchdog-subject.ts`, new test, `watchdog.ts`)
+- **Files**: 4 (new `watchdog-subject.ts`, new `watchdog-subject.test.ts`, `watchdog.ts`, `watchdog.test.ts` — the 4th an observer-throw characterization test)
 - **Modules**: `src/lifecycle/watchdog.ts` (run reconcile loop 179-273, firing reconcile loop 275-345, `sampleRun` 475-502, `sampleRoutineFiring` 504-529); new `src/lifecycle/watchdog-subject.ts` (port + driver)
-- **Summary**: Collapse the two near-identical ~85-line watchdog reconcile loops (run vs routine-firing, the second added by #622) into one `reconcileWatchdogSubjects` driver behind a `WatchdogSubject` port; run-vs-firing knowledge lands in two thin adapters.
+- **Summary**: Collapse the two near-identical ~85-line watchdog reconcile loops (run vs routine-firing, the second added by #622) into one `driveWatchdogSubject` driver behind a `WatchdogSubjectPort`; run-vs-firing knowledge lands in two thin adapters.
 - **First seen**: 2026-09-02
-- **Reason**: **Picked by the 2026-09-03 run** (top surviving candidate at 20/25, tied with `provider-run-harness` at 20/25; won the deterministic tie-break — blast tie, heat tie, then `watchdog.ts` most-recently-touched at #680 15:51 vs providers #672 14:21). Terminal policy differs (ADR 0091: firings get idle-grace only), so the port carries a `terminalReason` member (`watchdogTerminalReason` for runs, idle-grace-only for firings). **Scope refined**: the twinned run-store method pairs (`run-store.ts:1571-1872`) stay put — the adapters call them; unifying their table-specific SQL is `leaked-subject-sweep`'s separate concern.
+- **PR**: #695
+- **Reason**: **Picked by the 2026-09-03 run** (top surviving candidate at 20/25, tied with `provider-run-harness` at 20/25; won the deterministic tie-break — blast tie, heat tie, then `watchdog.ts` most-recently-touched at #680 15:51 vs providers #672 14:21). Terminal policy differs (ADR 0091: firings get idle-grace only), so the port carries a `terminalReason` member (`watchdogTerminalReason` for runs, idle-grace-only for firings). **Scope refined**: the twinned run-store method pairs (`run-store.ts:1571-1872`) stay put — the adapters call them; unifying their table-specific SQL is `leaked-subject-sweep`'s separate concern. Implemented via design-it-twice winner C (9-member port + generic driver); runner-up design A (single `terminate` member) lost on test surface. Added the `Watchdog Subject` term to CONTEXT.md.
+
+### Run 2026-09-03 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M1J5Q8C7` (adopted; conditions 1-4 held — non-default, 0 unique commits, no upstream, unpublished on origin). Not renamed per the adopted-branch rule; slug recorded here and in the report instead.
+- **Committed**: report + backlog reconciliation (`8116eb4`), design section (`72bdcd7`), implementation + CONTEXT.md term (`2db6413`), this in-flight update.
+- **Evidence**: PR #695; quality gate green (lint, typecheck, format:check, knip, build; test 2626 passed — no flakes this run). Diff 4 files (est. ~3; the 4th is a behaviour-pinning test edit, within tolerance). `reconcileWatchdog` public signature unchanged.
+- **Next**: human review of #695; `provider-run-harness` (20/25, tied runner-up) is the natural next firing.
 
 ## run-slot-lease
 

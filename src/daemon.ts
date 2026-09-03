@@ -19,6 +19,7 @@ import {
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
 import type {
+  FilteredProjectIssueSnapshot,
   GitHubIssuesApi,
   GitHubRepositoryIdentity,
   PollingProjectConfig
@@ -69,6 +70,7 @@ import {
 } from "./lifecycle/reconcile.js";
 import { reconcileWatchdog } from "./lifecycle/watchdog.js";
 import {
+  isDispatchProject,
   RunController,
   type RunControllerProjectConfig,
   type RunControllerProvidersConfig,
@@ -797,6 +799,33 @@ export async function startDaemon(
           configuredIssueProjectKeys,
           selectedIssueProjectKeysByName
         )
+      );
+      // #683/#691: pickProjectCandidate silently skips a candidate whose
+      // newest Run already suppresses fresh dispatch
+      // (RunStore.latestRunSuppressesFreshDispatch), but pollProject is a
+      // pure label-based check with no RunStore access, so it keeps
+      // resurfacing the same issue as a candidate every tick. Applied to the
+      // merged, shared issuePollStatus (not nextStatus) so the dashboard,
+      // /api/status, and poll-now -- which all read this same object --
+      // never report a suppressed issue as eligible, including one carried
+      // over from a prior tick while its project backs off. Also applied to
+      // the per-project candidateIssues counts (issuePollStatus.projects) and
+      // to nextStatus before it's persisted below -- otherwise poll-now can
+      // report a global 0 while still printing a stale per-project count, and
+      // the persisted /issues triage snapshot keeps describing the
+      // suppressed issue as eligible (#691 review).
+      const effectiveProjectsByName = new Map(
+        snapshot.projects.map((project) => [project.name, project])
+      );
+      suppressResolvedFreshDispatchCandidates(
+        issuePollStatus,
+        effectiveProjectsByName,
+        runStore
+      );
+      suppressResolvedFreshDispatchCandidates(
+        nextStatus,
+        effectiveProjectsByName,
+        runStore
       );
       // Persisted with the polled subset only (not the merged status).
       // Poll outcome and issue-snapshot writes iterate only fresh reports;
@@ -2001,6 +2030,103 @@ export async function startDaemon(
       }
     }
   };
+}
+
+// Reason recorded for a candidate reclassified as filtered by
+// suppressResolvedFreshDispatchCandidates -- distinguishes it from the
+// pure label-based reasons issueFilterReasons produces (see
+// evaluateProjectEligibility), which never mention Run history.
+// latestRunSuppressesFreshDispatch (run-store.ts) looks only at the newest
+// Run row for this (Project, repository, Issue), never at the Issue's own
+// revision/updated_at -- so this string must not promise that editing the
+// Issue (title, body, or any label short of closing/reopening) lifts the
+// suppression, since it does not (#691 review).
+const FRESH_DISPATCH_SUPPRESSED_REASON =
+  "a newer run's terminal outcome (no_workspace_changes) suppresses fresh dispatch until a newer run for this issue changes the verdict";
+
+// #683/#691: reclassifies candidates whose newest Run already suppresses
+// fresh dispatch (RunStore.latestRunSuppressesFreshDispatch) as filtered
+// rather than dropping them, so fetched == candidate + filtered stays true
+// and the issue remains visible in /issues triage search with a reason --
+// see #691 review. Adjusts each report's candidateIssues/filteredIssues
+// counts by the number of ITS OWN candidates reclassified, rather than
+// recomputing from status.candidateIssues -- for a name-shadowed
+// declaration (two Project entries sharing a name, different repository;
+// see the "last declaration wins" comment on selectedIssueProjectKeysByName
+// above), mergeIssuePollStatus's selectedCandidate filter already strips
+// the shadowed repository's own candidates out of the merged array before
+// this runs, so recomputing its count from that array would wrongly reset
+// it to zero instead of leaving its own honestly-polled count untouched
+// (see #691 review). Mutates `status` in place so every caller sharing the
+// same IssuePollStatus object (issuePollStatus itself, or the raw
+// nextStatus fed to persistProjectPollState) reflects the same suppressed
+// set.
+function suppressResolvedFreshDispatchCandidates(
+  status: import("./issue-polling.js").IssuePollStatus,
+  effectiveProjectsByName: ReadonlyMap<string, RunControllerProjectConfig>,
+  runStore: ReturnType<typeof openRunStore>
+): void {
+  const surviving = status.candidateIssues.filter(
+    (candidate) => !isSuppressedFreshDispatchCandidate(candidate)
+  );
+  const suppressed: FilteredProjectIssueSnapshot[] = status.candidateIssues
+    .filter((candidate) => isSuppressedFreshDispatchCandidate(candidate))
+    .map((candidate) => ({
+      ...candidate,
+      reasons: [FRESH_DISPATCH_SUPPRESSED_REASON]
+    }));
+
+  status.candidateIssues = surviving;
+  status.filteredIssues = [...status.filteredIssues, ...suppressed];
+  status.projects = status.projects.map((project) => {
+    // Two declarations sharing both name and repository are genuinely
+    // indistinguishable by ProjectIssueSnapshot's own identity, so
+    // matchingProjectCount(suppressed, project) counts every duplicate's
+    // suppressed entries against each of them, not just its own -- capped
+    // at this report's own prior candidateIssues so the adjustment can
+    // never exceed (and go negative past) what this report actually had to
+    // give up (#691 review).
+    const suppressedForProject = Math.min(
+      matchingProjectCount(suppressed, project),
+      project.candidateIssues ?? 0
+    );
+    return {
+      ...project,
+      candidateIssues: (project.candidateIssues ?? 0) - suppressedForProject,
+      filteredIssues: (project.filteredIssues ?? 0) + suppressedForProject
+    };
+  });
+
+  function isSuppressedFreshDispatchCandidate(candidate: {
+    issue: { number: number };
+    project: string;
+    repository: GitHubRepositoryIdentity;
+  }): boolean {
+    const project = effectiveProjectsByName.get(candidate.project);
+    return (
+      project !== undefined &&
+      isDispatchProject(project) &&
+      runStore.latestRunSuppressesFreshDispatch({
+        issueNumber: candidate.issue.number,
+        projectName: candidate.project,
+        repository: candidate.repository
+      })
+    );
+  }
+}
+
+function matchingProjectCount(
+  candidates: readonly {
+    project: string;
+    repository: GitHubRepositoryIdentity;
+  }[],
+  project: { name: string; repository: GitHubRepositoryIdentity }
+): number {
+  return candidates.filter(
+    (candidate) =>
+      candidate.project === project.name &&
+      sameGitHubRepository(candidate.repository, project.repository)
+  ).length;
 }
 
 function persistProjectPollState(

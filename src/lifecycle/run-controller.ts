@@ -955,6 +955,17 @@ export class RunController {
         `fresh issue claim deferred for project ${input.project.name}`
       );
     }
+    if (
+      this.runStore.latestRunSuppressesFreshDispatch({
+        issueNumber: input.issue.number,
+        projectName: input.project.name,
+        repository: input.repository
+      })
+    ) {
+      throw new FreshClaimDeferredError(
+        `fresh issue claim suppressed by latest no_workspace_changes outcome for ${input.project.name}#${input.issue.number}`
+      );
+    }
     await this.bestEffort(
       () =>
         (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
@@ -3061,6 +3072,16 @@ export class RunController {
         continue;
       }
       if (
+        isDispatchProject(project) &&
+        this.runStore.latestRunSuppressesFreshDispatch({
+          issueNumber: entry.issue.number,
+          projectName: project.name,
+          repository: project.tracker
+        })
+      ) {
+        continue;
+      }
+      if (
         !guarded ||
         !(await this.fileOverlapGuard.hasKnownOverlap({
           issue: entry.issue,
@@ -3331,6 +3352,24 @@ export class RunController {
     if (this.activeRuns.isShuttingDown()) {
       throw new RegistryShutdownError(
         `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      );
+    }
+    // pickProjectCandidate and failFreshDispatchBeforeProvider apply the same
+    // check so a suppressed Issue does not starve later candidates and a
+    // misconfigured-provider short circuit still honors the guard. Repeat it
+    // here inside the serialized claim boundary so no durable verdict can
+    // land between selection and the `sym:claimed` write. Continuations and
+    // FSM-owned work are intentionally outside this fresh-dispatch-only rule.
+    if (
+      !input.isContinuation &&
+      this.runStore.latestRunSuppressesFreshDispatch({
+        issueNumber: input.issue.number,
+        projectName: input.project.name,
+        repository: input.repository
+      })
+    ) {
+      throw new FreshClaimDeferredError(
+        `fresh issue claim suppressed by latest no_workspace_changes outcome for ${input.project.name}#${input.issue.number}`
       );
     }
     // Host pressure BEFORE the cap, matching the other two admission points

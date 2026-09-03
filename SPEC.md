@@ -117,6 +117,15 @@ An issue is eligible when all are true:
 - it has no unresolved GitHub-native issue dependency (`blockedBy`): every blocker is `CLOSED`, and
   the dependency fetch was not truncated — see ADR-0081
 
+This list is the label-based candidate check (§9.2 below). Before it reaches the tracker-side
+candidate list, dashboard counts, poll-now output, and the persisted `/issues` triage snapshot, the
+daemon applies one further, non-label-based check on top of it: an issue whose newest Run for the
+same `(Project, repository, Issue)` terminated as `blocked` with `terminal_reason =
+"no_workspace_changes"` is reclassified as filtered, with a reason describing the suppression,
+instead of being shown as an eligible candidate — see §9.2. This reclassification happens in the
+daemon's shared poll status rather than in the label-based check itself, so every surface reading
+that status (not just fresh dispatch) reflects it.
+
 Symphonika does not parse issue body text, task lists, GitHub Projects fields, or linked PRs to infer
 blockers. The one exception is GitHub's own native issue-dependencies feature (`blockedBy`), which is
 a GraphQL-queried relationship, not free text — see ADR-0081.
@@ -1459,6 +1468,23 @@ Default labels:
 
 Each Project may configure these.
 
+Fresh dispatch also consults durable Run evidence after label-based tracker filtering. When the
+newest Run for the same `(Project, repository, Issue)` is `blocked` with `terminal_reason =
+"no_workspace_changes"`, the Issue is not claimed again even if an operator clears its `sym:*`
+labels while leaving every Required Eligibility Label in place. This guard uses the classified Run
+outcome rather than parsing free-form issue comments, and it does not remove repository-owned
+labels or close the Issue. Its dispatch effect applies only to fresh dispatch: retries,
+label-controlled Continuations, raw-FSM State Advances, waiting rows, and PR Follow-up retain their
+existing lifecycle rules. Repository identity is compared case-insensitively; a legacy Run whose
+origin is unknown is treated conservatively as belonging to the current Issue history. See ADR
+0058's issue #683 amendment.
+
+The daemon also applies this same check to its shared poll status, reclassifying a suppressed Issue
+as filtered rather than an eligible candidate — see §4.3. That reclassification is a visibility
+concern for every consumer of the poll status (the tracker-side candidate list, dashboard counts,
+poll-now output, and the persisted `/issues` triage snapshot), separate from the dispatch-only scope
+described above.
+
 ### 9.3 Operational Label Writes
 
 On claim:
@@ -1817,7 +1843,10 @@ On provider exit code 0:
    `refs/remotes/origin/<configured-base-branch>..HEAD`.
 2. If the branch has zero commits ahead of base, mark the run `blocked` with deterministic terminal
    reason `no_workspace_changes` and add `sym:blocked`. This covers the agent correctly declining
-   the task (e.g. the target was already superseded) — exit 0, zero commits, nothing broken.
+   the task (e.g. the target was already superseded) — exit 0, zero commits, nothing broken. The
+   durable outcome suppresses a later fresh claim of the same `(Project, repository, Issue)` even
+   if its Operational Labels are cleared; Symphonika does not infer the same verdict from comment
+   text or take ownership of the Issue's workflow labels.
 3. If Workspace inspection fails, mark the run `failed` with deterministic terminal reason
    `workspace_inspection_failed` and add `sym:failed`. This is a real failure (the `git` inspection
    command itself errored), unlike case 2.

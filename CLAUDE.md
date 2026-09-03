@@ -10,6 +10,21 @@ Symphony reference spec.
 - Use `docs/adr/` for accepted architectural decisions.
 - Treat `symphony/` as an upstream reference submodule, not as the Symphonika implementation.
 
+### ADR numbering
+
+`docs/adr/0001-*.md` through the existing sequential range are frozen legacy
+numbers — don't renumber or reuse a number from that range, and don't try to
+resolve the duplicate numbers already in there (several numbers have more
+than one file; that's pre-existing history, not something to fix here). Name
+new ADRs `docs/adr/YYYY-MM-DD-HHMM-slug.md` instead (UTC, 24h clock),
+timestamped when the ADR is authored, and reference one in prose or comments
+as `ADR-YYYY-MM-DD-HHMM`. A bare date isn't enough here — several ADRs can
+land in one day — but two authors can't independently pick the same
+real-world minute the way they could pick the same next integer, so there's
+no more numbering-collision class to guard against in CI —
+`scripts/check-adr-numbers.mjs` and the branch ruleset's "ADR numbers"
+required check existed only for that and have been removed.
+
 ## Implementation Posture
 
 - Keep changes aligned with the bootstrap slice in `SPEC.md`.

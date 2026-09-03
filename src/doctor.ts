@@ -984,27 +984,176 @@ function winningByteSizeAssignment(
   return undefined;
 }
 
-const SYSTEMD_BYTE_SIZE_PATTERN = /^(\d+(?:\.\d+)?)\s*([KMGT]?)$/i;
+// systemd's own WHITESPACE macro (" \t\n\r") — no form feed or vertical
+// tab. Used verbatim for the gap between a magnitude and its suffix within
+// a single term: parse_size()'s `e += strspn(e, WHITESPACE)` there has no
+// fallback if a character isn't in this exact set, so "32 G" (space)
+// parses but "64\vG"/"64\fG" (vertical tab / form feed) do not — confirmed
+// on systemd 261, both rejected with "Invalid memory limit". Also used for
+// systemdTrim() below, matching conf-parser.c's own use of the same macro
+// for line/key/value trimming. See SYSTEMD_TERM_SEPARATOR_SOURCE further
+// down for the different, broader class that applies *between* compound
+// terms — JavaScript's Unicode `\s` set is broader than either and must
+// not be used for either position.
+const SYSTEMD_NARROW_WHITESPACE_SOURCE = "[ \\t\\n\\r]";
+const SYSTEMD_BYTE_SIZE_PATTERN = new RegExp(
+  `^(\\d+(?:\\.\\d+)?)${SYSTEMD_NARROW_WHITESPACE_SOURCE}*([KMGT]?)$`,
+  "i"
+);
 
-// One component of a systemd compound memory value: a magnitude, optional
-// whitespace (systemd and SYSTEMD_BYTE_SIZE_PATTERN both tolerate "32 G"),
-// then an optional single-letter K/M/G/T/P/E suffix or an explicit "B"
-// (bytes) marker — never both combined ("32GB" is not a valid systemd unit,
-// only "32G" or "32000000000B" are).
-const SYSTEMD_MEMORY_VALUE_TERM = /^(\d+(?:\.\d+)?)\s*(?:[KMGTPE]|B)?$/i;
-const SYSTEMD_MEMORY_PERCENTAGE = /^(\d+(?:\.\d+)?)%$/;
+// One token of a systemd compound memory value: a magnitude, optional
+// whitespace, then an optional single-letter K/M/G/T/P/E suffix or an
+// explicit "B" (bytes) marker, captured so isDefinitelyInvalidSystemdMemoryValue
+// can check systemd's descending-unit-order rule (a bare magnitude with no
+// suffix ranks as bytes, same as an explicit "B"). Matched case-sensitively
+// (no "i" flag where this is compiled below) because systemd's parse_size()
+// suffix table only recognizes the uppercase letters — "1G500m" is
+// rejected by systemd and must fail to tokenize here too, not silently
+// normalize "m" to "M". An optional leading "+" may prefix each term
+// (e.g. "+64G", "64G+512M") and must be immediately followed by that
+// term's magnitude, so it is matched inside each token.
+// Whitespace between terms is skipped separately in the tokenizing loop
+// below rather than folded into this pattern: an earlier version matched
+// runs of terms with `(?:TERM_SOURCE)+` against the whole string, which is
+// catastrophically backtracking on a long malformed digit run (each `\d+`
+// repetition can be split ambiguously across the outer `+`), letting a
+// single typo'd local MemoryMax= drop-in hang the doctor check
+// indefinitely.
+const SYSTEMD_MEMORY_VALUE_TERM_SOURCE = `\\+?(\\d+(?:\\.\\d*)?)${SYSTEMD_NARROW_WHITESPACE_SOURCE}*([KMGTPE]|B)?`;
+// The gap *between* compound terms — immediately before the next term's
+// magnitude — is a different position from the magnitude-to-suffix gap
+// above, and tolerates more than systemd's own WHITESPACE macro would
+// suggest: systemd's explicit pre-skip there (`p += strspn(p, WHITESPACE)`)
+// is just as narrow, but the `strtoull()` call that follows has its own
+// independent, C-standard isspace()-based whitespace skip (glibc's
+// isspace() includes form feed and vertical tab), which silently covers
+// whatever the explicit pre-skip missed. Confirmed on systemd 261:
+// "64G\v512M" and "64G\f512M" both resolve to the sum of the two terms,
+// and a leading "\v64G"/"\f64G" before the very first term resolves to
+// plain 64G — both are "about to parse a magnitude" positions, unlike the
+// magnitude-to-suffix gap, which has no such fallback. Sticky match
+// against a run of this class, used to skip between compound terms in the
+// tokenizing loop below without a per-character regex test.
+const SYSTEMD_TERM_SEPARATOR_SOURCE = "[ \\t\\n\\r\\f\\v]";
+const SYSTEMD_MEMORY_WHITESPACE_PATTERN = new RegExp(
+  `${SYSTEMD_TERM_SEPARATOR_SOURCE}*`,
+  "y"
+);
+// A leading "+" is meaningful for relative values too — systemd's
+// parse_percent_unbounded()/parse_permille_unbounded()/parse_permyriad_unbounded()
+// (src/basic/percent-util.c) all parse the integer part with safe_atoi() and
+// reject it outright when negative — except when that integer part is
+// exactly "0": safe_atoi("-0") returns plain 0, so "-0" slips past the
+// `v < 0` guard and the sign is silently dropped. That makes "-0.01%" parse
+// identically to "+0.01%" (confirmed on systemd 255), but "-50%" is rejected
+// exactly like "-50" would be. A "-" is therefore only ever meaningful when
+// the digits before any decimal point are "0" — captured separately from
+// the magnitude below so that rule can be checked without re-parsing. The
+// accepted precision depends on the symbol: hundredths for percent, tenths
+// for permille, and whole permyriads (no decimal point at all, so "-0‱"
+// is the only negative form syntactically possible, and it always resolves
+// to zero — already rejected by the amount > 0 check below).
+//
+// safe_atoi()'s integer part is itself base-aware, not decimal-only: it
+// calls mangle_base() (which explicitly recognizes "0b"/"0B" and "0o"/"0O"
+// prefixes) and then glibc strtol() with the resulting base — base 0 when
+// neither prefix matched, which is strtol()'s own auto-detection: a "0x"/
+// "0X" prefix means hex, and a bare leading "0" with more digits means
+// octal. Confirmed on systemd 261: "0x32%" resolves to 50%, "0b1%" to 1%,
+// and "0144%" to 100% (octal). Only the fractional digits after the "."
+// stay plain decimal — parse_parts_value_with_hundredths_place() reads
+// those with `dot[1] - '0'`, never through safe_atoi().
+const SYSTEMD_RELATIVE_INTEGER_SOURCE =
+  "0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|0[0-7]*|[1-9]\\d*";
+// safe_atoi() applies its own narrow pre-skip (`s += strspn(s, WHITESPACE)`)
+// before calling strtol() — but exactly like parse_size()'s strtoull()
+// call, strtol() has its own independent, C-standard isspace()-based skip
+// that silently covers what the narrow pre-skip misses, so a leading form
+// feed or vertical tab before a relative value is tolerated too. Confirmed
+// on systemd 261: "\v50%" and "\f50%" both resolve to 50%. There is no
+// equivalent trailing tolerance — parse_parts_value_whole() requires the
+// symbol ("%"/"‰"/"‱") to be the literal last character via endswith(),
+// so anything at all after it, whitespace included, fails outright; the
+// trailing "$" anchors below already enforce that correctly.
+const SYSTEMD_MEMORY_RELATIVE_PATTERNS = [
+  {
+    maximum: 100,
+    pattern: new RegExp(
+      `^${SYSTEMD_TERM_SEPARATOR_SOURCE}*([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})(?:\\.(\\d{1,2}))?%$`
+    )
+  },
+  {
+    maximum: 1_000,
+    pattern: new RegExp(
+      `^${SYSTEMD_TERM_SEPARATOR_SOURCE}*([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})(?:\\.(\\d))?‰$`
+    )
+  },
+  {
+    maximum: 10_000,
+    pattern: new RegExp(
+      `^${SYSTEMD_TERM_SEPARATOR_SOURCE}*([+-]?)(${SYSTEMD_RELATIVE_INTEGER_SOURCE})‱$`
+    )
+  }
+] as const;
+
+// Mirrors safe_atoi()'s base-0 strtol() auto-detection for a relative
+// value's whole-number part (see SYSTEMD_MEMORY_RELATIVE_PATTERNS above):
+// "0x"/"0X" is hex, "0b"/"0B" and "0o"/"0O" are binary/octal, and any other
+// leading "0" followed by more digits is octal. Anything else — including
+// bare "0" — is decimal.
+function parseSystemdRelativeWholeNumber(digits: string): number {
+  const hex = /^0[xX]([0-9a-fA-F]+)$/.exec(digits);
+  if (hex !== null) {
+    return Number.parseInt(hex[1] ?? "0", 16);
+  }
+  const binary = /^0[bB]([01]+)$/.exec(digits);
+  if (binary !== null) {
+    return Number.parseInt(binary[1] ?? "0", 2);
+  }
+  const octalWithPrefix = /^0[oO]([0-7]+)$/.exec(digits);
+  if (octalWithPrefix !== null) {
+    return Number.parseInt(octalWithPrefix[1] ?? "0", 8);
+  }
+  if (/^0[0-7]+$/.test(digits)) {
+    return Number.parseInt(digits, 8);
+  }
+  return Number(digits);
+}
+// Explicit-suffix rank, smallest first — systemd's parse_size() requires
+// each compound term's unit to be strictly smaller than the one before it,
+// so "1G500M" is accepted but "1G2G" (repeated) and "500M1G" (increasing)
+// are both rejected, keeping the previous MemoryMax= in force. An omitted
+// suffix and an explicit "B" both mean bytes but rank as two DIFFERENT,
+// adjacent steps rather than being collapsed into one: systemd accepts
+// "1K1B1" (K, then explicit B, then a final bare/omitted term), so the
+// omitted form must rank strictly below "B", not equal to it.
+const SYSTEMD_MEMORY_UNIT_ORDER = "BKMGTPE";
+// config_parse_memory_limit() reserves UINT64_MAX (2^64 - 1) as its infinity
+// sentinel and rejects a parsed byte total at or above it. That catches both
+// parse_size() overflow (a single "+16E" or compound "16E1P") and the exact
+// sentinel spelling "18446744073709551615". Keep this as a BigInt so the
+// comparison remains exact past 2^53 and still accepts the largest finite
+// value, 18446744073709551614 (2^64 - 2).
+const SYSTEMD_MEMORY_LIMIT_INFINITY = 2n ** 64n - 1n;
+// parse_size()'s own per-term arithmetic (`l + (frac > 0)`, `l * factor`) is
+// native uint64_t, so it wraps modulo 2^64 rather than rejecting on
+// overflow — see the guard and per-term total below, both of which
+// replicate that wraparound deliberately rather than computing it exactly.
+const SYSTEMD_UINT64_MODULUS = 2n ** 64n;
 
 // config_parse_memory_limit() drops an assignment two different ways, both
 // of which make systemd keep whatever limit was previously in force:
 //
 //   - "Invalid memory limit ..., ignoring" when the text is not a memory
-//     value at all — neither a percentage of at most two decimal places nor
-//     a sum of magnitudes each carrying at most one K/M/G/T/P/E-or-"B"
-//     suffix. Covers "bogus", "32GB", "10garbage", and a percentage above
-//     100 ("101%", "200%"), which overflows parse_permyriad and then fails
-//     parse_size because of the "%".
+//     value at all — neither a relative value with parse_permyriad's
+//     symbol-specific precision nor a sum of magnitudes each carrying at
+//     most one K/M/G/T/P/E-or-"B" suffix. Covers "bogus", "32GB",
+//     "10garbage", and a percentage above 100 ("101%", "200%"), which
+//     overflows parse_permyriad and then fails parse_size because of "%".
 //   - "Memory limit ... out of range, ignoring" when the text parses but
-//     resolves to zero bytes — "0", "0B", "0P", "0K", and "0%".
+//     resolves to zero bytes — "0", "0B", "0P", "0K", "0%", and a compound
+//     whose terms are individually non-zero but sum to under one byte
+//     ("0G0.1B").
 //
 // Both verified against `systemd-analyze verify` (systemd 261), which also
 // confirms the inclusive upper bound: "100%" is accepted, "100.01%" is not.
@@ -1013,28 +1162,154 @@ const SYSTEMD_MEMORY_PERCENTAGE = /^(\d+(?:\.\d+)?)%$/;
 // parseSystemdByteSize merely cannot compute a byte count for ("50%",
 // "1024B", "2P", "1G 500M") is never treated as skippable here: it IS the
 // effective assignment, so skipping past it would warn against the wrong,
-// no-longer-effective value instead of just declining to evaluate. Splits
-// a compound sum only on whitespace immediately before a digit, so a single
-// spaced-out term ("32 G") stays one component. Two systemd-valid forms
-// this deliberately misreads as invalid are the compact, no-separator
-// compound ("1G500M") and an explicitly-signed magnitude ("+5G");
-// recognizing them needs a full tokenizer, out of proportion for a check
-// whose only job is to decide which drop-in line to read a ceiling from.
-function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
-  const percentage = SYSTEMD_MEMORY_PERCENTAGE.exec(value);
-  if (percentage !== null) {
-    const percent = Number(percentage[1]);
-    return !(percent > 0 && percent <= 100);
+// no-longer-effective value instead of just declining to evaluate. Scans
+// tokens through the complete text because systemd permits compound terms
+// both with whitespace ("1G 500M") and without it ("1G500M") — but only
+// when each term's unit is strictly smaller than the one before it; a
+// repeated or increasing unit ("1G2G", "500M1G") is rejected by systemd's
+// own parser and must be rejected here too, or winningByteSizeAssignment
+// would select a value systemd never applied. Accumulates an actual byte
+// total (rather than just checking magnitudes for all-zero) so a compound
+// that resolves to a sub-byte fraction ("0G0.1B") or one that overflows
+// systemd's uint64_t accumulator ("+16E", "16E1P") is caught too — except
+// when the whole-number part is exactly the UINT64_MAX sentinel, where
+// parse_size()'s own overflow guard wraps instead of catching (see the
+// guard and per-term total below). Each term's byte contribution is
+// truncated to an integer (matching systemd's own
+// `l * factor + (uint64_t)(frac * factor)` per-term arithmetic in
+// parse_size()) before being added to the BigInt total, rather than summing
+// raw fractional contributions first — otherwise a compound like
+// "0.6B0.6", where each term is individually a sub-byte fraction systemd
+// discards to zero, would sum to a non-zero 1.2 here and be wrongly
+// accepted as effective when systemd rejects it as a zero-byte limit.
+//
+// parse_size() computes a term's fractional contribution by reading the
+// digit run as an unsigned 64-bit integer (`l2 = strtoull(...)`), widening
+// it to a C `double` (`frac = l2;`), then dividing by 10 once per digit —
+// not by parsing the decimal string directly. That widen step is itself
+// lossy above 2^53, so for a long enough digit run this can round UP to a
+// value a direct decimal parse would never produce: "0.9999999999999999"
+// (16 nines) widens 9999999999999999 to the nearest double,
+// 10000000000000000, and sixteen successive divisions by 10 land exactly
+// on 1.0 — confirmed on systemd 261, where standalone
+// "0.9999999999999999B" resolves to exactly 1 byte, not 0.
+function systemdFractionalValue(magnitude: bigint, digitCount: number): number {
+  let frac = Number(magnitude);
+  for (let i = 0; i < digitCount; i++) {
+    frac /= 10;
   }
-  const magnitudes: number[] = [];
-  for (const term of value.split(/\s+(?=\d)/)) {
-    const match = SYSTEMD_MEMORY_VALUE_TERM.exec(term);
+  return frac;
+}
+
+function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
+  for (const relativePattern of SYSTEMD_MEMORY_RELATIVE_PATTERNS) {
+    const relative = relativePattern.pattern.exec(value);
+    if (relative !== null) {
+      const [, sign, wholeDigits, fractionPart] = relative;
+      const wholeNumber = parseSystemdRelativeWholeNumber(wholeDigits ?? "0");
+      // safe_atoi() parses any base-prefixed spelling of zero ("-0", "-00",
+      // "-0x0", "-0b0", ...) as plain 0, not negative, so any whole-number
+      // part that numerically evaluates to zero slips the sign past
+      // systemd's `v < 0` guard, not just the literal "0" spelling.
+      if (sign === "-" && wholeNumber !== 0) {
+        return true;
+      }
+      const amount =
+        wholeNumber + (fractionPart ? Number(`0.${fractionPart}`) : 0);
+      return !(amount > 0 && amount <= relativePattern.maximum);
+    }
+  }
+  let totalBytes = 0n;
+  let previousRank = Infinity;
+  const term = new RegExp(SYSTEMD_MEMORY_VALUE_TERM_SOURCE, "y");
+  let offset = 0;
+  while (offset < value.length) {
+    SYSTEMD_MEMORY_WHITESPACE_PATTERN.lastIndex = offset;
+    offset += (SYSTEMD_MEMORY_WHITESPACE_PATTERN.exec(value)?.[0] ?? "").length;
+    // A separator run that reaches the end of the string with no term
+    // after it is invalid, not merely "nothing more to parse": the
+    // separator's own tolerance (see SYSTEMD_TERM_SEPARATOR_SOURCE above)
+    // exists only because it is immediately followed by a strtoull() call
+    // that skips it internally while parsing a digit — but per the C
+    // standard, when strtoull() finds no digit to convert, it reports
+    // failure by leaving its output pointer at the *original*, pre-skip
+    // position, not the post-skip one. So a trailing separator with
+    // nothing following it never actually gets consumed by systemd,
+    // exactly as if it weren't whitespace at all. Confirmed on systemd
+    // 261: "64G\v" and "64G\f" are both rejected with "Invalid memory
+    // limit", unlike "64G\v512M" and "64G\f512M".
+    if (offset === value.length) {
+      return true;
+    }
+    term.lastIndex = offset;
+    const match = term.exec(value);
     if (match === null) {
       return true;
     }
-    magnitudes.push(Number(match[1]));
+    const suffix = match[2];
+    const rank =
+      suffix === undefined ? 0 : SYSTEMD_MEMORY_UNIT_ORDER.indexOf(suffix) + 1;
+    if (rank >= previousRank) {
+      return true;
+    }
+    previousRank = rank;
+    const multiplier = 1024n ** BigInt(Math.max(rank - 1, 0));
+    // match[1] is guaranteed by the mandatory capture group `(\d+(?:\.\d*)?)`
+    // in SYSTEMD_MEMORY_VALUE_TERM_SOURCE; the `?? "0"` only satisfies
+    // noUncheckedIndexedAccess.
+    const [integerDigits = "0", fractionalDigits] = (match[1] ?? "0").split(
+      "."
+    );
+    const integerMagnitude = BigInt(integerDigits);
+    const fractionalMagnitude = BigInt(fractionalDigits || "0");
+    // parse_size() reads the fractional digit run itself with strtoull()
+    // before scaling it into bytes. A numerator above UINT64_MAX therefore
+    // fails with ERANGE even when the represented fraction would be small.
+    if (fractionalMagnitude > SYSTEMD_MEMORY_LIMIT_INFINITY) {
+      return true;
+    }
+    // strtoull() on the whole-number part fails the same way for a run of
+    // digits past UINT64_MAX — checked before the wraparound guard below,
+    // which only concerns itself with values strtoull() would have accepted
+    // (and would therefore go on to wrap, not fail outright).
+    if (integerMagnitude > SYSTEMD_MEMORY_LIMIT_INFINITY) {
+      return true;
+    }
+    const fractionalValue =
+      fractionalDigits === undefined
+        ? 0
+        : systemdFractionalValue(fractionalMagnitude, fractionalDigits.length);
+    // parse_size()'s own overflow guard — `l + (frac > 0) > UINT64_MAX /
+    // factor` — is itself native uint64_t arithmetic: when the whole-number
+    // part is exactly UINT64_MAX and a fraction follows, `l + 1` wraps to 0
+    // and the guard never fires (confirmed on systemd 255:
+    // "18446744073709551615.1K" is accepted, resolving to
+    // 18446744073709550694 — see the per-term total below for why).
+    // Replicated here with the same modulo-2^64 wraparound rather than
+    // exact BigInt addition.
+    const guardOperand =
+      (integerMagnitude + (fractionalValue > 0 ? 1n : 0n)) %
+      SYSTEMD_UINT64_MODULUS;
+    if (guardOperand > SYSTEMD_MEMORY_LIMIT_INFINITY / multiplier) {
+      return true;
+    }
+    const fractionalBytes = BigInt(
+      Math.trunc(fractionalValue * Number(multiplier))
+    );
+    // tmp = l * factor + (uint64_t)(frac * factor) in parse_size() is also
+    // native uint64_t arithmetic, so this per-term product wraps modulo
+    // 2^64 too, rather than growing past it the way unbounded BigInt
+    // multiplication would.
+    const termBytes =
+      (integerMagnitude * multiplier + fractionalBytes) %
+      SYSTEMD_UINT64_MODULUS;
+    totalBytes += termBytes;
+    if (totalBytes >= SYSTEMD_MEMORY_LIMIT_INFINITY) {
+      return true;
+    }
+    offset = term.lastIndex;
   }
-  return magnitudes.every((magnitude) => magnitude === 0);
+  return totalBytes < 1n;
 }
 
 function parseSystemdByteSize(value: string): number | undefined {
@@ -1130,6 +1405,21 @@ async function effectiveSliceAssignments(
   return assignments;
 }
 
+// Strips only the ASCII whitespace systemd's own WHITESPACE macro
+// recognizes, unlike JavaScript's Unicode-aware String.prototype.trim(),
+// which also strips characters such as U+00A0 (NBSP) that systemd's config
+// parser leaves in place. A value ending in a trailing NBSP (e.g.
+// "MemoryMax=64G" followed by U+00A0) is therefore preserved here exactly
+// as systemd sees it, so the byte-size tokenizer below correctly rejects it
+// as trailing garbage instead of silently accepting the NBSP-trimmed "64G".
+const SYSTEMD_TRIM_PATTERN = new RegExp(
+  `^${SYSTEMD_NARROW_WHITESPACE_SOURCE}+|${SYSTEMD_NARROW_WHITESPACE_SOURCE}+$`,
+  "g"
+);
+function systemdTrim(value: string): string {
+  return value.replace(SYSTEMD_TRIM_PATTERN, "");
+}
+
 // Returns the [Slice] section's assignments in file order, each tagged with
 // the file it came from, or undefined when the file has no [Slice] section.
 function sliceAssignments(
@@ -1140,8 +1430,23 @@ function sliceAssignments(
   let inSliceSection = false;
   let sawSliceSection = false;
 
-  for (const line of content.split(/\r?\n/)) {
-    const trimmed = line.trim();
+  // systemd's config-file reader strips a single leading UTF-8 BOM
+  // (U+FEFF) from the very first line only, before any further parsing
+  // (src/shared/conf-parser.c, gated by a `bom_seen` flag so it never
+  // fires again mid-file). JS `String.prototype.trim()` used to strip
+  // this incidentally (U+FEFF is part of its Unicode whitespace set), but
+  // switching to the ASCII-only systemdTrim() below dropped that
+  // side-effect: a BOM-prefixed "[Slice]" no longer matches the section
+  // regex, sawSliceSection stays false, and this function silently
+  // returns undefined for the entire file — suppressing every directive,
+  // not just MemoryMax=. Stripping it once here, up front, restores that
+  // behavior without needing to track a per-call bom_seen flag.
+  const contentWithoutBom = content.startsWith("\uFEFF")
+    ? content.slice(1)
+    : content;
+
+  for (const line of contentWithoutBom.split(/\r?\n/)) {
+    const trimmed = systemdTrim(line);
     const section = /^\[([^\]]+)\]$/.exec(trimmed);
     if (section !== null) {
       inSliceSection = section[1] === "Slice";
@@ -1154,9 +1459,9 @@ function sliceAssignments(
     const equalsIndex = trimmed.indexOf("=");
     if (equalsIndex > 0) {
       assignments.push({
-        name: trimmed.slice(0, equalsIndex).trim(),
+        name: systemdTrim(trimmed.slice(0, equalsIndex)),
         source,
-        value: trimmed.slice(equalsIndex + 1).trim()
+        value: systemdTrim(trimmed.slice(equalsIndex + 1))
       });
     }
   }

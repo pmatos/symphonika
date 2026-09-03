@@ -2035,9 +2035,38 @@ describe("doctor", () => {
       "10garbage",
       "32GB",
       "0%",
+      "50.123%",
+      "+50.123%",
       "200%",
       "0B",
       "0 0",
+      "0G0M",
+      "+0G",
+      "64+4G",
+      "1G2G",
+      "512M1G",
+      "0G0.1B",
+      "0.6B0.6",
+      "18446744073709551614B0.9999999999999999",
+      "0.18446744073709551616G",
+      "0.99999999999999999999K",
+      "+16E",
+      "15.1E",
+      "16E1P",
+      "18446744073709551615",
+      "+18446744073709551615",
+      "+ 64G",
+      "+64G\u00a0+512M",
+      "64G\u00a0",
+      "-50%",
+      "-100%",
+      "-500.5\u2030",
+      "-5000\u2031",
+      "64\vG",
+      "64\fG",
+      "64G\v",
+      "64G\f",
+      "1G500m",
       "Infinity",
       "INFINITY"
     ])(
@@ -2056,7 +2085,117 @@ describe("doctor", () => {
       }
     );
 
-    it.each(["50%", "100%", "1024B", "2P", "1G 500M"])(
+    it("recognizes MemoryMax= in a drop-in that starts with a UTF-8 BOM", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInBom: true,
+        dropInMemoryMax: "6G",
+        hostParallelism: 24
+      });
+
+      const warning = report.warnings.find((entry) =>
+        entry.includes("provider build memory estimate")
+      );
+      expect(warning).toContain("MemoryMax=6G");
+    });
+
+    it("does not overflow-reject a bare MemoryMax= within 2 of the uint64 ceiling", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "18446744073709551614", // 2^64 - 2
+        hostParallelism: 24
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
+    });
+
+    it("accepts a fractional remainder on the uint64 sentinel the way systemd's own overflow guard wraps", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "18446744073709551615.1K", // wraps to 18446744073709550694
+        hostParallelism: 24
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
+    });
+
+    it("rounds a near-one fractional byte the way systemd's own double-widening does", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "0.9999999999999999B", // widens to exactly 1 byte, not 0
+        hostParallelism: 24
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
+    });
+
+    it("still rejects a whole-number part past UINT64_MAX even with a fractional remainder", async () => {
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: "18446744073709551616.1K", // 2^64, strtoull() itself would ERANGE
+        hostParallelism: 24
+      });
+
+      const warning = report.warnings.find((entry) =>
+        entry.includes("provider build memory estimate")
+      );
+      expect(warning).toContain("MemoryMax=32G");
+      expect(warning).toContain("36 GiB");
+    });
+
+    it("rejects a long malformed digit run without catastrophic backtracking", async () => {
+      const start = Date.now();
+      const report = await runProviderCapacityDoctor({
+        dropInMemoryMax: `${"1".repeat(2000)}x`,
+        hostParallelism: 24
+      });
+      expect(Date.now() - start).toBeLessThan(2000);
+
+      const warning = report.warnings.find((entry) =>
+        entry.includes("provider build memory estimate")
+      );
+      expect(warning).toContain("MemoryMax=32G");
+      expect(warning).toContain("36 GiB");
+    });
+
+    it.each([
+      "50%",
+      "100%",
+      "+50%",
+      "+100%",
+      "-0.01%",
+      "-00.01%",
+      "0x32%",
+      "0b1%",
+      "0144%",
+      "500.5‰",
+      "+500.5‰",
+      "-0.1‰",
+      "5000‱",
+      "+5000‱",
+      "1024B",
+      "2P",
+      "1G 500M",
+      "3. G",
+      "+3.G2.M",
+      "+64G",
+      "64G512M",
+      "64G+512M",
+      "+64G+512M",
+      "1K1B1",
+      "+1G 500M",
+      "64G\v512M",
+      "64G\f512M",
+      "\v50%",
+      "\f50%"
+    ])(
       "does not fall back past a MemoryMax= form it cannot parse but systemd accepts (%s)",
       async (unparseableButValid) => {
         const report = await runProviderCapacityDoctor({
@@ -2436,6 +2575,7 @@ async function runDoctorCommand(
 
 async function runProviderCapacityDoctor(input: {
   dropInMemoryMax?: string;
+  dropInBom?: boolean;
   hostParallelism: number;
 }) {
   const root = await makeTempRoot();
@@ -2472,7 +2612,7 @@ async function runProviderCapacityDoctor(input: {
     await mkdir(dropInDir);
     await writeFile(
       path.join(dropInDir, "20-memory-budget.conf"),
-      `[Slice]\nMemoryMax=${input.dropInMemoryMax}\n`,
+      `${input.dropInBom === true ? "\uFEFF" : ""}[Slice]\nMemoryMax=${input.dropInMemoryMax}\n`,
       "utf8"
     );
   }

@@ -5,7 +5,9 @@ import {
 } from "node:child_process";
 
 import {
+  confirmProviderScopeCleanup,
   createProcessScope,
+  markProviderScopeCleanupPending,
   type ProcessScope
 } from "../lifecycle/process-scope.js";
 import { providerScratchEnvironment } from "../lifecycle/provider-scratch.js";
@@ -154,11 +156,14 @@ export function createOmpProvider(
       );
       if (activeRun.cancelled) {
         activeRuns.delete(input.run.id);
-        await processScope.stopProviderScope(input.run);
         yield processExitEvent(activeRun, null, null);
         return;
       }
 
+      const providerScopeWrapped = markProviderScopeCleanupPending(
+        command,
+        input.recordProviderScopeCleanupPending
+      );
       const child = spawnProviderProcess(
         command,
         input.workspacePath,
@@ -319,7 +324,12 @@ export function createOmpProvider(
       } finally {
         activeRuns.delete(input.run.id);
         await shutdownProviderProcess(child);
-        await processScope.stopProviderScope(input.run);
+        await confirmProviderScopeCleanup(
+          processScope,
+          input.run,
+          providerScopeWrapped,
+          input.recordProviderScopeCleanupPending
+        );
         // Last, so scope teardown is never delayed by it: the caller reads
         // the stderr log to explain an unclean exit as soon as this generator
         // returns, and only this await orders that read after the tee's write

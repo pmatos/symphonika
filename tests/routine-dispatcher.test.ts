@@ -650,6 +650,7 @@ describe("RoutineFiringDispatcher", () => {
       ): AsyncGenerator<ProviderEvent> {
         await Promise.resolve();
         providerInputs.push(input);
+        input.recordProviderScopeCleanupPending?.(true);
         yield {
           normalized: { exitCode: 0, type: "process_exit" },
           raw: { code: 0, kind: "exit" }
@@ -709,6 +710,10 @@ describe("RoutineFiringDispatcher", () => {
         ROUTINE_OVERRIDE_COMMAND_TEMPLATE,
         ROUTINE_EXECUTION_OVERRIDES
       );
+      expect(runStore.getRoutineFiring("fire-overrides")).toMatchObject({
+        providerScopeCleanupPending: true,
+        state: "succeeded"
+      });
     } finally {
       runStore.close();
     }

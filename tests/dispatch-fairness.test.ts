@@ -34,6 +34,85 @@ afterEach(async () => {
 });
 
 describe("dispatch fairness", () => {
+  it("does not re-claim an issue whose newest run made no workspace changes", async () => {
+    const root = await makeTempRoot();
+    await writeWeightedConfig(root);
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const resolvedIssue = issue({
+      number: 1,
+      title: "Already resolved",
+      url: "https://github.com/pmatos/alpha/issues/1"
+    });
+    runStore.createRun({
+      id: "run-already-resolved",
+      issue: resolvedIssue,
+      projectName: "alpha",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    runStore.recordTerminalReason(
+      "run-already-resolved",
+      "no_workspace_changes",
+      "deterministic"
+    );
+    runStore.updateRunState("run-already-resolved", "blocked");
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepared = {
+      branchName: "sym/alpha/1-already-resolved",
+      branchRef: "refs/heads/sym/alpha/1-already-resolved",
+      cachePath: path.join(root, "cache", "alpha.git"),
+      issueDirectoryName: "1-already-resolved",
+      reused: true,
+      workspacePath: path.join(root, "workspaces", "already-resolved")
+    };
+    await createGitWorkspaceAhead(prepared);
+
+    try {
+      const result = await dispatchOneEligibleIssue({
+        agentProviders: { codex: provider },
+        configDir: root,
+        configPath: path.join(root, "symphonika.yml"),
+        createRunId: () => "run-duplicate",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        issuePollStatus: pollStatusFor([
+          { issue: resolvedIssue, project: "alpha" }
+        ]),
+        prepareIssueWorkspace: vi.fn().mockResolvedValue(prepared),
+        runStore,
+        stateRoot
+      });
+
+      expect(result.dispatched).toBe(false);
+      if (!result.dispatched) {
+        expect(result.reason).toBe(
+          "no eligible issue has a registered provider"
+        );
+      }
+      expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("dispatches fresh issues with weighted project fairness", async () => {
     const root = await makeTempRoot();
     await writeWeightedConfig(root);

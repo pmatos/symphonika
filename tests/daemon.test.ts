@@ -1,4 +1,11 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -425,6 +432,350 @@ describe("startDaemon", () => {
     }
   });
 
+  it("reclassifies a no_workspace_changes-suppressed issue as filtered (#683/#691)", async () => {
+    const cwd = await makeTempRoot();
+    await writeMinimalProject(cwd);
+    const stateRoot = path.join(cwd, ".symphonika");
+    const seedStore = openRunStore({ stateRoot });
+    seedStore.createRun({
+      id: "run-suppressed",
+      issue: sampleIssue({ number: 42 }),
+      projectName: "symphonika",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    seedStore.recordTerminalReason(
+      "run-suppressed",
+      "no_workspace_changes",
+      "deterministic"
+    );
+    seedStore.updateRunState("run-suppressed", "blocked");
+    seedStore.close();
+
+    // Matches the "symphonika" project's issue_filters (labels_all:
+    // ["agent-ready"]) so pollProject's pure label-based check keeps
+    // resurfacing it as a candidate every tick, same as it would in
+    // production once an operator clears the sym:* labels.
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: () => Promise.resolve(),
+      listOpenIssues: () =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "",
+            id: 42,
+            labels: ["agent-ready"],
+            number: 42,
+            state: "open",
+            title: "issue",
+            updated_at: "",
+            url: ""
+          }
+        ]),
+      removeLabelsFromIssue: () => Promise.resolve()
+    };
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const pollNowResult = (await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      }).then((r) => r.json())) as {
+        candidateIssues: number;
+        issuePolling: {
+          projects: Array<{
+            name: string;
+            candidateIssues?: number;
+            filteredIssues?: number;
+          }>;
+        };
+      };
+      // Regression guard (#691 review): the suppression filter used to only
+      // touch the top-level candidateIssues array, leaving poll-now's
+      // per-project count (and the raw status fed to persistProjectPollState
+      // below) stale -- poll-now could report a global 0 while still
+      // printing "1 candidate" for the project.
+      expect(pollNowResult.candidateIssues).toBe(0);
+      const projectReport = pollNowResult.issuePolling.projects.find(
+        (project) => project.name === "symphonika"
+      );
+      expect(projectReport?.candidateIssues ?? 0).toBe(0);
+      // Regression guard (#691 review): a suppressed candidate must be
+      // reclassified as filtered, not dropped -- otherwise fetched (1) no
+      // longer equals candidate (0) + filtered (0), and the issue vanishes
+      // from /issues triage search instead of showing up with a reason.
+      expect(projectReport?.filteredIssues ?? 0).toBe(1);
+
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
+        candidateIssues: Array<{ issue: { number: number } }>;
+        filteredIssues: Array<{
+          issue: { number: number };
+          reasons: string[];
+        }>;
+      };
+      // Regression guard: issueFilterReasons is a pure label-based check and
+      // matches this issue every tick, so without the suppression filter in
+      // refreshIssuePollStatus this list would keep including it forever.
+      expect(status.candidateIssues).toHaveLength(0);
+      const filteredEntry = status.filteredIssues.find(
+        (entry) => entry.issue.number === 42
+      );
+      expect(filteredEntry).toBeDefined();
+      expect(filteredEntry?.reasons).toEqual([
+        expect.stringContaining("no_workspace_changes")
+      ]);
+      // Regression guard (#691 review): latestRunSuppressesFreshDispatch
+      // looks only at the newest Run row, never at the Issue's own
+      // revision -- the reason string must not promise that editing the
+      // Issue lifts the suppression, since it does not.
+      expect(filteredEntry?.reasons[0]).not.toContain(
+        "until the issue changes"
+      );
+      expect(filteredEntry?.reasons[0]).toContain("newer run");
+
+      // Regression guard (#691 review): the persisted /issues triage
+      // snapshot (fed from the raw, unfiltered nextStatus) used to keep
+      // describing the suppressed issue as an eligible candidate even
+      // though the in-memory views above were already fixed.
+      const verifyStore = openRunStore({ stateRoot });
+      const projectState = verifyStore
+        .getProjectStatesByName()
+        .get("symphonika");
+      expect(projectState?.lastCandidateIssues ?? 0).toBe(0);
+      expect(projectState?.lastFilteredIssues ?? 0).toBe(1);
+      const snapshotRows = verifyStore.listProjectIssueSnapshots("symphonika");
+      const snapshotRow = snapshotRows.find((row) => row.issueNumber === 42);
+      expect(snapshotRow?.kind).toBe("filtered");
+      expect(snapshotRow?.reasons).toEqual([
+        expect.stringContaining("no_workspace_changes")
+      ]);
+      verifyStore.close();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("keeps a name-shadowed project's own candidate count intact (#691 review)", async () => {
+    const cwd = await makeTempRoot();
+    await writeMinimalProject(cwd);
+    // Second declaration reuses the "symphonika" name with a different
+    // repository. selectedIssueProjectKeysByName's "last declaration wins"
+    // rule makes this one (symphonika-other) the winner, so the first
+    // declaration (repo symphonika, from writeMinimalProject) is shadowed:
+    // its own candidates never survive mergeIssuePollStatus's
+    // selectedCandidate filter into the merged candidateIssues array, even
+    // though its own poll still finds them.
+    await appendFile(
+      path.join(cwd, "symphonika.yml"),
+      [
+        "  - name: symphonika",
+        "    disabled: false",
+        "    weight: 1",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika-other",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked", "needs-human"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/symphonika-other",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika-other.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: () => Promise.resolve(),
+      listOpenIssues: (input) =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "",
+            id: input.repo === "symphonika" ? 1 : 2,
+            labels: ["agent-ready"],
+            number: input.repo === "symphonika" ? 1 : 2,
+            state: "open",
+            title: "issue",
+            updated_at: "",
+            url: ""
+          }
+        ]),
+      removeLabelsFromIssue: () => Promise.resolve()
+    };
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const pollNowResult = (await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      }).then((r) => r.json())) as {
+        issuePolling: {
+          projects: Array<{
+            name: string;
+            repository: { owner: string; repo: string };
+            candidateIssues?: number;
+          }>;
+        };
+      };
+      // Regression guard (#691 review): recomputing each project's
+      // candidateIssues count from the globally merged (and
+      // selectedCandidate-filtered) candidateIssues array wrongly reset the
+      // shadowed declaration's own honestly-polled count to zero, even
+      // though nothing here is suppressed.
+      const reports = pollNowResult.issuePolling.projects.filter(
+        (project) => project.name === "symphonika"
+      );
+      expect(reports).toHaveLength(2);
+      for (const project of reports) {
+        expect(project.candidateIssues).toBe(1);
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("never reports a negative candidateIssues count for a fully duplicate project declaration (#691 review)", async () => {
+    const cwd = await makeTempRoot();
+    await writeMinimalProject(cwd);
+    const stateRoot = path.join(cwd, ".symphonika");
+    const seedStore = openRunStore({ stateRoot });
+    seedStore.createRun({
+      id: "run-suppressed",
+      issue: sampleIssue({ number: 42 }),
+      projectName: "symphonika",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    seedStore.recordTerminalReason(
+      "run-suppressed",
+      "no_workspace_changes",
+      "deterministic"
+    );
+    seedStore.updateRunState("run-suppressed", "blocked");
+    seedStore.close();
+
+    // Second declaration duplicates both the name AND the repository of
+    // the first (from writeMinimalProject) -- genuinely indistinguishable
+    // by ProjectIssueSnapshot's own {project, repository} identity, unlike
+    // the name-shadowing test above where the repository differs.
+    await appendFile(
+      path.join(cwd, "symphonika.yml"),
+      [
+        "  - name: symphonika",
+        "    disabled: false",
+        "    weight: 1",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked", "needs-human"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/symphonika-duplicate",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: () => Promise.resolve(),
+      listOpenIssues: () =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "",
+            id: 42,
+            labels: ["agent-ready"],
+            number: 42,
+            state: "open",
+            title: "issue",
+            updated_at: "",
+            url: ""
+          }
+        ]),
+      removeLabelsFromIssue: () => Promise.resolve()
+    };
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+
+      // Asserted against the persisted RunStore project state, not
+      // poll-now's own HTTP response: two declarations that duplicate both
+      // name and repository also produce two rows for the same issue
+      // number in one replaceProjectIssueSnapshots insert batch (a
+      // separate, pre-existing bug in projectIssueSnapshotRows, unrelated
+      // to suppression), which throws a UNIQUE constraint violation that
+      // the outer catch in refreshIssuePollStatus turns into a blanket
+      // issuePollStatus reset -- masking this fix's effect from poll-now's
+      // JSON response. recordProjectPollOutcome (which writes
+      // last_candidate_issues) runs before that throw, so it still
+      // observably captures the unclamped/clamped value.
+      const verifyStore = openRunStore({ stateRoot });
+      const projectState = verifyStore
+        .getProjectStatesByName()
+        .get("symphonika");
+      // Regression guard (#691 review): matchingProjectCount can't tell
+      // the two identical declarations' own suppressed entries apart, so
+      // the raw suppressed count (2, the sum across both declarations) used
+      // to be subtracted from the persisted candidateIssues (1), producing
+      // lastCandidateIssues: -1 and lastFilteredIssues: 2 -- clamping the
+      // adjustment to the report's own prior count keeps it at
+      // lastCandidateIssues: 0, lastFilteredIssues: 1.
+      expect(projectState?.lastCandidateIssues).toBe(0);
+      expect(projectState?.lastFilteredIssues).toBe(1);
+      verifyStore.close();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("cleans up the HTTP listener when endpoint descriptor writing fails", async () => {
     const cwd = await makeTempRoot();
     const port = await getFreePort();
@@ -633,6 +984,9 @@ describe("startDaemon orphan sweep logging", () => {
       workspacePath: stateRoot
     });
     store.updateRunState("orphan-run", "running");
+    // Only attempt 2 was actually spawned wrapped in a live scope -- the
+    // sweep now trusts this durable per-attempt marker, not state alone.
+    store.setAttemptProviderScopeCleanupPending("orphan-run-attempt-2", true);
     store.close();
 
     const stopCalls: Array<{ attempt: number; id: string }> = [];
@@ -652,6 +1006,179 @@ describe("startDaemon orphan sweep logging", () => {
 
     try {
       expect(stopCalls).toEqual([{ attempt: 2, id: "orphan-run" }]);
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression for the P1 fix (PR #684 review): a Run-level boolean let a
+  // later attempt's confirmed cleanup silently erase an earlier attempt's
+  // still-unconfirmed obligation, permanently losing it. Cleanup is now
+  // tracked per attempt, so the sweep must retry attempt 1 specifically even
+  // though attempt 2 already confirmed its own scope.
+  it("retries an earlier attempt's unconfirmed cleanup even after a later attempt confirmed its own", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "retried-run",
+      issue: sampleIssue({ number: 56 }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/symphonika/56-fixture",
+      branchRef: "refs/heads/sym/symphonika/56-fixture",
+      id: "retried-run-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "retried-run",
+      state: "failed",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    // Attempt 1's cleanup was never confirmed (e.g. a transient systemd
+    // hiccup) -- its flag stays set.
+    store.setAttemptProviderScopeCleanupPending("retried-run-attempt-1", true);
+    store.createAttempt({
+      attemptNumber: 2,
+      branchName: "sym/symphonika/56-fixture",
+      branchRef: "refs/heads/sym/symphonika/56-fixture",
+      id: "retried-run-attempt-2",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "retried-run",
+      state: "running",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    store.updateRunState("retried-run", "running");
+    // Attempt 2's cleanup was already confirmed and cleared before this
+    // restart -- its own flag is false, unlike attempt 1's.
+    store.close();
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve(true);
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      // Only attempt 1 -- the one still marked pending -- is retried.
+      // Attempt 2 is not re-stopped since its own obligation was already
+      // clear.
+      expect(stopCalls).toEqual([{ attempt: 1, id: "retried-run" }]);
+
+      const verifyStore = openRunStore({ stateRoot });
+      try {
+        expect(verifyStore.getRun("retried-run")).toMatchObject({
+          providerScopeCleanupPending: false
+        });
+        const attempts = verifyStore.listAttempts("retried-run");
+        expect(
+          attempts.map((attempt) => attempt.providerScopeCleanupPending)
+        ).toEqual([false, false]);
+      } finally {
+        verifyStore.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression for the P2 fix (PR #684 review): on a host with no reachable
+  // systemd --user manager, a provider process is never wrapped in a scope,
+  // so providerScopeCleanupPending is never set true for that attempt --
+  // even though the Run legitimately reaches "running". The sweep must not
+  // infer a live scope from state alone (that made stopProviderScope fail
+  // there every time and durably mark cleanup pending forever); it must
+  // trust only the durable marker.
+  it("does not stop or durably mark cleanup pending for a running orphan that was never scope-wrapped", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "unwrapped-run",
+      issue: sampleIssue({ number: 57 }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/symphonika/57-fixture",
+      branchRef: "refs/heads/sym/symphonika/57-fixture",
+      id: "unwrapped-run-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "unwrapped-run",
+      state: "running",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    // Never wrapped -- no systemd --user manager on this host -- so no
+    // provider_scope_cleanup_pending flag was ever set, even though the run
+    // legitimately reached "running".
+    store.updateRunState("unwrapped-run", "running");
+    store.close();
+
+    const stopCalls: Array<{ attempt: number; id: string }> = [];
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: (run) => {
+          stopCalls.push(run);
+          return Promise.resolve(false);
+        },
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+
+    try {
+      expect(stopCalls).toEqual([]);
+
+      const verifyStore = openRunStore({ stateRoot });
+      try {
+        expect(verifyStore.getRun("unwrapped-run")).toMatchObject({
+          providerScopeCleanupPending: false,
+          state: "stale",
+          terminalReason: "leaked_active_run"
+        });
+        expect(verifyStore.findLeakedRuns()).toEqual([]);
+      } finally {
+        verifyStore.close();
+      }
     } finally {
       await daemon.stop();
     }
@@ -718,6 +1245,9 @@ describe("startDaemon orphan sweep logging", () => {
       routineName: "nightly-report"
     });
     store.updateRoutineFiringState("leaked-firing", "running");
+    // The sweep now trusts this durable marker, not state alone -- it was
+    // set true synchronously before spawn (process-scope.ts).
+    store.setRoutineFiringProviderScopeCleanupPending("leaked-firing", true);
     store.close();
 
     const stopCalls: Array<{ attempt: number; id: string }> = [];
@@ -825,6 +1355,10 @@ describe("startDaemon orphan sweep logging", () => {
       workspacePath: stateRoot
     });
     store.updateRunState("unconfirmed-run", "running");
+    store.setAttemptProviderScopeCleanupPending(
+      "unconfirmed-run-attempt-1",
+      true
+    );
     store.close();
 
     const { logger, lines } = createCapturingLogger();
@@ -848,8 +1382,9 @@ describe("startDaemon orphan sweep logging", () => {
       expect(pendingLines).toHaveLength(1);
       expect(pendingLines[0]).toMatchObject({
         level: pino.levels.values.warn,
+        providerScopeCleanupPending: true,
         runId: "unconfirmed-run",
-        terminalReason: "leaked_active_run_cleanup_pending"
+        terminalReason: "leaked_active_run"
       });
 
       await daemon.stop();
@@ -858,8 +1393,9 @@ describe("startDaemon orphan sweep logging", () => {
       const verifyStore = openRunStore({ stateRoot });
       try {
         expect(verifyStore.getRun("unconfirmed-run")).toMatchObject({
+          providerScopeCleanupPending: true,
           state: "stale",
-          terminalReason: "leaked_active_run_cleanup_pending"
+          terminalReason: "leaked_active_run"
         });
         expect(
           verifyStore.findLeakedRuns().map((entry) => entry.runId)
@@ -898,6 +1434,10 @@ describe("startDaemon orphan sweep logging", () => {
       routineName: "nightly-report"
     });
     store.updateRoutineFiringState("unconfirmed-firing", "running");
+    store.setRoutineFiringProviderScopeCleanupPending(
+      "unconfirmed-firing",
+      true
+    );
     store.close();
 
     const { logger, lines } = createCapturingLogger();
@@ -920,9 +1460,10 @@ describe("startDaemon orphan sweep logging", () => {
       );
       expect(pendingLines).toHaveLength(1);
       expect(pendingLines[0]).toMatchObject({
+        providerScopeCleanupPending: true,
         level: pino.levels.values.warn,
         firingId: "unconfirmed-firing",
-        terminalReason: "leaked_routine_firing_cleanup_pending"
+        terminalReason: "leaked_routine_firing"
       });
 
       await daemon.stop();
@@ -933,8 +1474,9 @@ describe("startDaemon orphan sweep logging", () => {
         expect(verifyStore.listRoutineFirings()).toEqual([
           expect.objectContaining({
             id: "unconfirmed-firing",
+            providerScopeCleanupPending: true,
             state: "failed",
-            terminalReason: "leaked_routine_firing_cleanup_pending"
+            terminalReason: "leaked_routine_firing"
           })
         ]);
         expect(
@@ -947,6 +1489,98 @@ describe("startDaemon orphan sweep logging", () => {
       if (!stopped) {
         await daemon.stop();
       }
+    }
+  });
+
+  it("retries terminal-run scope cleanup without changing the run outcome", async () => {
+    const cwd = await makeTempRoot();
+    const stateRoot = path.join(cwd, ".symphonika");
+    await mkdir(stateRoot, { recursive: true });
+    const store = openRunStore({ stateRoot });
+    store.createRun({
+      id: "terminal-cleanup-pending",
+      issue: sampleIssue({ number: 72 }),
+      projectName: "symphonika",
+      providerCommand: "codex fake",
+      providerName: "codex"
+    });
+    store.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/symphonika/72-fixture",
+      branchRef: "refs/heads/sym/symphonika/72-fixture",
+      id: "terminal-cleanup-pending-attempt-1",
+      issueSnapshotPath: "/tmp/snap.json",
+      metadataPath: "/tmp/meta.json",
+      normalizedLogPath: "/tmp/normalized.jsonl",
+      promptPath: "/tmp/prompt.md",
+      providerCommand: "codex fake",
+      providerName: "codex",
+      rawLogPath: "/tmp/raw.jsonl",
+      runId: "terminal-cleanup-pending",
+      state: "failed",
+      workflowGraphPath: "",
+      workspacePath: stateRoot
+    });
+    store.updateRunState("terminal-cleanup-pending", "failed");
+    store.recordTerminalReason(
+      "terminal-cleanup-pending",
+      "provider_process_exit_1",
+      "deterministic"
+    );
+    store.setRunProviderScopeCleanupPending("terminal-cleanup-pending", true);
+    store.close();
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(false),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+    await daemon.stop();
+
+    const verifyStore = openRunStore({ stateRoot });
+    try {
+      expect(verifyStore.getRun("terminal-cleanup-pending")).toMatchObject({
+        providerScopeCleanupPending: true,
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+      expect(verifyStore.findLeakedRuns()).toEqual([
+        expect.objectContaining({
+          needsTerminalization: false,
+          runId: "terminal-cleanup-pending"
+        })
+      ]);
+    } finally {
+      verifyStore.close();
+    }
+
+    const retryDaemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      logger: pino({ enabled: false }),
+      port: 0,
+      processScope: {
+        stopProviderScope: () => Promise.resolve(true),
+        wrapForProviderScope: (_run, command) => Promise.resolve(command)
+      }
+    });
+    await retryDaemon.stop();
+
+    const cleanedStore = openRunStore({ stateRoot });
+    try {
+      expect(cleanedStore.getRun("terminal-cleanup-pending")).toMatchObject({
+        providerScopeCleanupPending: false,
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+      expect(cleanedStore.findLeakedRuns()).toEqual([]);
+    } finally {
+      cleanedStore.close();
     }
   });
 
@@ -986,6 +1620,7 @@ describe("startDaemon orphan sweep logging", () => {
         workspacePath: stateRoot
       });
       store.updateRunState(runId, "running");
+      store.setAttemptProviderScopeCleanupPending(`${runId}-attempt-1`, true);
     }
     store.close();
 

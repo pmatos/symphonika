@@ -9,6 +9,7 @@ import type {
   RawGitHubIssueDependencyRef
 } from "./issue-polling.js";
 import { normalizeProjectWeight } from "./issue-priority.js";
+import { isNoWorkspaceChangesReason } from "./lifecycle/terminal-reason.js";
 import { isPathInside } from "./path-safety.js";
 import {
   decodeJsonArrayColumn,
@@ -117,15 +118,13 @@ const SHUTDOWN_PREEMPTIVE_REASON: CancelReason = "daemon_shutdown";
 // `no_progress`. See ADR 0091.
 const WATCHDOG_NO_PROGRESS_REASON: CancelReason = "no_progress";
 
-// Startup's leaked-routine-firing sweep (src/daemon.ts) writes this terminal_reason
-// when a provider scope's cleanup could not be confirmed stopped, so
-// findLeakedRoutineFirings re-detects the row on the next restart (ADR 0064).
-// claimSettledRoutineWatchdogTerminations and markRoutineFiringsFailed both need the
-// exact string — the former to avoid consuming a still-unconfirmed row's pending
-// notification, the latter to avoid overwriting a durable no_progress latch while
-// cleanup is still pending — so it is exported as the one shared definition rather
-// than duplicated as a local literal in daemon.ts.
-export const LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON =
+// Legacy terminal_reason value: older rows (and startup's leaked-routine-firing
+// sweep before it moved to the durable provider_scope_cleanup_pending column, ADR
+// 0064) used this string in place of a plain "leaked" reason to signal that cleanup
+// was not yet confirmed. findLeakedRoutineFirings still matches on it for those rows,
+// and claimSettledRoutineWatchdogTerminations still checks for it so a legacy row
+// isn't treated as settled before it is actually re-swept and normalized.
+const LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON =
   "leaked_routine_firing_cleanup_pending";
 
 // Shared by listRuns/listRoutineFirings so both accept either a single state
@@ -173,6 +172,7 @@ export type RunStatus = {
   issueTitle: string;
   project: string;
   provider: string;
+  providerScopeCleanupPending: boolean;
   retryCount: number;
   state: RunState;
   stateTransitionReason: string | null;
@@ -194,6 +194,7 @@ export type AttemptStatus = {
   id: string;
   providerCommand: string;
   providerName: string;
+  providerScopeCleanupPending: boolean;
   runId: string;
   state: RunState;
   updatedAt: string;
@@ -269,6 +270,7 @@ export type RoutineFiringStatus = {
   projectName: string;
   provider: AgentProviderName;
   providerCommand: string;
+  providerScopeCleanupPending: boolean;
   pullRequests: RoutinePullRequestStatus[];
   routineName: string;
   scheduledAt: string | null;
@@ -694,6 +696,7 @@ type RunRow = {
   issue_title: string;
   project_name: string;
   provider_name: string | null;
+  provider_scope_cleanup_pending: number;
   retry_count: number;
   state: RunState;
   state_transition_reason: string | null;
@@ -726,6 +729,7 @@ type AttemptRow = {
   prompt_path: string | null;
   provider_command: string;
   provider_name: string;
+  provider_scope_cleanup_pending: number;
   raw_log_path: string | null;
   run_id: string;
   state: RunState;
@@ -1046,6 +1050,7 @@ type RoutineFiringRow = {
   project_name: string;
   provider_command: string;
   provider_name: AgentProviderName;
+  provider_scope_cleanup_pending: number;
   routine_name: string;
   scheduled_at: string;
   state: RoutineFiringState;
@@ -2113,6 +2118,44 @@ export class RunStore {
       )
       .get(projectName, issueNumber) as { count: number } | undefined;
     return row?.count ?? 0;
+  }
+
+  latestRunSuppressesFreshDispatch(input: {
+    issueNumber: number;
+    projectName: string;
+    repository: { owner: string; repo: string };
+  }): boolean {
+    // `sym:*` labels are mutable tracker bookkeeping, so clearing them cannot
+    // erase the durable verdict from the newest Run. Scope the lookup by the
+    // Issue's repository identity, mirroring restart resumption's rationale
+    // (a Project may be retargeted while retaining same-numbered historical
+    // Runs) though not its null-matching: here a null owner/repo is a
+    // wildcard, so rows whose legacy origin is unknown conservatively belong
+    // to the current history. See ADR 0058's issue #683 amendment.
+    const row = this.database
+      .prepare(
+        [
+          "select state, terminal_reason from runs",
+          "where project_name = @projectName",
+          "and issue_number = @issueNumber",
+          "and (issue_owner is null or issue_repo is null or (",
+          "  lower(issue_owner) = lower(@owner)",
+          "  and lower(issue_repo) = lower(@repo)",
+          "))",
+          "order by created_at desc, id desc",
+          "limit 1"
+        ].join(" ")
+      )
+      .get({
+        issueNumber: input.issueNumber,
+        owner: input.repository.owner,
+        projectName: input.projectName,
+        repo: input.repository.repo
+      }) as { state: RunState; terminal_reason: string | null } | undefined;
+    return (
+      row?.state === "blocked" &&
+      isNoWorkspaceChangesReason(row.terminal_reason)
+    );
   }
 
   syncProjectStates(projects: SyncProjectStateInput[]): void {
@@ -4183,7 +4226,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, kind, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, kind, state, provider_name, provider_command, provider_scope_cleanup_pending, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings where id = ?"
         ].join(" ")
       )
@@ -4262,11 +4305,13 @@ export class RunStore {
           "where watchdog_notification_pending = 1",
           "and state in ('succeeded', 'failed', 'cancelled')",
           // A row the leaked-firing sweep couldn't confirm cleaned up keeps this
-          // terminal_reason so it is re-swept on the next restart (ADR 0064). Claiming
-          // it now would clear the durable pending bit while the row's own outcome is
-          // still unsettled, permanently losing the notification once cleanup finally
-          // confirms and overwrites terminal_reason with the real verdict.
+          // legacy terminal_reason, or still carries the durable
+          // provider_scope_cleanup_pending bit, so it is re-swept on the next restart
+          // (ADR 0064). Claiming it now would clear the pending notification while the
+          // row's own outcome is still unsettled, permanently losing it once cleanup
+          // finally confirms and overwrites terminal_reason with the real verdict.
           "and terminal_reason is not @cleanup_pending_reason",
+          "and provider_scope_cleanup_pending = 0",
           "returning id, project_name, routine_name, terminal_reason"
         ].join(" ")
       )
@@ -4350,7 +4395,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, kind, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, kind, state, provider_name, provider_command, provider_scope_cleanup_pending, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           where,
           "order by created_at desc, id desc",
@@ -4388,7 +4433,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, fanout_id, project_name, routine_name, kind, state, provider_name, provider_command, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
+          "select id, fanout_id, project_name, routine_name, kind, state, provider_name, provider_command, provider_scope_cleanup_pending, trigger_source, scheduled_at, workspace_path, workspace_pruned_at, branch_name, branch_ref, terminal_reason, commits_ahead, outcome_status, outcome_action, outcome_url, outcome_title, outcome_summary, outcome_verified, outcome_source, notification_state, notification_error, cancel_requested, cancel_reason, created_at, updated_at",
           "from routine_firings",
           "where workspace_path is not null and workspace_path <> ''",
           "and workspace_pruned_at is null",
@@ -4850,7 +4895,7 @@ export class RunStore {
           "workspace_path, branch_name,",
           "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
-          "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
+          "failure_classification, terminal_reason, provider_scope_cleanup_pending, cancel_requested, cancel_reason,",
           "created_at, updated_at",
           "from runs",
           where,
@@ -4921,7 +4966,7 @@ export class RunStore {
           "workspace_path, branch_name,",
           "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
-          "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
+          "failure_classification, terminal_reason, provider_scope_cleanup_pending, cancel_requested, cancel_reason,",
           "created_at, updated_at,",
           "coalesce((select case when transition.state = ranked_runs.state",
           "  then transition.created_at end from run_state_transitions transition",
@@ -4964,7 +5009,7 @@ export class RunStore {
           "workspace_path, branch_name,",
           "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
-          "failure_classification, terminal_reason, cancel_requested, cancel_reason,",
+          "failure_classification, terminal_reason, provider_scope_cleanup_pending, cancel_requested, cancel_reason,",
           "created_at, updated_at",
           "from runs where id = ?"
         ].join(" ")
@@ -4989,7 +5034,7 @@ export class RunStore {
           "select id, run_id, attempt_number, state, provider_name, provider_command,",
           "workspace_path, branch_name, prompt_path, metadata_path, issue_snapshot_path,",
           "raw_log_path, normalized_log_path, workflow_graph_path,",
-          "created_at, updated_at",
+          "provider_scope_cleanup_pending, created_at, updated_at",
           "from attempts where run_id = ? order by attempt_number asc, id asc"
         ].join(" ")
       )
@@ -5003,6 +5048,7 @@ export class RunStore {
       id: row.id,
       providerCommand: row.provider_command,
       providerName: row.provider_name,
+      providerScopeCleanupPending: row.provider_scope_cleanup_pending === 1,
       runId: row.run_id,
       state: row.state,
       updatedAt: row.updated_at,
@@ -5743,12 +5789,62 @@ export class RunStore {
       .run(SHUTDOWN_PREEMPTIVE_REASON, reason, timestamp(), runId);
   }
 
+  setRunProviderScopeCleanupPending(runId: string, pending: boolean): void {
+    this.database
+      .prepare(
+        "update runs set provider_scope_cleanup_pending = ?, updated_at = ? where id = ?"
+      )
+      .run(pending ? 1 : 0, timestamp(), runId);
+  }
+
+  // Per-attempt cleanup obligation. A Run can retry the same runId across
+  // several attempts, each wrapped in its own systemd scope unit
+  // (process-scope.ts's scopeUnitName). Writing the pending flag onto the
+  // owning attempt row -- instead of unconditionally overwriting a single
+  // Run-level column -- means a later attempt's confirmed cleanup can never
+  // silently erase an earlier attempt's still-unconfirmed one: the Run-level
+  // aggregate below is recomputed from every attempt row, not assigned
+  // directly.
+  setAttemptProviderScopeCleanupPending(
+    attemptId: string,
+    pending: boolean
+  ): void {
+    const apply = this.database.transaction(() => {
+      const now = timestamp();
+      this.database
+        .prepare(
+          "update attempts set provider_scope_cleanup_pending = ?, updated_at = ? where id = ?"
+        )
+        .run(pending ? 1 : 0, now, attemptId);
+      const row = this.database
+        .prepare("select run_id from attempts where id = ?")
+        .get(attemptId) as { run_id: string } | undefined;
+      if (row === undefined) {
+        return;
+      }
+      const anyPending =
+        this.database
+          .prepare(
+            "select 1 from attempts where run_id = ? and provider_scope_cleanup_pending = 1 limit 1"
+          )
+          .get(row.run_id) !== undefined;
+      this.database
+        .prepare(
+          "update runs set provider_scope_cleanup_pending = ?, updated_at = ? where id = ?"
+        )
+        .run(anyPending ? 1 : 0, now, row.run_id);
+    });
+    apply();
+  }
+
   findLeakedRuns(): {
     runId: string;
     projectName: string;
     issueNumber: number;
     previousState: RunState;
     previousTerminalReason: string | null;
+    providerScopeCleanupPending: boolean;
+    needsTerminalization: boolean;
   }[] {
     // Sweeps three classes of orphaned rows:
     // - queued / preparing_workspace / running: their in-memory scheduler
@@ -5759,46 +5855,67 @@ export class RunStore {
     //   transaction wrapper); listWaitingRuns filters these out so
     //   reconcileWaitingRuns can never re-evaluate them. Valid durable waits
     //   (current_state_id set) are intentionally preserved per ADR 0047.
-    // - stale with terminal_reason = 'leaked_active_run_cleanup_pending': a
-    //   prior sweep terminalized the row but could not confirm its provider
-    //   scope was actually stopped. Read-only re-detection here (see
-    //   markRunsStale below) is what makes that retry durable across
-    //   restarts without ever re-exposing the row as 'running' — see
-    //   docs/adr/0064.
+    // - any row with provider_scope_cleanup_pending = 1, independent of its
+    //   lifecycle state and terminal reason. The finalizer can therefore
+    //   preserve a real succeeded/failed/cancelled outcome while asking the
+    //   next daemon instance to retry provider-scope cleanup.
+    // - legacy stale rows whose terminal reason encoded the same obligation;
+    //   these are normalized by the next sweep.
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, issue_number, state, terminal_reason",
+          "select id, project_name, issue_number, state, current_state_id, terminal_reason, provider_scope_cleanup_pending",
           "from runs",
           "where state in ('queued','preparing_workspace','running')",
           "or (state = 'waiting' and current_state_id is null)",
+          "or provider_scope_cleanup_pending = 1",
           "or (state = 'stale' and terminal_reason = 'leaked_active_run_cleanup_pending')"
         ].join(" ")
       )
       .all() as {
       id: string;
+      current_state_id: string | null;
       project_name: string;
       issue_number: number;
       state: RunState;
       terminal_reason: string | null;
+      provider_scope_cleanup_pending: number;
     }[];
-    return rows.map((row) => ({
-      issueNumber: row.issue_number,
-      previousState: row.state,
-      previousTerminalReason: row.terminal_reason,
-      projectName: row.project_name,
-      runId: row.id
-    }));
+    return rows.map((row) => {
+      const legacyCleanupPending =
+        row.terminal_reason === "leaked_active_run_cleanup_pending";
+      return {
+        issueNumber: row.issue_number,
+        needsTerminalization:
+          row.state === "queued" ||
+          row.state === "preparing_workspace" ||
+          row.state === "running" ||
+          (row.state === "waiting" && row.current_state_id === null) ||
+          legacyCleanupPending,
+        previousState: row.state,
+        previousTerminalReason: row.terminal_reason,
+        projectName: row.project_name,
+        providerScopeCleanupPending:
+          row.provider_scope_cleanup_pending === 1 || legacyCleanupPending,
+        runId: row.id
+      };
+    });
   }
 
   markRunsStale(
-    entries: { runId: string; reason: string; previousState: RunState }[]
+    entries: {
+      runId: string;
+      reason: string;
+      previousState: RunState;
+      providerScopeCleanupPending?: boolean;
+    }[]
   ): void {
     const update = this.database.prepare(
       [
         "update runs set",
         "state = 'stale',",
         "terminal_reason = ?,",
+        "provider_scope_cleanup_pending = ?,",
         "notification_state = 'pending',",
         "notification_error = null,",
         "updated_at = ?",
@@ -5809,7 +5926,12 @@ export class RunStore {
       const events: RunTransitionChangeEvent[] = [];
       for (const entry of entries) {
         const updatedAt = timestamp();
-        update.run(entry.reason, updatedAt, entry.runId);
+        update.run(
+          entry.reason,
+          entry.providerScopeCleanupPending === true ? 1 : 0,
+          updatedAt,
+          entry.runId
+        );
         // A re-swept row (previousState already 'stale') isn't changing
         // state — only its terminal_reason may bump between pending and
         // confirmed — so recording another "stale" transition here would
@@ -5833,6 +5955,8 @@ export class RunStore {
     routineName: string;
     previousState: RoutineFiringState;
     previousTerminalReason: string | null;
+    providerScopeCleanupPending: boolean;
+    needsTerminalization: boolean;
   }[] {
     // A daemon crash or kill can leave a routine firing durably in queued,
     // preparing_workspace, or running. findLeakedRuns only sweeps the runs
@@ -5840,16 +5964,17 @@ export class RunStore {
     // hasActiveRoutineFiring returning true forever, permanently skipping every
     // future recurring tick for that routine. routine_firings has no 'stale'
     // state, so leaked rows are settled as 'failed' with a distinct
-    // terminal_reason to remove them from the active set. A row already
-    // 'failed' with terminal_reason = 'leaked_routine_firing_cleanup_pending'
-    // is re-detected the same way findLeakedRuns re-detects its own pending
-    // rows — see docs/adr/0064.
+    // terminal_reason to remove them from the active set. Cleanup obligations
+    // are stored independently so terminal firings retain their real outcome;
+    // legacy cleanup-pending terminal reasons are still recognized and get
+    // normalized by the next sweep — see docs/adr/0064.
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, routine_name, state, terminal_reason",
+          "select id, project_name, routine_name, state, terminal_reason, provider_scope_cleanup_pending",
           "from routine_firings",
           "where state in ('queued','preparing_workspace','running')",
+          "or provider_scope_cleanup_pending = 1",
           "or (state = 'failed' and terminal_reason = 'leaked_routine_firing_cleanup_pending')"
         ].join(" ")
       )
@@ -5859,14 +5984,47 @@ export class RunStore {
       routine_name: string;
       state: RoutineFiringState;
       terminal_reason: string | null;
+      provider_scope_cleanup_pending: number;
     }[];
-    return rows.map((row) => ({
-      firingId: row.id,
-      previousState: row.state,
-      previousTerminalReason: row.terminal_reason,
-      projectName: row.project_name,
-      routineName: row.routine_name
-    }));
+    return rows.map((row) => {
+      const legacyCleanupPending =
+        row.terminal_reason === "leaked_routine_firing_cleanup_pending";
+      return {
+        firingId: row.id,
+        needsTerminalization:
+          row.state === "queued" ||
+          row.state === "preparing_workspace" ||
+          row.state === "running" ||
+          legacyCleanupPending,
+        previousState: row.state,
+        previousTerminalReason: row.terminal_reason,
+        projectName: row.project_name,
+        providerScopeCleanupPending:
+          row.provider_scope_cleanup_pending === 1 || legacyCleanupPending,
+        routineName: row.routine_name
+      };
+    });
+  }
+
+  // Deliberately leaves updated_at untouched, unlike most setters in this
+  // file: listRoutineWorkspacePruneCandidates keys retention entirely off
+  // updated_at for terminal firings, and this setter is called on every
+  // daemon restart for any row still marked cleanup-pending (see
+  // findLeakedRoutineFirings). Bumping updated_at here would push a
+  // succeeded/failed/cancelled firing's retention window forward on every
+  // restart -- indefinitely, if the scope can never be confirmed stopped --
+  // even though its real terminal transition (completeRoutineFiring /
+  // markRoutineFiringsFailed) already stamped the timestamp retention should
+  // use.
+  setRoutineFiringProviderScopeCleanupPending(
+    firingId: string,
+    pending: boolean
+  ): void {
+    this.database
+      .prepare(
+        "update routine_firings set provider_scope_cleanup_pending = ? where id = ?"
+      )
+      .run(pending ? 1 : 0, firingId);
   }
 
   markRoutineFiringsFailed(
@@ -5874,6 +6032,7 @@ export class RunStore {
       firingId: string;
       reason: string;
       previousState: RoutineFiringState;
+      providerScopeCleanupPending?: boolean;
     }[]
   ): void {
     const update = this.database.prepare(
@@ -5886,14 +6045,14 @@ export class RunStore {
         // leaked-firing sweep is then the only path left to settle it. Re-check the same
         // latch completeRoutineFiring itself checks and let it win, exactly as there,
         // so claimSettledRoutineWatchdogTerminations still finds `no_progress` instead of
-        // a leaked-firing reason that silently drops the pending alert. Skip the override
-        // for the cleanup-pending sentinel: that row isn't settled yet either way, and
-        // overwriting it would stop findLeakedRoutineFirings from re-sweeping it (ADR 0064).
+        // a leaked-firing reason that silently drops the pending alert. Provider-scope
+        // cleanup is tracked independently below, so no sentinel terminal_reason is
+        // needed to keep the row re-detectable — see docs/adr/0064.
         "terminal_reason = case",
         "when cancel_requested = 1 and cancel_reason = @no_progress_reason",
-        "and @reason is not @cleanup_pending_reason",
         "then @no_progress_reason",
         "else @reason end,",
+        "provider_scope_cleanup_pending = @provider_scope_cleanup_pending,",
         "commits_ahead = case",
         "when kind = 'report' then 0",
         "when workspace_path is not null and workspace_path <> '' then 1",
@@ -5907,9 +6066,10 @@ export class RunStore {
       for (const entry of entries) {
         const updatedAt = timestamp();
         update.run({
-          cleanup_pending_reason: LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON,
           id: entry.firingId,
           no_progress_reason: WATCHDOG_NO_PROGRESS_REASON,
+          provider_scope_cleanup_pending:
+            entry.providerScopeCleanupPending === true ? 1 : 0,
           reason: entry.reason,
           updated_at: updatedAt
         });
@@ -6009,6 +6169,7 @@ export class RunStore {
         notification_state text not null default 'skipped',
         notification_error text,
         watchdog_generation integer not null default 0,
+        provider_scope_cleanup_pending integer not null default 0,
         created_at text not null,
         updated_at text not null
       );
@@ -6027,6 +6188,7 @@ export class RunStore {
         issue_snapshot_path text not null,
         raw_log_path text not null,
         normalized_log_path text not null,
+        provider_scope_cleanup_pending integer not null default 0,
         created_at text not null,
         updated_at text not null,
         foreign key (run_id) references runs(id)
@@ -6304,6 +6466,7 @@ export class RunStore {
         notification_error text,
         cancel_requested integer not null default 0,
         cancel_reason text,
+        provider_scope_cleanup_pending integer not null default 0,
         watchdog_notification_pending integer not null default 0,
         created_at text not null,
         updated_at text not null,
@@ -6424,6 +6587,7 @@ export class RunStore {
       ["runs", "watchdog_generation", "integer not null default 0"],
       ["runs", "issue_owner", "text"],
       ["runs", "issue_repo", "text"],
+      ["runs", "provider_scope_cleanup_pending", "integer not null default 0"],
       [
         "tracked_pull_requests",
         "review_followup_cap_reached",
@@ -6433,6 +6597,11 @@ export class RunStore {
       ["attempts", "failure_classification", "text"],
       ["attempts", "metadata_path", "text"],
       ["attempts", "workflow_graph_path", "text"],
+      [
+        "attempts",
+        "provider_scope_cleanup_pending",
+        "integer not null default 0"
+      ],
       ["watchdog_samples", "normalized_log_path", "text not null default ''"],
       ["watchdog_samples", "last_message_at", "text"],
       ["watchdog_samples", "workspace_digest", "text not null default ''"],
@@ -6489,6 +6658,11 @@ export class RunStore {
       ["routine_firings", "notification_error", "text"],
       ["routine_firings", "workspace_pruned_at", "text"],
       ["routine_firings", "fanout_id", "text"],
+      [
+        "routine_firings",
+        "provider_scope_cleanup_pending",
+        "integer not null default 0"
+      ],
       ["routine_fanout_targets", "hold_reason", "text"],
       ["routine_fanout_targets", "deferred_reason", "text"],
       ["routine_fanout_targets", "deferred_since", "text"],
@@ -6517,6 +6691,8 @@ export class RunStore {
       let addedFiringKind = false;
       let addedIssueRepository = false;
       let addedLastSuccessfulPollAt = false;
+      let addedProviderScopeCleanupPending = false;
+      let addedAttemptProviderScopeCleanupPending = false;
       for (const [table, column, decl] of additions) {
         const added = this.ensureColumn(table, column, decl);
         if (
@@ -6543,6 +6719,65 @@ export class RunStore {
         ) {
           addedLastSuccessfulPollAt = true;
         }
+        if (
+          added &&
+          column === "provider_scope_cleanup_pending" &&
+          table !== "attempts"
+        ) {
+          addedProviderScopeCleanupPending = true;
+        }
+        if (
+          added &&
+          table === "attempts" &&
+          column === "provider_scope_cleanup_pending"
+        ) {
+          addedAttemptProviderScopeCleanupPending = true;
+        }
+      }
+
+      if (addedProviderScopeCleanupPending) {
+        // Releases before the independent cleanup flag encoded the retry
+        // obligation in terminal_reason. Preserve that obligation during
+        // migration; the daemon's next startup sweep rewrites the legacy
+        // reason to the normal human-facing orphan reason without losing
+        // retryability.
+        this.database.exec(`
+          update runs
+          set provider_scope_cleanup_pending = 1
+          where terminal_reason = 'leaked_active_run_cleanup_pending';
+
+          update routine_firings
+          set provider_scope_cleanup_pending = 1
+          where terminal_reason = 'leaked_routine_firing_cleanup_pending';
+        `);
+      }
+
+      if (addedAttemptProviderScopeCleanupPending) {
+        // The daemon startup sweep now trusts this durable per-attempt flag
+        // alone to decide whether a leaked run needs its scope stopped (see
+        // daemon.ts) instead of inferring a live scope from state='running'
+        // -- that inference false-positived forever on hosts with no
+        // systemd --user manager (the process was never wrapped, so no
+        // scope ever existed to confirm). Attempt rows created before this
+        // column existed carry no such signal, so a running attempt row from
+        // that era is the one place the old inference is still needed:
+        // assume it may have a live wrapped scope and mark it pending so the
+        // sweep still retries it. Derive the run-level aggregate from actual
+        // attempt rows, never from run state directly -- a crash between
+        // updateRunState(running) and createAttempt would otherwise mark a
+        // run with zero attempts, and therefore no scope, as pending
+        // forever.
+        this.database.exec(`
+          update attempts
+          set provider_scope_cleanup_pending = 1
+          where state = 'running';
+
+          update runs
+          set provider_scope_cleanup_pending = 1
+          where id in (
+            select run_id from attempts where provider_scope_cleanup_pending = 1
+          );
+        `);
       }
 
       if (addedIssueRepository) {
@@ -7102,6 +7337,7 @@ function mapRunRow(row: RunRow): RunStatus {
     issueTitle: row.issue_title,
     project: row.project_name,
     provider: row.provider_name ?? "",
+    providerScopeCleanupPending: row.provider_scope_cleanup_pending === 1,
     retryCount: row.retry_count ?? 0,
     state: row.state,
     stateTransitionReason: row.state_transition_reason ?? null,
@@ -7403,6 +7639,7 @@ function mapRoutineFiringRow(row: RoutineFiringRow): RoutineFiringStatus {
     projectName: row.project_name,
     provider: row.provider_name,
     providerCommand: row.provider_command,
+    providerScopeCleanupPending: row.provider_scope_cleanup_pending === 1,
     pullRequests: [],
     routineName: row.routine_name,
     scheduledAt: row.scheduled_at.length === 0 ? null : row.scheduled_at,

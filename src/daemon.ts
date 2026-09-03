@@ -19,6 +19,7 @@ import {
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
 import type {
+  FilteredProjectIssueSnapshot,
   GitHubIssuesApi,
   GitHubRepositoryIdentity,
   PollingProjectConfig
@@ -69,6 +70,7 @@ import {
 } from "./lifecycle/reconcile.js";
 import { reconcileWatchdog } from "./lifecycle/watchdog.js";
 import {
+  isDispatchProject,
   RunController,
   type RunControllerProjectConfig,
   type RunControllerProvidersConfig,
@@ -99,7 +101,6 @@ import type { WatchdogConfig } from "./reload.js";
 import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
-  LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON,
   openRunStore,
   type ProjectState,
   type ProjectSnapshotRepository,
@@ -223,10 +224,6 @@ export async function startDaemon(
       "symphonika startup: failed legacy input_required runs"
     );
   }
-  const RUN_CLEANUP_PENDING_REASON = "leaked_active_run_cleanup_pending";
-  const FIRING_CLEANUP_PENDING_REASON =
-    LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON;
-
   // Provider processes run in symphonika-providers.slice, a sibling of the
   // daemon's own service cgroup (docs/adr/0064), so a previous daemon
   // instance dying no longer tears its in-flight provider scopes down with
@@ -234,44 +231,92 @@ export async function startDaemon(
   // started together and awaited via Promise.all (not one-by-one) so N
   // leaked entries don't each add their own stopTimeoutMs delay in series
   // before serve() starts listening below. A row whose cleanup could not be
-  // confirmed keeps a distinct terminal_reason instead of the plain leaked
-  // reason, so runStore.findLeakedRuns()/findLeakedRoutineFirings() surface
-  // it again on the next restart — see docs/adr/0064.
+  // confirmed stays in an independent durable cleanup flag, so the real
+  // lifecycle outcome and its terminal reason remain truthful while
+  // findLeakedRuns()/findLeakedRoutineFirings() can retry next restart.
   const leakedRuns = runStore.findLeakedRuns();
   const runOutcomes = await Promise.all(
     leakedRuns.map(async (entry) => {
-      // Only a run that reached "running" ever had a provider spawned —
-      // queued/preparing_workspace orphans have no attempt, and therefore no
-      // scope, to reap. A row re-swept from a prior pending sweep is already
-      // 'stale', not 'running', but still had a live attempt to retry.
-      // Attempts are ordered by attempt_number ascending, so the last one is
-      // the attempt that was actually live when this daemon's predecessor
-      // died.
-      const hadLiveAttempt =
-        entry.previousState === "running" ||
-        entry.previousTerminalReason === RUN_CLEANUP_PENDING_REASON;
-      if (!hadLiveAttempt) {
+      // The durable per-attempt flag is the only signal trusted here for
+      // whether a provider was ever actually wrapped in a systemd scope —
+      // previousState==='running' is not: on a host with no systemd --user
+      // manager, a Run reaches "running" without ever being wrapped, so
+      // inferring a live scope from state alone made stopProviderScope fail
+      // there every time and durably (and falsely) mark cleanup pending
+      // forever. See docs/adr/0064 and process-scope.ts's isAvailable().
+      if (!entry.providerScopeCleanupPending) {
         return { confirmed: true, entry };
       }
+      // Retried Runs reuse the same runId across attempts, each wrapped in
+      // its own scope unit (process-scope.ts's scopeUnitName). Check every
+      // attempt still marked pending, not just the latest, so an earlier
+      // attempt's unconfirmed cleanup is never dropped just because a later
+      // attempt's own cleanup succeeded.
       const attempts = runStore.listAttempts(entry.runId);
-      const latestAttempt = attempts[attempts.length - 1];
-      if (latestAttempt === undefined) {
-        return { confirmed: true, entry };
+      const pendingAttempts = attempts.filter(
+        (attempt) => attempt.providerScopeCleanupPending
+      );
+      if (pendingAttempts.length === 0) {
+        // Legacy shape: the Run-level flag is set (e.g. the terminal_reason
+        // backfill, or a row from before the per-attempt column existed) but
+        // no individual attempt agrees. Fall back to the latest attempt, the
+        // only one that could plausibly still hold a live scope.
+        const latestAttempt = attempts[attempts.length - 1];
+        if (latestAttempt === undefined) {
+          return { confirmed: !entry.providerScopeCleanupPending, entry };
+        }
+        const confirmed = await processScope.stopProviderScope({
+          attempt: latestAttempt.attemptNumber,
+          id: entry.runId
+        });
+        if (confirmed) {
+          runStore.setAttemptProviderScopeCleanupPending(
+            latestAttempt.id,
+            false
+          );
+        }
+        return { confirmed, entry };
       }
-      const confirmed = await processScope.stopProviderScope({
-        attempt: latestAttempt.attemptNumber,
-        id: entry.runId
-      });
-      return { confirmed, entry };
+      const attemptResults = await Promise.all(
+        pendingAttempts.map(async (attempt) => {
+          const confirmed = await processScope.stopProviderScope({
+            attempt: attempt.attemptNumber,
+            id: entry.runId
+          });
+          if (confirmed) {
+            runStore.setAttemptProviderScopeCleanupPending(attempt.id, false);
+          }
+          return confirmed;
+        })
+      );
+      return {
+        confirmed: attemptResults.every((value) => value),
+        entry
+      };
     })
   );
   for (const { confirmed, entry } of runOutcomes) {
-    if (confirmed) {
+    if (!entry.needsTerminalization) {
+      runStore.setRunProviderScopeCleanupPending(entry.runId, !confirmed);
+      logger[confirmed ? "info" : "warn"](
+        {
+          issueNumber: entry.issueNumber,
+          project: entry.projectName,
+          providerScopeCleanupPending: !confirmed,
+          runId: entry.runId,
+          terminalReason: entry.previousTerminalReason
+        },
+        confirmed
+          ? "symphonika startup: terminal run provider scope cleanup confirmed"
+          : "symphonika startup: terminal run provider scope cleanup could not be confirmed"
+      );
+    } else if (confirmed) {
       logger.warn(
         {
           issueNumber: entry.issueNumber,
           previousState: entry.previousState,
           project: entry.projectName,
+          providerScopeCleanupPending: false,
           runId: entry.runId,
           terminalReason: "leaked_active_run"
         },
@@ -283,19 +328,23 @@ export async function startDaemon(
           issueNumber: entry.issueNumber,
           previousState: entry.previousState,
           project: entry.projectName,
+          providerScopeCleanupPending: true,
           runId: entry.runId,
-          terminalReason: RUN_CLEANUP_PENDING_REASON
+          terminalReason: "leaked_active_run"
         },
         "symphonika startup: orphaned run scope cleanup could not be confirmed"
       );
     }
   }
   runStore.markRunsStale(
-    runOutcomes.map(({ confirmed, entry }) => ({
-      previousState: entry.previousState,
-      reason: confirmed ? "leaked_active_run" : RUN_CLEANUP_PENDING_REASON,
-      runId: entry.runId
-    }))
+    runOutcomes
+      .filter(({ entry }) => entry.needsTerminalization)
+      .map(({ confirmed, entry }) => ({
+        previousState: entry.previousState,
+        providerScopeCleanupPending: !confirmed,
+        reason: "leaked_active_run",
+        runId: entry.runId
+      }))
   );
   if (runOutcomes.length === 0) {
     logger.info({ count: 0 }, "symphonika startup: no orphaned runs found");
@@ -313,14 +362,11 @@ export async function startDaemon(
   const leakedFirings = runStore.findLeakedRoutineFirings();
   const firingOutcomes = await Promise.all(
     leakedFirings.map(async (entry) => {
-      // Same gap as the regular-run sweep above, for the separate Routine
-      // Firing subsystem (src/routines/dispatcher.ts). Firings never retry,
-      // so their provider is always spawned as attempt 1 — no listAttempts
-      // lookup needed here.
-      const hadLiveAttempt =
-        entry.previousState === "running" ||
-        entry.previousTerminalReason === FIRING_CLEANUP_PENDING_REASON;
-      if (!hadLiveAttempt) {
+      // Same durable-marker-only rule as the regular-run sweep above (see
+      // that sweep's comment), for the separate Routine Firing subsystem
+      // (src/routines/dispatcher.ts). Firings never retry, so their provider
+      // is always spawned as attempt 1 — no listAttempts lookup needed here.
+      if (!entry.providerScopeCleanupPending) {
         return { confirmed: true, entry };
       }
       const confirmed = await processScope.stopProviderScope({
@@ -331,12 +377,31 @@ export async function startDaemon(
     })
   );
   for (const { confirmed, entry } of firingOutcomes) {
-    if (confirmed) {
+    if (!entry.needsTerminalization) {
+      runStore.setRoutineFiringProviderScopeCleanupPending(
+        entry.firingId,
+        !confirmed
+      );
+      logger[confirmed ? "info" : "warn"](
+        {
+          firingId: entry.firingId,
+          previousState: entry.previousState,
+          project: entry.projectName,
+          providerScopeCleanupPending: !confirmed,
+          routine: entry.routineName,
+          terminalReason: entry.previousTerminalReason
+        },
+        confirmed
+          ? "symphonika startup: terminal routine firing provider scope cleanup confirmed"
+          : "symphonika startup: terminal routine firing provider scope cleanup could not be confirmed"
+      );
+    } else if (confirmed) {
       logger.warn(
         {
           firingId: entry.firingId,
           previousState: entry.previousState,
           project: entry.projectName,
+          providerScopeCleanupPending: false,
           routine: entry.routineName,
           terminalReason: "leaked_routine_firing"
         },
@@ -348,21 +413,23 @@ export async function startDaemon(
           firingId: entry.firingId,
           previousState: entry.previousState,
           project: entry.projectName,
+          providerScopeCleanupPending: true,
           routine: entry.routineName,
-          terminalReason: FIRING_CLEANUP_PENDING_REASON
+          terminalReason: "leaked_routine_firing"
         },
         "symphonika startup: orphaned routine firing scope cleanup could not be confirmed"
       );
     }
   }
   runStore.markRoutineFiringsFailed(
-    firingOutcomes.map(({ confirmed, entry }) => ({
-      firingId: entry.firingId,
-      previousState: entry.previousState,
-      reason: confirmed
-        ? "leaked_routine_firing"
-        : FIRING_CLEANUP_PENDING_REASON
-    }))
+    firingOutcomes
+      .filter(({ entry }) => entry.needsTerminalization)
+      .map(({ confirmed, entry }) => ({
+        firingId: entry.firingId,
+        previousState: entry.previousState,
+        providerScopeCleanupPending: !confirmed,
+        reason: "leaked_routine_firing"
+      }))
   );
   if (firingOutcomes.length > 0) {
     logger.info(
@@ -797,6 +864,33 @@ export async function startDaemon(
           configuredIssueProjectKeys,
           selectedIssueProjectKeysByName
         )
+      );
+      // #683/#691: pickProjectCandidate silently skips a candidate whose
+      // newest Run already suppresses fresh dispatch
+      // (RunStore.latestRunSuppressesFreshDispatch), but pollProject is a
+      // pure label-based check with no RunStore access, so it keeps
+      // resurfacing the same issue as a candidate every tick. Applied to the
+      // merged, shared issuePollStatus (not nextStatus) so the dashboard,
+      // /api/status, and poll-now -- which all read this same object --
+      // never report a suppressed issue as eligible, including one carried
+      // over from a prior tick while its project backs off. Also applied to
+      // the per-project candidateIssues counts (issuePollStatus.projects) and
+      // to nextStatus before it's persisted below -- otherwise poll-now can
+      // report a global 0 while still printing a stale per-project count, and
+      // the persisted /issues triage snapshot keeps describing the
+      // suppressed issue as eligible (#691 review).
+      const effectiveProjectsByName = new Map(
+        snapshot.projects.map((project) => [project.name, project])
+      );
+      suppressResolvedFreshDispatchCandidates(
+        issuePollStatus,
+        effectiveProjectsByName,
+        runStore
+      );
+      suppressResolvedFreshDispatchCandidates(
+        nextStatus,
+        effectiveProjectsByName,
+        runStore
       );
       // Persisted with the polled subset only (not the merged status).
       // Poll outcome and issue-snapshot writes iterate only fresh reports;
@@ -2001,6 +2095,103 @@ export async function startDaemon(
       }
     }
   };
+}
+
+// Reason recorded for a candidate reclassified as filtered by
+// suppressResolvedFreshDispatchCandidates -- distinguishes it from the
+// pure label-based reasons issueFilterReasons produces (see
+// evaluateProjectEligibility), which never mention Run history.
+// latestRunSuppressesFreshDispatch (run-store.ts) looks only at the newest
+// Run row for this (Project, repository, Issue), never at the Issue's own
+// revision/updated_at -- so this string must not promise that editing the
+// Issue (title, body, or any label short of closing/reopening) lifts the
+// suppression, since it does not (#691 review).
+const FRESH_DISPATCH_SUPPRESSED_REASON =
+  "a newer run's terminal outcome (no_workspace_changes) suppresses fresh dispatch until a newer run for this issue changes the verdict";
+
+// #683/#691: reclassifies candidates whose newest Run already suppresses
+// fresh dispatch (RunStore.latestRunSuppressesFreshDispatch) as filtered
+// rather than dropping them, so fetched == candidate + filtered stays true
+// and the issue remains visible in /issues triage search with a reason --
+// see #691 review. Adjusts each report's candidateIssues/filteredIssues
+// counts by the number of ITS OWN candidates reclassified, rather than
+// recomputing from status.candidateIssues -- for a name-shadowed
+// declaration (two Project entries sharing a name, different repository;
+// see the "last declaration wins" comment on selectedIssueProjectKeysByName
+// above), mergeIssuePollStatus's selectedCandidate filter already strips
+// the shadowed repository's own candidates out of the merged array before
+// this runs, so recomputing its count from that array would wrongly reset
+// it to zero instead of leaving its own honestly-polled count untouched
+// (see #691 review). Mutates `status` in place so every caller sharing the
+// same IssuePollStatus object (issuePollStatus itself, or the raw
+// nextStatus fed to persistProjectPollState) reflects the same suppressed
+// set.
+function suppressResolvedFreshDispatchCandidates(
+  status: import("./issue-polling.js").IssuePollStatus,
+  effectiveProjectsByName: ReadonlyMap<string, RunControllerProjectConfig>,
+  runStore: ReturnType<typeof openRunStore>
+): void {
+  const surviving = status.candidateIssues.filter(
+    (candidate) => !isSuppressedFreshDispatchCandidate(candidate)
+  );
+  const suppressed: FilteredProjectIssueSnapshot[] = status.candidateIssues
+    .filter((candidate) => isSuppressedFreshDispatchCandidate(candidate))
+    .map((candidate) => ({
+      ...candidate,
+      reasons: [FRESH_DISPATCH_SUPPRESSED_REASON]
+    }));
+
+  status.candidateIssues = surviving;
+  status.filteredIssues = [...status.filteredIssues, ...suppressed];
+  status.projects = status.projects.map((project) => {
+    // Two declarations sharing both name and repository are genuinely
+    // indistinguishable by ProjectIssueSnapshot's own identity, so
+    // matchingProjectCount(suppressed, project) counts every duplicate's
+    // suppressed entries against each of them, not just its own -- capped
+    // at this report's own prior candidateIssues so the adjustment can
+    // never exceed (and go negative past) what this report actually had to
+    // give up (#691 review).
+    const suppressedForProject = Math.min(
+      matchingProjectCount(suppressed, project),
+      project.candidateIssues ?? 0
+    );
+    return {
+      ...project,
+      candidateIssues: (project.candidateIssues ?? 0) - suppressedForProject,
+      filteredIssues: (project.filteredIssues ?? 0) + suppressedForProject
+    };
+  });
+
+  function isSuppressedFreshDispatchCandidate(candidate: {
+    issue: { number: number };
+    project: string;
+    repository: GitHubRepositoryIdentity;
+  }): boolean {
+    const project = effectiveProjectsByName.get(candidate.project);
+    return (
+      project !== undefined &&
+      isDispatchProject(project) &&
+      runStore.latestRunSuppressesFreshDispatch({
+        issueNumber: candidate.issue.number,
+        projectName: candidate.project,
+        repository: candidate.repository
+      })
+    );
+  }
+}
+
+function matchingProjectCount(
+  candidates: readonly {
+    project: string;
+    repository: GitHubRepositoryIdentity;
+  }[],
+  project: { name: string; repository: GitHubRepositoryIdentity }
+): number {
+  return candidates.filter(
+    (candidate) =>
+      candidate.project === project.name &&
+      sameGitHubRepository(candidate.repository, project.repository)
+  ).length;
 }
 
 function persistProjectPollState(

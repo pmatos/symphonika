@@ -147,6 +147,36 @@ describe("persistProviderEvent ordering", () => {
     const result = await dispatchPromise;
     expect(result).toEqual({ dispatched: true, runId: "run-1" });
   });
+
+  it("persists provider-scope cleanup reports independently of the terminal run outcome", async () => {
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      async *runAttempt(input): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        input.recordProviderScopeCleanupPending?.(true);
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const harness = await createHarness(provider);
+
+    await harness.controller.dispatchOneFresh(pollStatus());
+
+    expect(harness.runStore.getRun("run-1")).toMatchObject({
+      providerScopeCleanupPending: true,
+      state: "failed"
+    });
+    expect(harness.runStore.findLeakedRuns()).toEqual([
+      expect.objectContaining({
+        needsTerminalization: false,
+        runId: "run-1"
+      })
+    ]);
+  });
 });
 
 function projectConfig(root: string): RunControllerProjectConfig {

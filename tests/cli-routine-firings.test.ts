@@ -103,6 +103,7 @@ describe("CLI routine firing commands", () => {
       projectName: "alpha",
       routineName: "dependency-update"
     });
+    store.setRoutineFiringProviderScopeCleanupPending("01J-FIRING", true);
     store.close();
 
     const evidenceDirectory = path.join(
@@ -168,6 +169,9 @@ describe("CLI routine firing commands", () => {
       `normalized log:  ${path.join(evidenceDirectory, "provider.normalized.jsonl")}`
     );
     expect(output.stdout).toContain("terminal:        cancelled");
+    expect(output.stdout).toContain(
+      "scope cleanup:   pending (retry on daemon restart)"
+    );
     expect(output.stdout).toContain("cancel reason:   operator");
     expect(output.stdout).toContain("pull requests:   #42 abc123");
     expect(output.stdout).toContain("normalized events (last 2):");

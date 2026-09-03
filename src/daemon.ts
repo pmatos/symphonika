@@ -143,6 +143,15 @@ import { prepareAdoptedPrWorkspace } from "./workspace.js";
 import { planWorkspacePaths } from "./workspace-paths.js";
 import { listAdoptableEntryStates } from "./workflow/fsm-expansion.js";
 
+// adoptPullRequest's workspace preparation runs while holding the global
+// dispatchMutex (docs/adr/0098) -- an unbounded git fetch (e.g. a half-open
+// connection to GitHub) would otherwise freeze dispatch/reconcile/shutdown-
+// resume/stale-claim-detection daemon-wide, the exact class of risk
+// claimAndPersistRun's own claimDeadline already bounds for its in-mutex I/O
+// (run-controller.ts, ADR 0093). Generous enough not to spuriously fail a
+// legitimately slow fetch on a large repo or a loaded host.
+const ADOPT_PR_WORKSPACE_TIMEOUT_MS = 60_000;
+
 export type StartDaemonOptions = {
   agentProviders?: AgentProviderRegistry;
   configPath?: string;
@@ -1704,7 +1713,8 @@ export async function startDaemon(
             configDir: state.configDir,
             expectedHeadSha: snapshot.headSha,
             issue: { number: input.issueNumber, title: issueSnapshot.title },
-            project
+            project,
+            signal: AbortSignal.timeout(ADOPT_PR_WORKSPACE_TIMEOUT_MS)
           });
           const runId = randomUUID();
           runStore.createAdoptedRun({

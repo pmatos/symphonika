@@ -797,6 +797,11 @@ last-known-good Service Config fallback, and transition into and out of one-or-m
 Routine declarations. Reload and invalid-Routine health are separate edge-triggered components, so
 a persistently broken configuration sends once rather than once per tick, followed by one recovery
 message. Watchdog terminations from one reconciliation pass are grouped.
+For a Routine Firing, latching `cancel_reason = "no_progress"` only queues a durable pending
+Watchdog notification. Reconciliation consumes that pending entry only after the firing is terminal
+and includes it only when the authoritative `terminal_reason` is still `no_progress`;
+when the firing's declared deadline wins as `firing_timeout` (or any other terminal verdict wins),
+the pending entry is consumed without a Watchdog alert.
 
 All notification delivery gets two total attempts within one 30-second orchestration deadline.
 Sink construction, rendering, delivery, and delivery-evidence failures are best-effort and cannot
@@ -2044,7 +2049,21 @@ is abandoned, so the firing always reaches a terminal row and always releases it
 capacity slots; a cancel that arrives while the firing is healthy sees that work finish normally
 and loses no evidence. Completion is fenced on the latch as well: a provider that finishes between
 the durable latch and the in-memory cancellation still records `failed / no_progress` rather than
-`succeeded`, so the Watchdog termination notification and the durable row cannot disagree. The
+`succeeded`. The same atomic latch sets a durable pending-notification bit. Reconciliation consumes
+that bit only after the firing becomes terminal, reports the firing only when its authoritative
+`terminal_reason` is `no_progress`, and suppresses the pending alert when `firing_timeout` or any
+other verdict wins. Pending confirmation therefore survives daemon restart, never blocks the
+current tick waiting for settlement, and may delay a legitimate grouped alert until the next
+Watchdog reconciliation pass. Reconciliation is attempted on daemon ticks — the regular poll
+schedule, a manual poll trigger, or the startup pass — whenever a config with at least one project
+is loaded, gated on an in-memory clock that advances on each pass and resets to daemon start on
+restart, so a restart can wait a full `sample_interval_seconds` before the first pass. Under a
+steady poll cadence with no manual triggers, consecutive automatic passes nominally land
+`ceil(sample_interval_seconds / (polling.interval_ms / 1000)) * (polling.interval_ms / 1000)`
+seconds apart, which can approach the sum of the two intervals when they aren't multiples of each
+other; a manual poll trigger can settle a pending alert sooner than this nominal figure, and
+in-tick work ahead of the gate means an individual pass can land before or after it. Terminal
+pending entries are drained even when Watchdog sampling has subsequently been disabled. The
 outcome and commits-ahead evidence that completion gathered is retained either way, because
 Workspace retention depends on it.
 

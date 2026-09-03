@@ -99,6 +99,7 @@ import type { WatchdogConfig } from "./reload.js";
 import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
+  LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON,
   openRunStore,
   type ProjectState,
   type ProjectSnapshotRepository,
@@ -223,7 +224,8 @@ export async function startDaemon(
     );
   }
   const RUN_CLEANUP_PENDING_REASON = "leaked_active_run_cleanup_pending";
-  const FIRING_CLEANUP_PENDING_REASON = "leaked_routine_firing_cleanup_pending";
+  const FIRING_CLEANUP_PENDING_REASON =
+    LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON;
 
   // Provider processes run in symphonika-providers.slice, a sibling of the
   // daemon's own service cgroup (docs/adr/0064), so a previous daemon
@@ -966,8 +968,8 @@ export async function startDaemon(
       const watchdog = serviceConfig.watchdog;
       const nowMs = Date.now();
       if (
-        watchdog.enabled &&
-        nowMs - lastWatchdogSampleAt >= watchdog.sampleIntervalSeconds * 1_000
+        nowMs - lastWatchdogSampleAt >=
+        watchdog.sampleIntervalSeconds * 1_000
       ) {
         lastWatchdogSampleAt = nowMs;
         const watchdogTerminations: WatchdogTermination[] = [];

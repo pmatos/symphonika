@@ -1835,7 +1835,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       "attach an already-open pull request to a new Run, parked at an operator-chosen FSM state (docs/adr/0098)"
     )
     .argument("<project>", "project name")
-    .argument("<pr-number>", "pull request number", parseIssueNumber)
+    .argument("<pr-number>", "pull request number", parsePrNumber)
     .requiredOption(
       "--issue <number>",
       "the pull request's originating issue number",
@@ -2163,23 +2163,17 @@ function readAdoptPullRequestResult(
         ? { kind: "invalid-entry-state", validStateIds: value.validStateIds }
         : undefined;
     case "not-pr-aware-workflow":
-      return { kind: "not-pr-aware-workflow" };
     case "issue-not-found":
-      return { kind: "issue-not-found" };
     case "issue-not-open":
-      return { kind: "issue-not-open" };
     case "snapshot-unavailable":
-      return { kind: "snapshot-unavailable" };
     case "snapshot-incomplete":
-      return { kind: "snapshot-incomplete" };
+    case "not-issue-branch":
+    case "pr-not-open":
+      return { kind: value.kind };
     case "repository-mismatch":
       return typeof value.error === "string"
         ? { error: value.error, kind: "repository-mismatch" }
         : undefined;
-    case "not-issue-branch":
-      return { kind: "not-issue-branch" };
-    case "pr-not-open":
-      return { kind: "pr-not-open" };
     case "live-run-conflict":
       return typeof value.runId === "string"
         ? { kind: "live-run-conflict", runId: value.runId }
@@ -3276,15 +3270,20 @@ function parsePort(value: string): number {
   return port;
 }
 
-function parseIssueNumber(value: string): number {
-  const issue = Number(value);
+function parsePositiveInteger(label: string): (value: string) => number {
+  return (value: string): number => {
+    const parsed = Number(value);
 
-  if (!Number.isInteger(issue) || issue < 1) {
-    throw new InvalidArgumentError("issue number must be a positive integer");
-  }
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      throw new InvalidArgumentError(`${label} must be a positive integer`);
+    }
 
-  return issue;
+    return parsed;
+  };
 }
+
+const parseIssueNumber = parsePositiveInteger("issue number");
+const parsePrNumber = parsePositiveInteger("pull request number");
 
 function parseProvider(value: string): InitProvider {
   if (value === "codex" || value === "claude" || value === "omp") {

@@ -2524,25 +2524,40 @@ export class RunStore {
   // source of PR facts (headRef, headSha, open, merged) instead of a new
   // GitHub wrapper; requiring the row to exist and failing closed otherwise
   // mirrors verifySnapshotRepositoryBinding's own posture for a missing
-  // snapshot.
+  // snapshot. Also selects the repository columns
+  // getProjectPullRequestSnapshotRepository exposes separately, so a
+  // caller needing both facts (adoptPullRequest) reads this one row once
+  // rather than issuing two queries against it.
   getProjectPullRequestSnapshot(
     projectName: string,
     prNumber: number
-  ): ProjectPullRequestSnapshotRow | undefined {
+  ):
+    | (ProjectPullRequestSnapshotRow & {
+        repository: ProjectSnapshotRepository | undefined;
+      })
+    | undefined {
     const row = this.database
       .prepare(
         [
           "select pr_number, title, url, draft, open, merged, head_ref,",
           "head_sha, labels, branch_origin, state_available, mergeable, checks,",
-          "review_decision, tracking_state, unresolved_review_threads, polled_at",
+          "review_decision, tracking_state, unresolved_review_threads, polled_at,",
+          "repository_owner, repository_name",
           "from project_pull_request_snapshots where project_name = ? and pr_number = ?"
         ].join(" ")
       )
       .get(projectName, prNumber) as
-      ProjectPullRequestSnapshotDbRow | undefined;
+      | (ProjectPullRequestSnapshotDbRow & {
+          repository_name: string | null;
+          repository_owner: string | null;
+        })
+      | undefined;
     return row === undefined
       ? undefined
-      : mapProjectPullRequestSnapshotRow(row);
+      : {
+          ...mapProjectPullRequestSnapshotRow(row),
+          repository: snapshotRepository(row)
+        };
   }
 
   listProjectPullRequestSnapshots(

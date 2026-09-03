@@ -617,7 +617,7 @@ function buildController(input: {
   project: RunControllerProjectConfig;
   root: string;
   runStore: ReturnType<typeof openRunStore>;
-  schedule?: (item: ScheduledWorkInput) => void;
+  schedule?: (item: ScheduledWorkInput) => boolean;
 }): RunController {
   let nextRun = 0;
   return new RunController({
@@ -656,7 +656,7 @@ function buildController(input: {
         codex: { command: DEFAULT_CODEX_COMMAND }
       }),
     runStore: input.runStore,
-    schedule: input.schedule ?? (() => undefined),
+    schedule: input.schedule ?? (() => true),
     stateRoot: path.join(input.root, ".symphonika")
   });
 }
@@ -2095,7 +2095,7 @@ describe("wait state lifecycle", () => {
         listOpenIssues: vi.fn().mockResolvedValue([])
       };
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const controller = buildController({
         activeRuns,
         githubIssuesApi,
@@ -2113,6 +2113,100 @@ describe("wait state lifecycle", () => {
       expect(store.getRun("waiting-run")?.state).toBe("waiting");
       expect(store.listRuns()).toHaveLength(2);
       expect(schedule).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("cancels the parent when shutdown has already begun before a state-advance pre-provider claim starts", async () => {
+    const root = await makeTempRoot();
+    await writeWaitStateProject(root);
+    // Same advance-into-unregistered-provider shape as the mid-write test
+    // below, but shutdown is latched BEFORE executeStateAdvance runs at
+    // all, exercising failScheduledRunBeforeProvider's FIRST isShuttingDown()
+    // check (before any label write) rather than its second. See issue
+    // #663 / PR #674 review.
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: advance_into_unregistered",
+        "  initial: planning",
+        "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: plan-prompt.md",
+        "      complete_when:",
+        "        provider_success: true",
+        "      transitions:",
+        "        - to: implementing",
+        "    implementing:",
+        "      action:",
+        "        kind: agent",
+        "        provider: claude",
+        "        prompt: plan-prompt.md",
+        "      complete_when:",
+        "        provider_success: true",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const activeRuns = new ActiveRunRegistry();
+      const controller = buildController({
+        activeRuns,
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      activeRuns.beginShutdown();
+
+      await controller.executeStateAdvance({
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        toStateId: "implementing"
+      });
+
+      // No claim label was ever written, and no continuation row was
+      // created — the parent must carry the cancellation evidence (its
+      // sym:running removal is ordinary terminal-cancellation bookkeeping).
+      expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
+      expect(githubIssuesApi.removeLabelsFromIssue).not.toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed"] })
+      );
+      expect(store.getRun("wait-rerun-1")).toBeUndefined();
+      expect(store.getRun("parent-run")).toMatchObject({
+        cancelReason: "daemon_shutdown",
+        state: "cancelled"
+      });
     } finally {
       store.close();
     }
@@ -2202,15 +2296,80 @@ describe("wait state lifecycle", () => {
       labelWrite.resolve();
       await advancePromise;
 
-      // The claim is skipped entirely: no continuation row, and the claim
-      // label written before the gate is released again.
-      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
-        expect.objectContaining({
-          issueNumber: issue.number,
-          labels: ["sym:claimed"]
-        })
+      // The claim is skipped entirely: no continuation row is created. The
+      // claim label written before the gate must be KEPT, not rolled back —
+      // daemon_shutdown cancellation relies on sym:claimed staying present
+      // for ADR 0088's resume pass — so the parent carries the cancellation
+      // evidence instead. See issue #663 / PR #674 review.
+      expect(githubIssuesApi.removeLabelsFromIssue).not.toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed"] })
       );
       expect(store.getRun("wait-rerun-1")).toBeUndefined();
+      expect(store.getRun("parent-run")).toMatchObject({
+        cancelReason: "daemon_shutdown",
+        state: "cancelled"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("cancels the parent when shutdown has already begun before a state-advance terminal target starts", async () => {
+    const root = await makeTempRoot();
+    // done is a terminal state, so the advance exits through
+    // recordStateAdvanceTerminalTarget. Shutdown is latched BEFORE
+    // executeStateAdvance runs, exercising the FIRST isShuttingDown() check
+    // in recordStateAdvanceTerminalTarget rather than its second. See issue
+    // #663 / PR #674 review.
+    await writeWaitStateProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const activeRuns = new ActiveRunRegistry();
+      const controller = buildController({
+        activeRuns,
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      activeRuns.beginShutdown();
+
+      await controller.executeStateAdvance({
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        toStateId: "done"
+      });
+
+      expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
+      expect(githubIssuesApi.removeLabelsFromIssue).not.toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed"] })
+      );
+      expect(store.getRun("wait-rerun-1")).toBeUndefined();
+      expect(store.getRun("parent-run")).toMatchObject({
+        cancelReason: "daemon_shutdown",
+        state: "cancelled"
+      });
     } finally {
       store.close();
     }
@@ -2269,13 +2428,20 @@ describe("wait state lifecycle", () => {
       labelWrite.resolve();
       await advancePromise;
 
-      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
-        expect.objectContaining({
-          issueNumber: issue.number,
-          labels: ["sym:claimed"]
-        })
+      // sym:claimed is applied but must be KEPT for daemon_shutdown — ADR
+      // 0088's resume pass relies on it staying present — so this no longer
+      // rolls the label back (only sym:running, part of ordinary terminal
+      // cancellation label bookkeeping, is removed). No child row was
+      // created, so the parent carries the cancellation evidence instead of
+      // being left "succeeded" forever. See issue #663 / PR #674 review.
+      expect(githubIssuesApi.removeLabelsFromIssue).not.toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed"] })
       );
       expect(store.getRun("wait-rerun-1")).toBeUndefined();
+      expect(store.getRun("parent-run")).toMatchObject({
+        cancelReason: "daemon_shutdown",
+        state: "cancelled"
+      });
     } finally {
       store.close();
     }
@@ -2334,7 +2500,7 @@ describe("wait state lifecycle", () => {
         removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
       };
       const activeRuns = new ActiveRunRegistry();
-      const schedule = vi.fn();
+      const schedule = vi.fn().mockReturnValue(true);
       const controller = buildController({
         activeRuns,
         githubIssuesApi,

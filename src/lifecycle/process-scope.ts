@@ -77,6 +77,13 @@ export type ProcessCommand = {
   executable: string;
 };
 
+type ScopedProcessCommand = ProcessCommand & {
+  // Absent is accepted for injected legacy/test implementations and means
+  // unwrapped. The production ProcessScope always sets this explicitly so
+  // providers never persist cleanup work on a host with no user manager.
+  providerScopeWrapped?: boolean;
+};
+
 export type ProcessScopeOptions = {
   confirmUnitInactive?: (
     unitName: string,
@@ -96,7 +103,7 @@ export type ProcessScope = {
   wrapForProviderScope: (
     run: ProviderRunIdentity,
     command: ProcessCommand
-  ) => Promise<ProcessCommand>;
+  ) => Promise<ScopedProcessCommand>;
 };
 
 const DEFAULT_PROVIDERS_SLICE = "symphonika-providers.slice";
@@ -130,7 +137,7 @@ export function createProcessScope(
   return {
     wrapForProviderScope: async (run, command) => {
       if (!(await isAvailable())) {
-        return command;
+        return { ...command, providerScopeWrapped: false };
       }
 
       // Deliberately no MemoryHigh=/MemoryMax= here. Per-scope caps set to
@@ -165,7 +172,8 @@ export function createProcessScope(
           command.executable,
           ...command.args
         ],
-        executable: "systemd-run"
+        executable: "systemd-run",
+        providerScopeWrapped: true
       };
     },
     stopProviderScope: async (run) => {
@@ -193,6 +201,33 @@ export function createProcessScope(
       }
     }
   };
+}
+
+// Shared by every provider adapter's runAttempt: each spawns a process via
+// wrapForProviderScope, then must record/clear the durable cleanup
+// obligation identically around it. Centralized here so the "mark pending
+// on wrap, clear only once stopProviderScope confirms" bookkeeping isn't
+// hand-duplicated per provider.
+export function markProviderScopeCleanupPending(
+  command: ScopedProcessCommand,
+  recordProviderScopeCleanupPending?: (pending: boolean) => void
+): boolean {
+  const providerScopeWrapped = command.providerScopeWrapped === true;
+  if (providerScopeWrapped) {
+    recordProviderScopeCleanupPending?.(true);
+  }
+  return providerScopeWrapped;
+}
+
+export async function confirmProviderScopeCleanup(
+  processScope: ProcessScope,
+  run: ProviderRunIdentity,
+  providerScopeWrapped: boolean,
+  recordProviderScopeCleanupPending?: (pending: boolean) => void
+): Promise<void> {
+  if (providerScopeWrapped && (await processScope.stopProviderScope(run))) {
+    recordProviderScopeCleanupPending?.(false);
+  }
 }
 
 // Runs unconditionally from every runAttempt's finally block (see

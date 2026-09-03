@@ -140,6 +140,160 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("preserves the Watchdog no-progress latch when startup recovery settles a still-running firing", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched-then-crash",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringState("fire-latched-then-crash", "running");
+      expect(
+        store.markRoutineFiringWatchdogNoProgress("fire-latched-then-crash")
+      ).toBe(true);
+
+      // The daemon exits before completeRoutineFiring ever reads the latch back,
+      // so the row is still `running` on restart — findLeakedRoutineFirings is the
+      // only path left to settle it.
+      const leaked = store.findLeakedRoutineFirings();
+      expect(leaked).toEqual([
+        expect.objectContaining({
+          firingId: "fire-latched-then-crash",
+          previousState: "running",
+          previousTerminalReason: null
+        })
+      ]);
+
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "fire-latched-then-crash",
+          previousState: "running",
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(store.getRoutineFiring("fire-latched-then-crash")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(store.claimSettledRoutineWatchdogTerminations()).toEqual([
+        {
+          firingId: "fire-latched-then-crash",
+          projectName: "alpha",
+          routineName: "dependency-update"
+        }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("does not consume a latched firing's pending notification while its leaked-cleanup confirmation is still pending", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched-cleanup-pending",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringState("fire-latched-cleanup-pending", "running");
+      expect(
+        store.markRoutineFiringWatchdogNoProgress(
+          "fire-latched-cleanup-pending"
+        )
+      ).toBe(true);
+
+      // First startup sweep can't confirm the provider scope is actually gone —
+      // the row keeps the durable cleanup-pending bit set so it is re-swept, and
+      // must not yet be treated as settled: claiming the notification now would
+      // clear the pending bit before the real outcome is known.
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "fire-latched-cleanup-pending",
+          previousState: "running",
+          providerScopeCleanupPending: true,
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(
+        store.getRoutineFiring("fire-latched-cleanup-pending")
+      ).toMatchObject({
+        cancelReason: "no_progress",
+        providerScopeCleanupPending: true,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(store.claimSettledRoutineWatchdogTerminations()).toEqual([]);
+      expect(store.findLeakedRoutineFirings()).toEqual([
+        expect.objectContaining({
+          firingId: "fire-latched-cleanup-pending",
+          previousState: "failed",
+          providerScopeCleanupPending: true
+        })
+      ]);
+
+      // A later sweep confirms the scope is stopped — now the latch wins and the
+      // notification becomes claimable.
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "fire-latched-cleanup-pending",
+          previousState: "failed",
+          providerScopeCleanupPending: false,
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(
+        store.getRoutineFiring("fire-latched-cleanup-pending")
+      ).toMatchObject({
+        providerScopeCleanupPending: false,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(store.claimSettledRoutineWatchdogTerminations()).toEqual([
+        {
+          firingId: "fire-latched-cleanup-pending",
+          projectName: "alpha",
+          routineName: "dependency-update"
+        }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("overrides an ordinary failed completion observed after the latch", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });
@@ -3152,9 +3306,11 @@ describe("RunStore routines", () => {
       expect(leaked).toEqual([
         {
           firingId: "leaked-fire",
+          needsTerminalization: true,
           previousState: "running",
           previousTerminalReason: null,
           projectName: "alpha",
+          providerScopeCleanupPending: false,
           routineName: "daily-report"
         }
       ]);
@@ -3192,6 +3348,132 @@ describe("RunStore routines", () => {
           .listRoutineFiringTransitions("leaked-fire")
           .map((entry) => entry.state)
       ).toEqual(["queued", "running", "failed"]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("finds terminal routine firings with provider-scope cleanup pending without replacing their outcome", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { cron: "30 1 * * *", tz: "Europe/Lisbon" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "cleanup-pending-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.completeRoutineFiring({
+        id: "cleanup-pending-fire",
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+
+      store.setRoutineFiringProviderScopeCleanupPending(
+        "cleanup-pending-fire",
+        true
+      );
+
+      expect(store.findLeakedRoutineFirings()).toEqual([
+        expect.objectContaining({
+          firingId: "cleanup-pending-fire",
+          needsTerminalization: false,
+          previousState: "failed",
+          previousTerminalReason: "provider_process_exit_1",
+          providerScopeCleanupPending: true
+        })
+      ]);
+      expect(store.getRoutineFiring("cleanup-pending-fire")).toMatchObject({
+        providerScopeCleanupPending: true,
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  // Regression: setRoutineFiringProviderScopeCleanupPending is called on
+  // every daemon restart for any row still marked cleanup-pending
+  // (findLeakedRoutineFirings re-selects it). listRoutineWorkspacePruneCandidates
+  // keys retention entirely off updated_at for terminal firings, so if the
+  // setter bumped it, a cleanup retry (successful or not) would push a
+  // failed/succeeded/cancelled firing's retention window forward on every
+  // restart -- indefinitely, if the scope can never be confirmed stopped.
+  it("does not delay workspace retention when toggling provider-scope cleanup pending", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "report",
+          name: "daily-report",
+          prompt: "Report.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/daily-report.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "retention-fire",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "daily-report"
+      });
+      store.updateRoutineFiringWorkspace({
+        id: "retention-fire",
+        workspacePath: "/tmp/retention-workspace"
+      });
+      store.completeRoutineFiring({
+        id: "retention-fire",
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+      const terminalUpdatedAt =
+        store.getRoutineFiring("retention-fire")?.updatedAt;
+
+      store.setRoutineFiringProviderScopeCleanupPending("retention-fire", true);
+      store.setRoutineFiringProviderScopeCleanupPending(
+        "retention-fire",
+        false
+      );
+
+      expect(store.getRoutineFiring("retention-fire")).toMatchObject({
+        providerScopeCleanupPending: false,
+        updatedAt: terminalUpdatedAt
+      });
+
+      // The retention cutoff is derived from the real terminal transition,
+      // not from the moment the daemon last swept this row's cleanup flag.
+      const justAfterTerminal = new Date(
+        Date.parse(terminalUpdatedAt as string) + 1
+      ).toISOString();
+      expect(
+        store.listRoutineWorkspacePruneCandidates({
+          cancelledBefore: justAfterTerminal,
+          failedBefore: justAfterTerminal,
+          succeededBefore: justAfterTerminal
+        })
+      ).toEqual([
+        expect.objectContaining({
+          id: "retention-fire",
+          workspacePath: "/tmp/retention-workspace"
+        })
+      ]);
     } finally {
       store.close();
     }
@@ -3368,9 +3650,11 @@ describe("RunStore routines", () => {
       expect(leaked).toEqual([
         {
           firingId: "pending-fire",
+          needsTerminalization: true,
           previousState: "failed",
           previousTerminalReason: "leaked_routine_firing_cleanup_pending",
           projectName: "alpha",
+          providerScopeCleanupPending: true,
           routineName: "daily-report"
         }
       ]);

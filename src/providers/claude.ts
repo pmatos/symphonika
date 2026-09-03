@@ -5,7 +5,9 @@ import {
 } from "node:child_process";
 
 import {
+  confirmProviderScopeCleanup,
   createProcessScope,
+  markProviderScopeCleanupPending,
   type ProcessScope
 } from "../lifecycle/process-scope.js";
 import { providerScratchEnvironment } from "../lifecycle/provider-scratch.js";
@@ -123,6 +125,10 @@ export function createClaudeProvider(
         };
         return;
       }
+      const providerScopeWrapped = markProviderScopeCleanupPending(
+        command,
+        input.recordProviderScopeCleanupPending
+      );
       const child = spawnProviderProcess(command, input.workspacePath, {
         ...providerScratchEnvironment(
           input.scratchPath,
@@ -171,7 +177,12 @@ export function createClaudeProvider(
         // bypassing terminateProcess entirely. A provider-spawned build tool
         // can outlive that exit as a detached grandchild; stopping the
         // run's scope here is what actually reaps it (see docs/adr/0064).
-        await processScope.stopProviderScope(input.run);
+        await confirmProviderScopeCleanup(
+          processScope,
+          input.run,
+          providerScopeWrapped,
+          input.recordProviderScopeCleanupPending
+        );
         // Last, so scope teardown is never delayed by it: the caller reads
         // the stderr log to explain an unclean exit as soon as this generator
         // returns, and only this await orders that read after the tee's write

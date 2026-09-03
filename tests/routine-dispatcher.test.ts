@@ -650,6 +650,7 @@ describe("RoutineFiringDispatcher", () => {
       ): AsyncGenerator<ProviderEvent> {
         await Promise.resolve();
         providerInputs.push(input);
+        input.recordProviderScopeCleanupPending?.(true);
         yield {
           normalized: { exitCode: 0, type: "process_exit" },
           raw: { code: 0, kind: "exit" }
@@ -709,6 +710,10 @@ describe("RoutineFiringDispatcher", () => {
         ROUTINE_OVERRIDE_COMMAND_TEMPLATE,
         ROUTINE_EXECUTION_OVERRIDES
       );
+      expect(runStore.getRoutineFiring("fire-overrides")).toMatchObject({
+        providerScopeCleanupPending: true,
+        state: "succeeded"
+      });
     } finally {
       runStore.close();
     }
@@ -7803,7 +7808,10 @@ describe("RoutineFiringDispatcher", () => {
     await mkdir(workspacePath, { recursive: true });
     const runStore = openRunStore({ stateRoot });
     const activeRuns = new ActiveRunRegistry();
-    const onRoutineTerminated = vi.fn();
+    let firingAtNotification: ReturnType<typeof runStore.getRoutineFiring>;
+    const onRoutineTerminated = vi.fn(() => {
+      firingAtNotification = runStore.getRoutineFiring("wedged-fire");
+    });
     const routine = minuteRoutine(root);
     const firingIds = ["wedged-fire", "replacement-fire"];
     let releaseWedgedProvider: (() => void) | undefined;
@@ -7888,11 +7896,30 @@ describe("RoutineFiringDispatcher", () => {
       expect(termination).toEqual({ sampled: 1, terminated: 1 });
       await firstDispatch;
       expect(provider.cancel).toHaveBeenCalledWith("wedged-fire");
+      await reconcileWatchdog({
+        activeRuns,
+        config: { ...watchdogConfig, enabled: false },
+        now: () => new Date("2026-05-22T10:02:00.000Z"),
+        onRoutineTerminated,
+        runStore
+      });
       expect(onRoutineTerminated).toHaveBeenCalledWith({
         firingId: "wedged-fire",
         projectName: "alpha",
         routineName: "minute-report"
       });
+      expect(firingAtNotification).toMatchObject({
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      await reconcileWatchdog({
+        activeRuns,
+        config: watchdogConfig,
+        now: () => new Date("2026-05-22T10:03:00.000Z"),
+        onRoutineTerminated,
+        runStore
+      });
+      expect(onRoutineTerminated).toHaveBeenCalledOnce();
       expect(runStore.getRoutineFiring("wedged-fire")).toMatchObject({
         cancelReason: "no_progress",
         cancelRequested: true,

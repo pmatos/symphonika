@@ -137,7 +137,38 @@ function workspaceChanged(
   return next.workspaceDigest !== previous.workspaceDigest;
 }
 
+function notifySettledRoutineWatchdogTerminations(
+  input: ReconcileWatchdogInput
+): void {
+  for (const firing of input.runStore.claimSettledRoutineWatchdogTerminations()) {
+    try {
+      input.onRoutineTerminated?.(firing);
+    } catch (error) {
+      input.logger?.warn(
+        { err: error, firingId: firing.firingId },
+        "symphonika routine watchdog termination observer failed"
+      );
+    }
+  }
+}
+
+// Drains settled routine watchdog notifications after a successful pass — the
+// disabled-config early return and the normal completion both return normally
+// from sampleAndTerminate, so one call after the await covers both without
+// duplicating it at each return site. This must NOT be a `finally`: a thrown
+// sampleAndTerminate (a runStore call, or a rejected cancellation) would still
+// durably clear the pending bit and invoke the observer, but the caller's own
+// rethrow skips forwarding that entry onward — permanently losing an alert
+// that would otherwise have retried claiming it on the next tick.
 export async function reconcileWatchdog(
+  input: ReconcileWatchdogInput
+): Promise<WatchdogReconcileResult> {
+  const result = await sampleAndTerminate(input);
+  notifySettledRoutineWatchdogTerminations(input);
+  return result;
+}
+
+async function sampleAndTerminate(
   input: ReconcileWatchdogInput
 ): Promise<WatchdogReconcileResult> {
   if (!input.config.enabled) {
@@ -236,26 +267,17 @@ export async function reconcileWatchdog(
   };
 
   const firingPort: WatchdogSubjectPort<WatchdogCandidateRoutineFiring> = {
+    // The termination observer fires later, once cancellation has actually
+    // settled — see notifySettledRoutineWatchdogTerminations. This announce
+    // only logs that cancellation was requested.
     announce: (firing) => {
-      try {
-        input.onRoutineTerminated?.({
-          firingId: firing.firingId,
-          projectName: firing.projectName,
-          routineName: firing.routineName
-        });
-      } catch (error) {
-        input.logger?.warn(
-          { err: error, firingId: firing.firingId },
-          "symphonika routine watchdog termination observer failed"
-        );
-      }
       input.logger?.warn(
         {
           firingId: firing.firingId,
           project: firing.projectName,
           terminalReason: "no_progress"
         },
-        "symphonika watchdog terminated routine firing"
+        "symphonika watchdog requested routine firing cancellation"
       );
     },
     candidates: () => input.runStore.listWatchdogCandidateRoutineFirings(),

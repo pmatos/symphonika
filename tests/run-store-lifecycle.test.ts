@@ -730,6 +730,61 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("findLeakedRuns discovers terminal runs with provider-scope cleanup pending without replacing their outcome", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "cleanup-pending", issueNumber: 7 });
+      store.updateRunState("cleanup-pending", "failed");
+      store.recordTerminalReason(
+        "cleanup-pending",
+        "provider_process_exit_1",
+        "deterministic"
+      );
+
+      store.setRunProviderScopeCleanupPending("cleanup-pending", true);
+
+      expect(store.findLeakedRuns()).toEqual([
+        expect.objectContaining({
+          needsTerminalization: false,
+          previousState: "failed",
+          previousTerminalReason: "provider_process_exit_1",
+          providerScopeCleanupPending: true,
+          runId: "cleanup-pending"
+        })
+      ]);
+      expect(store.getRun("cleanup-pending")).toMatchObject({
+        providerScopeCleanupPending: true,
+        state: "failed",
+        terminalReason: "provider_process_exit_1"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("treats cleanup pending on a valid durable wait as cleanup-only", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      seedRun(store, { id: "waiting-cleanup", issueNumber: 8 });
+      store.updateRunState("waiting-cleanup", "waiting");
+      store.setRunCurrentState("waiting-cleanup", "pr_review");
+      store.setRunProviderScopeCleanupPending("waiting-cleanup", true);
+
+      expect(store.findLeakedRuns()).toEqual([
+        expect.objectContaining({
+          needsTerminalization: false,
+          previousState: "waiting",
+          providerScopeCleanupPending: true,
+          runId: "waiting-cleanup"
+        })
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("findLeakedRuns returns previousState per row", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });
@@ -1686,6 +1741,159 @@ describe("listResumableShutdownRuns", () => {
           .map((entry) => `${entry.projectName}:${entry.runId}`)
           .sort()
       ).toEqual(["alpha:run-1", "beta:run-2"]);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe("latestRunSuppressesFreshDispatch", () => {
+  it("suppresses only for the matching repository, case-insensitively", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const runId = seedRun(store, {
+        id: "run-blocked",
+        issueNumber: 5,
+        projectName: "alpha",
+        url: "https://github.com/pmatos/alpha/issues/5"
+      });
+      store.recordTerminalReason(
+        runId,
+        "no_workspace_changes",
+        "deterministic"
+      );
+      store.updateRunState(runId, "blocked");
+
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 5,
+          projectName: "alpha",
+          repository: { owner: "PMatos", repo: "ALPHA" }
+        })
+      ).toBe(true);
+
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 5,
+          projectName: "alpha",
+          repository: { owner: "someone-else", repo: "other-repo" }
+        })
+      ).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("does not suppress for other terminal reasons or non-blocked states", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const wrongReason = seedRun(store, {
+        id: "run-wrong-reason",
+        issueNumber: 6,
+        projectName: "alpha",
+        url: "https://github.com/pmatos/alpha/issues/6"
+      });
+      store.recordTerminalReason(
+        wrongReason,
+        "workflow_terminal_blocked",
+        "deterministic"
+      );
+      store.updateRunState(wrongReason, "blocked");
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 6,
+          projectName: "alpha",
+          repository: { owner: "pmatos", repo: "alpha" }
+        })
+      ).toBe(false);
+
+      const wrongState = seedRun(store, {
+        id: "run-wrong-state",
+        issueNumber: 7,
+        projectName: "alpha",
+        url: "https://github.com/pmatos/alpha/issues/7"
+      });
+      store.recordTerminalReason(
+        wrongState,
+        "no_workspace_changes",
+        "deterministic"
+      );
+      store.updateRunState(wrongState, "failed");
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 7,
+          projectName: "alpha",
+          repository: { owner: "pmatos", repo: "alpha" }
+        })
+      ).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("lets a newer run's outcome lift a prior blocked/no_workspace_changes suppression", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const older = seedRun(store, {
+        id: "run-a-older",
+        issueNumber: 8,
+        projectName: "alpha",
+        url: "https://github.com/pmatos/alpha/issues/8"
+      });
+      store.recordTerminalReason(
+        older,
+        "no_workspace_changes",
+        "deterministic"
+      );
+      store.updateRunState(older, "blocked");
+
+      const newer = seedRun(store, {
+        id: "run-b-newer",
+        issueNumber: 8,
+        projectName: "alpha",
+        url: "https://github.com/pmatos/alpha/issues/8"
+      });
+      store.updateRunState(newer, "succeeded");
+
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 8,
+          projectName: "alpha",
+          repository: { owner: "pmatos", repo: "alpha" }
+        })
+      ).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("conservatively suppresses for a legacy run with unknown repository origin", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const runId = seedRun(store, {
+        id: "run-legacy",
+        issueNumber: 9,
+        projectName: "alpha",
+        url: "https://example/9"
+      });
+      store.recordTerminalReason(
+        runId,
+        "no_workspace_changes",
+        "deterministic"
+      );
+      store.updateRunState(runId, "blocked");
+
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 9,
+          projectName: "alpha",
+          repository: { owner: "anyone", repo: "anything" }
+        })
+      ).toBe(true);
     } finally {
       store.close();
     }

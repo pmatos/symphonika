@@ -423,9 +423,31 @@ async function prepareAdoptedPrWorkspaceResult(
         `workspace path ${plan.workspacePath} has uncommitted changes; resolve or discard them before adopting`
       );
     }
-    // A no-op in the expected orphaned-Run case: the worktree's HEAD is
-    // already the SHA its own agent last pushed, which is what the earlier
-    // head-mismatch check just confirmed equals expectedHeadSha.
+    // `status --porcelain` above only catches uncommitted working-tree
+    // changes, not local commits the worktree's HEAD holds that were never
+    // pushed (e.g. the orphaned Run's agent committed, then died before
+    // `git push`) -- exactly the kind of work adopt-pr exists to recover.
+    // Confirm local HEAD is an ancestor of origin/<branch> (a no-op fast
+    // -forward or already-equal) before the reset below, which would
+    // otherwise discard those commits silently.
+    const localHeadIsAncestor = await workspaceGitSucceeds(
+      [
+        "-C",
+        plan.workspacePath,
+        "merge-base",
+        "--is-ancestor",
+        "HEAD",
+        `origin/${plan.branchName}`
+      ],
+      input.signal,
+      abortCleanup
+    );
+    if (!localHeadIsAncestor) {
+      throw new WorkspacePreparationError(
+        "workspace_dirty",
+        `workspace path ${plan.workspacePath} has local commits not present on origin/${plan.branchName}; resolve or push them before adopting`
+      );
+    }
     await workspaceGit(
       [
         "-C",

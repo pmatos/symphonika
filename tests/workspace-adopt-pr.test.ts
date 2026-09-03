@@ -299,6 +299,53 @@ describe("prepareAdoptedPrWorkspace (ADR-2026-09-03-1158)", () => {
     ).toBe("uncommitted local edit\n");
   });
 
+  it("refuses with workspace_dirty rather than discarding an orphaned Run's unpushed local commits", async () => {
+    const root = await makeTempRoot();
+    const { remotePath, seedPath } = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const project = makeProject(remotePath, workspaceRoot);
+    const sha = await pushBranchCommit(
+      seedPath,
+      planWorkspacePaths({ issue, project }).branchName,
+      "login.txt",
+      "v1\n"
+    );
+
+    const first = await prepareAdoptedPrWorkspace({
+      expectedHeadSha: sha,
+      issue,
+      project
+    });
+    // Simulates the orphaned-Run scenario adopt-pr exists to recover: the
+    // agent committed locally, then the process died before `git push` --
+    // the working tree is clean, but local HEAD is now ahead of
+    // origin/<branch>.
+    await writeFile(
+      path.join(first.workspacePath, "login.txt"),
+      "unpushed local commit\n"
+    );
+    await git(["-C", first.workspacePath, "add", "login.txt"]);
+    await git(["-C", first.workspacePath, "commit", "-m", "unpushed work"]);
+    const unpushedSha = await git([
+      "-C",
+      first.workspacePath,
+      "rev-parse",
+      "HEAD"
+    ]);
+
+    const error = await rejectionOf(
+      prepareAdoptedPrWorkspace({ expectedHeadSha: sha, issue, project })
+    );
+    expect(error).toBeInstanceOf(WorkspacePreparationError);
+    if (!(error instanceof WorkspacePreparationError)) {
+      throw new Error("expected workspace preparation error");
+    }
+    expect(error.code).toBe("workspace_dirty");
+    expect(await git(["-C", first.workspacePath, "rev-parse", "HEAD"])).toBe(
+      unpushedSha
+    );
+  });
+
   it("refuses with head_mismatch when expectedHeadSha does not match the fetched remote head", async () => {
     const root = await makeTempRoot();
     const { remotePath, seedPath } = await createRemoteRepository(root);

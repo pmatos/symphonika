@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
@@ -9,11 +10,14 @@ import { parse } from "yaml";
 
 import {
   createHttpApp,
+  type AdoptPullRequestInput,
+  type AdoptPullRequestResult,
   type FireRoutineResult,
   type MergePullRequestResult,
   type PollNowResult,
   type WriteIssueLabelsResult
 } from "./http/app.js";
+import { findLiveRunIdForIssue } from "./http/pages.js";
 import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
@@ -30,6 +34,7 @@ import {
   DEFAULT_POLLING_INTERVAL_MS,
   emptyIssuePollStatus,
   mergeIssuePollStatus,
+  normalizeIssueSnapshot,
   pollConfiguredGitHubIssuesFromConfig,
   projectPollIdentityKey,
   rateLimitedTokens,
@@ -37,6 +42,7 @@ import {
   replaceIssuePollStatus,
   resolveEnvBackedValue,
   tryAddLabelsToIssue,
+  tryGetIssue,
   tryGetPullRequestFollowupState,
   tryMergePullRequest,
   tryRemoveLabelsFromIssue
@@ -133,6 +139,18 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "./workspace.js";
+import { prepareAdoptedPrWorkspace } from "./workspace.js";
+import { slugifyWorkspaceSegment } from "./workspace-paths.js";
+import { listAdoptableEntryStates } from "./workflow/fsm-expansion.js";
+
+// adoptPullRequest's workspace preparation runs while holding the global
+// dispatchMutex (ADR-2026-09-03-1158) -- an unbounded git fetch (e.g. a half-open
+// connection to GitHub) would otherwise freeze dispatch/reconcile/shutdown-
+// resume/stale-claim-detection daemon-wide, the exact class of risk
+// claimAndPersistRun's own claimDeadline already bounds for its in-mutex I/O
+// (run-controller.ts, ADR 0093). Generous enough not to spuriously fail a
+// legitimately slow fetch on a large repo or a loaded host.
+const ADOPT_PR_WORKSPACE_TIMEOUT_MS = 60_000;
 
 export type StartDaemonOptions = {
   agentProviders?: AgentProviderRegistry;
@@ -1500,6 +1518,296 @@ export async function startDaemon(
     }
     return { kind: "not-found" };
   };
+  // Ownership/liveness guards key on Project name, but two Projects can
+  // point at the same GitHub owner/repo (a supported config) -- returns
+  // every Project name sharing that repo, including projectName itself.
+  // Extracted so both HttpAppOptions.getProjectRepoAliases (below) and
+  // adoptPullRequest's own live-run guard (ADR-2026-09-03-1158) share one
+  // implementation.
+  const resolveProjectRepoAliases = (projectName: string): string[] => {
+    const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
+    if (tracker === undefined) {
+      return [projectName];
+    }
+    const aliases: string[] = [];
+    for (const project of runtimeConfig.projectsByName().values()) {
+      if (
+        project.tracker?.owner === tracker.owner &&
+        project.tracker.repo === tracker.repo
+      ) {
+        aliases.push(project.name);
+      }
+    }
+    return aliases;
+  };
+
+  // Same extraction reason as resolveProjectRepoAliases above: a property
+  // of the createHttpApp options object literal below cannot reference a
+  // sibling property through `options`, since the object does not exist
+  // yet during its own construction -- adoptPullRequest needs these same
+  // shapes for its own live-run guard (findLiveRunIdForIssue) but is
+  // defined before that literal, so both share these named consts instead
+  // of each defining their own copy.
+  const getActiveRunsForLiveCheck = () =>
+    activeRuns.list().map((entry) => ({
+      cancelReason: entry.cancelReason ?? null,
+      cancelRequested: entry.cancelRequested,
+      issueNumber: entry.issueNumber,
+      projectName: entry.projectName,
+      runId: entry.runId
+    }));
+  const getScheduledCallbacks = () => activeRuns.peekDelayed();
+
+  // adopt-pr (ADR-2026-09-03-1158): attaches an already-open pull request to a
+  // fresh Run parked at an operator-chosen wait/merge_pr state. Defined as
+  // its own const rather than inline in the createHttpApp options object
+  // literal below for the same self-reference reason as above.
+  const adoptPullRequest = async (
+    input: AdoptPullRequestInput
+  ): Promise<AdoptPullRequestResult> => {
+    const project = runtimeConfig.projectsByName().get(input.projectName);
+    if (project?.tracker === undefined) {
+      return {
+        kind: "error",
+        error: `projects.${input.projectName}.tracker is not configured`
+      };
+    }
+    // Captured now: property narrowing on project.priority does not survive
+    // the `await tryGetIssue` below, since TS conservatively assumes an
+    // intervening call could have re-assigned it.
+    const { priority } = project;
+    if (priority === undefined) {
+      return {
+        kind: "error",
+        error: `projects.${input.projectName} is not a dispatch project`
+      };
+    }
+    const workflow = project.workflow;
+    if (workflow === undefined || !("expandedWorkflow" in workflow)) {
+      return { kind: "not-pr-aware-workflow" };
+    }
+    const adoptableStates = listAdoptableEntryStates(workflow.expandedWorkflow);
+    if (adoptableStates.length === 0) {
+      return { kind: "not-pr-aware-workflow" };
+    }
+    if (!adoptableStates.some((state) => state.id === input.entryStateId)) {
+      return {
+        kind: "invalid-entry-state",
+        validStateIds: adoptableStates.map((state) => state.id)
+      };
+    }
+
+    const token = resolveToken(project.tracker.token, env);
+    if (token === undefined) {
+      return {
+        kind: "error",
+        error: `projects.${input.projectName}.tracker.token is not available`
+      };
+    }
+    const repository = {
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    };
+
+    // Cheap, local-only checks first: an operator adopting a merged/closed
+    // PR, or one this Project hasn't polled yet, is a common mistake that a
+    // SQLite read can refuse without spending a GitHub API call and its
+    // rate-limit budget.
+    const snapshot = runStore.getProjectPullRequestSnapshot(
+      input.projectName,
+      input.prNumber
+    );
+    if (snapshot === undefined) {
+      return { kind: "snapshot-unavailable" };
+    }
+    if (
+      snapshot.repository === undefined ||
+      !sameGitHubRepository(snapshot.repository, repository)
+    ) {
+      return {
+        kind: "repository-mismatch",
+        error:
+          "snapshot repository does not match the current tracker repository; poll the Project and retry"
+      };
+    }
+    if (snapshot.merged || !snapshot.open) {
+      return { kind: "pr-not-open" };
+    }
+    if (snapshot.headSha === null || snapshot.url === null) {
+      return { kind: "snapshot-incomplete" };
+    }
+
+    const rawIssue = await tryGetIssue(githubIssuesApi, {
+      ...repository,
+      issueNumber: input.issueNumber
+    });
+    if (rawIssue === undefined || rawIssue === null) {
+      return { kind: "issue-not-found" };
+    }
+    if ((rawIssue.state ?? "open") !== "open") {
+      return { kind: "issue-not-open" };
+    }
+    const issueSnapshot = normalizeIssueSnapshot(rawIssue, { priority });
+
+    // Validate against the PR's *actual* branch name, not a freshly
+    // recomputed one: planWorkspacePaths derives a branch name from
+    // issueSnapshot.title, which was just fetched live above and can differ
+    // from whatever the title was when the original Run first created this
+    // branch (e.g. a maintainer editing the title afterwards). Recomputing
+    // from the live title and comparing for exact equality would then wrongly
+    // reject a PR that genuinely is this issue's branch -- exactly the
+    // orphaned-Run case adopt-pr exists to recover. Same project + same
+    // issue number is sufficient to prove ownership; the trailing slug can be
+    // anything -- classifyPullRequestBranchOrigin's own "starts with sym/, no
+    // /routine/" test is deliberately looser still, since it has no issue
+    // number to check against.
+    const projectSlug = slugifyWorkspaceSegment(project.name, "project");
+    const branchPrefix = `sym/${projectSlug}/${input.issueNumber}-`;
+    if (
+      snapshot.headRef === null ||
+      !snapshot.headRef.startsWith(branchPrefix)
+    ) {
+      return { kind: "not-issue-branch" };
+    }
+    const expectedBranch = snapshot.headRef;
+    // The branch's own slug -- not a freshly recomputed one -- drives
+    // workspace pathing below, so the adopted PR's workspace lands wherever
+    // its branch's original Run already created it on disk.
+    // slugifyWorkspaceSegment is idempotent on an already-slugified string,
+    // so re-slugifying this extracted segment as if it were a "title"
+    // reproduces the exact issueDirectoryName/branchName/workspacePath
+    // planWorkspacePaths gave that original Run -- provided the branch's
+    // slug actually is one planWorkspacePaths could have produced. A branch
+    // that merely starts with the right prefix but was created by hand
+    // (uppercase, double hyphens, ...) would otherwise reach
+    // prepareAdoptedPrWorkspace's git fetch and fail there with a raw
+    // "couldn't find remote ref" surfaced as a generic {kind:"error"}
+    // instead of this function's own, clearer not-issue-branch refusal.
+    const branchSlug = expectedBranch.slice(branchPrefix.length);
+    if (slugifyWorkspaceSegment(branchSlug, "issue") !== branchSlug) {
+      return { kind: "not-issue-branch" };
+    }
+
+    const checkLiveRun = (): string | undefined =>
+      findLiveRunIdForIssue({
+        getActiveRuns: getActiveRunsForLiveCheck,
+        getProjectRepoAliases: resolveProjectRepoAliases,
+        getScheduled: getScheduledCallbacks,
+        issueNumber: input.issueNumber,
+        projectName: input.projectName,
+        runStore
+      });
+
+    // Cheap, unlocked pre-check: skip the mutex wait entirely for a request
+    // that's already obviously conflicting. Re-checked immediately after
+    // acquiring the mutex below, since this unlocked read can race a
+    // concurrent claim landing before the mutex is actually held.
+    const earlyLiveRunId = checkLiveRun();
+    if (earlyLiveRunId !== undefined) {
+      return { kind: "live-run-conflict", runId: earlyLiveRunId };
+    }
+
+    // Serializes the live-run recheck, the workspace mutation, and the
+    // Run/tracked-PR row writes with RunController's own claim path (ADR
+    // 0052) -- deliberately held across prepareAdoptedPrWorkspace despite
+    // its slow git I/O, unlike an earlier version of this function that
+    // narrowed the lock to just the DB writes. prepareAdoptedPrWorkspace
+    // can force-reset an *already-existing* worktree at this issue's own
+    // deterministic path (planWorkspacePaths is a pure function of its
+    // inputs, and a normal dispatch of this same issue resolves to the same
+    // workspace path whenever the branch's own slug still matches the
+    // issue's current title), so if that reset ran unlocked, a
+    // concurrent claim could start using that same worktree between this
+    // call's own unlocked check above and its mutex-protected write below
+    // -- the reset would then corrupt a live Run's workspace out from
+    // under it. The later recheck still correctly refuses to create the
+    // adopted Run in that case, but by then the damage to the concurrently
+    // dispatched run's workspace is already done, so the mutation itself
+    // -- not just the DB write -- has to be inside the lock.
+    await dispatchMutex.acquire();
+    let claim:
+      | { kind: "conflict"; runId: string }
+      | { kind: "error"; error: string }
+      | { kind: "ok"; runId: string };
+    try {
+      const liveRunId = checkLiveRun();
+      if (liveRunId !== undefined) {
+        claim = { kind: "conflict", runId: liveRunId };
+      } else {
+        try {
+          const workspace = await prepareAdoptedPrWorkspace({
+            configDir: state.configDir,
+            expectedHeadSha: snapshot.headSha,
+            issue: { number: input.issueNumber, title: branchSlug },
+            project,
+            signal: AbortSignal.timeout(ADOPT_PR_WORKSPACE_TIMEOUT_MS)
+          });
+          const runId = randomUUID();
+          runStore.createAdoptedRun({
+            currentStateId: input.entryStateId,
+            id: runId,
+            issue: issueSnapshot,
+            projectName: input.projectName,
+            workspacePath: workspace.workspacePath
+          });
+          runStore.trackPullRequest({
+            branchName: expectedBranch,
+            headSha: snapshot.headSha,
+            issueNumber: input.issueNumber,
+            prNumber: input.prNumber,
+            projectName: input.projectName,
+            prUrl: snapshot.url,
+            runId
+          });
+          // Unconditional: trackPullRequest's upsert just wrote a row for
+          // (projectName, prNumber) either way (insert or update-without-
+          // touching-run_id), so re-pointing it at this fresh run_id is a
+          // no-op when the insert branch ran and the needed correction
+          // when an older tracked row's upsert preserved a stale run_id.
+          runStore.reassignTrackedPullRequestRun({
+            prNumber: input.prNumber,
+            projectName: input.projectName,
+            runId
+          });
+          claim = { kind: "ok", runId };
+        } catch (error) {
+          claim = { kind: "error", error: errorMessage(error) };
+        }
+      }
+    } finally {
+      dispatchMutex.release();
+    }
+    if (claim.kind === "conflict") {
+      return { kind: "live-run-conflict", runId: claim.runId };
+    }
+    if (claim.kind === "error") {
+      return { kind: "error", error: claim.error };
+    }
+    const runId = claim.runId;
+
+    // Best-effort, outside the mutex: the Run and tracked-PR rows are
+    // already durably committed above, so a transient GitHub failure here
+    // must not turn a successful adoption into a reported error -- that
+    // would leave an orphaned, unlabeled Run behind while telling the
+    // operator nothing was created, and a retry would then hit
+    // live-run-conflict instead of succeeding.
+    try {
+      await tryAddLabelsToIssue(githubIssuesApi, {
+        ...repository,
+        issueNumber: input.issueNumber,
+        labels: ["sym:claimed"]
+      });
+    } catch (error) {
+      logger.warn(
+        { err: error, issueNumber: input.issueNumber, runId },
+        "symphonika adopt-pr: sym:claimed label write failed"
+      );
+    }
+
+    return { kind: "adopted", runId };
+  };
+
   const shutdownController = new AbortController();
   const app = createHttpApp({
     cancelRun: cancelViaUi,
@@ -1508,6 +1816,7 @@ export async function startDaemon(
     // same mutex detectStaleClaims already gates its own automatic sweep
     // behind (dispatchMutex.held, above).
     claimMutex: dispatchMutex,
+    adoptPullRequest,
     dispatchRuntime,
     fireRoutine: async (request): Promise<FireRoutineResult> => {
       // fireRoutineNow is a second admission path outside launchWork's
@@ -1591,14 +1900,7 @@ export async function startDaemon(
       });
       return response;
     },
-    getActiveRuns: () =>
-      activeRuns.list().map((entry) => ({
-        cancelReason: entry.cancelReason ?? null,
-        cancelRequested: entry.cancelRequested,
-        issueNumber: entry.issueNumber,
-        projectName: entry.projectName,
-        runId: entry.runId
-      })),
+    getActiveRuns: getActiveRunsForLiveCheck,
     getLastTickAt: () => lastTickAtMs,
     getLastTickAtMonotonic: () => lastTickAtMonotonicMs,
     getNextPollAtMonotonic: () => nextPollAtMonotonicMs,
@@ -1661,22 +1963,7 @@ export async function startDaemon(
       }
       return { format: workflow.format, path: workflow.path };
     },
-    getProjectRepoAliases: (projectName) => {
-      const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
-      if (tracker === undefined) {
-        return [projectName];
-      }
-      const aliases: string[] = [];
-      for (const project of runtimeConfig.projectsByName().values()) {
-        if (
-          project.tracker?.owner === tracker.owner &&
-          project.tracker.repo === tracker.repo
-        ) {
-          aliases.push(project.name);
-        }
-      }
-      return aliases;
-    },
+    getProjectRepoAliases: resolveProjectRepoAliases,
     getProjectRequiredLabels: (projectName) =>
       runtimeConfig.projectsByName().get(projectName)?.issue_filters
         ?.labels_all ?? [],
@@ -1868,7 +2155,7 @@ export async function startDaemon(
     },
     getRuns: () => runStore.listRuns(),
     getWatchdogConfig: watchdogConfigFor,
-    getScheduled: () => activeRuns.peekDelayed(),
+    getScheduled: getScheduledCallbacks,
     getStatusSnapshot: () =>
       buildStatusSnapshot({
         configDir: state.configDir,

@@ -261,6 +261,20 @@ export async function loadProjectWorkflow(input: {
   };
 }
 
+// Only a wait/merge_pr state is a position the workflow's own author already
+// gave meaning to as something to observe and react to (ADR-2026-09-03-1158) --
+// adopt-pr's --entry-state must name one of these, never an agent state
+// (which would re-run a provider from scratch against a branch that may
+// already hold complete work) or a terminal state (a no-op).
+export function listAdoptableEntryStates(
+  workflow: ExpandedWorkflow
+): ExpandedWorkflowState[] {
+  return workflow.states.filter(
+    (state) =>
+      state.action?.kind === "wait" || state.action?.kind === "merge_pr"
+  );
+}
+
 export function explainWorkflow(workflow: ExpandedWorkflow): string {
   const lines = [
     `workflow: ${workflow.name}`,

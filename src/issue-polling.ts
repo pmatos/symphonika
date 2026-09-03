@@ -1414,9 +1414,13 @@ export function parseParentIssueNumber(body: string): number | undefined {
   return Number.parseInt(match[1], 10);
 }
 
-function normalizeIssueSnapshot(
+export function normalizeIssueSnapshot(
   rawIssue: RawGitHubIssue,
-  project: PollingProjectConfig
+  // Narrowed to the one field this function actually reads, rather than the
+  // full PollingProjectConfig: adopt-pr's caller (src/daemon.ts) only has a
+  // RunControllerProjectConfig on hand, whose `priority` field is optional
+  // (Routine Hosts have none) where PollingProjectConfig's is required.
+  project: Pick<PollingProjectConfig, "priority">
 ): IssueSnapshot {
   const labels = normalizeLabels(rawIssue.labels ?? []);
   const body = rawIssue.body ?? "";

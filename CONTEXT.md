@@ -225,6 +225,15 @@ _Avoid_: event log when referring to scheduler state
 One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
+**Adopted Run**:
+A Run created by `adopt-pr` rather than the normal issue-dispatch path, attaching an already-open
+pull request to a fresh Run parked directly at an operator-named `wait`/`merge_pr` state instead of
+the workflow's `initial` state. It has no parent Run — it is the first and only Run in its chain —
+and is the one case where something outside the FSM names a start state, a deliberate, audited
+exception to the rule that only the FSM's own position does (ADR 0090). See ADR-2026-09-03-1158.
+_Avoid_: Continuation Run when referring to an adopted Run; a Continuation Run always inherits its
+parent's position, while an adopted Run has no parent at all
+
 **Routine**:
 A service-level scheduled prompt declaration with a globally unique name that targets an explicit,
 non-empty list of declared Projects and can launch Coding Agents without GitHub Issues. A Routine

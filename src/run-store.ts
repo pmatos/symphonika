@@ -1311,6 +1311,53 @@ export class RunStore {
     this.publishChange(apply());
   }
 
+  // adopt-pr's write path (ADR-2026-09-03-1158): unlike createWaitingRun this Run
+  // has no predecessor -- it's the first (and only) Run in its chain, so
+  // parentRunId is always null and isContinuation is always false. Unlike
+  // createRun it must never dispatch a provider, so it parks directly in
+  // `waiting` the same way createWaitingRun does. workspacePath is required,
+  // not optional, because an adopted Run always has a prepared workspace by
+  // the time this is called. Uses recordWorkflowStateAdvance rather than the
+  // bare setRunCurrentState createWaitingRun uses, so the row's own
+  // state_transition_reason records *why* it's parked there for show-run and
+  // the dashboard -- createWaitingRun's park has no such reason because its
+  // caller is the FSM itself, not an operator.
+  createAdoptedRun(input: {
+    currentStateId: string;
+    id: string;
+    issue: IssueSnapshot;
+    projectName: string;
+    workspacePath: string;
+  }): void {
+    // A stale workflow_progress row from an earlier, unrelated chain on this
+    // issue must not gate or false-match the adopted Run's very first
+    // re-evaluation -- the same clear every fresh-claim boundary performs
+    // (run-controller.ts, ADR 0090's Progress Guard).
+    this.clearProgressFingerprints({
+      issueNumber: input.issue.number,
+      projectName: input.projectName
+    });
+    const apply = this.database.transaction(() => {
+      const event = this.insertRunRow({
+        id: input.id,
+        isContinuation: false,
+        issue: input.issue,
+        parentRunId: null,
+        projectName: input.projectName,
+        providerCommand: null,
+        providerName: null,
+        state: "waiting",
+        workspacePath: input.workspacePath
+      });
+      this.recordWorkflowStateAdvance(input.id, {
+        nextStateId: input.currentStateId,
+        transitionReason: "adopted_pull_request"
+      });
+      return event;
+    });
+    this.publishChange(apply());
+  }
+
   // Includes cancel-requested rows on purpose: a waiting run cancelled via
   // cancelViaUi only flips `cancel_requested = 1`, and the cancellation branch
   // lives inside reEvaluateWaitingRun. Filtering cancel-requested rows out
@@ -2471,6 +2518,46 @@ export class RunStore {
       | { repository_name: string | null; repository_owner: string | null }
       | undefined;
     return snapshotRepository(row);
+  }
+
+  // Single-row sibling of listProjectPullRequestSnapshots -- adopt-pr's
+  // source of PR facts (headRef, headSha, open, merged) instead of a new
+  // GitHub wrapper; requiring the row to exist and failing closed otherwise
+  // mirrors verifySnapshotRepositoryBinding's own posture for a missing
+  // snapshot. Also selects the repository columns
+  // getProjectPullRequestSnapshotRepository exposes separately, so a
+  // caller needing both facts (adoptPullRequest) reads this one row once
+  // rather than issuing two queries against it.
+  getProjectPullRequestSnapshot(
+    projectName: string,
+    prNumber: number
+  ):
+    | (ProjectPullRequestSnapshotRow & {
+        repository: ProjectSnapshotRepository | undefined;
+      })
+    | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select pr_number, title, url, draft, open, merged, head_ref,",
+          "head_sha, labels, branch_origin, state_available, mergeable, checks,",
+          "review_decision, tracking_state, unresolved_review_threads, polled_at,",
+          "repository_owner, repository_name",
+          "from project_pull_request_snapshots where project_name = ? and pr_number = ?"
+        ].join(" ")
+      )
+      .get(projectName, prNumber) as
+      | (ProjectPullRequestSnapshotDbRow & {
+          repository_name: string | null;
+          repository_owner: string | null;
+        })
+      | undefined;
+    return row === undefined
+      ? undefined
+      : {
+          ...mapProjectPullRequestSnapshotRow(row),
+          repository: snapshotRepository(row)
+        };
   }
 
   listProjectPullRequestSnapshots(
@@ -5448,6 +5535,25 @@ export class RunStore {
         run_id: input.runId,
         updated_at: now
       });
+  }
+
+  // trackPullRequest's own upsert deliberately never updates run_id on
+  // conflict (docs/adr/0078-pr-surface-poll-snapshot-and-state-projection.md)
+  // -- that's load-bearing for its other caller (pull-request-followup.ts),
+  // which must not clobber an existing owner. adopt-pr needs the opposite:
+  // when it adopts a PR already tracked under a now-dead run_id, the
+  // dashboard must stop showing that dead Run as the owner. A dedicated
+  // method keeps trackPullRequest's own contract unchanged.
+  reassignTrackedPullRequestRun(input: {
+    prNumber: number;
+    projectName: string;
+    runId: string;
+  }): void {
+    this.database
+      .prepare(
+        "update tracked_pull_requests set run_id = ?, updated_at = ? where project_name = ? and pr_number = ?"
+      )
+      .run(input.runId, timestamp(), input.projectName, input.prNumber);
   }
 
   // Claims one park-to-advance transition against the observation it would be

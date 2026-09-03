@@ -2403,6 +2403,7 @@ Bootstrap CLI commands:
 - `symphonika show-firing <firing-id> [--config <path>] [--events <n>]`
 - `symphonika cancel <run-id> [--config <path>]`
 - `symphonika clear-stale <project> (<issue-number> | --all) [--config <path>] --yes`
+- `symphonika adopt-pr <project> <pr-number> --issue <number> --entry-state <state> [--config <path>] [--daemon-url <url>]`
 
 When neither a project-local config nor a user config exists, `doctor` reports the missing user
 config path and points the operator to `symphonika init`.

@@ -12,7 +12,6 @@ import {
   type WatchdogServiceConfig
 } from "../reload.js";
 import type {
-  CancelReason,
   RoutineWatchdogSample,
   RunStore,
   WatchdogCandidateRoutineFiring,
@@ -22,7 +21,12 @@ import type {
   WatchdogTerminalReason
 } from "../run-store.js";
 
-import { ActiveRunRegistry, CANCEL_REASONS } from "./active-runs.js";
+import type { ActiveRunRegistry } from "./active-runs.js";
+import {
+  driveWatchdogSubject,
+  type WatchdogSubjectContext,
+  type WatchdogSubjectPort
+} from "./watchdog-subject.js";
 
 // Directory names whose contents are build or tool output in the ecosystems
 // Symphonika dispatches against. They are never descended into, so a
@@ -102,32 +106,6 @@ export function runElapsedMs(createdAt: string, now: Date): number | undefined {
   return now.getTime() - claimedAtMs;
 }
 
-// The idle clock both Watchdog paths run on. ADR 0054: attempt start normally
-// clears the latest sample and advances the generation fence before
-// preparing_workspace. Keep path-change detection as a defensive fallback for
-// legacy or partially-upgraded state so a surviving prior-attempt row still
-// cannot carry its idle clock into the new attempt. Routine Firings have one
-// attempt, but the same reset applies if their evidence path ever changes.
-function watchdogIdleClock(
-  previous: WatchdogProgressSample | undefined,
-  next: WatchdogProgressSample,
-  sampledAt: string
-): { idleSince: string | null; progress: boolean } {
-  const progress =
-    previous === undefined ? false : watchdogProgressObserved(previous, next);
-  const attemptChanged =
-    previous !== undefined &&
-    previous.normalizedLogPath !== next.normalizedLogPath;
-  return {
-    idleSince: progress
-      ? null
-      : attemptChanged
-        ? sampledAt
-        : (previous?.idleSince ?? sampledAt),
-    progress
-  };
-}
-
 export function watchdogProgressObserved(
   previous: WatchdogProgressSample,
   next: WatchdogProgressSample
@@ -203,182 +181,149 @@ async function sampleAndTerminate(
     projects: input.projects ?? [],
     watchdog: input.config
   };
-  const cancellations: Promise<void>[] = [];
-  let sampled = 0;
-  let terminated = 0;
+  const ctx: WatchdogSubjectContext = {
+    cancellations: [],
+    now,
+    requestCancel: (id, reason) => input.activeRuns.requestCancel(id, reason),
+    resolveConfig: (projectName) =>
+      resolveWatchdogConfig(serviceConfig, projectName),
+    sampledAt
+  };
 
-  for (const run of input.runStore.listWatchdogCandidateRuns()) {
-    const config = resolveWatchdogConfig(serviceConfig, run.projectName);
-    const previous = input.runStore.getWatchdogSample(run.runId);
-    const next = await sampleRun({
-      directoryIgnore:
-        input.evidenceIgnoreForProject?.(run.projectName) ?? run.evidenceIgnore,
-      mtimeIgnore: config.mtimeIgnore,
-      mtimeInclude: config.mtimeInclude,
-      previous,
-      run,
-      runStore: input.runStore,
-      sampledAt
-    });
-    if (next === undefined) {
-      continue;
-    }
-    const { idleSince, progress } = watchdogIdleClock(
-      previous,
-      next,
-      sampledAt
-    );
-    const persisted = {
-      ...next,
-      idleSince
-    };
-    if (
-      !input.runStore.upsertWatchdogSample(persisted, run.watchdogGeneration)
-    ) {
-      continue;
-    }
-    sampled += 1;
-
-    // ADR 0086: the convergence budget is checked before the liveness clock and
-    // independently of it. A Run that burns its whole output-token budget
-    // without finishing is busy, not idle — the liveness rule is satisfied on
-    // every tick and would never fire. ADR 0089's wall-clock cap sits ahead of
-    // both for the same reason, one step further: a Run trickling real work
-    // satisfies the liveness rule AND stays under the budget, so elapsed time
-    // is the only signal left that can bound it.
-    const terminalReason = watchdogTerminalReason({
-      budget: config.outputTokenBudget,
-      createdAt: run.createdAt,
-      graceMs: config.graceMinutes * 60_000,
-      idleSince,
-      maxRunMs: config.maxRunMinutes * 60_000,
-      now,
-      outputTokensTotal: persisted.outputTokensTotal,
-      progress
-    });
-    if (terminalReason === undefined) {
-      continue;
-    }
-
-    const marked = input.runStore.markRunWatchdogStale(
-      run.runId,
-      terminalReason,
-      sampledAt,
-      run.watchdogGeneration
-    );
-    if (!marked) {
-      continue;
-    }
-    cancellations.push(
-      input.activeRuns.requestCancel(
-        run.runId,
-        WATCHDOG_CANCEL_REASONS[terminalReason]
-      )
-    );
-    terminated += 1;
-    try {
-      input.onTerminated?.({
-        issueNumber: run.issueNumber,
-        projectName: run.projectName,
-        runId: run.runId
-      });
-    } catch (error) {
+  const runPort: WatchdogSubjectPort<WatchdogCandidateRun> = {
+    // Runs onto the shared cancellation sink under the verdict's own name, then
+    // fires the termination observer (guarded so a throwing observer never
+    // suppresses the audit line that follows) and logs.
+    announce: (run, outcome) => {
+      try {
+        input.onTerminated?.({
+          issueNumber: run.issueNumber,
+          projectName: run.projectName,
+          runId: run.runId
+        });
+      } catch (error) {
+        input.logger?.warn(
+          { err: error, runId: run.runId },
+          "symphonika watchdog termination observer failed"
+        );
+      }
       input.logger?.warn(
-        { err: error, runId: run.runId },
-        "symphonika watchdog termination observer failed"
+        {
+          elapsedMs: runElapsedMs(run.createdAt, outcome.now),
+          issueNumber: run.issueNumber,
+          maxRunMinutes: outcome.config.maxRunMinutes,
+          outputTokenBudget: outcome.config.outputTokenBudget,
+          outputTokensTotal: outcome.outputTokensTotal,
+          project: run.projectName,
+          runId: run.runId,
+          terminalReason: outcome.terminalReason
+        },
+        "symphonika watchdog marked run stale"
       );
-    }
-    input.logger?.warn(
-      {
-        elapsedMs: runElapsedMs(run.createdAt, now),
-        issueNumber: run.issueNumber,
-        maxRunMinutes: config.maxRunMinutes,
-        outputTokenBudget: config.outputTokenBudget,
-        outputTokensTotal: persisted.outputTokensTotal,
-        project: run.projectName,
-        runId: run.runId,
-        terminalReason
-      },
-      "symphonika watchdog marked run stale"
-    );
-  }
-
-  for (const firing of input.runStore.listWatchdogCandidateRoutineFirings()) {
-    const config = resolveWatchdogConfig(serviceConfig, firing.projectName);
-    const previous = input.runStore.getRoutineWatchdogSample(firing.firingId);
-    const next = await sampleRoutineFiring({
-      firing,
-      mtimeIgnore: config.mtimeIgnore,
-      mtimeInclude: config.mtimeInclude,
-      previous,
-      runStore: input.runStore,
-      sampledAt
-    });
-    if (next === undefined) {
-      continue;
-    }
-    const { idleSince, progress } = watchdogIdleClock(
-      previous,
-      next,
-      sampledAt
-    );
-    const persisted = { ...next, idleSince };
-    if (!input.runStore.upsertRoutineWatchdogSample(persisted)) {
-      continue;
-    }
-    sampled += 1;
-
-    if (
-      !idleGraceExpired({
-        graceMs: config.graceMinutes * 60_000,
-        idleSince,
-        now,
-        progress
+    },
+    candidates: () => input.runStore.listWatchdogCandidateRuns(),
+    id: (run) => run.runId,
+    loadPrevious: (run) => input.runStore.getWatchdogSample(run.runId),
+    markStale: (run, terminalReason, at) =>
+      input.runStore.markRunWatchdogStale(
+        run.runId,
+        terminalReason,
+        at,
+        run.watchdogGeneration
+      ),
+    persist: (run, sample) =>
+      input.runStore.upsertWatchdogSample(
+        { ...sample, runId: run.runId },
+        run.watchdogGeneration
+      ),
+    projectName: (run) => run.projectName,
+    sample: (run, sampleInput) =>
+      sampleRun({
+        directoryIgnore:
+          input.evidenceIgnoreForProject?.(run.projectName) ??
+          run.evidenceIgnore,
+        mtimeIgnore: sampleInput.config.mtimeIgnore,
+        mtimeInclude: sampleInput.config.mtimeInclude,
+        previous: sampleInput.previous,
+        run,
+        runStore: input.runStore,
+        sampledAt: sampleInput.sampledAt
+      }),
+    // ADR 0086/0089: the wall-clock cap and the convergence budget are checked
+    // ahead of the liveness clock and independently of it. A Run that burns its
+    // whole output-token budget, or trickles real work forever, satisfies the
+    // liveness rule on every tick and would never be bounded by it alone.
+    terminalReason: (run, decision) =>
+      watchdogTerminalReason({
+        budget: decision.config.outputTokenBudget,
+        createdAt: run.createdAt,
+        graceMs: decision.config.graceMinutes * 60_000,
+        idleSince: decision.idleSince,
+        maxRunMs: decision.config.maxRunMinutes * 60_000,
+        now: decision.now,
+        outputTokensTotal: decision.outputTokensTotal,
+        progress: decision.progress
       })
-    ) {
-      continue;
-    }
-    if (
-      !input.runStore.markRoutineFiringWatchdogNoProgress(
-        firing.firingId,
-        sampledAt
-      )
-    ) {
-      continue;
-    }
-    cancellations.push(
-      input.activeRuns.requestCancel(
-        firing.firingId,
-        CANCEL_REASONS.NO_PROGRESS
-      )
-    );
-    terminated += 1;
-    input.logger?.warn(
-      {
-        firingId: firing.firingId,
-        project: firing.projectName,
-        terminalReason: "no_progress"
-      },
-      "symphonika watchdog requested routine firing cancellation"
-    );
-  }
+  };
 
-  await Promise.all(cancellations);
-  return { sampled, terminated };
+  const firingPort: WatchdogSubjectPort<WatchdogCandidateRoutineFiring> = {
+    // The termination observer fires later, once cancellation has actually
+    // settled — see notifySettledRoutineWatchdogTerminations. This announce
+    // only logs that cancellation was requested.
+    announce: (firing) => {
+      input.logger?.warn(
+        {
+          firingId: firing.firingId,
+          project: firing.projectName,
+          terminalReason: "no_progress"
+        },
+        "symphonika watchdog requested routine firing cancellation"
+      );
+    },
+    candidates: () => input.runStore.listWatchdogCandidateRoutineFirings(),
+    id: (firing) => firing.firingId,
+    loadPrevious: (firing) =>
+      input.runStore.getRoutineWatchdogSample(firing.firingId),
+    markStale: (firing, _terminalReason, at) =>
+      input.runStore.markRoutineFiringWatchdogNoProgress(firing.firingId, at),
+    persist: (firing, sample) =>
+      input.runStore.upsertRoutineWatchdogSample({
+        ...sample,
+        firingId: firing.firingId
+      }),
+    projectName: (firing) => firing.projectName,
+    sample: (firing, sampleInput) =>
+      sampleRoutineFiring({
+        firing,
+        mtimeIgnore: sampleInput.config.mtimeIgnore,
+        mtimeInclude: sampleInput.config.mtimeInclude,
+        previous: sampleInput.previous,
+        runStore: input.runStore,
+        sampledAt: sampleInput.sampledAt
+      }),
+    // ADR 0091: a Routine Firing is bounded by the liveness rule alone — no
+    // wall-clock cap, no convergence budget — so its only terminal reason is
+    // `no_progress`.
+    terminalReason: (_firing, decision) =>
+      idleGraceExpired({
+        graceMs: decision.config.graceMinutes * 60_000,
+        idleSince: decision.idleSince,
+        now: decision.now,
+        progress: decision.progress
+      })
+        ? "no_progress"
+        : undefined
+  };
+
+  const runResult = await driveWatchdogSubject(runPort, ctx);
+  const firingResult = await driveWatchdogSubject(firingPort, ctx);
+
+  await Promise.all(ctx.cancellations);
+  return {
+    sampled: runResult.sampled + firingResult.sampled,
+    terminated: runResult.terminated + firingResult.terminated
+  };
 }
-
-// Each Watchdog verdict cancels under its own name, so the three bounds stay
-// distinguishable on the in-flight registry entry while the Run is still live.
-// This reason is in-memory only — `markRunWatchdogStale` deliberately does not
-// write `runs.cancel_reason` (it reads `cancel_requested = 0` as its guard
-// against a competing cancel), so the durable verdict is `terminal_reason`.
-const WATCHDOG_CANCEL_REASONS: Readonly<
-  Record<WatchdogTerminalReason, CancelReason>
-> = {
-  no_convergence: CANCEL_REASONS.NO_CONVERGENCE,
-  no_progress: CANCEL_REASONS.NO_PROGRESS,
-  run_timeout: CANCEL_REASONS.RUN_TIMEOUT
-};
 
 function watchdogTerminalReason(input: {
   budget: number;
@@ -495,7 +440,7 @@ async function sampleRun(input: {
   directoryIgnore: readonly string[];
   mtimeIgnore: readonly string[];
   mtimeInclude: readonly string[];
-  previous: WatchdogSample | undefined;
+  previous: WatchdogProgressSample | undefined;
   run: WatchdogCandidateRun;
   runStore: RunStore;
   sampledAt: string;
@@ -524,7 +469,7 @@ async function sampleRoutineFiring(input: {
   firing: WatchdogCandidateRoutineFiring;
   mtimeIgnore: readonly string[];
   mtimeInclude: readonly string[];
-  previous: RoutineWatchdogSample | undefined;
+  previous: WatchdogProgressSample | undefined;
   runStore: RunStore;
   sampledAt: string;
 }): Promise<RoutineWatchdogSample | undefined> {

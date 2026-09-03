@@ -382,6 +382,14 @@ issue Runs additionally use the Convergence Budget and wall-clock Run cap, whose
 verdict can also be won by a Run Slot Deadline while the Run owns capacity outside `running`.
 _Avoid_: heartbeat checker, liveness probe
 
+**Watchdog Subject**:
+The unifying abstraction the Watchdog reconciles — an issue Run or a Routine Firing — driven through
+one shared liveness sequence (sample the Progress Signal, run the idle clock, persist, decide a
+terminal reason, mark stale, cancel). The two kinds differ only in their terminal policy (ADR 0091: a
+Routine Firing is bounded by the no-progress grace alone, while an issue Run also carries the
+Convergence Budget and wall-clock cap) and in whether their Run Store writes are generation-fenced.
+_Avoid_: Watchdog target, Watchdog entry
+
 **Progress Signal**:
 The tuple of observed active-provider progress evidence the Watchdog samples — most recent
 tool-call timestamp, provider progress timestamp (including Thinking Markers and Run Plan updates),

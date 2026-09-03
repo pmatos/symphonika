@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import pino from "pino";
+import pino, { type Logger } from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const normalizedLogRemoval = vi.hoisted(() => ({
@@ -782,6 +782,57 @@ describe("reconcileWatchdog", () => {
         projectName: "symphonika",
         runId: "run-idle"
       });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("still writes the terminal audit log when the termination observer throws", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      await prepareIdleRun(store, root, workspacePath, "run-idle", 198);
+      const warn = vi.fn<(obj: unknown, msg?: string) => void>();
+      const cancel = vi.fn().mockResolvedValue(undefined);
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.register({
+        cancel,
+        issueNumber: 198,
+        projectName: "symphonika",
+        runId: "run-idle"
+      });
+
+      await reconcileWatchdog({
+        activeRuns,
+        config: {
+          enabled: true,
+          mtimeIgnore: [],
+          mtimeInclude: [],
+          graceMinutes: 30,
+          maxRunMinutes: 0,
+          outputTokenBudget: 0,
+          sampleIntervalSeconds: 60
+        },
+        logger: { warn } as unknown as Logger,
+        now: () => new Date("2026-05-22T10:00:00.000Z"),
+        onTerminated: () => {
+          throw new Error("observer boom");
+        },
+        runStore: store
+      });
+
+      expect(store.getRun("run-idle")).toMatchObject({
+        state: "stale",
+        terminalReason: "no_progress"
+      });
+      expect(cancel).toHaveBeenCalledOnce();
+      const messages = warn.mock.calls.map((call) => call[1]);
+      expect(messages).toContain(
+        "symphonika watchdog termination observer failed"
+      );
+      expect(messages).toContain("symphonika watchdog marked run stale");
     } finally {
       store.close();
     }

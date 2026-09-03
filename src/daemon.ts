@@ -1677,8 +1677,17 @@ export async function startDaemon(
     // slugifyWorkspaceSegment is idempotent on an already-slugified string,
     // so re-slugifying this extracted segment as if it were a "title"
     // reproduces the exact issueDirectoryName/branchName/workspacePath
-    // planWorkspacePaths gave that original Run.
+    // planWorkspacePaths gave that original Run -- provided the branch's
+    // slug actually is one planWorkspacePaths could have produced. A branch
+    // that merely starts with the right prefix but was created by hand
+    // (uppercase, double hyphens, ...) would otherwise reach
+    // prepareAdoptedPrWorkspace's git fetch and fail there with a raw
+    // "couldn't find remote ref" surfaced as a generic {kind:"error"}
+    // instead of this function's own, clearer not-issue-branch refusal.
     const branchSlug = expectedBranch.slice(branchPrefix.length);
+    if (slugifyWorkspaceSegment(branchSlug, "issue") !== branchSlug) {
+      return { kind: "not-issue-branch" };
+    }
 
     const checkLiveRun = (): string | undefined =>
       findLiveRunIdForIssue({

@@ -648,6 +648,44 @@ describe("daemon-wired POST /api/prs/:project/:number/adopt (ADR-2026-09-03-1158
     }
   });
 
+  it("refuses not-issue-branch for a hand-made branch that merely starts with the right prefix", async () => {
+    const root = await makeTempRoot();
+    const { remotePath, seedPath } = await createRemoteRepository(root);
+    const handMadeBranch = `sym/${PROJECT_NAME}/${ISSUE.number}-Not_A_Slug`;
+    await pushBranchCommit(seedPath, handMadeBranch, "x.txt", "x\n");
+    await writeAdoptPrProject(root, remotePath);
+    const githubIssuesApi = {
+      getIssue: vi.fn().mockResolvedValue(issueFixture()),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      listPullRequests: vi.fn().mockResolvedValue([
+        pullRequestFixture("deadbeef", {
+          head: { ref: handMadeBranch, sha: "deadbeef" }
+        })
+      ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    try {
+      const { body, status } = await postAdopt(
+        daemon.url,
+        PROJECT_NAME,
+        12,
+        ISSUE.number,
+        "wait_for_pr"
+      );
+      expect(status).toBe(422);
+      expect(body).toEqual({ kind: "not-issue-branch" });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("adopts a PR whose issue title was edited after the branch was created", async () => {
     const root = await makeTempRoot();
     const { remotePath, seedPath } = await createRemoteRepository(root);

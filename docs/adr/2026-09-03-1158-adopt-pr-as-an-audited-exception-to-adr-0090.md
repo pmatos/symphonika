@@ -71,3 +71,9 @@ surprised by it.
   state from PR/CI/review shape) remains out of scope. `adopt-pr`'s guard and validation logic is
   reusable infrastructure for that direction if it's ever built, but building it now would reopen the
   exact question this ADR answers by requiring a human in the loop.
+- **Known limitation, not fixed here:** `adopt-pr` derives the adopted Run's workspace path from the
+  PR's own existing branch, not a freshly recomputed one, so an issue title edited before adoption
+  cannot cause adoption itself to land on the wrong path. But a *later* continuation/state-advance
+  that re-enters an `agent` state still recomputes the workspace/branch path from whatever the issue's
+  title is at that moment (`prepareIssueWorkspace`, `run-controller.ts`) — the same pre-existing gap
+  every normally-dispatched Run has. See #699.

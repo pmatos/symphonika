@@ -1982,7 +1982,8 @@ export function registerPages(options: RegisterPagesOptions): void {
         kind: "service_config",
         reload:
           options.triggerReload ??
-          (() => Promise.resolve({ errors: [], ok: true }))
+          (() => Promise.resolve({ errors: [], ok: true })),
+        validationPath: configPath
       });
 
       if (result.kind === "saved") {

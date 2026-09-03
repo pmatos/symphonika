@@ -2727,7 +2727,9 @@ config actually references (`resolveConfinedWritePath`/`computeReferencedRealPat
 `src/path-safety.ts`), not merely a path inside the config directory. For a symlinked Workflow
 Contract, confinement, stale checks, and the atomic write use the resolved target, while validation
 keeps the configured logical Workflow Contract path as the base for relative prompt references —
-the same base the real reload uses.
+the same base the real reload uses. A symlinked Service Config follows the same split: validation
+keeps the selected logical Service Config path as the base for relative Routine declaration and
+Workflow Contract references, while stale checks and writes use the resolved target.
 
 `GET /routines/:name/edit` is the first caller (`#307`, ADR-0076): raw text editing of the
 Routine's declaration file, no generated form — the file is Markdown-with-YAML-front-matter, and a

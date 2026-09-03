@@ -1921,11 +1921,19 @@ pass. Every Run persists the repository its Issue lived in when it was created; 
 cannot be determined (a legacy row, a non-GitHub tracker) proves no mismatch and is treated as
 before. See ADR 0088 and ADR 0089.
 Delayed-work registration closes with cancellation: the scheduler refuses timers armed after
-that point, so nothing fires against a store that is closing. A Run that was about to park
-into a wait state when cancellation latched is classified `cancelled` instead of flipping to
-`waiting`, and an in-flight wait re-evaluation stops before mutating rows — durable waiting
-rows are left untouched for the next daemon's reconciliation. Only after those requests have
-been awaited does it wait for in-flight dispatches to unwind. This explicit
+that point, so nothing fires against a store that is closing. Registration reports whether the
+timer was accepted. If shutdown refuses — or clears an already-accepted timer for — a retry,
+Continuation, or State Advance, the owning Run is converted to `cancelled` with
+`cancel_reason = "daemon_shutdown"` and pending notification evidence; a retry consumes budget
+only after registration succeeds, so a cleared timer that had already registered keeps its
+consumed budget. A timer accepted before shutdown latches is otherwise indistinguishable from one
+refused after — both leave the Run's scheduled callback dead — so both are persisted as durable
+shutdown evidence and both are eligible for the next daemon's resume pass; only a wait_park timer
+is exempt, per the waiting-row sentence below. A Run that was about to park into a wait state when cancellation
+latched is classified `cancelled` instead of flipping to `waiting`, and an in-flight wait
+re-evaluation stops before mutating rows — durable waiting rows are left untouched for the next
+daemon's reconciliation. Only after those requests have been awaited does it wait for in-flight
+dispatches to unwind. This explicit
 shutdown path is required because provider processes may run in a cgroup outside the daemon's
 own process tree (ADR 0064).
 

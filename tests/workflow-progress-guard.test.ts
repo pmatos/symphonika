@@ -228,7 +228,7 @@ function buildController(input: {
   providerInputs?: ProviderRunInput[];
   root: string;
   runStore: ReturnType<typeof openRunStore>;
-  schedule?: (item: ScheduledWorkInput) => void;
+  schedule?: (item: ScheduledWorkInput) => boolean;
 }): RunController {
   let nextRun = 0;
   return new RunController({
@@ -272,7 +272,7 @@ function buildController(input: {
         codex: { command: DEFAULT_CODEX_COMMAND }
       }),
     runStore: input.runStore,
-    schedule: input.schedule ?? (() => undefined),
+    schedule: input.schedule ?? (() => true),
     stateRoot: path.join(input.root, ".symphonika")
   });
 }
@@ -590,6 +590,7 @@ describe("workflow progress guard", () => {
         runStore: store,
         schedule: (item) => {
           scheduled.push(item);
+          return true;
         }
       });
 
@@ -643,6 +644,7 @@ describe("workflow progress guard", () => {
         runStore: store,
         schedule: (item) => {
           scheduled.push(item);
+          return true;
         }
       });
 

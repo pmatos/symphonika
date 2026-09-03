@@ -183,7 +183,7 @@ function buildController(input: {
         input.pullRequestPolicy ?? DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY
       ),
     runStore: input.runStore,
-    schedule: () => undefined,
+    schedule: () => true,
     stateRoot: path.join(input.root, ".symphonika")
   });
 }
@@ -804,6 +804,7 @@ describe("merge_pr state lifecycle", () => {
         runStore: store,
         schedule: (item) => {
           scheduled.push({ kind: item.kind, runId: item.runId });
+          return true;
         },
         stateRoot: path.join(root, ".symphonika")
       });

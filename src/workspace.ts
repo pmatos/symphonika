@@ -726,8 +726,21 @@ async function fetchOriginRef(
   signal: AbortSignal | undefined,
   abortCleanup?: WorkspaceAbortCleanup
 ): Promise<void> {
+  // --force: without it, git refuses a non-fast-forward update to an
+  // already-populated refs/remotes/origin/<ref> -- the common case for a
+  // second adoption attempt (or a retry after head_mismatch) against a
+  // branch that was rebased or force-pushed since the last fetch. The
+  // resulting error would otherwise surface as a raw git rejection instead
+  // of this function's own head_mismatch/retry flow.
   await workspaceGit(
-    ["-C", cachePath, "fetch", "origin", `${ref}:refs/remotes/origin/${ref}`],
+    [
+      "-C",
+      cachePath,
+      "fetch",
+      "--force",
+      "origin",
+      `${ref}:refs/remotes/origin/${ref}`
+    ],
     signal,
     abortCleanup
   );

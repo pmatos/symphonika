@@ -1553,6 +1553,12 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
               );
             }
           }
+          if (detail.providerScopeCleanupPending) {
+            writeOut(
+              program,
+              "scope cleanup: pending (retry on daemon restart)\n"
+            );
+          }
           if (detail.cancelRequested) {
             writeOut(
               program,
@@ -1714,6 +1720,13 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           );
           if (displayDetail.terminalReason !== null) {
             writeFiringField(program, "terminal", displayDetail.terminalReason);
+          }
+          if (displayDetail.providerScopeCleanupPending) {
+            writeFiringField(
+              program,
+              "scope cleanup",
+              "pending (retry on daemon restart)"
+            );
           }
           if (displayDetail.cancelReason !== null) {
             writeFiringField(

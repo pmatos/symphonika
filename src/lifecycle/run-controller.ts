@@ -4596,6 +4596,12 @@ export class RunController {
           command: input.providerCommand,
           name: input.providerName
         },
+        recordProviderScopeCleanupPending: (pending) => {
+          this.runStore.setAttemptProviderScopeCleanupPending(
+            input.attemptId,
+            pending
+          );
+        },
         run: scratchIdentity,
         scratchPath,
         stderrLogPath: providerStderrLogPath(input.evidence.rawLogPath),

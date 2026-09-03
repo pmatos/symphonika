@@ -101,7 +101,6 @@ import type { WatchdogConfig } from "./reload.js";
 import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
-  LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON,
   openRunStore,
   type ProjectState,
   type ProjectSnapshotRepository,
@@ -225,10 +224,6 @@ export async function startDaemon(
       "symphonika startup: failed legacy input_required runs"
     );
   }
-  const RUN_CLEANUP_PENDING_REASON = "leaked_active_run_cleanup_pending";
-  const FIRING_CLEANUP_PENDING_REASON =
-    LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON;
-
   // Provider processes run in symphonika-providers.slice, a sibling of the
   // daemon's own service cgroup (docs/adr/0064), so a previous daemon
   // instance dying no longer tears its in-flight provider scopes down with
@@ -236,44 +231,92 @@ export async function startDaemon(
   // started together and awaited via Promise.all (not one-by-one) so N
   // leaked entries don't each add their own stopTimeoutMs delay in series
   // before serve() starts listening below. A row whose cleanup could not be
-  // confirmed keeps a distinct terminal_reason instead of the plain leaked
-  // reason, so runStore.findLeakedRuns()/findLeakedRoutineFirings() surface
-  // it again on the next restart — see docs/adr/0064.
+  // confirmed stays in an independent durable cleanup flag, so the real
+  // lifecycle outcome and its terminal reason remain truthful while
+  // findLeakedRuns()/findLeakedRoutineFirings() can retry next restart.
   const leakedRuns = runStore.findLeakedRuns();
   const runOutcomes = await Promise.all(
     leakedRuns.map(async (entry) => {
-      // Only a run that reached "running" ever had a provider spawned —
-      // queued/preparing_workspace orphans have no attempt, and therefore no
-      // scope, to reap. A row re-swept from a prior pending sweep is already
-      // 'stale', not 'running', but still had a live attempt to retry.
-      // Attempts are ordered by attempt_number ascending, so the last one is
-      // the attempt that was actually live when this daemon's predecessor
-      // died.
-      const hadLiveAttempt =
-        entry.previousState === "running" ||
-        entry.previousTerminalReason === RUN_CLEANUP_PENDING_REASON;
-      if (!hadLiveAttempt) {
+      // The durable per-attempt flag is the only signal trusted here for
+      // whether a provider was ever actually wrapped in a systemd scope —
+      // previousState==='running' is not: on a host with no systemd --user
+      // manager, a Run reaches "running" without ever being wrapped, so
+      // inferring a live scope from state alone made stopProviderScope fail
+      // there every time and durably (and falsely) mark cleanup pending
+      // forever. See docs/adr/0064 and process-scope.ts's isAvailable().
+      if (!entry.providerScopeCleanupPending) {
         return { confirmed: true, entry };
       }
+      // Retried Runs reuse the same runId across attempts, each wrapped in
+      // its own scope unit (process-scope.ts's scopeUnitName). Check every
+      // attempt still marked pending, not just the latest, so an earlier
+      // attempt's unconfirmed cleanup is never dropped just because a later
+      // attempt's own cleanup succeeded.
       const attempts = runStore.listAttempts(entry.runId);
-      const latestAttempt = attempts[attempts.length - 1];
-      if (latestAttempt === undefined) {
-        return { confirmed: true, entry };
+      const pendingAttempts = attempts.filter(
+        (attempt) => attempt.providerScopeCleanupPending
+      );
+      if (pendingAttempts.length === 0) {
+        // Legacy shape: the Run-level flag is set (e.g. the terminal_reason
+        // backfill, or a row from before the per-attempt column existed) but
+        // no individual attempt agrees. Fall back to the latest attempt, the
+        // only one that could plausibly still hold a live scope.
+        const latestAttempt = attempts[attempts.length - 1];
+        if (latestAttempt === undefined) {
+          return { confirmed: !entry.providerScopeCleanupPending, entry };
+        }
+        const confirmed = await processScope.stopProviderScope({
+          attempt: latestAttempt.attemptNumber,
+          id: entry.runId
+        });
+        if (confirmed) {
+          runStore.setAttemptProviderScopeCleanupPending(
+            latestAttempt.id,
+            false
+          );
+        }
+        return { confirmed, entry };
       }
-      const confirmed = await processScope.stopProviderScope({
-        attempt: latestAttempt.attemptNumber,
-        id: entry.runId
-      });
-      return { confirmed, entry };
+      const attemptResults = await Promise.all(
+        pendingAttempts.map(async (attempt) => {
+          const confirmed = await processScope.stopProviderScope({
+            attempt: attempt.attemptNumber,
+            id: entry.runId
+          });
+          if (confirmed) {
+            runStore.setAttemptProviderScopeCleanupPending(attempt.id, false);
+          }
+          return confirmed;
+        })
+      );
+      return {
+        confirmed: attemptResults.every((value) => value),
+        entry
+      };
     })
   );
   for (const { confirmed, entry } of runOutcomes) {
-    if (confirmed) {
+    if (!entry.needsTerminalization) {
+      runStore.setRunProviderScopeCleanupPending(entry.runId, !confirmed);
+      logger[confirmed ? "info" : "warn"](
+        {
+          issueNumber: entry.issueNumber,
+          project: entry.projectName,
+          providerScopeCleanupPending: !confirmed,
+          runId: entry.runId,
+          terminalReason: entry.previousTerminalReason
+        },
+        confirmed
+          ? "symphonika startup: terminal run provider scope cleanup confirmed"
+          : "symphonika startup: terminal run provider scope cleanup could not be confirmed"
+      );
+    } else if (confirmed) {
       logger.warn(
         {
           issueNumber: entry.issueNumber,
           previousState: entry.previousState,
           project: entry.projectName,
+          providerScopeCleanupPending: false,
           runId: entry.runId,
           terminalReason: "leaked_active_run"
         },
@@ -285,19 +328,23 @@ export async function startDaemon(
           issueNumber: entry.issueNumber,
           previousState: entry.previousState,
           project: entry.projectName,
+          providerScopeCleanupPending: true,
           runId: entry.runId,
-          terminalReason: RUN_CLEANUP_PENDING_REASON
+          terminalReason: "leaked_active_run"
         },
         "symphonika startup: orphaned run scope cleanup could not be confirmed"
       );
     }
   }
   runStore.markRunsStale(
-    runOutcomes.map(({ confirmed, entry }) => ({
-      previousState: entry.previousState,
-      reason: confirmed ? "leaked_active_run" : RUN_CLEANUP_PENDING_REASON,
-      runId: entry.runId
-    }))
+    runOutcomes
+      .filter(({ entry }) => entry.needsTerminalization)
+      .map(({ confirmed, entry }) => ({
+        previousState: entry.previousState,
+        providerScopeCleanupPending: !confirmed,
+        reason: "leaked_active_run",
+        runId: entry.runId
+      }))
   );
   if (runOutcomes.length === 0) {
     logger.info({ count: 0 }, "symphonika startup: no orphaned runs found");
@@ -315,14 +362,11 @@ export async function startDaemon(
   const leakedFirings = runStore.findLeakedRoutineFirings();
   const firingOutcomes = await Promise.all(
     leakedFirings.map(async (entry) => {
-      // Same gap as the regular-run sweep above, for the separate Routine
-      // Firing subsystem (src/routines/dispatcher.ts). Firings never retry,
-      // so their provider is always spawned as attempt 1 — no listAttempts
-      // lookup needed here.
-      const hadLiveAttempt =
-        entry.previousState === "running" ||
-        entry.previousTerminalReason === FIRING_CLEANUP_PENDING_REASON;
-      if (!hadLiveAttempt) {
+      // Same durable-marker-only rule as the regular-run sweep above (see
+      // that sweep's comment), for the separate Routine Firing subsystem
+      // (src/routines/dispatcher.ts). Firings never retry, so their provider
+      // is always spawned as attempt 1 — no listAttempts lookup needed here.
+      if (!entry.providerScopeCleanupPending) {
         return { confirmed: true, entry };
       }
       const confirmed = await processScope.stopProviderScope({
@@ -333,12 +377,31 @@ export async function startDaemon(
     })
   );
   for (const { confirmed, entry } of firingOutcomes) {
-    if (confirmed) {
+    if (!entry.needsTerminalization) {
+      runStore.setRoutineFiringProviderScopeCleanupPending(
+        entry.firingId,
+        !confirmed
+      );
+      logger[confirmed ? "info" : "warn"](
+        {
+          firingId: entry.firingId,
+          previousState: entry.previousState,
+          project: entry.projectName,
+          providerScopeCleanupPending: !confirmed,
+          routine: entry.routineName,
+          terminalReason: entry.previousTerminalReason
+        },
+        confirmed
+          ? "symphonika startup: terminal routine firing provider scope cleanup confirmed"
+          : "symphonika startup: terminal routine firing provider scope cleanup could not be confirmed"
+      );
+    } else if (confirmed) {
       logger.warn(
         {
           firingId: entry.firingId,
           previousState: entry.previousState,
           project: entry.projectName,
+          providerScopeCleanupPending: false,
           routine: entry.routineName,
           terminalReason: "leaked_routine_firing"
         },
@@ -350,21 +413,23 @@ export async function startDaemon(
           firingId: entry.firingId,
           previousState: entry.previousState,
           project: entry.projectName,
+          providerScopeCleanupPending: true,
           routine: entry.routineName,
-          terminalReason: FIRING_CLEANUP_PENDING_REASON
+          terminalReason: "leaked_routine_firing"
         },
         "symphonika startup: orphaned routine firing scope cleanup could not be confirmed"
       );
     }
   }
   runStore.markRoutineFiringsFailed(
-    firingOutcomes.map(({ confirmed, entry }) => ({
-      firingId: entry.firingId,
-      previousState: entry.previousState,
-      reason: confirmed
-        ? "leaked_routine_firing"
-        : FIRING_CLEANUP_PENDING_REASON
-    }))
+    firingOutcomes
+      .filter(({ entry }) => entry.needsTerminalization)
+      .map(({ confirmed, entry }) => ({
+        firingId: entry.firingId,
+        previousState: entry.previousState,
+        providerScopeCleanupPending: !confirmed,
+        reason: "leaked_routine_firing"
+      }))
   );
   if (firingOutcomes.length > 0) {
     logger.info(

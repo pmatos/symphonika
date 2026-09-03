@@ -444,6 +444,15 @@ temporary directory, removed when the attempt ends. Transient, never read back â
 evidence, which is also under the state root but retained.
 _Avoid_: workspace, evidence, cache
 
+**Provider Scope Cleanup**:
+The durable obligation to confirm that one provider attempt's transient systemd scope is inactive.
+It is recorded immediately before a wrapped provider spawn and cleared only after confirmed scope
+teardown. It is independent of the owning Run or Routine Firing's lifecycle state and terminal
+reason, so cleanup can be retried across daemon restarts without falsifying the execution outcome.
+No obligation exists when systemd scope wrapping was unavailable and the process-group fallback ran
+unwrapped.
+_Avoid_: terminal reason, Run outcome, process-group cleanup
+
 **Provider Build Parallelism Ceiling**:
 The make/`cmake --build` job count injected into a spawned provider's environment when the Service
 Config declares a daemon-wide concurrency cap. It gives every possible concurrent attempt a
@@ -545,6 +554,8 @@ _Avoid_: chat session
   while making its held **Routine Fan-out** leg non-gating and visible as a summary failure
 - A **Routine Fan-out** produces one grouped notification after all target legs are terminal or held
 - A **Routine Firing** consumes the same Project/global in-flight capacity as issue **Runs**
+- A wrapped **Agent Provider** attempt may leave one **Provider Scope Cleanup** obligation on its
+  owning **Run** or **Routine Firing**
 - A **Routine Firing** may contain one canonical **Routine Outcome** reconciled from a **Routine
   Outcome Claim** and externally observed state
 - A manual **Routine Firing** leaves the Routine's next scheduled clock event unchanged

@@ -44,7 +44,7 @@ function noopProcessScope(): RecordingProcessScope {
     wrapCalls,
     wrapForProviderScope: (run, command) => {
       wrapCalls.push({ command, run });
-      return Promise.resolve(command);
+      return Promise.resolve({ ...command, providerScopeWrapped: true });
     }
   };
 }
@@ -348,11 +348,15 @@ describe("Claude stream-json provider", () => {
     const processScope = noopProcessScope();
     const provider = createClaudeProvider({ processScope });
     const command = `${process.execPath} ${fakeClaudePath} -p --dangerously-skip-permissions --verbose --input-format stream-json --output-format stream-json`;
+    const cleanupPending: boolean[] = [];
 
     await collectProviderEvents(
       provider.runAttempt({
         ...providerInputFixture(),
         provider: { command, name: "claude" },
+        recordProviderScopeCleanupPending: (pending) => {
+          cleanupPending.push(pending);
+        },
         workspacePath
       })
     );
@@ -382,6 +386,7 @@ describe("Claude stream-json provider", () => {
     expect(processScope.stopCalls).toEqual([
       { attempt: 1, id: "run-issue-10" }
     ]);
+    expect(cleanupPending).toEqual([true, false]);
   });
 
   it("maps AskUserQuestion tool use to input_required and stops the process", async () => {

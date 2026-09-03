@@ -1473,6 +1473,12 @@ async function runRoutineFiring(input: {
           command: input.providerCommand,
           name: input.providerName
         },
+        recordProviderScopeCleanupPending: (pending) => {
+          input.runStore.setRoutineFiringProviderScopeCleanupPending(
+            input.firingId,
+            pending
+          );
+        },
         run: scratchIdentity,
         routine: routineOverrides,
         scratchPath,

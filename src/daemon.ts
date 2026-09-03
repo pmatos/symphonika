@@ -140,11 +140,11 @@ import type {
   PrepareIssueWorkspaceInput
 } from "./workspace.js";
 import { prepareAdoptedPrWorkspace } from "./workspace.js";
-import { planWorkspacePaths } from "./workspace-paths.js";
+import { slugifyWorkspaceSegment } from "./workspace-paths.js";
 import { listAdoptableEntryStates } from "./workflow/fsm-expansion.js";
 
 // adoptPullRequest's workspace preparation runs while holding the global
-// dispatchMutex (docs/adr/0098) -- an unbounded git fetch (e.g. a half-open
+// dispatchMutex (ADR-2026-09-03-1158) -- an unbounded git fetch (e.g. a half-open
 // connection to GitHub) would otherwise freeze dispatch/reconcile/shutdown-
 // resume/stale-claim-detection daemon-wide, the exact class of risk
 // claimAndPersistRun's own claimDeadline already bounds for its in-mutex I/O
@@ -1522,7 +1522,7 @@ export async function startDaemon(
   // point at the same GitHub owner/repo (a supported config) -- returns
   // every Project name sharing that repo, including projectName itself.
   // Extracted so both HttpAppOptions.getProjectRepoAliases (below) and
-  // adoptPullRequest's own live-run guard (docs/adr/0098) share one
+  // adoptPullRequest's own live-run guard (ADR-2026-09-03-1158) share one
   // implementation.
   const resolveProjectRepoAliases = (projectName: string): string[] => {
     const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
@@ -1558,7 +1558,7 @@ export async function startDaemon(
     }));
   const getScheduledCallbacks = () => activeRuns.peekDelayed();
 
-  // adopt-pr (docs/adr/0098): attaches an already-open pull request to a
+  // adopt-pr (ADR-2026-09-03-1158): attaches an already-open pull request to a
   // fresh Run parked at an operator-chosen wait/merge_pr state. Defined as
   // its own const rather than inline in the createHttpApp options object
   // literal below for the same self-reference reason as above.
@@ -1650,18 +1650,35 @@ export async function startDaemon(
     }
     const issueSnapshot = normalizeIssueSnapshot(rawIssue, { priority });
 
-    // Exact equality against the deterministic branch name is already a
-    // strictly stronger check than classifyPullRequestBranchOrigin's own
-    // "starts with sym/, no /routine/" test -- expectedBranch always
-    // classifies as issue_branch (planWorkspacePaths's slug segments never
-    // contain "/"), so a separate classify() call adds no coverage here.
-    const expectedBranch = planWorkspacePaths({
-      issue: { number: input.issueNumber, title: issueSnapshot.title },
-      project
-    }).branchName;
-    if (snapshot.headRef !== expectedBranch) {
+    // Validate against the PR's *actual* branch name, not a freshly
+    // recomputed one: planWorkspacePaths derives a branch name from
+    // issueSnapshot.title, which was just fetched live above and can differ
+    // from whatever the title was when the original Run first created this
+    // branch (e.g. a maintainer editing the title afterwards). Recomputing
+    // from the live title and comparing for exact equality would then wrongly
+    // reject a PR that genuinely is this issue's branch -- exactly the
+    // orphaned-Run case adopt-pr exists to recover. Same project + same
+    // issue number is sufficient to prove ownership; the trailing slug can be
+    // anything -- classifyPullRequestBranchOrigin's own "starts with sym/, no
+    // /routine/" test is deliberately looser still, since it has no issue
+    // number to check against.
+    const projectSlug = slugifyWorkspaceSegment(project.name, "project");
+    const branchPrefix = `sym/${projectSlug}/${input.issueNumber}-`;
+    if (
+      snapshot.headRef === null ||
+      !snapshot.headRef.startsWith(branchPrefix)
+    ) {
       return { kind: "not-issue-branch" };
     }
+    const expectedBranch = snapshot.headRef;
+    // The branch's own slug -- not a freshly recomputed one -- drives
+    // workspace pathing below, so the adopted PR's workspace lands wherever
+    // its branch's original Run already created it on disk.
+    // slugifyWorkspaceSegment is idempotent on an already-slugified string,
+    // so re-slugifying this extracted segment as if it were a "title"
+    // reproduces the exact issueDirectoryName/branchName/workspacePath
+    // planWorkspacePaths gave that original Run.
+    const branchSlug = expectedBranch.slice(branchPrefix.length);
 
     const checkLiveRun = (): string | undefined =>
       findLiveRunIdForIssue({
@@ -1688,9 +1705,10 @@ export async function startDaemon(
     // its slow git I/O, unlike an earlier version of this function that
     // narrowed the lock to just the DB writes. prepareAdoptedPrWorkspace
     // can force-reset an *already-existing* worktree at this issue's own
-    // deterministic path (planWorkspacePaths is a pure function of
-    // project+issue, so a normal dispatch of this same issue resolves to
-    // the identical workspace path), so if that reset ran unlocked, a
+    // deterministic path (planWorkspacePaths is a pure function of its
+    // inputs, and a normal dispatch of this same issue resolves to the same
+    // workspace path whenever the branch's own slug still matches the
+    // issue's current title), so if that reset ran unlocked, a
     // concurrent claim could start using that same worktree between this
     // call's own unlocked check above and its mutex-protected write below
     // -- the reset would then corrupt a live Run's workspace out from
@@ -1712,7 +1730,7 @@ export async function startDaemon(
           const workspace = await prepareAdoptedPrWorkspace({
             configDir: state.configDir,
             expectedHeadSha: snapshot.headSha,
-            issue: { number: input.issueNumber, title: issueSnapshot.title },
+            issue: { number: input.issueNumber, title: branchSlug },
             project,
             signal: AbortSignal.timeout(ADOPT_PR_WORKSPACE_TIMEOUT_MS)
           });

@@ -4053,7 +4053,7 @@ function collectLiveRunEntries(input: {
 // Closing this needs RunController to expose a lock-aware dispatch variant
 // (or a restructured mutex ownership model), not a blind extra acquire()
 // here.
-// Exported for adopt-pr's own live-run guard (src/daemon.ts, docs/adr/0098)
+// Exported for adopt-pr's own live-run guard (src/daemon.ts, ADR-2026-09-03-1158)
 // -- reusing this instead of duplicating the query is exactly what ADR 0052
 // warns a second guard implementation against.
 export function findLiveRunIdForIssue(input: {

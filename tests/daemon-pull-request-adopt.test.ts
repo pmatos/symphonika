@@ -202,7 +202,7 @@ async function writeAdoptPrProject(
 }
 
 // A second project shape with no wait/merge_pr state anywhere -- the
-// builtin_single_agent_pr case docs/adr/0098 refuses outright.
+// builtin_single_agent_pr case ADR-2026-09-03-1158 refuses outright.
 async function writeNonPrAwareProject(root: string): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
@@ -338,7 +338,7 @@ async function postAdopt(
   return { body: await response.json(), status: response.status };
 }
 
-describe("daemon-wired POST /api/prs/:project/:number/adopt (docs/adr/0098)", () => {
+describe("daemon-wired POST /api/prs/:project/:number/adopt (ADR-2026-09-03-1158)", () => {
   it("adopts an orphaned PR into a waiting Run parked at the requested state", async () => {
     const root = await makeTempRoot();
     const { remotePath, seedPath } = await createRemoteRepository(root);
@@ -440,7 +440,7 @@ describe("daemon-wired POST /api/prs/:project/:number/adopt (docs/adr/0098)", ()
     try {
       // Adopted directly into `merging` (kind: merge_pr) -- the PR already
       // satisfies the merge policy per followupStateFixture's defaults, so
-      // this is the accepted-risk scenario docs/adr/0098 documents: no dwell
+      // this is the accepted-risk scenario ADR-2026-09-03-1158 documents: no dwell
       // time, the parked position's own transitions decide.
       const { body, status } = await postAdopt(
         daemon.url,
@@ -643,6 +643,70 @@ describe("daemon-wired POST /api/prs/:project/:number/adopt (docs/adr/0098)", ()
       );
       expect(status).toBe(422);
       expect(body).toEqual({ kind: "not-issue-branch" });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("adopts a PR whose issue title was edited after the branch was created", async () => {
+    const root = await makeTempRoot();
+    const { remotePath, seedPath } = await createRemoteRepository(root);
+    const headSha = await pushBranchCommit(
+      seedPath,
+      branchName,
+      "login.txt",
+      "fix v1\n"
+    );
+    await writeAdoptPrProject(root, remotePath);
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      // The title fetched live at adoption time no longer matches the title
+      // that produced `branchName` above -- a maintainer edit that happened
+      // any time after the branch's original Run created it.
+      getIssue: vi
+        .fn()
+        .mockResolvedValue(issueFixture({ title: "Orphan pr, renamed" })),
+      listOpenIssues: vi.fn().mockResolvedValue([]),
+      listPullRequests: vi.fn().mockResolvedValue([pullRequestFixture(headSha)])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    try {
+      const { body, status } = await postAdopt(
+        daemon.url,
+        PROJECT_NAME,
+        12,
+        ISSUE.number,
+        "wait_for_pr"
+      );
+      expect(status).toBe(200);
+      expect(body).toMatchObject({ kind: "adopted" });
+      const runId = (body as { runId: string }).runId;
+
+      const runStore = openRunStore({
+        stateRoot: path.join(root, ".symphonika")
+      });
+      try {
+        const run = runStore.getRun(runId);
+        // Workspace pathing follows the branch's own (pre-rename) slug, not
+        // a fresh recompute from the renamed title.
+        expect(run?.workspacePath).toContain("orphan-pr");
+        expect(run?.workspacePath).not.toContain("renamed");
+
+        const tracked = runStore.findTrackedPullRequestByProjectAndNumber({
+          prNumber: 12,
+          projectName: PROJECT_NAME
+        });
+        expect(tracked?.branchName).toBe(branchName);
+      } finally {
+        runStore.close();
+      }
     } finally {
       await daemon.stop();
     }

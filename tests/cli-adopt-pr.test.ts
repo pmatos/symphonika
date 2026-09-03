@@ -57,7 +57,7 @@ function requestUrl(input: string | URL | Request): string {
       : input.url;
 }
 
-describe("CLI adopt-pr command (docs/adr/0098)", () => {
+describe("CLI adopt-pr command (ADR-2026-09-03-1158)", () => {
   it("is listed in the top-level help output", () => {
     const { program } = captureProgram(".");
     expect(program.helpInformation()).toContain("adopt-pr");

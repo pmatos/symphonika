@@ -349,7 +349,7 @@ async function addWorktree(
   }
 }
 
-// adopt-pr's workspace preparation (docs/adr/0098). Unlike
+// adopt-pr's workspace preparation (ADR-2026-09-03-1158). Unlike
 // prepareIssueWorkspace, which trusts a normal in-progress Run's own branch
 // by construction, this always syncs to the PR's actual remote head before
 // returning -- an adopted PR's workspace must never silently reuse whatever
@@ -459,7 +459,7 @@ async function prepareAdoptedPrWorkspaceResult(
 
 // Shared by ensureIssueBranch (reuse-without-verification, sourced from the
 // base branch) and ensureAdoptedIssueBranch (force-synced to the PR's own
-// branch, docs/adr/0098) -- the two differ only in the source ref to point
+// branch, ADR-2026-09-03-1158) -- the two differ only in the source ref to point
 // at and whether an already-existing local ref is left alone or
 // force-updated.
 async function syncBranchRef(

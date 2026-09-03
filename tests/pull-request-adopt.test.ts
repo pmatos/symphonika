@@ -34,7 +34,7 @@ async function setup(): Promise<TestSetup> {
   return { cleanup: () => runStore.close(), runStore, stateRoot };
 }
 
-describe("POST /api/prs/:project/:number/adopt (docs/adr/0098)", () => {
+describe("POST /api/prs/:project/:number/adopt (ADR-2026-09-03-1158)", () => {
   it("returns 200 and the new run id on success", async () => {
     const test = await setup();
     try {

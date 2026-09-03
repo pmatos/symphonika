@@ -111,7 +111,7 @@ function makeProject(
 
 const issue = { number: 246, title: "Fix login" };
 
-describe("prepareAdoptedPrWorkspace (docs/adr/0098)", () => {
+describe("prepareAdoptedPrWorkspace (ADR-2026-09-03-1158)", () => {
   it("creates a fresh branch and worktree when the project's cache predates the PR's branch", async () => {
     const root = await makeTempRoot();
     const { remotePath, seedPath } = await createRemoteRepository(root);

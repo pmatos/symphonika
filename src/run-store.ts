@@ -1311,7 +1311,7 @@ export class RunStore {
     this.publishChange(apply());
   }
 
-  // adopt-pr's write path (docs/adr/0098): unlike createWaitingRun this Run
+  // adopt-pr's write path (ADR-2026-09-03-1158): unlike createWaitingRun this Run
   // has no predecessor -- it's the first (and only) Run in its chain, so
   // parentRunId is always null and isContinuation is always false. Unlike
   // createRun it must never dispatch a provider, so it parks directly in

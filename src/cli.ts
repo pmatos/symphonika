@@ -1832,7 +1832,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   program
     .command("adopt-pr")
     .description(
-      "attach an already-open pull request to a new Run, parked at an operator-chosen FSM state (docs/adr/0098)"
+      "attach an already-open pull request to a new Run, parked at an operator-chosen FSM state (ADR-2026-09-03-1158)"
     )
     .argument("<project>", "project name")
     .argument("<pr-number>", "pull request number", parsePrNumber)
@@ -1901,7 +1901,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
             `adopted PR #${prNumber} into run ${outcome.runId}, parked at '${options.entryState}'\n`
           );
           // The parked position's own transitions decide what happens next
-          // (docs/adr/0098) -- there is no dwell time, so if the entry
+          // (ADR-2026-09-03-1158) -- there is no dwell time, so if the entry
           // state's predicates are already satisfied the very next daemon
           // tick advances, including auto-merging on a merge_pr state.
           writeOut(

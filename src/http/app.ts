@@ -69,7 +69,7 @@ type CancelRunFn = (
       | { kind: "already-terminal"; state: RunState }
     >;
 
-// adopt-pr (docs/adr/0098): attaches an already-open pull request to a fresh
+// adopt-pr (ADR-2026-09-03-1158): attaches an already-open pull request to a fresh
 // Run parked at an operator-chosen FSM state. JSON-only -- unlike
 // mergePullRequest this has no dashboard/HTML surface, so it is not threaded
 // through registerPages's options.
@@ -319,7 +319,7 @@ export type HttpAppOptions = {
   // #309 part 3's guarded-merge action: see
   // docs/adr/0078-pr-surface-poll-snapshot-and-state-projection.md.
   mergePullRequest?: MergePullRequestFn;
-  // adopt-pr: see docs/adr/0098-adopt-pr-as-an-audited-exception-to-adr-0090.md.
+  // adopt-pr: see docs/adr/2026-09-03-1158-adopt-pr-as-an-audited-exception-to-adr-0090.md.
   adoptPullRequest?: AdoptPullRequestFn;
   // Aborted by stopServer before it calls server.close(), so open /events
   // streams exit their loop instead of holding the shutdown open forever.
@@ -396,7 +396,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       : (runId: string) => cancelRunInStore(runStore, runId));
   // No in-process default the way cancelRun falls back to cancelRunInStore --
   // adoption always needs the daemon-side workflow/workspace/GitHub wiring
-  // only daemon.ts can supply (docs/adr/0098). Undefined degrades to a plain
+  // only daemon.ts can supply (ADR-2026-09-03-1158). Undefined degrades to a plain
   // 503, the same "not wired" posture the cancel route falls back to.
   const adoptPullRequest = options.adoptPullRequest;
   const csrfSecret = options.csrfSecret ?? createCsrfSecret();
@@ -806,7 +806,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       }
     );
 
-    // adopt-pr (docs/adr/0098): JSON-only, no dashboard caller, so unlike
+    // adopt-pr (ADR-2026-09-03-1158): JSON-only, no dashboard caller, so unlike
     // /api/runs/:id/cancel there is no form/redirect branch.
     app.post(
       "/api/prs/:project/:number/adopt",

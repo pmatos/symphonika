@@ -65,7 +65,7 @@ function samplePrRow(
   };
 }
 
-describe("RunStore adopt-pr helpers (docs/adr/0098)", () => {
+describe("RunStore adopt-pr helpers (ADR-2026-09-03-1158)", () => {
   it("createAdoptedRun parks a row directly in 'waiting' with no parent, no provider, and a recorded reason", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

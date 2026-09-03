@@ -66,12 +66,13 @@ A normalized unit of project work read from the issue tracker.
 _Avoid_: ticket, task
 
 **Eligible Issue**:
-An open issue that matches a Dispatch Project's required labels, avoids excluded labels, is not already claimed by the orchestrator, and has no unresolved GitHub-native issue dependency (see Dependency Gate below).
+An open issue that matches a Dispatch Project's required labels, avoids excluded labels, is not already claimed by the orchestrator, and has no unresolved GitHub-native issue dependency (see Dependency Gate below). This is the label-based candidate-list check; it does not itself consult Run history. The daemon's displayed candidate list, dashboard counts, and persisted `/issues` triage snapshot go one step further: an Eligible Issue whose newest Run's durable `no_workspace_changes` verdict (see Dispatch Eligibility below) suppresses fresh claim is shown as filtered, not as a candidate, in those surfaces.
 _Avoid_: active issue unless referring to tracker state
 
 **Dispatch Eligibility**:
 The question "may this Dispatch Project freshly claim this Issue?", including open state, required
-labels, excluded labels, blocking operational labels, and the Dependency Gate.
+labels, excluded labels, blocking operational labels, the newest Run's durable no-workspace-changes
+guard, and the Dependency Gate.
 _Avoid_: continuation eligibility when referring to first claim selection
 
 **Dependency Gate**:
@@ -513,6 +514,8 @@ _Avoid_: chat session
 - A **Dispatch Project**'s **Required Eligibility Labels** must exist in its Issue Tracker before dispatch
 - An **Orchestrator** may write **Operational Labels**
 - A **Stale Claim** blocks automatic dispatch until explicitly cleared in v1
+- A newest `blocked / no_workspace_changes` **Run** suppresses fresh dispatch for the same
+  `(Project, repository, Issue)` even after its mutable **Operational Labels** are cleared
 - An **Issue Reservation** prevents duplicate dispatch while an Issue is either executing or scheduled
 - A rejected label-controlled retry or **Continuation** releases its **Issue Reservation** so later
   restored eligibility can dispatch fresh work instead of becoming a **Stale Claim**

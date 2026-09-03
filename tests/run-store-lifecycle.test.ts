@@ -1746,3 +1746,156 @@ describe("listResumableShutdownRuns", () => {
     }
   });
 });
+
+describe("latestRunSuppressesFreshDispatch", () => {
+  it("suppresses only for the matching repository, case-insensitively", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const runId = seedRun(store, {
+        id: "run-blocked",
+        issueNumber: 5,
+        projectName: "alpha",
+        url: "https://github.com/pmatos/alpha/issues/5"
+      });
+      store.recordTerminalReason(
+        runId,
+        "no_workspace_changes",
+        "deterministic"
+      );
+      store.updateRunState(runId, "blocked");
+
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 5,
+          projectName: "alpha",
+          repository: { owner: "PMatos", repo: "ALPHA" }
+        })
+      ).toBe(true);
+
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 5,
+          projectName: "alpha",
+          repository: { owner: "someone-else", repo: "other-repo" }
+        })
+      ).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("does not suppress for other terminal reasons or non-blocked states", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const wrongReason = seedRun(store, {
+        id: "run-wrong-reason",
+        issueNumber: 6,
+        projectName: "alpha",
+        url: "https://github.com/pmatos/alpha/issues/6"
+      });
+      store.recordTerminalReason(
+        wrongReason,
+        "workflow_terminal_blocked",
+        "deterministic"
+      );
+      store.updateRunState(wrongReason, "blocked");
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 6,
+          projectName: "alpha",
+          repository: { owner: "pmatos", repo: "alpha" }
+        })
+      ).toBe(false);
+
+      const wrongState = seedRun(store, {
+        id: "run-wrong-state",
+        issueNumber: 7,
+        projectName: "alpha",
+        url: "https://github.com/pmatos/alpha/issues/7"
+      });
+      store.recordTerminalReason(
+        wrongState,
+        "no_workspace_changes",
+        "deterministic"
+      );
+      store.updateRunState(wrongState, "failed");
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 7,
+          projectName: "alpha",
+          repository: { owner: "pmatos", repo: "alpha" }
+        })
+      ).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("lets a newer run's outcome lift a prior blocked/no_workspace_changes suppression", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const older = seedRun(store, {
+        id: "run-a-older",
+        issueNumber: 8,
+        projectName: "alpha",
+        url: "https://github.com/pmatos/alpha/issues/8"
+      });
+      store.recordTerminalReason(
+        older,
+        "no_workspace_changes",
+        "deterministic"
+      );
+      store.updateRunState(older, "blocked");
+
+      const newer = seedRun(store, {
+        id: "run-b-newer",
+        issueNumber: 8,
+        projectName: "alpha",
+        url: "https://github.com/pmatos/alpha/issues/8"
+      });
+      store.updateRunState(newer, "succeeded");
+
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 8,
+          projectName: "alpha",
+          repository: { owner: "pmatos", repo: "alpha" }
+        })
+      ).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("conservatively suppresses for a legacy run with unknown repository origin", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const runId = seedRun(store, {
+        id: "run-legacy",
+        issueNumber: 9,
+        projectName: "alpha",
+        url: "https://example/9"
+      });
+      store.recordTerminalReason(
+        runId,
+        "no_workspace_changes",
+        "deterministic"
+      );
+      store.updateRunState(runId, "blocked");
+
+      expect(
+        store.latestRunSuppressesFreshDispatch({
+          issueNumber: 9,
+          projectName: "alpha",
+          repository: { owner: "anyone", repo: "anything" }
+        })
+      ).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+});

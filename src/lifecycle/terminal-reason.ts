@@ -40,6 +40,16 @@ export function formatCapReachedReason(
   return `continuation cap reached after ${continuationCount} ${noun}: ${CAP_REACHED_LABELS[kind]}`;
 }
 
+const NO_WORKSPACE_CHANGES_REASON = "no_workspace_changes";
+
+// Shared by the writer (classify-failure.ts, when the workspace shows zero
+// commits ahead of base) and readers that must not treat this specific
+// blocked outcome like an ordinary one, e.g. the fresh-dispatch suppression
+// guard (run-store.ts). See ADR 0058's issue #683 amendment.
+export function isNoWorkspaceChangesReason(reason: string | null): boolean {
+  return reason === NO_WORKSPACE_CHANGES_REASON;
+}
+
 const MERGE_PR_REFUSED_PREFIX = "merge_pr_refused:";
 
 export function buildMergePrRefusedReason(

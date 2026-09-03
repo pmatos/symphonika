@@ -1,4 +1,11 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -419,6 +426,350 @@ describe("startDaemon", () => {
 
       const verifyStore = openRunStore({ stateRoot });
       expect(verifyStore.getRun("run-blocked")?.state).toBe("blocked");
+      verifyStore.close();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("reclassifies a no_workspace_changes-suppressed issue as filtered (#683/#691)", async () => {
+    const cwd = await makeTempRoot();
+    await writeMinimalProject(cwd);
+    const stateRoot = path.join(cwd, ".symphonika");
+    const seedStore = openRunStore({ stateRoot });
+    seedStore.createRun({
+      id: "run-suppressed",
+      issue: sampleIssue({ number: 42 }),
+      projectName: "symphonika",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    seedStore.recordTerminalReason(
+      "run-suppressed",
+      "no_workspace_changes",
+      "deterministic"
+    );
+    seedStore.updateRunState("run-suppressed", "blocked");
+    seedStore.close();
+
+    // Matches the "symphonika" project's issue_filters (labels_all:
+    // ["agent-ready"]) so pollProject's pure label-based check keeps
+    // resurfacing it as a candidate every tick, same as it would in
+    // production once an operator clears the sym:* labels.
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: () => Promise.resolve(),
+      listOpenIssues: () =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "",
+            id: 42,
+            labels: ["agent-ready"],
+            number: 42,
+            state: "open",
+            title: "issue",
+            updated_at: "",
+            url: ""
+          }
+        ]),
+      removeLabelsFromIssue: () => Promise.resolve()
+    };
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const pollNowResult = (await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      }).then((r) => r.json())) as {
+        candidateIssues: number;
+        issuePolling: {
+          projects: Array<{
+            name: string;
+            candidateIssues?: number;
+            filteredIssues?: number;
+          }>;
+        };
+      };
+      // Regression guard (#691 review): the suppression filter used to only
+      // touch the top-level candidateIssues array, leaving poll-now's
+      // per-project count (and the raw status fed to persistProjectPollState
+      // below) stale -- poll-now could report a global 0 while still
+      // printing "1 candidate" for the project.
+      expect(pollNowResult.candidateIssues).toBe(0);
+      const projectReport = pollNowResult.issuePolling.projects.find(
+        (project) => project.name === "symphonika"
+      );
+      expect(projectReport?.candidateIssues ?? 0).toBe(0);
+      // Regression guard (#691 review): a suppressed candidate must be
+      // reclassified as filtered, not dropped -- otherwise fetched (1) no
+      // longer equals candidate (0) + filtered (0), and the issue vanishes
+      // from /issues triage search instead of showing up with a reason.
+      expect(projectReport?.filteredIssues ?? 0).toBe(1);
+
+      const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
+        r.json()
+      )) as {
+        candidateIssues: Array<{ issue: { number: number } }>;
+        filteredIssues: Array<{
+          issue: { number: number };
+          reasons: string[];
+        }>;
+      };
+      // Regression guard: issueFilterReasons is a pure label-based check and
+      // matches this issue every tick, so without the suppression filter in
+      // refreshIssuePollStatus this list would keep including it forever.
+      expect(status.candidateIssues).toHaveLength(0);
+      const filteredEntry = status.filteredIssues.find(
+        (entry) => entry.issue.number === 42
+      );
+      expect(filteredEntry).toBeDefined();
+      expect(filteredEntry?.reasons).toEqual([
+        expect.stringContaining("no_workspace_changes")
+      ]);
+      // Regression guard (#691 review): latestRunSuppressesFreshDispatch
+      // looks only at the newest Run row, never at the Issue's own
+      // revision -- the reason string must not promise that editing the
+      // Issue lifts the suppression, since it does not.
+      expect(filteredEntry?.reasons[0]).not.toContain(
+        "until the issue changes"
+      );
+      expect(filteredEntry?.reasons[0]).toContain("newer run");
+
+      // Regression guard (#691 review): the persisted /issues triage
+      // snapshot (fed from the raw, unfiltered nextStatus) used to keep
+      // describing the suppressed issue as an eligible candidate even
+      // though the in-memory views above were already fixed.
+      const verifyStore = openRunStore({ stateRoot });
+      const projectState = verifyStore
+        .getProjectStatesByName()
+        .get("symphonika");
+      expect(projectState?.lastCandidateIssues ?? 0).toBe(0);
+      expect(projectState?.lastFilteredIssues ?? 0).toBe(1);
+      const snapshotRows = verifyStore.listProjectIssueSnapshots("symphonika");
+      const snapshotRow = snapshotRows.find((row) => row.issueNumber === 42);
+      expect(snapshotRow?.kind).toBe("filtered");
+      expect(snapshotRow?.reasons).toEqual([
+        expect.stringContaining("no_workspace_changes")
+      ]);
+      verifyStore.close();
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("keeps a name-shadowed project's own candidate count intact (#691 review)", async () => {
+    const cwd = await makeTempRoot();
+    await writeMinimalProject(cwd);
+    // Second declaration reuses the "symphonika" name with a different
+    // repository. selectedIssueProjectKeysByName's "last declaration wins"
+    // rule makes this one (symphonika-other) the winner, so the first
+    // declaration (repo symphonika, from writeMinimalProject) is shadowed:
+    // its own candidates never survive mergeIssuePollStatus's
+    // selectedCandidate filter into the merged candidateIssues array, even
+    // though its own poll still finds them.
+    await appendFile(
+      path.join(cwd, "symphonika.yml"),
+      [
+        "  - name: symphonika",
+        "    disabled: false",
+        "    weight: 1",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika-other",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked", "needs-human"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/symphonika-other",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika-other.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: () => Promise.resolve(),
+      listOpenIssues: (input) =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "",
+            id: input.repo === "symphonika" ? 1 : 2,
+            labels: ["agent-ready"],
+            number: input.repo === "symphonika" ? 1 : 2,
+            state: "open",
+            title: "issue",
+            updated_at: "",
+            url: ""
+          }
+        ]),
+      removeLabelsFromIssue: () => Promise.resolve()
+    };
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      const pollNowResult = (await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      }).then((r) => r.json())) as {
+        issuePolling: {
+          projects: Array<{
+            name: string;
+            repository: { owner: string; repo: string };
+            candidateIssues?: number;
+          }>;
+        };
+      };
+      // Regression guard (#691 review): recomputing each project's
+      // candidateIssues count from the globally merged (and
+      // selectedCandidate-filtered) candidateIssues array wrongly reset the
+      // shadowed declaration's own honestly-polled count to zero, even
+      // though nothing here is suppressed.
+      const reports = pollNowResult.issuePolling.projects.filter(
+        (project) => project.name === "symphonika"
+      );
+      expect(reports).toHaveLength(2);
+      for (const project of reports) {
+        expect(project.candidateIssues).toBe(1);
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("never reports a negative candidateIssues count for a fully duplicate project declaration (#691 review)", async () => {
+    const cwd = await makeTempRoot();
+    await writeMinimalProject(cwd);
+    const stateRoot = path.join(cwd, ".symphonika");
+    const seedStore = openRunStore({ stateRoot });
+    seedStore.createRun({
+      id: "run-suppressed",
+      issue: sampleIssue({ number: 42 }),
+      projectName: "symphonika",
+      providerCommand: "x",
+      providerName: "codex"
+    });
+    seedStore.recordTerminalReason(
+      "run-suppressed",
+      "no_workspace_changes",
+      "deterministic"
+    );
+    seedStore.updateRunState("run-suppressed", "blocked");
+    seedStore.close();
+
+    // Second declaration duplicates both the name AND the repository of
+    // the first (from writeMinimalProject) -- genuinely indistinguishable
+    // by ProjectIssueSnapshot's own {project, repository} identity, unlike
+    // the name-shadowing test above where the repository differs.
+    await appendFile(
+      path.join(cwd, "symphonika.yml"),
+      [
+        "  - name: symphonika",
+        "    disabled: false",
+        "    weight: 1",
+        "    tracker:",
+        "      kind: github",
+        "      owner: pmatos",
+        "      repo: symphonika",
+        '      token: "$GITHUB_TOKEN"',
+        "    issue_filters:",
+        '      states: ["open"]',
+        '      labels_all: ["agent-ready"]',
+        '      labels_none: ["blocked", "needs-human"]',
+        "    priority:",
+        "      labels: {}",
+        "      default: 99",
+        "    workspace:",
+        "      root: ./.symphonika/workspaces/symphonika-duplicate",
+        "      git:",
+        "        remote: git@github.com:pmatos/symphonika.git",
+        "        base_branch: main",
+        "    agent:",
+        "      provider: codex",
+        "    workflow: ./WORKFLOW.md",
+        ""
+      ].join("\n")
+    );
+
+    const githubIssuesApi: GitHubIssuesApi = {
+      addLabelsToIssue: () => Promise.resolve(),
+      listOpenIssues: () =>
+        Promise.resolve([
+          {
+            body: "",
+            created_at: "",
+            id: 42,
+            labels: ["agent-ready"],
+            number: 42,
+            state: "open",
+            title: "issue",
+            updated_at: "",
+            url: ""
+          }
+        ]),
+      removeLabelsFromIssue: () => Promise.resolve()
+    };
+
+    const daemon = await startDaemon({
+      configPath: "symphonika.yml",
+      cwd,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      await fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
+
+      // Asserted against the persisted RunStore project state, not
+      // poll-now's own HTTP response: two declarations that duplicate both
+      // name and repository also produce two rows for the same issue
+      // number in one replaceProjectIssueSnapshots insert batch (a
+      // separate, pre-existing bug in projectIssueSnapshotRows, unrelated
+      // to suppression), which throws a UNIQUE constraint violation that
+      // the outer catch in refreshIssuePollStatus turns into a blanket
+      // issuePollStatus reset -- masking this fix's effect from poll-now's
+      // JSON response. recordProjectPollOutcome (which writes
+      // last_candidate_issues) runs before that throw, so it still
+      // observably captures the unclamped/clamped value.
+      const verifyStore = openRunStore({ stateRoot });
+      const projectState = verifyStore
+        .getProjectStatesByName()
+        .get("symphonika");
+      // Regression guard (#691 review): matchingProjectCount can't tell
+      // the two identical declarations' own suppressed entries apart, so
+      // the raw suppressed count (2, the sum across both declarations) used
+      // to be subtracted from the persisted candidateIssues (1), producing
+      // lastCandidateIssues: -1 and lastFilteredIssues: 2 -- clamping the
+      // adjustment to the report's own prior count keeps it at
+      // lastCandidateIssues: 0, lastFilteredIssues: 1.
+      expect(projectState?.lastCandidateIssues).toBe(0);
+      expect(projectState?.lastFilteredIssues).toBe(1);
       verifyStore.close();
     } finally {
       await daemon.stop();

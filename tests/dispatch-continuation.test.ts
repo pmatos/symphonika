@@ -582,7 +582,7 @@ describe("dispatch continuation cap", () => {
           codex: { command: "codex" }
         }),
       runStore,
-      schedule: () => undefined,
+      schedule: () => true,
       stateRoot
     });
 

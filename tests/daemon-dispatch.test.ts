@@ -1607,7 +1607,7 @@ describe("daemon dispatch", () => {
           Promise.resolve(new Map([[mutatedProject.name, mutatedProject]])),
         providersLoader: () => Promise.resolve(reloader.providersConfig()),
         runStore,
-        schedule: () => undefined,
+        schedule: () => true,
         stateRoot: path.join(root, ".symphonika")
       });
 

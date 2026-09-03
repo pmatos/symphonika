@@ -68,13 +68,18 @@ export type ScheduledWorkSnapshot = {
 };
 
 export class ScheduledWorkRegistry {
-  scheduleDelayed(input: ScheduledWorkInput): void;
+  scheduleDelayed(input: ScheduledWorkInput): boolean;
   peekDelayed(): ScheduledWorkSnapshot[];
   isIssueScheduled(projectName: string, issueNumber: number): boolean;
   issueKeys(): Array<{ issueNumber: number; projectName: string }>;
   cancelAll(): void;
 }
 ```
+
+`scheduleDelayed` returns `true` only after it registers the timer. It returns `false` when
+`cancelAll` has latched daemon shutdown, allowing lifecycle callers to persist cancellation and
+notification evidence instead of treating refused work as scheduled. Duplicate registration for
+the same Project Issue remains a programmer error and throws.
 
 `ScheduledWorkRegistry` should store items in a `Map<issueKey, ScheduledItem>`, where `issueKey` is
 the existing `projectName#issueNumber` shape. A second scheduled item for the same Project Issue
@@ -124,5 +129,5 @@ issues from being marked stale after daemon restart or during parked waits.
 2. Add `ScheduledWorkRegistry` duplicate-schedule tests before switching to the `Map`.
 3. Update dispatch and PR follow-up gates to call `isIssueReserved`.
 4. Update stale-claim liveness collection to consume facade issue keys.
-5. Keep existing retry, Continuation, State Advance, and wait-park semantics unchanged; this ADR
-   only moves the data structures and names the reservation seam.
+5. Preserve retry, Continuation, State Advance, and wait-park semantics while making scheduler
+   shutdown refusal observable at the reservation seam.

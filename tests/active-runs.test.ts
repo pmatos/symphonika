@@ -129,6 +129,31 @@ describe("ActiveRunRegistry", () => {
     }
   });
 
+  it("cancelAll invokes onShutdown for accepted work that never fires", async () => {
+    vi.useFakeTimers();
+    try {
+      const registry = new ActiveRunRegistry();
+      const fire = vi.fn().mockResolvedValue(undefined);
+      const onShutdown = vi.fn().mockResolvedValue(undefined);
+      registry.scheduleDelayed({
+        delayMs: 50,
+        fire,
+        issueNumber: 1,
+        kind: "retry",
+        onShutdown,
+        projectName: "p",
+        runId: "run-a"
+      });
+      await registry.cancelAll(CANCEL_REASONS.DAEMON_SHUTDOWN);
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(onShutdown).toHaveBeenCalledOnce();
+      expect(fire).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("refuses delayed work scheduled after cancelAll", async () => {
     vi.useFakeTimers();
     try {

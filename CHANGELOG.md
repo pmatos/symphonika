@@ -1,5 +1,17 @@
 # Changelog
 
+# [0.3.0](https://github.com/pmatos/symphonika/compare/v0.2.0...v0.3.0) (2026-09-03)
+
+
+### Bug Fixes
+
+* **ci:** retire the ADR-number collision check for date-time-based new ADRs ([#698](https://github.com/pmatos/symphonika/issues/698)) ([27cac65](https://github.com/pmatos/symphonika/commit/27cac6538f0b2ce4ef9840c3046009730d8fed9c))
+
+
+### Features
+
+* add adopt-pr for attaching orphaned PRs to a Run ([#697](https://github.com/pmatos/symphonika/issues/697)) ([2fb122e](https://github.com/pmatos/symphonika/commit/2fb122ecd394b257ff56d9c98a8fea562b58bd0f))
+
 # [0.2.0](https://github.com/pmatos/symphonika/compare/v0.1.11...v0.2.0) (2026-09-03)
 
 

@@ -1485,6 +1485,60 @@ describe("CLI", () => {
     expect(output.stdout).toContain("states: 2");
   });
 
+  it("validates a Dispatch Project when the service config also contains a Routine Host", async () => {
+    const previousExitCode = process.exitCode;
+    process.exitCode = 0;
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeFile(
+      configPath,
+      [
+        "projects:",
+        "  - name: symphonika",
+        "    mode: dispatch",
+        "    workflow: ./WORKFLOW.md",
+        "  - name: reports",
+        "    mode: routine_host",
+        ""
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
+    const output = { stderr: "", stdout: "" };
+    const program = buildCli({ registerSignalHandlers: false });
+    program.configureOutput({
+      writeErr: (message) => {
+        output.stderr += message;
+      },
+      writeOut: (message) => {
+        output.stdout += message;
+      }
+    });
+
+    try {
+      await program.parseAsync([
+        "node",
+        "symphonika",
+        "workflow",
+        "validate",
+        "--config",
+        configPath,
+        "--project",
+        "symphonika"
+      ]);
+
+      expect(process.exitCode).toBe(0);
+      expect(output.stderr).toBe("");
+      expect(output.stdout).toContain(
+        "workflow validate ok: symphonika -> single_agent_workflow"
+      );
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
   it("validates a template-backed workflow and prints the expanded graph", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");

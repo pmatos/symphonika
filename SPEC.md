@@ -1746,6 +1746,13 @@ prevent the provider from starting. See ADR 0091.
 Future sandboxing, if added, should be outside the provider through host, container, VM, network, or
 credential isolation.
 
+ADR-0097 keeps this provider-neutral full-permission default unchanged. Symphonika does not adopt
+Claude's `--permission-mode auto` as an interim provider-specific default, and it defers `bwrap`
+filesystem sandboxing until the writable provider-state paths and host-degradation behavior form an
+explicit compatibility contract across Codex, Claude, and OMP. Operators may still select another
+permission policy through an authored provider-command override; adapters continue to validate the
+wire protocol, not that policy.
+
 ### 11.4 Input Required
 
 Runs are autonomous. If a provider requests interactive input:
@@ -2957,7 +2964,7 @@ The bootstrap slice is accepted when:
 ## 16. Deferred Work
 
 - remote workers
-- external sandboxing
+- external sandboxing (deferred with explicit re-entry criteria in ADR-0097)
 - stale-claim TTLs
 - GitHub Projects board support
 - webhook-based PR subscriptions

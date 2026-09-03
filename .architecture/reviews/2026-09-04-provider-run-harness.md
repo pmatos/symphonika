@@ -182,4 +182,83 @@ shapes are still near-identical across the three providers, and the stderr-attac
 
 ## Design
 
-_Written in step 4 after this report was first committed._
+Produced by three parallel design sub-agents (one interface each: minimal, maximally flexible,
+common-case-optimised), then chosen by a fourth **non-author adjudicator** against the fixed criteria
+(depth → locality → seam placement → test surface → blast radius). Dependency category: **in-process
+orchestration + local-substitutable** — `processScope` is already an injected seam with a
+`noopProcessScope`/recording test stand-in, and the spawn/stderr/queue helpers are already exercised
+through env-driven fake-subprocess transcripts. **No new external port is introduced** (one adapter =
+a hypothetical seam).
+
+### Winner — Design C, "common-case optimised"
+
+A new deep module `src/providers/provider-session.ts` exporting:
+
+- `createProviderSession<RunState extends ProviderRunState, Queue>(config): Pick<AgentProvider, "name" | "cancel" | "runAttempt">`
+  — owns the `activeRuns` Map, the ADR-0052 register-before-await cancel race, the prologue, the
+  `finally` (delete → optional benign shutdown → `confirmProviderScopeCleanup` → `waitForFlush`), and
+  `cancel()`.
+- `jsonlProviderSession<RunState>(configWithoutCreateQueue)` — a convenience that fixes the queue to
+  `createJsonlProcessQueue`, so the two alike providers (codex, claude) **never name a queue**.
+
+`ProviderRunState = { cancelled: boolean; child?: ChildProcessWithoutNullStreams }`; each provider's
+activeRun extends it, so `cancelled`/`child` stay where the existing per-provider helpers already read
+them. `config`: `name`, `label`, `processScope`, `createRunState()`, `createQueue(child, input, run)`,
+`runTurn(turn)` (an async generator; `turn.run` is narrowed to `RunState & { child }`, which deletes
+codex's `SpawnedCodexRun` alias and its `as` cast), plus optionals `refineCommand?`, `extraEnv?`,
+`cancelInterrupt?(run, child) → (() => void) | undefined` (two-phase: a synchronous side effect now,
+a returned `beforeClose` courtesy later), and `shutdownChildOnFinish?: boolean` (a **boolean, not a
+hook**, for omp's single fixed benign finally shutdown). The synthetic cancelled-before-spawn
+`process_exit` is proven byte-identical across all three providers (the branch only runs when
+`cancelled === true`) and folds to one `cancelledBeforeSpawnExit()` factory; omp's now-unused
+`processExitEvent` is deleted.
+
+Common case (codex/claude): 5 required fields + 0–2 optionals. Outlier (omp): `createProviderSession`
+directly with its own `createQueue` (stashing the queue on its own run for cancel), `cancelInterrupt`,
+and `shutdownChildOnFinish: true`.
+
+**Why it won**, walking the criteria: *Depth* — `jsonlProviderSession` gives the two-of-three common
+case the smallest interface (the shared JSONL queue is hidden, not re-named per provider). *Locality*
+— it disturbs existing provider internals least; `cancelled`/`child`/`queue` stay on the run object
+the current helpers read, so post-refactor bugs concentrate in the harness rather than across
+rethreaded call sites. *Seam placement* — the only design that reduces omp's single fixed shutdown to
+a boolean instead of spending a general hook, and hard-codes the one-spawn/one-queue shape because it
+genuinely never varies. *Blast radius* — smallest (deletes a cast and a dead helper rather than
+relocating state). *Test surface* — an effective tie; a slight edge from a required `processScope` and
+the smallest trivial `runTurn`.
+
+### Runner-up design — Design A, "minimal interface"
+
+`createProviderSession<R, Q>(config) → { runAttempt, cancel }`, harness owning the Map (and stashing
+the queue on a harness-side `SessionEntry`). It lost on **depth at the common case**: it forces codex
+*and* claude to supply a `createQueue` factory for the JSONL queue they **share**, and spends a
+general `beforeCleanup` hook on omp's **single** fixed shutdown — where the winner hides the shared
+queue behind `jsonlProviderSession` and reduces the one-off to a boolean (a deeper common case with an
+honest seam instead of a hypothetical one). A's shared *frozen* synthetic-exit constant is
+behaviour-safe but converts any missed mutation into a `TypeError`; the winner's fresh-object factory
+sidesteps the question. Otherwise strong and close.
+
+### Losing design — Design B, "maximally flexible"
+
+`createProviderSessionRunner<S, T>(deps, definition)` with a 9-field definition, a generic transport
+`T` the harness stores but never inspects, and a capability object handed to a free-form `drive`. It
+placed last: surface bloat and depth dilution (`drive` is a near-total escape hatch — deep at the rim,
+hollow in the centre), a zero-implementation `cancelledBeforeSpawnEvent` port and duplicated `input`
+params (speculative surface no current provider uses), and the **highest churn** — relocating
+`cancelled`/`child` off every provider's run object forces rethreading all three adapters' reads, not
+just omp's.
+
+### Adjudicator's verified implementation constraints (carried into step 5)
+
+- Synthetic cancelled-exit is byte-identical (incl. key order) across `codex.ts`, `claude.ts`, and
+  omp's `processExitEvent` on the `cancelled === true` branch — the fold is behaviour-preserving.
+- Deleting omp's `processExitEvent` is required once folded (its only caller is the cancel-race yield),
+  or `noUnusedLocals`/knip fails.
+- `runTurn`'s `run: RunState & { child }` narrowing removes codex's `SpawnedCodexRun` cast at the
+  spawn site; `readUntilResponse`'s param must be retyped to the narrowed type.
+- `knip` (`src/**` scope): export only the types a provider actually *annotates*; a config/context type
+  reachable purely by contextual inference will fail as an unused export — drop its `export`.
+- `shutdownChildOnFinish` must fire strictly between `activeRuns.delete` and
+  `confirmProviderScopeCleanup`, mirroring omp's current `finally` order.
+
+_Designs were produced by parallel sub-agents; the adjudicator authored none of them._

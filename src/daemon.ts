@@ -1664,77 +1664,88 @@ export async function startDaemon(
         runStore
       });
 
-    // Cheap, unlocked pre-check: refuse an obviously-conflicting request
-    // before paying for the git fetch/worktree prep below. Re-checked under
-    // the mutex immediately before the writes, since this unlocked read can
-    // race a concurrent claim landing during that I/O.
+    // Cheap, unlocked pre-check: skip the mutex wait entirely for a request
+    // that's already obviously conflicting. Re-checked immediately after
+    // acquiring the mutex below, since this unlocked read can race a
+    // concurrent claim landing before the mutex is actually held.
     const earlyLiveRunId = checkLiveRun();
     if (earlyLiveRunId !== undefined) {
       return { kind: "live-run-conflict", runId: earlyLiveRunId };
     }
 
-    let workspace: PreparedIssueWorkspace;
-    try {
-      workspace = await prepareAdoptedPrWorkspace({
-        configDir: state.configDir,
-        expectedHeadSha: snapshot.headSha,
-        issue: { number: input.issueNumber, title: issueSnapshot.title },
-        project
-      });
-    } catch (error) {
-      return { kind: "error", error: errorMessage(error) };
-    }
-
-    // Serializes the live-run re-check and the Run/tracked-PR row writes
-    // with RunController's own claim path (ADR 0052) -- narrowed to just
-    // this section, unlike handlePullRequestMerge's own guard, which holds
-    // the mutex across its GitHub merge call too: the git fetch/worktree
-    // prep above needs no atomicity with the claim path, only the final
-    // check-then-write does, and holding the mutex across that slow I/O
-    // would stall every other dispatch/claim/merge operation daemon-wide
-    // for its duration.
+    // Serializes the live-run recheck, the workspace mutation, and the
+    // Run/tracked-PR row writes with RunController's own claim path (ADR
+    // 0052) -- deliberately held across prepareAdoptedPrWorkspace despite
+    // its slow git I/O, unlike an earlier version of this function that
+    // narrowed the lock to just the DB writes. prepareAdoptedPrWorkspace
+    // can force-reset an *already-existing* worktree at this issue's own
+    // deterministic path (planWorkspacePaths is a pure function of
+    // project+issue, so a normal dispatch of this same issue resolves to
+    // the identical workspace path), so if that reset ran unlocked, a
+    // concurrent claim could start using that same worktree between this
+    // call's own unlocked check above and its mutex-protected write below
+    // -- the reset would then corrupt a live Run's workspace out from
+    // under it. The later recheck still correctly refuses to create the
+    // adopted Run in that case, but by then the damage to the concurrently
+    // dispatched run's workspace is already done, so the mutation itself
+    // -- not just the DB write -- has to be inside the lock.
     await dispatchMutex.acquire();
     let claim:
-      { kind: "conflict"; runId: string } | { kind: "ok"; runId: string };
+      | { kind: "conflict"; runId: string }
+      | { kind: "error"; error: string }
+      | { kind: "ok"; runId: string };
     try {
       const liveRunId = checkLiveRun();
       if (liveRunId !== undefined) {
         claim = { kind: "conflict", runId: liveRunId };
       } else {
-        const runId = randomUUID();
-        runStore.createAdoptedRun({
-          currentStateId: input.entryStateId,
-          id: runId,
-          issue: issueSnapshot,
-          projectName: input.projectName,
-          workspacePath: workspace.workspacePath
-        });
-        runStore.trackPullRequest({
-          branchName: expectedBranch,
-          headSha: snapshot.headSha,
-          issueNumber: input.issueNumber,
-          prNumber: input.prNumber,
-          projectName: input.projectName,
-          prUrl: snapshot.url,
-          runId
-        });
-        // Unconditional: trackPullRequest's upsert just wrote a row for
-        // (projectName, prNumber) either way (insert or update-without-
-        // touching-run_id), so re-pointing it at this fresh run_id is a
-        // no-op when the insert branch ran and the needed correction when
-        // an older tracked row's upsert preserved a stale run_id.
-        runStore.reassignTrackedPullRequestRun({
-          prNumber: input.prNumber,
-          projectName: input.projectName,
-          runId
-        });
-        claim = { kind: "ok", runId };
+        try {
+          const workspace = await prepareAdoptedPrWorkspace({
+            configDir: state.configDir,
+            expectedHeadSha: snapshot.headSha,
+            issue: { number: input.issueNumber, title: issueSnapshot.title },
+            project
+          });
+          const runId = randomUUID();
+          runStore.createAdoptedRun({
+            currentStateId: input.entryStateId,
+            id: runId,
+            issue: issueSnapshot,
+            projectName: input.projectName,
+            workspacePath: workspace.workspacePath
+          });
+          runStore.trackPullRequest({
+            branchName: expectedBranch,
+            headSha: snapshot.headSha,
+            issueNumber: input.issueNumber,
+            prNumber: input.prNumber,
+            projectName: input.projectName,
+            prUrl: snapshot.url,
+            runId
+          });
+          // Unconditional: trackPullRequest's upsert just wrote a row for
+          // (projectName, prNumber) either way (insert or update-without-
+          // touching-run_id), so re-pointing it at this fresh run_id is a
+          // no-op when the insert branch ran and the needed correction
+          // when an older tracked row's upsert preserved a stale run_id.
+          runStore.reassignTrackedPullRequestRun({
+            prNumber: input.prNumber,
+            projectName: input.projectName,
+            runId
+          });
+          claim = { kind: "ok", runId };
+        } catch (error) {
+          claim = { kind: "error", error: errorMessage(error) };
+        }
       }
     } finally {
       dispatchMutex.release();
     }
     if (claim.kind === "conflict") {
       return { kind: "live-run-conflict", runId: claim.runId };
+    }
+    if (claim.kind === "error") {
+      return { kind: "error", error: claim.error };
     }
     const runId = claim.runId;
 

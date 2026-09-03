@@ -324,6 +324,23 @@ describe("prepareAdoptedPrWorkspace (ADR-2026-09-03-1158)", () => {
       path.join(first.workspacePath, "login.txt"),
       "unpushed local commit\n"
     );
+    // The workspace worktree is created from the project's own cache clone,
+    // not from seedPath, so it never inherits seedPath's local identity
+    // config -- and CI runners have no global git identity configured.
+    await git([
+      "-C",
+      first.workspacePath,
+      "config",
+      "user.email",
+      "test@example.com"
+    ]);
+    await git([
+      "-C",
+      first.workspacePath,
+      "config",
+      "user.name",
+      "Symphonika Test"
+    ]);
     await git(["-C", first.workspacePath, "add", "login.txt"]);
     await git(["-C", first.workspacePath, "commit", "-m", "unpushed work"]);
     const unpushedSha = await git([

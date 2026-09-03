@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
@@ -9,11 +10,14 @@ import { parse } from "yaml";
 
 import {
   createHttpApp,
+  type AdoptPullRequestInput,
+  type AdoptPullRequestResult,
   type FireRoutineResult,
   type MergePullRequestResult,
   type PollNowResult,
   type WriteIssueLabelsResult
 } from "./http/app.js";
+import { findLiveRunIdForIssue } from "./http/pages.js";
 import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
@@ -30,6 +34,7 @@ import {
   DEFAULT_POLLING_INTERVAL_MS,
   emptyIssuePollStatus,
   mergeIssuePollStatus,
+  normalizeIssueSnapshot,
   pollConfiguredGitHubIssuesFromConfig,
   projectPollIdentityKey,
   rateLimitedTokens,
@@ -37,6 +42,7 @@ import {
   replaceIssuePollStatus,
   resolveEnvBackedValue,
   tryAddLabelsToIssue,
+  tryGetIssue,
   tryGetPullRequestFollowupState,
   tryMergePullRequest,
   tryRemoveLabelsFromIssue
@@ -78,7 +84,10 @@ import {
 } from "./lifecycle/run-controller.js";
 import { resumeShutdownCancelledRuns } from "./lifecycle/shutdown-resume.js";
 import { detectStaleClaims } from "./lifecycle/stale-claims.js";
-import { pollConfiguredGitHubPullRequestsFromConfig } from "./pull-request-polling.js";
+import {
+  classifyPullRequestBranchOrigin,
+  pollConfiguredGitHubPullRequestsFromConfig
+} from "./pull-request-polling.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { createSmtpNotificationSink } from "./notifications/smtp.js";
@@ -133,6 +142,9 @@ import type {
   PreparedIssueWorkspace,
   PrepareIssueWorkspaceInput
 } from "./workspace.js";
+import { prepareAdoptedPrWorkspace } from "./workspace.js";
+import { planWorkspacePaths } from "./workspace-paths.js";
+import { listAdoptableEntryStates } from "./workflow/fsm-expansion.js";
 
 export type StartDaemonOptions = {
   agentProviders?: AgentProviderRegistry;
@@ -1500,6 +1512,213 @@ export async function startDaemon(
     }
     return { kind: "not-found" };
   };
+  // Ownership/liveness guards key on Project name, but two Projects can
+  // point at the same GitHub owner/repo (a supported config) -- returns
+  // every Project name sharing that repo, including projectName itself.
+  // Extracted so both HttpAppOptions.getProjectRepoAliases (below) and
+  // adoptPullRequest's own live-run guard (docs/adr/0098) share one
+  // implementation.
+  const resolveProjectRepoAliases = (projectName: string): string[] => {
+    const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
+    if (tracker === undefined) {
+      return [projectName];
+    }
+    const aliases: string[] = [];
+    for (const project of runtimeConfig.projectsByName().values()) {
+      if (
+        project.tracker?.owner === tracker.owner &&
+        project.tracker.repo === tracker.repo
+      ) {
+        aliases.push(project.name);
+      }
+    }
+    return aliases;
+  };
+
+  // adopt-pr (docs/adr/0098): attaches an already-open pull request to a
+  // fresh Run parked at an operator-chosen wait/merge_pr state. Defined as
+  // its own const rather than inline in the createHttpApp options object
+  // literal below because it needs getActiveRuns/getScheduled-shaped values
+  // (via findLiveRunIdForIssue) that the object literal's own
+  // getActiveRuns/getScheduled properties compute inline -- a property of
+  // that same literal cannot reference its sibling properties through
+  // `options`, since the object does not exist yet during its own
+  // construction. Reads activeRuns/resolveProjectRepoAliases directly
+  // instead.
+  const adoptPullRequest = async (
+    input: AdoptPullRequestInput
+  ): Promise<AdoptPullRequestResult> => {
+    const project = runtimeConfig.projectsByName().get(input.projectName);
+    if (project?.tracker === undefined) {
+      return {
+        kind: "error",
+        error: `projects.${input.projectName}.tracker is not configured`
+      };
+    }
+    // Captured now: property narrowing on project.priority does not survive
+    // the `await tryGetIssue` below, since TS conservatively assumes an
+    // intervening call could have re-assigned it.
+    const { priority } = project;
+    if (priority === undefined) {
+      return {
+        kind: "error",
+        error: `projects.${input.projectName} is not a dispatch project`
+      };
+    }
+    const workflow = project.workflow;
+    if (workflow === undefined || !("expandedWorkflow" in workflow)) {
+      return { kind: "not-pr-aware-workflow" };
+    }
+    const adoptableStates = listAdoptableEntryStates(workflow.expandedWorkflow);
+    if (adoptableStates.length === 0) {
+      return { kind: "not-pr-aware-workflow" };
+    }
+    if (!adoptableStates.some((state) => state.id === input.entryStateId)) {
+      return {
+        kind: "invalid-entry-state",
+        validStateIds: adoptableStates.map((state) => state.id)
+      };
+    }
+
+    const token = resolveToken(project.tracker.token, env);
+    if (token === undefined) {
+      return {
+        kind: "error",
+        error: `projects.${input.projectName}.tracker.token is not available`
+      };
+    }
+    const repository = {
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    };
+
+    const rawIssue = await tryGetIssue(githubIssuesApi, {
+      ...repository,
+      issueNumber: input.issueNumber
+    });
+    if (rawIssue === undefined || rawIssue === null) {
+      return { kind: "issue-not-found" };
+    }
+    if ((rawIssue.state ?? "open") !== "open") {
+      return { kind: "issue-not-open" };
+    }
+    const issueSnapshot = normalizeIssueSnapshot(rawIssue, { priority });
+
+    const snapshot = runStore.getProjectPullRequestSnapshot(
+      input.projectName,
+      input.prNumber
+    );
+    if (snapshot === undefined) {
+      return { kind: "snapshot-unavailable" };
+    }
+    const snapshotRepository = runStore.getProjectPullRequestSnapshotRepository(
+      input.projectName,
+      input.prNumber
+    );
+    if (
+      snapshotRepository === undefined ||
+      !sameGitHubRepository(snapshotRepository, repository)
+    ) {
+      return {
+        kind: "repository-mismatch",
+        error:
+          "snapshot repository does not match the current tracker repository; poll the Project and retry"
+      };
+    }
+    if (snapshot.merged || !snapshot.open) {
+      return { kind: "pr-not-open" };
+    }
+    if (snapshot.headSha === null || snapshot.url === null) {
+      return { kind: "snapshot-incomplete" };
+    }
+    const expectedBranch = planWorkspacePaths({
+      issue: { number: input.issueNumber, title: issueSnapshot.title },
+      project
+    }).branchName;
+    if (
+      classifyPullRequestBranchOrigin(snapshot.headRef ?? undefined) !==
+        "issue_branch" ||
+      snapshot.headRef !== expectedBranch
+    ) {
+      return { kind: "not-issue-branch" };
+    }
+
+    // Serializes the live-run check and the Run row insert with
+    // RunController's own claim path (ADR 0052) -- the same posture
+    // handlePullRequestMerge already holds across its own GitHub call.
+    await dispatchMutex.acquire();
+    try {
+      const liveRunId = findLiveRunIdForIssue({
+        getActiveRuns: () =>
+          activeRuns.list().map((entry) => ({
+            issueNumber: entry.issueNumber,
+            projectName: entry.projectName,
+            runId: entry.runId
+          })),
+        getProjectRepoAliases: resolveProjectRepoAliases,
+        getScheduled: () => activeRuns.peekDelayed(),
+        issueNumber: input.issueNumber,
+        projectName: input.projectName,
+        runStore
+      });
+      if (liveRunId !== undefined) {
+        return { kind: "live-run-conflict", runId: liveRunId };
+      }
+
+      let workspace: PreparedIssueWorkspace;
+      try {
+        workspace = await prepareAdoptedPrWorkspace({
+          configDir: state.configDir,
+          expectedHeadSha: snapshot.headSha,
+          issue: { number: input.issueNumber, title: issueSnapshot.title },
+          project
+        });
+      } catch (error) {
+        return { kind: "error", error: errorMessage(error) };
+      }
+
+      const runId = randomUUID();
+      runStore.createAdoptedRun({
+        currentStateId: input.entryStateId,
+        id: runId,
+        issue: issueSnapshot,
+        projectName: input.projectName,
+        workspacePath: workspace.workspacePath
+      });
+      const alreadyTracked = runStore.findTrackedPullRequestByProjectAndNumber({
+        prNumber: input.prNumber,
+        projectName: input.projectName
+      });
+      runStore.trackPullRequest({
+        branchName: expectedBranch,
+        headSha: snapshot.headSha,
+        issueNumber: input.issueNumber,
+        prNumber: input.prNumber,
+        projectName: input.projectName,
+        prUrl: snapshot.url,
+        runId
+      });
+      if (alreadyTracked !== undefined && alreadyTracked.runId !== runId) {
+        runStore.reassignTrackedPullRequestRun({
+          prNumber: input.prNumber,
+          projectName: input.projectName,
+          runId
+        });
+      }
+
+      await tryAddLabelsToIssue(githubIssuesApi, {
+        ...repository,
+        issueNumber: input.issueNumber,
+        labels: ["sym:claimed"]
+      });
+
+      return { kind: "adopted", runId };
+    } finally {
+      dispatchMutex.release();
+    }
+  };
+
   const shutdownController = new AbortController();
   const app = createHttpApp({
     cancelRun: cancelViaUi,
@@ -1508,6 +1727,7 @@ export async function startDaemon(
     // same mutex detectStaleClaims already gates its own automatic sweep
     // behind (dispatchMutex.held, above).
     claimMutex: dispatchMutex,
+    adoptPullRequest,
     dispatchRuntime,
     fireRoutine: async (request): Promise<FireRoutineResult> => {
       // fireRoutineNow is a second admission path outside launchWork's
@@ -1661,22 +1881,7 @@ export async function startDaemon(
       }
       return { format: workflow.format, path: workflow.path };
     },
-    getProjectRepoAliases: (projectName) => {
-      const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
-      if (tracker === undefined) {
-        return [projectName];
-      }
-      const aliases: string[] = [];
-      for (const project of runtimeConfig.projectsByName().values()) {
-        if (
-          project.tracker?.owner === tracker.owner &&
-          project.tracker.repo === tracker.repo
-        ) {
-          aliases.push(project.name);
-        }
-      }
-      return aliases;
-    },
+    getProjectRepoAliases: resolveProjectRepoAliases,
     getProjectRequiredLabels: (projectName) =>
       runtimeConfig.projectsByName().get(projectName)?.issue_filters
         ?.labels_all ?? [],

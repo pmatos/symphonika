@@ -69,6 +69,35 @@ type CancelRunFn = (
       | { kind: "already-terminal"; state: RunState }
     >;
 
+// adopt-pr (docs/adr/0098): attaches an already-open pull request to a fresh
+// Run parked at an operator-chosen FSM state. JSON-only -- unlike
+// mergePullRequest this has no dashboard/HTML surface, so it is not threaded
+// through registerPages's options.
+export type AdoptPullRequestInput = {
+  entryStateId: string;
+  issueNumber: number;
+  prNumber: number;
+  projectName: string;
+};
+
+export type AdoptPullRequestResult =
+  | { kind: "adopted"; runId: string }
+  | { kind: "invalid-entry-state"; validStateIds: string[] }
+  | { kind: "not-pr-aware-workflow" }
+  | { kind: "issue-not-found" }
+  | { kind: "issue-not-open" }
+  | { kind: "snapshot-unavailable" }
+  | { kind: "snapshot-incomplete" }
+  | { kind: "repository-mismatch"; error: string }
+  | { kind: "not-issue-branch" }
+  | { kind: "pr-not-open" }
+  | { kind: "live-run-conflict"; runId: string }
+  | { kind: "error"; error: string };
+
+type AdoptPullRequestFn = (
+  input: AdoptPullRequestInput
+) => Promise<AdoptPullRequestResult>;
+
 export type PollNowResult = {
   candidateIssues: number;
   dispatching: boolean;
@@ -290,6 +319,8 @@ export type HttpAppOptions = {
   // #309 part 3's guarded-merge action: see
   // docs/adr/0078-pr-surface-poll-snapshot-and-state-projection.md.
   mergePullRequest?: MergePullRequestFn;
+  // adopt-pr: see docs/adr/0098-adopt-pr-as-an-audited-exception-to-adr-0090.md.
+  adoptPullRequest?: AdoptPullRequestFn;
   // Aborted by stopServer before it calls server.close(), so open /events
   // streams exit their loop instead of holding the shutdown open forever.
   shutdownSignal?: AbortSignal;
@@ -363,6 +394,11 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     (runStore === undefined
       ? undefined
       : (runId: string) => cancelRunInStore(runStore, runId));
+  // No in-process default the way cancelRun falls back to cancelRunInStore --
+  // adoption always needs the daemon-side workflow/workspace/GitHub wiring
+  // only daemon.ts can supply (docs/adr/0098). Undefined degrades to a plain
+  // 503, the same "not wired" posture the cancel route falls back to.
+  const adoptPullRequest = options.adoptPullRequest;
   const csrfSecret = options.csrfSecret ?? createCsrfSecret();
   const requireAuthorizedMutation: MiddlewareHandler = async (
     context,
@@ -770,6 +806,55 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       }
     );
 
+    // adopt-pr (docs/adr/0098): JSON-only, no dashboard caller, so unlike
+    // /api/runs/:id/cancel there is no form/redirect branch.
+    app.post(
+      "/api/prs/:project/:number/adopt",
+      requireAuthorizedMutation,
+      async (context) => {
+        if (adoptPullRequest === undefined) {
+          return context.json({ kind: "unavailable" }, 503);
+        }
+        let body: unknown;
+        try {
+          body = await context.req.json();
+        } catch {
+          return context.json(
+            { kind: "error", error: "invalid JSON body" },
+            400
+          );
+        }
+        const parsed = parseAdoptPullRequestBody(body);
+        if (parsed === undefined) {
+          return context.json(
+            { kind: "error", error: "invalid request body" },
+            400
+          );
+        }
+        const prNumber = Number(context.req.param("number"));
+        if (!Number.isInteger(prNumber)) {
+          return context.json(
+            { kind: "error", error: "invalid pull request number" },
+            400
+          );
+        }
+        const outcome = await adoptPullRequest({
+          ...parsed,
+          prNumber,
+          projectName: context.req.param("project")
+        });
+        const status =
+          outcome.kind === "adopted"
+            ? 200
+            : outcome.kind === "live-run-conflict"
+              ? 409
+              : outcome.kind === "error"
+                ? 500
+                : 422;
+        return context.json(outcome, status);
+      }
+    );
+
     registerPages({
       app,
       csrfSecret,
@@ -911,6 +996,25 @@ async function streamAttemptArtifact(
 
 function parseRunArtifactKind(value: string): RunArtifactKind | undefined {
   return RUN_ARTIFACT_KINDS.has(value) ? (value as RunArtifactKind) : undefined;
+}
+
+function parseAdoptPullRequestBody(
+  body: unknown
+): { entryStateId: string; issueNumber: number } | undefined {
+  if (typeof body !== "object" || body === null) {
+    return undefined;
+  }
+  const record = body as Record<string, unknown>;
+  const { entryStateId, issueNumber } = record;
+  if (
+    typeof entryStateId !== "string" ||
+    entryStateId === "" ||
+    typeof issueNumber !== "number" ||
+    !Number.isInteger(issueNumber)
+  ) {
+    return undefined;
+  }
+  return { entryStateId, issueNumber };
 }
 
 // Only these five RunArtifactKind values have a Firing evidence-path

@@ -145,7 +145,11 @@ class WorkspaceAbortCleanup {
 }
 
 export type WorkspacePreparationErrorCode =
-  "branch_conflict" | "cache_conflict" | "workspace_conflict";
+  | "branch_conflict"
+  | "cache_conflict"
+  | "head_mismatch"
+  | "workspace_conflict"
+  | "workspace_dirty";
 
 export class WorkspacePreparationError extends Error {
   readonly code: WorkspacePreparationErrorCode;
@@ -317,6 +321,237 @@ async function prepareIssueWorkspaceResult(
     ...plan,
     reused: false
   };
+}
+
+// adopt-pr's workspace preparation (docs/adr/0098). Unlike
+// prepareIssueWorkspace, which trusts a normal in-progress Run's own branch
+// by construction, this always syncs to the PR's actual remote head before
+// returning -- an adopted PR's workspace must never silently reuse whatever
+// a prior, possibly-dead Run's worktree happens to hold.
+export async function prepareAdoptedPrWorkspace(
+  input: PrepareIssueWorkspaceInput & { expectedHeadSha: string }
+): Promise<PreparedIssueWorkspace> {
+  const abortCleanup = new WorkspaceAbortCleanup(input.signal);
+  try {
+    return await prepareAdoptedPrWorkspaceResult(input, abortCleanup);
+  } finally {
+    abortCleanup.finish();
+  }
+}
+
+async function prepareAdoptedPrWorkspaceResult(
+  input: PrepareIssueWorkspaceInput & { expectedHeadSha: string },
+  abortCleanup: WorkspaceAbortCleanup
+): Promise<PreparedIssueWorkspace> {
+  const plan = planWorkspacePaths(input);
+
+  await ensureRepositoryCacheTracked(
+    input.project,
+    plan.cachePath,
+    input.signal,
+    abortCleanup
+  );
+
+  // Narrow, single-ref fetch of the PR's own branch --
+  // ensureRepositoryCacheTracked's own fetch above is scoped to base_branch
+  // only.
+  await workspaceGit(
+    [
+      "-C",
+      plan.cachePath,
+      "fetch",
+      "origin",
+      `${plan.branchName}:refs/remotes/origin/${plan.branchName}`
+    ],
+    input.signal,
+    abortCleanup
+  );
+  const fetchedHeadSha = await workspaceGit(
+    ["-C", plan.cachePath, "rev-parse", `origin/${plan.branchName}`],
+    input.signal,
+    abortCleanup
+  );
+  if (fetchedHeadSha !== input.expectedHeadSha) {
+    throw new WorkspacePreparationError(
+      "head_mismatch",
+      `pull request head ${plan.branchName} is now at ${fetchedHeadSha}, expected ${input.expectedHeadSha}; poll the Project and retry adoption`
+    );
+  }
+
+  if (await exists(plan.workspacePath)) {
+    let currentBranch: string;
+    try {
+      currentBranch = await workspaceGit(
+        ["-C", plan.workspacePath, "rev-parse", "--abbrev-ref", "HEAD"],
+        input.signal,
+        abortCleanup
+      );
+    } catch (error) {
+      throw new WorkspacePreparationError(
+        "workspace_conflict",
+        `workspace path ${plan.workspacePath} exists but is not a reusable Git worktree for ${plan.branchName}`,
+        error
+      );
+    }
+    if (currentBranch !== plan.branchName) {
+      throw new WorkspacePreparationError(
+        "workspace_conflict",
+        `workspace path ${plan.workspacePath} is already checked out on ${currentBranch}, expected ${plan.branchName}`
+      );
+    }
+    if (
+      !(await isWorktreeRoot(plan.workspacePath, input.signal, abortCleanup))
+    ) {
+      throw new WorkspacePreparationError(
+        "workspace_conflict",
+        `workspace path ${plan.workspacePath} is checked out on ${plan.branchName} but is not the Git worktree root`
+      );
+    }
+    if (
+      !(await isWorktreeForCache(
+        plan.workspacePath,
+        plan.cachePath,
+        input.signal,
+        abortCleanup
+      ))
+    ) {
+      throw new WorkspacePreparationError(
+        "workspace_conflict",
+        `workspace path ${plan.workspacePath} is checked out on ${plan.branchName} but is not linked to cache ${plan.cachePath}`
+      );
+    }
+
+    // The common orphaned-Run case: a prior Run's worktree is still checked
+    // out here (issue workspaces are never torn down on normal Run
+    // completion). `git branch -f` cannot force-update a branch checked out
+    // in a linked worktree, so the sync happens in the worktree itself.
+    const status = await workspaceGit(
+      ["-C", plan.workspacePath, "status", "--porcelain"],
+      input.signal,
+      abortCleanup
+    );
+    if (status !== "") {
+      throw new WorkspacePreparationError(
+        "workspace_dirty",
+        `workspace path ${plan.workspacePath} has uncommitted changes; resolve or discard them before adopting`
+      );
+    }
+    // A no-op in the expected orphaned-Run case: the worktree's HEAD is
+    // already the SHA its own agent last pushed, which is what the earlier
+    // head-mismatch check just confirmed equals expectedHeadSha.
+    await workspaceGit(
+      [
+        "-C",
+        plan.workspacePath,
+        "reset",
+        "--hard",
+        `origin/${plan.branchName}`
+      ],
+      input.signal,
+      abortCleanup
+    );
+
+    return { ...plan, reused: true };
+  }
+
+  const conflictingWorktreePath = await worktreePathForBranch(
+    plan.cachePath,
+    plan.branchName,
+    input.signal,
+    abortCleanup
+  );
+  if (conflictingWorktreePath !== undefined) {
+    throw new WorkspacePreparationError(
+      "branch_conflict",
+      `issue branch ${plan.branchName} is already checked out at ${conflictingWorktreePath}`
+    );
+  }
+
+  // No worktree exists anywhere for this branch, so force-updating (or
+  // creating) the cache-side branch ref is always safe here -- nothing has
+  // it checked out.
+  await ensureAdoptedIssueBranch(
+    plan.cachePath,
+    plan.branchName,
+    input.signal,
+    abortCleanup
+  );
+
+  await mkdir(path.dirname(plan.workspacePath), { recursive: true });
+  const workspaceWasRegistered = await isWorktreeRegistered(
+    plan.cachePath,
+    plan.workspacePath,
+    input.signal,
+    abortCleanup
+  );
+  input.signal?.throwIfAborted();
+  try {
+    await workspaceGit(
+      [
+        "-C",
+        plan.cachePath,
+        "worktree",
+        "add",
+        plan.workspacePath,
+        plan.branchName
+      ],
+      input.signal,
+      abortCleanup
+    );
+  } catch (error) {
+    if (input.signal?.aborted === true && !workspaceWasRegistered) {
+      try {
+        await cleanupAbortedIssueWorktree(
+          plan.cachePath,
+          plan.workspacePath,
+          abortCleanup
+        );
+      } catch (cleanupError) {
+        throw new WorkspacePreparationCleanupError(
+          `failed to clean aborted issue worktree ${plan.workspacePath}`,
+          new AggregateError([error, cleanupError])
+        );
+      }
+    }
+    throw error;
+  }
+
+  return {
+    ...plan,
+    reused: false
+  };
+}
+
+// Cache-side branch sync for adopt-pr, reached only when no worktree exists
+// anywhere for this branch -- prepareAdoptedPrWorkspaceResult syncs an
+// existing worktree in place instead, since git refuses to force-update a
+// branch checked out in a linked worktree.
+async function ensureAdoptedIssueBranch(
+  cachePath: string,
+  branchName: string,
+  signal: AbortSignal | undefined,
+  abortCleanup: WorkspaceAbortCleanup
+): Promise<void> {
+  if (
+    await workspaceGitSucceeds(
+      ["-C", cachePath, "show-ref", "--verify", `refs/heads/${branchName}`],
+      signal,
+      abortCleanup
+    )
+  ) {
+    await workspaceGit(
+      ["-C", cachePath, "branch", "-f", branchName, `origin/${branchName}`],
+      signal,
+      abortCleanup
+    );
+    return;
+  }
+
+  await workspaceGit(
+    ["-C", cachePath, "branch", branchName, `origin/${branchName}`],
+    signal,
+    abortCleanup
+  );
 }
 
 async function isWorktreeRoot(

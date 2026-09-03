@@ -9,6 +9,7 @@ import { runAddRoutine } from "./add-routine.js";
 import { formatArtifactKinds } from "./artifact-format.js";
 import type { DaemonHandle, StartDaemonOptions } from "./daemon.js";
 import { startDaemon } from "./daemon.js";
+import type { AdoptPullRequestResult } from "./http/app.js";
 import { resolveServiceConfigPath } from "./config-paths.js";
 import { daemonEndpointPath, readDaemonEndpoint } from "./daemon-endpoint.js";
 import type {
@@ -1828,6 +1829,124 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
       }
     );
 
+  program
+    .command("adopt-pr")
+    .description(
+      "attach an already-open pull request to a new Run, parked at an operator-chosen FSM state (docs/adr/0098)"
+    )
+    .argument("<project>", "project name")
+    .argument("<pr-number>", "pull request number", parseIssueNumber)
+    .requiredOption(
+      "--issue <number>",
+      "the pull request's originating issue number",
+      parseIssueNumber
+    )
+    .requiredOption(
+      "--entry-state <state>",
+      "workflow state id to park the Run at (must be a wait or merge_pr state)"
+    )
+    .option("--config <path>", "service config path")
+    .option("--daemon-url <url>", "local daemon base URL")
+    .action(
+      async (
+        project: string,
+        prNumber: number,
+        options: {
+          config?: string;
+          daemonUrl?: string;
+          entryState: string;
+          issue: number;
+        }
+      ) => {
+        const stateRoot = resolveStateRoot(
+          withConfigPath(options.config)
+        ).stateRoot;
+        const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
+        if (daemonUrl === undefined) {
+          const descriptorPath = daemonEndpointPath(stateRoot);
+          writeErr(
+            program,
+            `adopt-pr failed: daemon endpoint not found at ${descriptorPath}\n`
+          );
+          program.error("adopt-pr failed: daemon endpoint not found", {
+            exitCode: 1
+          });
+          return;
+        }
+
+        const daemonStatus = await fetchDaemonStatus(
+          fetcher,
+          daemonUrl,
+          stateRoot
+        );
+        if (daemonStatus.kind === "unavailable") {
+          writeErr(program, `adopt-pr failed: ${daemonStatus.error}\n`);
+          program.error(`adopt-pr failed: ${daemonStatus.error}`, {
+            exitCode: 1
+          });
+          return;
+        }
+
+        const outcome = await postAdoptPr(
+          fetcher,
+          daemonUrl,
+          project,
+          prNumber,
+          options.issue,
+          options.entryState
+        );
+        if (outcome.kind === "adopted") {
+          writeOut(
+            program,
+            `adopted PR #${prNumber} into run ${outcome.runId}, parked at '${options.entryState}'\n`
+          );
+          // The parked position's own transitions decide what happens next
+          // (docs/adr/0098) -- there is no dwell time, so if the entry
+          // state's predicates are already satisfied the very next daemon
+          // tick advances, including auto-merging on a merge_pr state.
+          writeOut(
+            program,
+            `note: this Run re-evaluates on the next daemon tick and may advance -- or merge, if '${options.entryState}' is a merge_pr state and policy is already satisfied -- immediately\n`
+          );
+          return;
+        }
+        if (outcome.kind === "invalid-entry-state") {
+          const validStates =
+            outcome.validStateIds.length === 0
+              ? "(none)"
+              : outcome.validStateIds.join(", ");
+          writeErr(
+            program,
+            `adopt-pr failed: '${options.entryState}' is not a valid entry state; valid states: ${validStates}\n`
+          );
+          program.error(`adopt-pr failed: invalid entry state`, {
+            exitCode: 1
+          });
+          return;
+        }
+        if (outcome.kind === "live-run-conflict") {
+          writeErr(
+            program,
+            `adopt-pr failed: run ${outcome.runId} is already live for this issue\n`
+          );
+          program.error(`adopt-pr failed: live run conflict`, {
+            exitCode: 1
+          });
+          return;
+        }
+        if (
+          outcome.kind === "repository-mismatch" ||
+          outcome.kind === "error"
+        ) {
+          writeErr(program, `adopt-pr failed: ${outcome.error}\n`);
+          program.error(`adopt-pr failed: ${outcome.error}`, { exitCode: 1 });
+          return;
+        }
+        writeErr(program, `adopt-pr failed: ${outcome.kind}\n`);
+        program.error(`adopt-pr failed: ${outcome.kind}`, { exitCode: 1 });
+      }
+    );
+
   return program;
 }
 
@@ -1982,6 +2101,96 @@ async function postCancel(
     error: "daemon returned an unexpected cancellation response",
     kind: "error"
   };
+}
+
+async function postAdoptPr(
+  fetcher: FetchFn,
+  daemonUrl: string,
+  project: string,
+  prNumber: number,
+  issueNumber: number,
+  entryStateId: string
+): Promise<AdoptPullRequestResult> {
+  let response: Response;
+  try {
+    response = await fetcher(
+      `${daemonUrl}/api/prs/${encodeURIComponent(project)}/${prNumber}/adopt`,
+      {
+        body: JSON.stringify({ entryStateId, issueNumber }),
+        headers: { "content-type": "application/json" },
+        method: "POST"
+      }
+    );
+  } catch (error) {
+    return { error: errorMessage(error), kind: "error" };
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+
+  // Every status this route returns (200/409/422/500), plus the 503 an
+  // unwired daemon sends, carries a JSON body -- 503's {kind:"unavailable"}
+  // is the one shape readAdoptPullRequestResult doesn't recognize, and falls
+  // through to the generic HTTP-status message below like any other
+  // unparseable body.
+  const parsed = readAdoptPullRequestResult(body);
+  return (
+    parsed ?? {
+      error: `daemon returned HTTP ${response.status}`,
+      kind: "error"
+    }
+  );
+}
+
+function readAdoptPullRequestResult(
+  value: unknown
+): AdoptPullRequestResult | undefined {
+  if (!isObject(value) || typeof value.kind !== "string") {
+    return undefined;
+  }
+  switch (value.kind) {
+    case "adopted":
+      return typeof value.runId === "string"
+        ? { kind: "adopted", runId: value.runId }
+        : undefined;
+    case "invalid-entry-state":
+      return Array.isArray(value.validStateIds) &&
+        value.validStateIds.every((id): id is string => typeof id === "string")
+        ? { kind: "invalid-entry-state", validStateIds: value.validStateIds }
+        : undefined;
+    case "not-pr-aware-workflow":
+      return { kind: "not-pr-aware-workflow" };
+    case "issue-not-found":
+      return { kind: "issue-not-found" };
+    case "issue-not-open":
+      return { kind: "issue-not-open" };
+    case "snapshot-unavailable":
+      return { kind: "snapshot-unavailable" };
+    case "snapshot-incomplete":
+      return { kind: "snapshot-incomplete" };
+    case "repository-mismatch":
+      return typeof value.error === "string"
+        ? { error: value.error, kind: "repository-mismatch" }
+        : undefined;
+    case "not-issue-branch":
+      return { kind: "not-issue-branch" };
+    case "pr-not-open":
+      return { kind: "pr-not-open" };
+    case "live-run-conflict":
+      return typeof value.runId === "string"
+        ? { kind: "live-run-conflict", runId: value.runId }
+        : undefined;
+    case "error":
+      return typeof value.error === "string"
+        ? { error: value.error, kind: "error" }
+        : undefined;
+    default:
+      return undefined;
+  }
 }
 
 async function postPollNow(

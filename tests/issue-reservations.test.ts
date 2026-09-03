@@ -19,7 +19,7 @@ function createRegistries(): {
 }
 
 describe("IssueReservationRegistry", () => {
-  it("reports reservations for either in-flight runs or scheduled work", () => {
+  it("reports reservations for either in-flight runs or scheduled work", async () => {
     vi.useFakeTimers();
     try {
       const { inFlightRuns, reservations, scheduledWork } = createRegistries();
@@ -47,14 +47,14 @@ describe("IssueReservationRegistry", () => {
       });
       expect(reservations.isIssueReserved("symphonika", 7)).toBe(true);
 
-      scheduledWork.cancelAll();
+      await scheduledWork.cancelAll();
       expect(reservations.isIssueReserved("symphonika", 7)).toBe(false);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("returns one issue key when a project issue is both in-flight and scheduled", () => {
+  it("returns one issue key when a project issue is both in-flight and scheduled", async () => {
     vi.useFakeTimers();
     try {
       const { inFlightRuns, reservations, scheduledWork } = createRegistries();
@@ -77,7 +77,7 @@ describe("IssueReservationRegistry", () => {
         { issueNumber: 7, projectName: "symphonika" }
       ]);
 
-      scheduledWork.cancelAll();
+      await scheduledWork.cancelAll();
     } finally {
       vi.useRealTimers();
     }

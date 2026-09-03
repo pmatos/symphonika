@@ -140,6 +140,157 @@ describe("RunStore routines", () => {
     }
   });
 
+  it("preserves the Watchdog no-progress latch when startup recovery settles a still-running firing", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched-then-crash",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringState("fire-latched-then-crash", "running");
+      expect(
+        store.markRoutineFiringWatchdogNoProgress("fire-latched-then-crash")
+      ).toBe(true);
+
+      // The daemon exits before completeRoutineFiring ever reads the latch back,
+      // so the row is still `running` on restart — findLeakedRoutineFirings is the
+      // only path left to settle it.
+      const leaked = store.findLeakedRoutineFirings();
+      expect(leaked).toEqual([
+        expect.objectContaining({
+          firingId: "fire-latched-then-crash",
+          previousState: "running",
+          previousTerminalReason: null
+        })
+      ]);
+
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "fire-latched-then-crash",
+          previousState: "running",
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(store.getRoutineFiring("fire-latched-then-crash")).toMatchObject({
+        cancelReason: "no_progress",
+        cancelRequested: true,
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(store.claimSettledRoutineWatchdogTerminations()).toEqual([
+        {
+          firingId: "fire-latched-then-crash",
+          projectName: "alpha",
+          routineName: "dependency-update"
+        }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("does not consume a latched firing's pending notification while its leaked-cleanup confirmation is still pending", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      store.createRoutineFiring({
+        id: "fire-latched-cleanup-pending",
+        projectName: "alpha",
+        providerCommand: "codex fake",
+        providerName: "codex",
+        routineName: "dependency-update"
+      });
+      store.updateRoutineFiringState("fire-latched-cleanup-pending", "running");
+      expect(
+        store.markRoutineFiringWatchdogNoProgress(
+          "fire-latched-cleanup-pending"
+        )
+      ).toBe(true);
+
+      // First startup sweep can't confirm the provider scope is actually gone —
+      // the row keeps the cleanup-pending sentinel so it is re-swept, and must
+      // not yet be treated as settled: overriding it to `no_progress` here would
+      // stop findLeakedRoutineFirings from re-detecting it, and claiming it now
+      // would clear the pending bit before the real outcome is known.
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "fire-latched-cleanup-pending",
+          previousState: "running",
+          reason: "leaked_routine_firing_cleanup_pending"
+        }
+      ]);
+
+      expect(
+        store.getRoutineFiring("fire-latched-cleanup-pending")
+      ).toMatchObject({
+        cancelReason: "no_progress",
+        state: "failed",
+        terminalReason: "leaked_routine_firing_cleanup_pending"
+      });
+      expect(store.claimSettledRoutineWatchdogTerminations()).toEqual([]);
+      expect(store.findLeakedRoutineFirings()).toEqual([
+        expect.objectContaining({
+          firingId: "fire-latched-cleanup-pending",
+          previousState: "failed",
+          previousTerminalReason: "leaked_routine_firing_cleanup_pending"
+        })
+      ]);
+
+      // A later sweep confirms the scope is stopped — now the latch wins and the
+      // notification becomes claimable.
+      store.markRoutineFiringsFailed([
+        {
+          firingId: "fire-latched-cleanup-pending",
+          previousState: "failed",
+          reason: "leaked_routine_firing"
+        }
+      ]);
+
+      expect(
+        store.getRoutineFiring("fire-latched-cleanup-pending")
+      ).toMatchObject({
+        state: "failed",
+        terminalReason: "no_progress"
+      });
+      expect(store.claimSettledRoutineWatchdogTerminations()).toEqual([
+        {
+          firingId: "fire-latched-cleanup-pending",
+          projectName: "alpha",
+          routineName: "dependency-update"
+        }
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("overrides an ordinary failed completion observed after the latch", async () => {
     const stateRoot = await makeTempRoot();
     const store = openRunStore({ stateRoot });

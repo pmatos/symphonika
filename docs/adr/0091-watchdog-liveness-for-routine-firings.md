@@ -33,7 +33,8 @@ are conditional on the firing still being running and not already cancelled, fen
 completion and operator-cancellation races.
 
 When the idle grace expires, the Watchdog atomically records `cancel_requested = 1` and
-`cancel_reason = 'no_progress'`, then requests cancellation through the shared active-run registry.
+`cancel_reason = 'no_progress'` together with a durable pending-notification bit, then requests
+cancellation through the shared active-run registry.
 The Routine dispatcher treats that reason differently from an operator or shutdown cancellation:
 it preserves `failed / no_progress` over the provider's cancellation-produced exit, completes the
 ordinary outcome and commits-ahead evidence path, and releases capacity in its existing `finally`.
@@ -58,6 +59,17 @@ transaction — the one place the two passes serialize — and lets it win. Only
 is overridden: the outcome and commits-ahead evidence that completing call gathered is real, and
 workspace retention still depends on it.
 
+The latch is not itself a terminal verdict and does not notify the operator. Before a successful
+Watchdog reconciliation returns, the Run Store atomically claims pending entries whose Routine
+Firing is now terminal. An entry whose authoritative `terminal_reason` is `no_progress` reaches the
+`onRoutineTerminated` observer and the grouped daemon-health notification; an entry whose declared
+deadline won as `firing_timeout`, or whose terminal reason is anything else, is consumed without a
+Watchdog alert. The pending bit is durable, so a daemon restart between the latch and terminal
+settlement does not lose the confirmation. Reconciliation still drains terminal pending entries
+when Watchdog sampling is disabled, although it takes no new samples in that state. This makes the
+notification follow the durable lifecycle verdict without awaiting up to the settlement bound in
+the daemon tick that requested cancellation.
+
 Routine Firings do not gain a `stale` state. `stale` is an issue-Run verdict coupled to operational
 labels and explicit stale-claim recovery; Routine Firings have no corresponding claim label to
 clear. A provider that violated the firing's liveness contract is a terminal failed firing, with
@@ -78,8 +90,19 @@ declared firing deadline and progress liveness.
   only for work whose owning daemon process was actually lost.
 - Operators can distinguish the failure from a declared deadline (`firing_timeout`) and from an
   explicit cancellation (`cancelled`) through `terminal_reason = 'no_progress'`.
-- A Watchdog-terminated firing never reports `succeeded`, so the termination notification and the
-  durable row always agree.
+- A Watchdog alert is delayed until terminal settlement confirms `no_progress`, so a declared
+  deadline that wins the race cannot produce a misleading Watchdog termination notification.
+- Pending confirmation survives daemon restart and can delay a legitimate grouped notification
+  until the next Watchdog reconciliation pass. Reconciliation is attempted on ticks — the regular
+  poll schedule, a manual poll trigger, or the startup pass — whenever a config with at least one
+  project is loaded, gated on an in-memory clock that resets to daemon start on restart, so a
+  restart can wait a full sample interval before the first pass. Under steady polling with no
+  manual triggers, consecutive automatic passes nominally land
+  `ceil(sample_interval / poll_interval) * poll_interval` seconds apart, which can approach the
+  sum of the two intervals when they aren't multiples; a manual trigger can settle a pending alert
+  sooner, and in-tick work ahead of the gate means an individual pass can land before or after
+  that figure. Decoupling reconciliation onto its own schedule to restore a true
+  one-sample-interval bound is tracked separately (#690).
 - Post-cancellation GitHub and Git evidence is best-effort: a firing whose enrichment is itself
   wedged settles without it rather than holding its slot.
 
@@ -102,6 +125,19 @@ equally powerless.
 **Add a dispatcher-local staleness timer.** Rejected. It would duplicate the Watchdog's Progress
 Signal, grace policy, Project overrides, and sampling races while producing a second definition of
 liveness.
+
+**Notify immediately from the cancellation latch.** Rejected. The latch and the firing's declared
+deadline can race; `completeRoutineFiring` deliberately lets the deadline preserve
+`failed / firing_timeout`, so an immediate observer can announce a verdict the durable row never
+adopts.
+
+**Wait synchronously for firing settlement.** Rejected. Cancellation settlement is bounded at 60
+seconds and would hold the daemon's periodic reconciliation tick for that whole window.
+
+**Keep pending confirmations only in daemon memory.** Rejected. It would avoid blocking the tick,
+but a daemon restart after the latch would silently lose every legitimate pending Watchdog alert.
+The single durable pending bit provides the same cross-tick behavior and lets the Run Store consume
+settled entries atomically.
 
 **Add `stale` to `RoutineFiringState`.** Rejected. It would imply the issue-Run stale-label and
 operator-clear workflow where none exists. `failed / no_progress` carries the needed terminal

@@ -158,7 +158,7 @@ export async function dispatchOneEligibleIssue(
     projectsLoader,
     providersLoader,
     runStore: options.runStore,
-    schedule: () => undefined,
+    schedule: () => true,
     stateRoot: options.stateRoot
   };
   if (options.createRunId !== undefined) {

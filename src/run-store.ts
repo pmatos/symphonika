@@ -122,9 +122,8 @@ const WATCHDOG_NO_PROGRESS_REASON: CancelReason = "no_progress";
 // sweep before it moved to the durable provider_scope_cleanup_pending column, ADR
 // 0064) used this string in place of a plain "leaked" reason to signal that cleanup
 // was not yet confirmed. findLeakedRoutineFirings still matches on it for those rows,
-// and claimSettledRoutineWatchdogTerminations/markRoutineFiringsFailed still check for
-// it so a legacy row isn't treated as settled before it is actually re-swept and
-// normalized.
+// and claimSettledRoutineWatchdogTerminations still checks for it so a legacy row
+// isn't treated as settled before it is actually re-swept and normalized.
 const LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON =
   "leaked_routine_firing_cleanup_pending";
 
@@ -6046,15 +6045,11 @@ export class RunStore {
         // leaked-firing sweep is then the only path left to settle it. Re-check the same
         // latch completeRoutineFiring itself checks and let it win, exactly as there,
         // so claimSettledRoutineWatchdogTerminations still finds `no_progress` instead of
-        // a leaked-firing reason that silently drops the pending alert. Skip the override
-        // whenever this entry's own cleanup isn't confirmed yet (legacy sentinel reason,
-        // or the durable provider_scope_cleanup_pending bit still true) — that row isn't
-        // settled either way, and overwriting it would stop findLeakedRoutineFirings from
-        // re-sweeping it (ADR 0064).
+        // a leaked-firing reason that silently drops the pending alert. Provider-scope
+        // cleanup is tracked independently below, so no sentinel terminal_reason is
+        // needed to keep the row re-detectable — see docs/adr/0064.
         "terminal_reason = case",
         "when cancel_requested = 1 and cancel_reason = @no_progress_reason",
-        "and @reason is not @cleanup_pending_reason",
-        "and @provider_scope_cleanup_pending = 0",
         "then @no_progress_reason",
         "else @reason end,",
         "provider_scope_cleanup_pending = @provider_scope_cleanup_pending,",
@@ -6071,7 +6066,6 @@ export class RunStore {
       for (const entry of entries) {
         const updatedAt = timestamp();
         update.run({
-          cleanup_pending_reason: LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON,
           id: entry.firingId,
           no_progress_reason: WATCHDOG_NO_PROGRESS_REASON,
           provider_scope_cleanup_pending:

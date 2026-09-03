@@ -235,15 +235,15 @@ describe("RunStore routines", () => {
       ).toBe(true);
 
       // First startup sweep can't confirm the provider scope is actually gone —
-      // the row keeps the cleanup-pending sentinel so it is re-swept, and must
-      // not yet be treated as settled: overriding it to `no_progress` here would
-      // stop findLeakedRoutineFirings from re-detecting it, and claiming it now
-      // would clear the pending bit before the real outcome is known.
+      // the row keeps the durable cleanup-pending bit set so it is re-swept, and
+      // must not yet be treated as settled: claiming the notification now would
+      // clear the pending bit before the real outcome is known.
       store.markRoutineFiringsFailed([
         {
           firingId: "fire-latched-cleanup-pending",
           previousState: "running",
-          reason: "leaked_routine_firing_cleanup_pending"
+          providerScopeCleanupPending: true,
+          reason: "leaked_routine_firing"
         }
       ]);
 
@@ -251,15 +251,16 @@ describe("RunStore routines", () => {
         store.getRoutineFiring("fire-latched-cleanup-pending")
       ).toMatchObject({
         cancelReason: "no_progress",
+        providerScopeCleanupPending: true,
         state: "failed",
-        terminalReason: "leaked_routine_firing_cleanup_pending"
+        terminalReason: "no_progress"
       });
       expect(store.claimSettledRoutineWatchdogTerminations()).toEqual([]);
       expect(store.findLeakedRoutineFirings()).toEqual([
         expect.objectContaining({
           firingId: "fire-latched-cleanup-pending",
           previousState: "failed",
-          previousTerminalReason: "leaked_routine_firing_cleanup_pending"
+          providerScopeCleanupPending: true
         })
       ]);
 
@@ -269,6 +270,7 @@ describe("RunStore routines", () => {
         {
           firingId: "fire-latched-cleanup-pending",
           previousState: "failed",
+          providerScopeCleanupPending: false,
           reason: "leaked_routine_firing"
         }
       ]);
@@ -276,6 +278,7 @@ describe("RunStore routines", () => {
       expect(
         store.getRoutineFiring("fire-latched-cleanup-pending")
       ).toMatchObject({
+        providerScopeCleanupPending: false,
         state: "failed",
         terminalReason: "no_progress"
       });

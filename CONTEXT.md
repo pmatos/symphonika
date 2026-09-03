@@ -339,7 +339,9 @@ _Avoid_: Run lifecycle state, one-email-per-Run
 
 **Daemon Health Notification**:
 An edge-triggered best-effort message for daemon start, configuration-health transitions,
-invalid-new-Routine transitions, or grouped Watchdog terminations.
+invalid-new-Routine transitions, or grouped Watchdog terminations. A Routine Firing joins the
+Watchdog group only after its durable terminal reason confirms `no_progress`; a competing terminal
+verdict consumes the queued event without notifying.
 _Avoid_: daemon log line, issue Run digest
 
 **Run Lifecycle**:

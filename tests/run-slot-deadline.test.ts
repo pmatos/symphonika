@@ -1216,7 +1216,9 @@ describe("Run slot deadline", () => {
       validate: vi.fn().mockResolvedValue(undefined)
     };
     const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
-    const schedule = vi.fn<RunControllerOptions["schedule"]>();
+    const schedule = vi
+      .fn<RunControllerOptions["schedule"]>()
+      .mockReturnValue(true);
     const controller = makeRunController(
       {
         activeRuns,
@@ -1273,6 +1275,82 @@ describe("Run slot deadline", () => {
       expect(addLabelsToIssue).not.toHaveBeenCalledWith(
         expect.objectContaining({ labels: ["sym:failed"] })
       );
+      expect(activeRuns.countInFlight()).toBe(0);
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("records shutdown cancellation when a post-create retry is refused", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+    const project = reloader.projectsByName().get("symphonika");
+    if (project === undefined) {
+      throw new Error("expected test project");
+    }
+
+    const activeRuns = new ActiveRunRegistry();
+    const runStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(successfulAttempt),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const controller = makeRunController(
+      {
+        activeRuns,
+        onTerminated: vi.fn(),
+        project,
+        provider,
+        reloader,
+        root,
+        runStore
+      },
+      {
+        createRunId: () => "run-refused-post-create-retry",
+        githubIssuesApi: {
+          addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          removeLabelsFromIssue: vi.fn(async (input: { labels: string[] }) => {
+            if (input.labels[0] === "sym:running") {
+              await activeRuns.cancelAll("daemon_shutdown");
+            }
+          })
+        },
+        lifecyclePolicy: {
+          continuation: { cap: 0, delayMs: 0 },
+          retry: { cap: 1, delaysMs: [25], maxBackoffMs: 25 }
+        },
+        schedule: (item) => activeRuns.scheduleDelayed(item)
+      }
+    );
+
+    vi.spyOn(activeRuns, "reserveSlot").mockImplementationOnce(() => {
+      throw new Error("temporary slot reservation failure");
+    });
+
+    try {
+      await expect(controller.dispatchOneFresh(pollStatus())).rejects.toThrow(
+        "temporary slot reservation failure"
+      );
+
+      expect(runStore.getRun("run-refused-post-create-retry")).toMatchObject({
+        cancelReason: "daemon_shutdown",
+        retryCount: 0,
+        state: "cancelled",
+        terminalReason: "daemon_shutdown"
+      });
+      expect(
+        runStore.listPendingRunNotifications().map((run) => run.id)
+      ).toContain("run-refused-post-create-retry");
+      expect(activeRuns.peekDelayed()).toHaveLength(0);
       expect(activeRuns.countInFlight()).toBe(0);
     } finally {
       runStore.close();
@@ -1687,7 +1765,7 @@ function makeRunController(
       : { providerBuildCapacityLoader: overrides.providerBuildCapacityLoader }),
     providersLoader: () => Promise.resolve(deps.reloader.providersConfig()),
     runStore: deps.runStore,
-    schedule: overrides.schedule ?? (() => undefined),
+    schedule: overrides.schedule ?? (() => true),
     stateRoot: path.join(deps.root, ".symphonika"),
     watchdogConfigLoader:
       overrides.watchdogConfigLoader ??

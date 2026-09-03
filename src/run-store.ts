@@ -118,6 +118,17 @@ const SHUTDOWN_PREEMPTIVE_REASON: CancelReason = "daemon_shutdown";
 // `no_progress`. See ADR 0091.
 const WATCHDOG_NO_PROGRESS_REASON: CancelReason = "no_progress";
 
+// Startup's leaked-routine-firing sweep (src/daemon.ts) writes this terminal_reason
+// when a provider scope's cleanup could not be confirmed stopped, so
+// findLeakedRoutineFirings re-detects the row on the next restart (ADR 0064).
+// claimSettledRoutineWatchdogTerminations and markRoutineFiringsFailed both need the
+// exact string — the former to avoid consuming a still-unconfirmed row's pending
+// notification, the latter to avoid overwriting a durable no_progress latch while
+// cleanup is still pending — so it is exported as the one shared definition rather
+// than duplicated as a local literal in daemon.ts.
+export const LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON =
+  "leaked_routine_firing_cleanup_pending";
+
 // Shared by listRuns/listRoutineFirings so both accept either a single state
 // or a state set (e.g. the dashboard's active-now band, which spans several
 // non-terminal states) without each call site hand-rolling an IN clause. An
@@ -1181,6 +1192,12 @@ type CreateRoutineFiringInput = {
   scheduledAt?: string | null;
   triggerSource?: RoutineFiringTriggerSource;
   workspacePath?: string;
+};
+
+type SettledRoutineWatchdogTermination = {
+  firingId: string;
+  projectName: string;
+  routineName: string;
 };
 
 export class RunStore {
@@ -4263,6 +4280,7 @@ export class RunStore {
           "update routine_firings set",
           "cancel_requested = 1,",
           "cancel_reason = @reason,",
+          "watchdog_notification_pending = 1,",
           "updated_at = @updated_at",
           "where id = @id and state = 'running' and cancel_requested = 0"
         ].join(" ")
@@ -4273,6 +4291,39 @@ export class RunStore {
         updated_at: updatedAt
       });
     return result.changes > 0;
+  }
+
+  claimSettledRoutineWatchdogTerminations(): SettledRoutineWatchdogTermination[] {
+    const rows = this.database
+      .prepare(
+        [
+          "update routine_firings set watchdog_notification_pending = 0",
+          "where watchdog_notification_pending = 1",
+          "and state in ('succeeded', 'failed', 'cancelled')",
+          // A row the leaked-firing sweep couldn't confirm cleaned up keeps this
+          // terminal_reason so it is re-swept on the next restart (ADR 0064). Claiming
+          // it now would clear the durable pending bit while the row's own outcome is
+          // still unsettled, permanently losing the notification once cleanup finally
+          // confirms and overwrites terminal_reason with the real verdict.
+          "and terminal_reason is not @cleanup_pending_reason",
+          "returning id, project_name, routine_name, terminal_reason"
+        ].join(" ")
+      )
+      .all({
+        cleanup_pending_reason: LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON
+      }) as Array<{
+      id: string;
+      project_name: string;
+      routine_name: string;
+      terminal_reason: string | null;
+    }>;
+    return rows
+      .filter((row) => row.terminal_reason === WATCHDOG_NO_PROGRESS_REASON)
+      .map((row) => ({
+        firingId: row.id,
+        projectName: row.project_name,
+        routineName: row.routine_name
+      }));
   }
 
   updateRoutineFiringWorkspace(input: {
@@ -5868,20 +5919,39 @@ export class RunStore {
       [
         "update routine_firings set",
         "state = 'failed',",
-        "terminal_reason = ?,",
+        // A row the Watchdog already latched with a no-progress verdict
+        // (markRoutineFiringWatchdogNoProgress) can still be `state = 'running'` here if
+        // the daemon exited before completeRoutineFiring ever read the latch back — the
+        // leaked-firing sweep is then the only path left to settle it. Re-check the same
+        // latch completeRoutineFiring itself checks and let it win, exactly as there,
+        // so claimSettledRoutineWatchdogTerminations still finds `no_progress` instead of
+        // a leaked-firing reason that silently drops the pending alert. Skip the override
+        // for the cleanup-pending sentinel: that row isn't settled yet either way, and
+        // overwriting it would stop findLeakedRoutineFirings from re-sweeping it (ADR 0064).
+        "terminal_reason = case",
+        "when cancel_requested = 1 and cancel_reason = @no_progress_reason",
+        "and @reason is not @cleanup_pending_reason",
+        "then @no_progress_reason",
+        "else @reason end,",
         "commits_ahead = case",
         "when kind = 'report' then 0",
         "when workspace_path is not null and workspace_path <> '' then 1",
         "else commits_ahead end,",
-        "updated_at = ?",
-        "where id = ?"
+        "updated_at = @updated_at",
+        "where id = @id"
       ].join(" ")
     );
     const apply = this.database.transaction(() => {
       const events: FiringTransitionChangeEvent[] = [];
       for (const entry of entries) {
         const updatedAt = timestamp();
-        update.run(entry.reason, updatedAt, entry.firingId);
+        update.run({
+          cleanup_pending_reason: LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON,
+          id: entry.firingId,
+          no_progress_reason: WATCHDOG_NO_PROGRESS_REASON,
+          reason: entry.reason,
+          updated_at: updatedAt
+        });
         // See markRunsStale's identical guard: a re-swept row (previousState
         // already 'failed') isn't changing state, so skip the duplicate
         // transition record.
@@ -6273,6 +6343,7 @@ export class RunStore {
         notification_error text,
         cancel_requested integer not null default 0,
         cancel_reason text,
+        watchdog_notification_pending integer not null default 0,
         created_at text not null,
         updated_at text not null,
         foreign key (project_name, routine_name) references routines(project_name, name)
@@ -6448,6 +6519,11 @@ export class RunStore {
       ["routine_firings", "branch_ref", "text"],
       ["routine_firings", "cancel_requested", "integer not null default 0"],
       ["routine_firings", "cancel_reason", "text"],
+      [
+        "routine_firings",
+        "watchdog_notification_pending",
+        "integer not null default 0"
+      ],
       ["routine_firings", "notification_state", "text"],
       ["routine_firings", "notification_error", "text"],
       ["routine_firings", "workspace_pruned_at", "text"],
@@ -6578,6 +6654,18 @@ export class RunStore {
     this.database.exec(`
       create index if not exists routine_firings_watchdog_idx
       on routine_firings(state, cancel_requested, created_at, id);
+    `);
+
+    // claimSettledRoutineWatchdogTerminations runs on every Watchdog tick
+    // (including while the Watchdog is disabled, to drain pending entries).
+    // A partial index keeps that scan cheap even as routine_firings grows,
+    // since watchdog_notification_pending is 1 for at most a handful of rows
+    // at any time — it is cleared the moment a firing's termination is
+    // claimed.
+    this.database.exec(`
+      create index if not exists routine_firings_watchdog_pending_idx
+      on routine_firings(watchdog_notification_pending)
+      where watchdog_notification_pending = 1;
     `);
 
     // run_state_transitions is append-only with no retention sweep and has no

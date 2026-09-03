@@ -806,6 +806,11 @@ last-known-good Service Config fallback, and transition into and out of one-or-m
 Routine declarations. Reload and invalid-Routine health are separate edge-triggered components, so
 a persistently broken configuration sends once rather than once per tick, followed by one recovery
 message. Watchdog terminations from one reconciliation pass are grouped.
+For a Routine Firing, latching `cancel_reason = "no_progress"` only queues a durable pending
+Watchdog notification. Reconciliation consumes that pending entry only after the firing is terminal
+and includes it only when the authoritative `terminal_reason` is still `no_progress`;
+when the firing's declared deadline wins as `firing_timeout` (or any other terminal verdict wins),
+the pending entry is consumed without a Watchdog alert.
 
 All notification delivery gets two total attempts within one 30-second orchestration deadline.
 Sink construction, rendering, delivery, and delivery-evidence failures are best-effort and cannot
@@ -1945,11 +1950,19 @@ pass. Every Run persists the repository its Issue lived in when it was created; 
 cannot be determined (a legacy row, a non-GitHub tracker) proves no mismatch and is treated as
 before. See ADR 0088 and ADR 0089.
 Delayed-work registration closes with cancellation: the scheduler refuses timers armed after
-that point, so nothing fires against a store that is closing. A Run that was about to park
-into a wait state when cancellation latched is classified `cancelled` instead of flipping to
-`waiting`, and an in-flight wait re-evaluation stops before mutating rows — durable waiting
-rows are left untouched for the next daemon's reconciliation. Only after those requests have
-been awaited does it wait for in-flight dispatches to unwind. This explicit
+that point, so nothing fires against a store that is closing. Registration reports whether the
+timer was accepted. If shutdown refuses — or clears an already-accepted timer for — a retry,
+Continuation, or State Advance, the owning Run is converted to `cancelled` with
+`cancel_reason = "daemon_shutdown"` and pending notification evidence; a retry consumes budget
+only after registration succeeds, so a cleared timer that had already registered keeps its
+consumed budget. A timer accepted before shutdown latches is otherwise indistinguishable from one
+refused after — both leave the Run's scheduled callback dead — so both are persisted as durable
+shutdown evidence and both are eligible for the next daemon's resume pass; only a wait_park timer
+is exempt, per the waiting-row sentence below. A Run that was about to park into a wait state when cancellation
+latched is classified `cancelled` instead of flipping to `waiting`, and an in-flight wait
+re-evaluation stops before mutating rows — durable waiting rows are left untouched for the next
+daemon's reconciliation. Only after those requests have been awaited does it wait for in-flight
+dispatches to unwind. This explicit
 shutdown path is required because provider processes may run in a cgroup outside the daemon's
 own process tree (ADR 0064).
 
@@ -2065,7 +2078,21 @@ is abandoned, so the firing always reaches a terminal row and always releases it
 capacity slots; a cancel that arrives while the firing is healthy sees that work finish normally
 and loses no evidence. Completion is fenced on the latch as well: a provider that finishes between
 the durable latch and the in-memory cancellation still records `failed / no_progress` rather than
-`succeeded`, so the Watchdog termination notification and the durable row cannot disagree. The
+`succeeded`. The same atomic latch sets a durable pending-notification bit. Reconciliation consumes
+that bit only after the firing becomes terminal, reports the firing only when its authoritative
+`terminal_reason` is `no_progress`, and suppresses the pending alert when `firing_timeout` or any
+other verdict wins. Pending confirmation therefore survives daemon restart, never blocks the
+current tick waiting for settlement, and may delay a legitimate grouped alert until the next
+Watchdog reconciliation pass. Reconciliation is attempted on daemon ticks — the regular poll
+schedule, a manual poll trigger, or the startup pass — whenever a config with at least one project
+is loaded, gated on an in-memory clock that advances on each pass and resets to daemon start on
+restart, so a restart can wait a full `sample_interval_seconds` before the first pass. Under a
+steady poll cadence with no manual triggers, consecutive automatic passes nominally land
+`ceil(sample_interval_seconds / (polling.interval_ms / 1000)) * (polling.interval_ms / 1000)`
+seconds apart, which can approach the sum of the two intervals when they aren't multiples of each
+other; a manual poll trigger can settle a pending alert sooner than this nominal figure, and
+in-tick work ahead of the gate means an individual pass can land before or after it. Terminal
+pending entries are drained even when Watchdog sampling has subsequently been disabled. The
 outcome and commits-ahead evidence that completion gathered is retained either way, because
 Workspace retention depends on it.
 

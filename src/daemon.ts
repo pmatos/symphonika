@@ -101,6 +101,7 @@ import type { WatchdogConfig } from "./reload.js";
 import { resolveWatchdogConfig, RuntimeConfigReloader } from "./reload.js";
 import {
   INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS,
+  LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON,
   openRunStore,
   type ProjectState,
   type ProjectSnapshotRepository,
@@ -225,7 +226,8 @@ export async function startDaemon(
     );
   }
   const RUN_CLEANUP_PENDING_REASON = "leaked_active_run_cleanup_pending";
-  const FIRING_CLEANUP_PENDING_REASON = "leaked_routine_firing_cleanup_pending";
+  const FIRING_CLEANUP_PENDING_REASON =
+    LEAKED_ROUTINE_FIRING_CLEANUP_PENDING_REASON;
 
   // Provider processes run in symphonika-providers.slice, a sibling of the
   // daemon's own service cgroup (docs/adr/0064), so a previous daemon
@@ -531,7 +533,7 @@ export async function startDaemon(
     providersLoader,
     pullRequestPolicyLoader,
     runStore,
-    schedule: (item: ScheduledWorkInput) => {
+    schedule: (item: ScheduledWorkInput) =>
       activeRuns.scheduleDelayed({
         delayMs: item.delayMs,
         fire: async () => {
@@ -555,10 +557,12 @@ export async function startDaemon(
         },
         issueNumber: item.issueNumber,
         kind: item.kind,
+        ...(item.onShutdown === undefined
+          ? {}
+          : { onShutdown: item.onShutdown }),
         projectName: item.projectName,
         runId: item.runId
-      });
-    },
+      }),
     stateRoot: state.stateRoot,
     // An unavailable policy (no valid runtime snapshot ever loaded) arms no
     // deadline rather than falling back to the default cap. See ADR 0092.
@@ -993,8 +997,8 @@ export async function startDaemon(
       const watchdog = serviceConfig.watchdog;
       const nowMs = Date.now();
       if (
-        watchdog.enabled &&
-        nowMs - lastWatchdogSampleAt >= watchdog.sampleIntervalSeconds * 1_000
+        nowMs - lastWatchdogSampleAt >=
+        watchdog.sampleIntervalSeconds * 1_000
       ) {
         lastWatchdogSampleAt = nowMs;
         const watchdogTerminations: WatchdogTermination[] = [];
@@ -2021,6 +2025,7 @@ export async function startDaemon(
         await stopServer(server, logger);
         await removeDaemonEndpoint(state.stateRoot);
       } finally {
+        issueRunNotifications.settleUndeliverableOnShutdown();
         runStore.close();
       }
     }

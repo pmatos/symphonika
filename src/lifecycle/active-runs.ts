@@ -174,8 +174,8 @@ export class ActiveRunRegistry {
     await this.inFlightRuns.requestCancel(runId, reason);
   }
 
-  scheduleDelayed(input: ScheduledWorkInput): void {
-    this.scheduledWork.scheduleDelayed(input);
+  scheduleDelayed(input: ScheduledWorkInput): boolean {
+    return this.scheduledWork.scheduleDelayed(input);
   }
 
   peekDelayed(): ScheduledWorkSnapshot[] {
@@ -188,13 +188,20 @@ export class ActiveRunRegistry {
 
   async cancelAll(reason: CancelReason): Promise<void> {
     this.inFlightRuns.beginShutdown();
-    this.scheduledWork.cancelAll();
-    await Promise.allSettled(
-      this.inFlightRuns.list().map((entry) =>
+    // scheduledWork.cancelAll() latches and clears every timer synchronously
+    // before its first await (persisting cancellation evidence for cleared
+    // work, e.g. a GitHub label write, is what needs the await). Starting it
+    // here and awaiting it alongside the in-flight requestCancel calls below
+    // — rather than awaiting it up front — keeps a slow/down GitHub API from
+    // delaying provider cancellation behind cleared-timer bookkeeping.
+    const clearedWork = this.scheduledWork.cancelAll();
+    await Promise.allSettled([
+      clearedWork,
+      ...this.inFlightRuns.list().map((entry) =>
         this.inFlightRuns.requestCancel(entry.runId, reason, {
           supersedeReason: true
         })
       )
-    );
+    ]);
   }
 }

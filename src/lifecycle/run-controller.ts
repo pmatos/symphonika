@@ -253,9 +253,12 @@ export type ScheduleHandler = (input: {
   fire: () => Promise<void>;
   issueNumber: number;
   kind: "retry" | "continuation" | "state_advance" | "wait_park";
+  // See ScheduledWorkInput's onShutdown for the contract; forwarded verbatim
+  // by every daemon/CLI wiring of this handler.
+  onShutdown?: () => Promise<void>;
   projectName: string;
   runId: string;
-}) => void;
+}) => boolean;
 
 export type RunControllerOptions = {
   activeRuns: ActiveRunRegistry;
@@ -1241,6 +1244,18 @@ export class RunController {
     }
 
     if (shuttingDown) {
+      // The retry timer already fired (this callback is running) but
+      // reserveSlot's shutdown gate refused the claim before any row
+      // mutation — the row is still "failed" (transient) from when the
+      // timer was first accepted, with no cancel_reason. Unlike a refused
+      // or cleared *registration* (handled by cancelRunAfterScheduleRefused/
+      // Cleared before this callback ever started), nothing else will
+      // persist shutdown evidence for it. See issue #663 / PR #674 review.
+      await this.cancelRunAfterScheduleCleared({
+        issueNumber: refreshed.number,
+        repository,
+        runId: payload.runId
+      });
       this.logger?.debug(
         {
           issueNumber: refreshed.number,
@@ -1264,14 +1279,27 @@ export class RunController {
         },
         "symphonika retry rescheduled: contention at claim"
       );
-      this.schedule({
+      const scheduled = this.schedule({
         delayMs: this.lifecyclePolicy.continuation.delayMs,
         fire: () => this.executeRetry(payload),
         issueNumber: refreshed.number,
         kind: "retry",
+        onShutdown: () =>
+          this.cancelRunAfterScheduleCleared({
+            issueNumber: refreshed.number,
+            repository,
+            runId: payload.runId
+          }),
         projectName: project.name,
         runId: payload.runId
       });
+      if (!scheduled) {
+        await this.cancelRunAfterScheduleRefused({
+          issueNumber: refreshed.number,
+          repository,
+          runId: payload.runId
+        });
+      }
       return;
     }
 
@@ -1870,7 +1898,7 @@ export class RunController {
             ? {}
             : { workspacePath: row.workspacePath })
         });
-        this.schedule({
+        const scheduled = this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
           fire: () => this.executeWaitPark({ waitingRunId: nextWaitingRunId }),
           issueNumber: refreshed.number,
@@ -1878,6 +1906,9 @@ export class RunController {
           projectName: project.name,
           runId
         });
+        if (!scheduled) {
+          this.logWaitReevaluationRefused(nextWaitingRunId);
+        }
         return;
       }
 
@@ -1892,7 +1923,7 @@ export class RunController {
             )
           : undefined;
 
-      this.schedule({
+      const scheduled = this.schedule({
         delayMs: this.lifecyclePolicy.continuation.delayMs,
         fire: () =>
           this.executeStateAdvance({
@@ -1906,9 +1937,22 @@ export class RunController {
           }),
         issueNumber: refreshed.number,
         kind: "state_advance",
+        onShutdown: () =>
+          this.cancelRunAfterScheduleCleared({
+            issueNumber: refreshed.number,
+            repository,
+            runId
+          }),
         projectName: project.name,
         runId
       });
+      if (!scheduled) {
+        await this.cancelRunAfterScheduleRefused({
+          issueNumber: refreshed.number,
+          repository,
+          runId
+        });
+      }
       return;
     }
 
@@ -1960,7 +2004,7 @@ export class RunController {
       shutdownResume: true
     };
     this.retainShutdownResume(resumePayload.parentRunId);
-    this.schedule({
+    const scheduled = this.schedule({
       delayMs: this.lifecyclePolicy.continuation.delayMs,
       fire: async () => {
         try {
@@ -1977,6 +2021,13 @@ export class RunController {
       projectName: resumePayload.projectName,
       runId: resumePayload.parentRunId
     });
+    if (!scheduled) {
+      this.releaseShutdownResume(resumePayload.parentRunId);
+      this.logger?.debug(
+        { runId: resumePayload.parentRunId },
+        "symphonika shutdown resume registration refused: daemon shutting down"
+      );
+    }
   }
 
   private retainShutdownResume(parentRunId: string): void {
@@ -2271,7 +2322,22 @@ export class RunController {
     } catch (error) {
       if (error instanceof RegistryShutdownError) {
         // Skip WITHOUT rescheduling: a rescheduled timer would keep the
-        // shutdown drain alive past stop().
+        // shutdown drain alive past stop(). claimAndPersistRun's own
+        // catch already persists cancellation when it threw AFTER creating
+        // the child row (runId) — touching the parent here would clobber
+        // that already-correct state. But its fast-path throw (shutdown
+        // observed before any row/label mutation) never reaches that catch,
+        // so if no child row exists, the parent (payload.parentRunId,
+        // already "succeeded" from the advance decision) is left with no
+        // shutdown evidence and no walk to resume. See issue #663 / PR #674
+        // review.
+        if (this.runStore.getRun(runId) === undefined) {
+          await this.cancelRunAfterScheduleCleared({
+            issueNumber: refreshed.number,
+            repository,
+            runId: payload.parentRunId
+          });
+        }
         this.logger?.debug(
           {
             issueNumber: refreshed.number,
@@ -2306,14 +2372,27 @@ export class RunController {
           this.scheduleShutdownResume(payload);
           return;
         }
-        this.schedule({
+        const scheduled = this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
           fire: () => this.executeStateAdvance(payload),
           issueNumber: refreshed.number,
           kind: "state_advance",
+          onShutdown: () =>
+            this.cancelRunAfterScheduleCleared({
+              issueNumber: refreshed.number,
+              repository,
+              runId: payload.parentRunId
+            }),
           projectName: project.name,
           runId
         });
+        if (!scheduled) {
+          await this.cancelRunAfterScheduleRefused({
+            issueNumber: refreshed.number,
+            repository,
+            runId: payload.parentRunId
+          });
+        }
         return;
       }
       throw error;
@@ -2324,26 +2403,6 @@ export class RunController {
   // Only the shutdown path awaits: the isShuttingDown() check at each call
   // site and the createContinuationRun below it are synchronous, so stop()
   // cannot close the gate between check and row creation. See ADR 0052.
-  private async rollbackScheduledRunClaimLabel(input: {
-    issueNumber: number;
-    phase: "continuation" | "state-advance";
-    projectName: string;
-    repository: GitHubIssueRepositoryInput;
-    runId: string;
-  }): Promise<void> {
-    await this.claimLabels.release({
-      issueNumber: input.issueNumber,
-      phase: input.phase,
-      repository: input.repository
-    });
-    this.logger?.debug(
-      { issueNumber: input.issueNumber, runId: input.runId },
-      `symphonika ${
-        input.phase === "state-advance" ? "state advance" : "continuation"
-      } skipped: daemon shutting down`
-    );
-  }
-
   private async failScheduledRunBeforeProvider(input: {
     issue: IssueSnapshot;
     parentRunId: string;
@@ -2356,9 +2415,19 @@ export class RunController {
     runId: string;
   }): Promise<void> {
     // Shutdown gate: every call site returns immediately after this helper,
-    // so skipping here skips the whole exit. The checks are synchronous
-    // with the row creation below — see rollbackScheduledRunClaimLabel.
+    // and no child row (input.runId) is ever created on this path, so the
+    // parent (input.parentRunId) — already "succeeded" from the advance/
+    // continuation decision — is the only durable row that can still carry
+    // shutdown evidence. Without this, the parent is left with no
+    // cancel_reason and the next daemon's resume query ignores it, the same
+    // gap the fired-callback fix (window 3) closed for the try/catch below.
+    // See issue #663 / PR #674 review.
     if (this.activeRuns.isShuttingDown()) {
+      await this.cancelRunAfterScheduleCleared({
+        issueNumber: input.issue.number,
+        repository: input.repository,
+        runId: input.parentRunId
+      });
       this.logger?.debug(
         { issueNumber: input.issue.number, runId: input.runId },
         `symphonika ${
@@ -2384,13 +2453,21 @@ export class RunController {
       }
     );
     if (this.activeRuns.isShuttingDown()) {
-      await this.rollbackScheduledRunClaimLabel({
+      // Unlike the pre-label-write check above, sym:claimed is now applied
+      // — but daemon_shutdown cancellation must KEEP it (ADR 0088's resume
+      // pass relies on the claim staying present), not release it. Cancel
+      // the parent the same way as above rather than rolling the label back.
+      await this.cancelRunAfterScheduleCleared({
         issueNumber: input.issue.number,
-        phase: input.phase,
-        projectName: input.project.name,
         repository: input.repository,
-        runId: input.runId
+        runId: input.parentRunId
       });
+      this.logger?.debug(
+        { issueNumber: input.issue.number, runId: input.runId },
+        `symphonika ${
+          input.phase === "state-advance" ? "state advance" : "continuation"
+        } skipped: daemon shutting down`
+      );
       return;
     }
     this.runStore.createContinuationRun({
@@ -2444,6 +2521,14 @@ export class RunController {
     targetState: ExpandedWorkflowState;
   }): Promise<void> {
     if (this.activeRuns.isShuttingDown()) {
+      // No child row exists yet — cancel the parent so shutdown evidence is
+      // durable. See the matching gate in failScheduledRunBeforeProvider for
+      // the full rationale. See issue #663 / PR #674 review.
+      await this.cancelRunAfterScheduleCleared({
+        issueNumber: input.issue.number,
+        repository: input.repository,
+        runId: input.parentRunId
+      });
       this.logger?.debug(
         { issueNumber: input.issue.number, runId: input.runId },
         "symphonika state advance skipped: daemon shutting down"
@@ -2476,12 +2561,12 @@ export class RunController {
         }
       );
       if (this.activeRuns.isShuttingDown()) {
-        await this.rollbackScheduledRunClaimLabel({
+        // sym:claimed is now applied but must be KEPT for daemon_shutdown
+        // (ADR 0088's resume pass relies on it), not rolled back.
+        await this.cancelRunAfterScheduleCleared({
           issueNumber: input.issue.number,
-          phase: "state-advance",
-          projectName: input.project.name,
           repository: input.repository,
-          runId: input.runId
+          runId: input.parentRunId
         });
         return;
       }
@@ -2659,7 +2744,17 @@ export class RunController {
     } catch (error) {
       if (error instanceof RegistryShutdownError) {
         // Skip WITHOUT rescheduling: a rescheduled timer would keep the
-        // shutdown drain alive past stop().
+        // shutdown drain alive past stop(). Same fast-path-vs-post-create
+        // distinction as executeStateAdvance: only cancel the parent when
+        // claimAndPersistRun never got far enough to create (and itself
+        // cancel) the child row. See issue #663 / PR #674 review.
+        if (this.runStore.getRun(runId) === undefined) {
+          await this.cancelRunAfterScheduleCleared({
+            issueNumber: refreshed.number,
+            repository,
+            runId: payload.parentRunId
+          });
+        }
         this.logger?.debug(
           {
             issueNumber: refreshed.number,
@@ -2684,14 +2779,27 @@ export class RunController {
           },
           "symphonika continuation rescheduled: contention at claim"
         );
-        this.schedule({
+        const scheduled = this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
           fire: () => this.executeContinuation(payload),
           issueNumber: refreshed.number,
           kind: "continuation",
+          onShutdown: () =>
+            this.cancelRunAfterScheduleCleared({
+              issueNumber: refreshed.number,
+              repository,
+              runId: payload.parentRunId
+            }),
           projectName: project.name,
           runId
         });
+        if (!scheduled) {
+          await this.cancelRunAfterScheduleRefused({
+            issueNumber: refreshed.number,
+            repository,
+            runId: payload.parentRunId
+          });
+        }
         return;
       }
       throw error;
@@ -3162,6 +3270,56 @@ export class RunController {
         "symphonika issue Run notification evidence write failed"
       );
     }
+  }
+
+  private async cancelRunAfterScheduleRefused(input: {
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    await this.cancelScheduledLifecycleWork({
+      ...input,
+      reason: CANCEL_REASONS.DAEMON_SHUTDOWN
+    });
+    this.markNotificationPendingIfNeeded(input.runId, false);
+    this.logger?.debug(
+      { issueNumber: input.issueNumber, runId: input.runId },
+      "symphonika delayed work refused: daemon shutting down"
+    );
+  }
+
+  // Companion to cancelRunAfterScheduleRefused for the other half of the same
+  // shutdown race: a timer accepted before cancelAll() latched the registry,
+  // then cleared before it fired. Passed as onShutdown to every retry/
+  // continuation/state_advance schedule() call so the registry can invoke it
+  // once the timer is gone — that item never gets its own fire() call, so
+  // this is the only remaining chance to record cancellation evidence. Without
+  // it the row is left "failed" (transient) with sym:claimed and no
+  // cancel_reason, which the restart-resume pass ignores because it requires
+  // cancel_reason=daemon_shutdown (see shutdown-resume.ts / SPEC.md). Not
+  // wired to wait_park: a waiting row is already durable and is meant to
+  // survive shutdown untouched for the next daemon's reconciliation.
+  private async cancelRunAfterScheduleCleared(input: {
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    await this.cancelScheduledLifecycleWork({
+      ...input,
+      reason: CANCEL_REASONS.DAEMON_SHUTDOWN
+    });
+    this.markNotificationPendingIfNeeded(input.runId, false);
+    this.logger?.debug(
+      { issueNumber: input.issueNumber, runId: input.runId },
+      "symphonika accepted delayed work cleared: daemon shutting down"
+    );
+  }
+
+  private logWaitReevaluationRefused(runId: string): void {
+    this.logger?.debug(
+      { runId },
+      "symphonika wait re-evaluation registration refused: daemon shutting down"
+    );
   }
 
   private async claimAndPersistRun(input: {
@@ -3644,7 +3802,7 @@ export class RunController {
           return;
         }
         this.runStore.updateRunState(input.runId, "waiting");
-        this.schedule({
+        const scheduled = this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
           fire: () => this.executeWaitPark({ waitingRunId: input.runId }),
           issueNumber: input.issue.number,
@@ -3655,7 +3813,10 @@ export class RunController {
         // Set the flag so finally skips the failure-classification pipeline
         // (the wait_park scheduled callback owns re-evaluation), but still
         // runs the unconditional unregister that releases the in-flight slot.
-        parkedAsWaiting = true;
+        parkedAsWaiting = scheduled;
+        if (!scheduled) {
+          this.logWaitReevaluationRefused(input.runId);
+        }
         return;
       }
 
@@ -4661,7 +4822,7 @@ export class RunController {
           },
           "symphonika scheduling state advance"
         );
-        this.schedule({
+        const scheduled = this.schedule({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
           fire: () =>
             this.executeStateAdvance({
@@ -4672,9 +4833,22 @@ export class RunController {
             }),
           issueNumber: refreshedForAdvance.number,
           kind: "state_advance",
+          onShutdown: () =>
+            this.cancelRunAfterScheduleCleared({
+              issueNumber: input.issue.number,
+              repository: input.repository,
+              runId: input.runId
+            }),
           projectName: input.project.name,
           runId: input.runId
         });
+        if (!scheduled) {
+          await this.cancelRunAfterScheduleRefused({
+            issueNumber: input.issue.number,
+            repository: input.repository,
+            runId: input.runId
+          });
+        }
         return;
       }
       // Bail-out: `refreshIssue` returned `undefined` (transient API error)
@@ -4731,7 +4905,7 @@ export class RunController {
         "symphonika scheduling wait re-evaluation"
       );
       const waitingRunId = input.waitPark.waitingRunId;
-      this.schedule({
+      const scheduled = this.schedule({
         delayMs: this.lifecyclePolicy.continuation.delayMs,
         fire: () => this.executeWaitPark({ waitingRunId }),
         issueNumber: input.issue.number,
@@ -4739,6 +4913,9 @@ export class RunController {
         projectName: input.project.name,
         runId: input.runId
       });
+      if (!scheduled) {
+        this.logWaitReevaluationRefused(waitingRunId);
+      }
       return;
     }
 
@@ -4750,9 +4927,9 @@ export class RunController {
       if (currentRetries >= this.lifecyclePolicy.retry.cap) {
         return;
       }
-      const next = this.runStore.incrementRetryCount(input.runId);
+      const next = currentRetries + 1;
       const delayMs = computeRetryDelayMs(next, this.lifecyclePolicy);
-      this.schedule({
+      const scheduled = this.schedule({
         delayMs,
         fire: () =>
           this.executeRetry({
@@ -4776,9 +4953,24 @@ export class RunController {
           }),
         issueNumber: input.issue.number,
         kind: "retry",
+        onShutdown: () =>
+          this.cancelRunAfterScheduleCleared({
+            issueNumber: input.issue.number,
+            repository: input.repository,
+            runId: input.runId
+          }),
         projectName: input.project.name,
         runId: input.runId
       });
+      if (!scheduled) {
+        await this.cancelRunAfterScheduleRefused({
+          issueNumber: input.issue.number,
+          repository: input.repository,
+          runId: input.runId
+        });
+        return;
+      }
+      this.runStore.incrementRetryCount(input.runId);
       return;
     }
 
@@ -4896,7 +5088,7 @@ export class RunController {
       "symphonika scheduling continuation"
     );
 
-    this.schedule({
+    const scheduled = this.schedule({
       delayMs: this.lifecyclePolicy.continuation.delayMs,
       fire: () =>
         this.executeContinuation({
@@ -4909,9 +5101,22 @@ export class RunController {
         }),
       issueNumber: refreshed.number,
       kind: "continuation",
+      onShutdown: () =>
+        this.cancelRunAfterScheduleCleared({
+          issueNumber: input.issue.number,
+          repository: input.repository,
+          runId: input.runId
+        }),
       projectName: input.project.name,
       runId: input.runId
     });
+    if (!scheduled) {
+      await this.cancelRunAfterScheduleRefused({
+        issueNumber: input.issue.number,
+        repository: input.repository,
+        runId: input.runId
+      });
+    }
   }
 
   private async refreshIssue(input: {

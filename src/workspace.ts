@@ -218,10 +218,24 @@ async function prepareIssueWorkspaceResult(
     return { ...plan, reused: true };
   }
 
+  await refuseConflictingWorktree(plan, input.signal, abortCleanup);
+  await addWorktree(plan, input.signal, abortCleanup);
+  return { ...plan, reused: false };
+}
+
+// Shared by prepareIssueWorkspaceResult and prepareAdoptedPrWorkspaceResult:
+// refuses if plan.branchName is already checked out at some other worktree
+// path than plan.workspacePath (the exists() check above already ruled out
+// a worktree at plan.workspacePath itself).
+async function refuseConflictingWorktree(
+  plan: WorkspacePathPlan,
+  signal: AbortSignal | undefined,
+  abortCleanup: WorkspaceAbortCleanup
+): Promise<void> {
   const conflictingWorktreePath = await worktreePathForBranch(
     plan.cachePath,
     plan.branchName,
-    input.signal,
+    signal,
     abortCleanup
   );
   if (conflictingWorktreePath !== undefined) {
@@ -230,9 +244,6 @@ async function prepareIssueWorkspaceResult(
       `issue branch ${plan.branchName} is already checked out at ${conflictingWorktreePath}`
     );
   }
-
-  await addWorktree(plan, input.signal, abortCleanup);
-  return { ...plan, reused: false };
 }
 
 // Shared by prepareIssueWorkspaceResult and prepareAdoptedPrWorkspaceResult:
@@ -370,14 +381,9 @@ async function prepareAdoptedPrWorkspaceResult(
   // Narrow, single-ref fetch of the PR's own branch --
   // ensureRepositoryCacheTracked's own fetch above is scoped to base_branch
   // only.
-  await workspaceGit(
-    [
-      "-C",
-      plan.cachePath,
-      "fetch",
-      "origin",
-      `${plan.branchName}:refs/remotes/origin/${plan.branchName}`
-    ],
+  await fetchOriginRef(
+    plan.cachePath,
+    plan.branchName,
     input.signal,
     abortCleanup
   );
@@ -435,18 +441,7 @@ async function prepareAdoptedPrWorkspaceResult(
     return { ...plan, reused: true };
   }
 
-  const conflictingWorktreePath = await worktreePathForBranch(
-    plan.cachePath,
-    plan.branchName,
-    input.signal,
-    abortCleanup
-  );
-  if (conflictingWorktreePath !== undefined) {
-    throw new WorkspacePreparationError(
-      "branch_conflict",
-      `issue branch ${plan.branchName} is already checked out at ${conflictingWorktreePath}`
-    );
-  }
+  await refuseConflictingWorktree(plan, input.signal, abortCleanup);
 
   // No worktree exists anywhere for this branch, so force-updating (or
   // creating) the cache-side branch ref is always safe here -- nothing has
@@ -722,6 +717,22 @@ export async function ensureRepositoryCache(
   await ensureRepositoryCacheTracked(project, cachePath, signal);
 }
 
+// Shared by ensureRepositoryCacheTracked's own base_branch fetch and
+// prepareAdoptedPrWorkspaceResult's narrow PR-branch fetch: fetches one ref
+// from origin into its own remote-tracking ref in the bare cache.
+async function fetchOriginRef(
+  cachePath: string,
+  ref: string,
+  signal: AbortSignal | undefined,
+  abortCleanup?: WorkspaceAbortCleanup
+): Promise<void> {
+  await workspaceGit(
+    ["-C", cachePath, "fetch", "origin", `${ref}:refs/remotes/origin/${ref}`],
+    signal,
+    abortCleanup
+  );
+}
+
 async function ensureRepositoryCacheTracked(
   project: WorkspaceProject,
   cachePath: string,
@@ -748,14 +759,9 @@ async function ensureRepositoryCacheTracked(
       );
     }
     signal?.throwIfAborted();
-    await workspaceGit(
-      [
-        "-C",
-        cachePath,
-        "fetch",
-        "origin",
-        `${project.workspace.git.base_branch}:refs/remotes/origin/${project.workspace.git.base_branch}`
-      ],
+    await fetchOriginRef(
+      cachePath,
+      project.workspace.git.base_branch,
       signal,
       abortCleanup
     );

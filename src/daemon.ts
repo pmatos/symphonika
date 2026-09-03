@@ -1654,18 +1654,21 @@ export async function startDaemon(
       return { kind: "not-issue-branch" };
     }
 
+    const checkLiveRun = (): string | undefined =>
+      findLiveRunIdForIssue({
+        getActiveRuns: getActiveRunsForLiveCheck,
+        getProjectRepoAliases: resolveProjectRepoAliases,
+        getScheduled: getScheduledCallbacks,
+        issueNumber: input.issueNumber,
+        projectName: input.projectName,
+        runStore
+      });
+
     // Cheap, unlocked pre-check: refuse an obviously-conflicting request
     // before paying for the git fetch/worktree prep below. Re-checked under
     // the mutex immediately before the writes, since this unlocked read can
     // race a concurrent claim landing during that I/O.
-    const earlyLiveRunId = findLiveRunIdForIssue({
-      getActiveRuns: getActiveRunsForLiveCheck,
-      getProjectRepoAliases: resolveProjectRepoAliases,
-      getScheduled: getScheduledCallbacks,
-      issueNumber: input.issueNumber,
-      projectName: input.projectName,
-      runStore
-    });
+    const earlyLiveRunId = checkLiveRun();
     if (earlyLiveRunId !== undefined) {
       return { kind: "live-run-conflict", runId: earlyLiveRunId };
     }
@@ -1694,14 +1697,7 @@ export async function startDaemon(
     let claim:
       { kind: "conflict"; runId: string } | { kind: "ok"; runId: string };
     try {
-      const liveRunId = findLiveRunIdForIssue({
-        getActiveRuns: getActiveRunsForLiveCheck,
-        getProjectRepoAliases: resolveProjectRepoAliases,
-        getScheduled: getScheduledCallbacks,
-        issueNumber: input.issueNumber,
-        projectName: input.projectName,
-        runStore
-      });
+      const liveRunId = checkLiveRun();
       if (liveRunId !== undefined) {
         claim = { kind: "conflict", runId: liveRunId };
       } else {
@@ -1713,11 +1709,6 @@ export async function startDaemon(
           projectName: input.projectName,
           workspacePath: workspace.workspacePath
         });
-        const alreadyTracked =
-          runStore.findTrackedPullRequestByProjectAndNumber({
-            prNumber: input.prNumber,
-            projectName: input.projectName
-          });
         runStore.trackPullRequest({
           branchName: expectedBranch,
           headSha: snapshot.headSha,
@@ -1727,16 +1718,16 @@ export async function startDaemon(
           prUrl: snapshot.url,
           runId
         });
-        // runId is a fresh UUID minted above, so it can never already
-        // equal alreadyTracked.runId -- reassignment is unconditional
-        // whenever a prior tracked row existed.
-        if (alreadyTracked !== undefined) {
-          runStore.reassignTrackedPullRequestRun({
-            prNumber: input.prNumber,
-            projectName: input.projectName,
-            runId
-          });
-        }
+        // Unconditional: trackPullRequest's upsert just wrote a row for
+        // (projectName, prNumber) either way (insert or update-without-
+        // touching-run_id), so re-pointing it at this fresh run_id is a
+        // no-op when the insert branch ran and the needed correction when
+        // an older tracked row's upsert preserved a stale run_id.
+        runStore.reassignTrackedPullRequestRun({
+          prNumber: input.prNumber,
+          projectName: input.projectName,
+          runId
+        });
         claim = { kind: "ok", runId };
       }
     } finally {

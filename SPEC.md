@@ -2102,16 +2102,19 @@ that bit only after the firing becomes terminal, reports the firing only when it
 `terminal_reason` is `no_progress`, and suppresses the pending alert when `firing_timeout` or any
 other verdict wins. Pending confirmation therefore survives daemon restart, never blocks the
 current tick waiting for settlement, and may delay a legitimate grouped alert until the next
-Watchdog reconciliation pass. Reconciliation is attempted on daemon ticks — the regular poll
-schedule, a manual poll trigger, or the startup pass — whenever a config with at least one project
-is loaded, gated on an in-memory clock that advances on each pass and resets to daemon start on
-restart, so a restart can wait a full `sample_interval_seconds` before the first pass. Under a
-steady poll cadence with no manual triggers, consecutive automatic passes nominally land
-`ceil(sample_interval_seconds / (polling.interval_ms / 1000)) * (polling.interval_ms / 1000)`
-seconds apart, which can approach the sum of the two intervals when they aren't multiples of each
-other; a manual poll trigger can settle a pending alert sooner than this nominal figure, and
-in-tick work ahead of the gate means an individual pass can land before or after it. Terminal
-pending entries are drained even when Watchdog sampling has subsequently been disabled. The
+Watchdog reconciliation pass. Reconciliation runs on its own timer, armed at
+`watchdog.sample_interval_seconds` and independent of `polling.interval_ms` and the poll tick
+(ADR-2026-09-04-0806) — so a large polling interval no longer bounds how often the Watchdog drains
+a settled Routine Firing's pending bit. The timer is re-armed against the current
+`sample_interval_seconds` on every config reload (the poll tick's own reload, a manual poll
+trigger, an editor save, or the startup load), and a pass in flight is never overlapped by a second
+one: a timer fire that lands before the previous pass finishes is dropped rather than queued, so
+consecutive passes land `sample_interval_seconds` apart under normal conditions and stretch only
+when a single pass itself outlasts that interval (for example a large Workspace walk), never when
+the poll tick is slow or infrequent. No config is loaded until the first reload completes, so a
+restart still waits up to one `sample_interval_seconds` for the timer to arm and produce its first
+pass. Terminal pending entries are drained even when Watchdog sampling has subsequently been
+disabled. The
 outcome and commits-ahead evidence that completion gathered is retained either way, because
 Workspace retention depends on it.
 

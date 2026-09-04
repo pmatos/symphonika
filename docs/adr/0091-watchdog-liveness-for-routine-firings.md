@@ -93,16 +93,10 @@ declared firing deadline and progress liveness.
 - A Watchdog alert is delayed until terminal settlement confirms `no_progress`, so a declared
   deadline that wins the race cannot produce a misleading Watchdog termination notification.
 - Pending confirmation survives daemon restart and can delay a legitimate grouped notification
-  until the next Watchdog reconciliation pass. Reconciliation is attempted on ticks — the regular
-  poll schedule, a manual poll trigger, or the startup pass — whenever a config with at least one
-  project is loaded, gated on an in-memory clock that resets to daemon start on restart, so a
-  restart can wait a full sample interval before the first pass. Under steady polling with no
-  manual triggers, consecutive automatic passes nominally land
-  `ceil(sample_interval / poll_interval) * poll_interval` seconds apart, which can approach the
-  sum of the two intervals when they aren't multiples; a manual trigger can settle a pending alert
-  sooner, and in-tick work ahead of the gate means an individual pass can land before or after
-  that figure. Decoupling reconciliation onto its own schedule to restore a true
-  one-sample-interval bound is tracked separately (#690).
+  until the next Watchdog reconciliation pass, bounded at one `sample_interval_seconds`.
+  Reconciliation runs on its own timer, decoupled from the poll tick and from
+  `polling.interval_ms`, per ADR-2026-09-04-0806 (issue #690). A restart still waits up to one
+  sample interval for the timer to arm and produce its first pass.
 - Post-cancellation GitHub and Git evidence is best-effort: a firing whose enrichment is itself
   wedged settles without it rather than holding its slot.
 

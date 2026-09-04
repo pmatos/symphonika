@@ -8,17 +8,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
-  confirmProviderScopeCleanup,
   createProcessScope,
-  markProviderScopeCleanupPending,
   type ProcessScope
 } from "../lifecycle/process-scope.js";
-import { providerScratchEnvironment } from "../lifecycle/provider-scratch.js";
-import type {
-  AgentProvider,
-  ProviderEvent,
-  ProviderRunInput
-} from "../provider.js";
+import type { AgentProvider, ProviderEvent } from "../provider.js";
 import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import { VERSION } from "../version.js";
 import { parseProviderCommand, type ProviderLabel } from "./command-parse.js";
@@ -41,25 +34,20 @@ import {
   type ProcessQueue,
   type ProcessQueueItem
 } from "./jsonl-process-queue.js";
+import { shutdownProviderProcess } from "./provider-process.js";
 import {
-  shutdownProviderProcess,
-  spawnProviderProcess
-} from "./provider-process.js";
-import { attachProviderStderrLog } from "./provider-stderr.js";
+  jsonlProviderSession,
+  type ProviderRunState,
+  type ProviderTurn
+} from "./provider-session.js";
 
 const PROVIDER_LABEL: ProviderLabel = "Codex";
 
-type ActiveCodexRun = {
-  cancelled: boolean;
-  child?: ChildProcessWithoutNullStreams;
+type ActiveCodexRun = ProviderRunState & {
   nextRequestId: number;
   reducer: CodexEventReducer;
   threadId?: string;
   turnId?: string;
-};
-
-type SpawnedCodexRun = ActiveCodexRun & {
-  child: ChildProcessWithoutNullStreams;
 };
 
 type ResponseReadResult = {
@@ -79,56 +67,21 @@ export function createCodexProvider(
 ): AgentProvider {
   const processScope = options.processScope ?? createProcessScope();
   const now = options.now ?? (() => Date.now());
-  const activeRuns = new Map<string, ActiveCodexRun>();
-
-  return {
-    cancel: (runId) => {
-      const activeRun = activeRuns.get(runId);
-      if (activeRun === undefined) {
-        return Promise.resolve();
-      }
-
-      activeRun.cancelled = true;
-      if (activeRun.child === undefined) {
-        // Cancelled before the scope probe/spawn finished — runAttempt's own
-        // post-probe recheck (see below) is what stops it from launching.
-        return Promise.resolve();
-      }
-      const child = activeRun.child;
-      return shutdownProviderProcess(
-        child,
-        () => {
-          if (
-            activeRun.threadId !== undefined &&
-            activeRun.turnId !== undefined
-          ) {
-            writeJson(child, {
-              id: activeRun.nextRequestId,
-              method: "turn/interrupt",
-              params: {
-                threadId: activeRun.threadId,
-                turnId: activeRun.turnId
-              }
-            });
-            activeRun.nextRequestId += 1;
+  const session = jsonlProviderSession<ActiveCodexRun>({
+    cancelInterrupt: (activeRun, child) => () => {
+      if (activeRun.threadId !== undefined && activeRun.turnId !== undefined) {
+        writeJson(child, {
+          id: activeRun.nextRequestId,
+          method: "turn/interrupt",
+          params: {
+            threadId: activeRun.threadId,
+            turnId: activeRun.turnId
           }
-        },
-        "cancellation"
-      );
+        });
+        activeRun.nextRequestId += 1;
+      }
     },
-    name: "codex",
-    runAttempt: async function* (
-      input: ProviderRunInput
-    ): AsyncGenerator<ProviderEvent> {
-      // Registered before the scope-probe await below so a cancel arriving
-      // during that await (up to probeTimeoutMs on the first, uncached
-      // call) has somewhere to land instead of being a silent no-op —
-      // cancel() finds this entry, sets cancelled, and the recheck right
-      // after the await stops the spawn from ever happening. Without this
-      // placeholder, a cancel here would be permanently lost: RunController
-      // only rechecks its own cancellation latch once, before runAttempt is
-      // called (see ADR 0052 at run-controller.ts:2274-2281), and this
-      // await reopens that exact race one level deeper.
+    createRunState: () => {
       const activeRun: ActiveCodexRun = {
         cancelled: false,
         nextRequestId: 4,
@@ -140,215 +93,16 @@ export function createCodexProvider(
           })
         })
       };
-      activeRuns.set(input.run.id, activeRun);
-
-      const renderedCommand = renderProviderCommandTemplate(
-        input.provider.command,
-        input.routine ?? {}
-      ).rendered;
-      const command = await processScope.wrapForProviderScope(
-        input.run,
-        parseProviderCommand(renderedCommand, PROVIDER_LABEL)
-      );
-      if (activeRun.cancelled) {
-        // Outside the try/finally below (which owns the only other
-        // activeRuns.delete call) -- without this, this placeholder would
-        // leak in the map for the lifetime of the provider instance.
-        activeRuns.delete(input.run.id);
-        yield {
-          normalized: {
-            cancelled: true,
-            exitCode: null,
-            signal: null,
-            type: "process_exit"
-          },
-          raw: {
-            cancelled: true,
-            exitCode: null,
-            kind: "process_exit",
-            signal: null
-          }
-        };
-        return;
-      }
-      const providerScopeWrapped = markProviderScopeCleanupPending(
-        command,
-        input.recordProviderScopeCleanupPending
-      );
-      const child = spawnProviderProcess(
-        command,
-        input.workspacePath,
-        providerScratchEnvironment(input.scratchPath, input.globalMaxInFlight)
-      );
-      activeRun.child = child;
-      const spawnedRun: SpawnedCodexRun = activeRun as SpawnedCodexRun;
-      const stderrCapture = attachProviderStderrLog(
-        child,
-        input.stderrLogPath,
-        input.stderrRedactSecrets === undefined
-          ? {}
-          : { redactSecrets: input.stderrRedactSecrets }
-      );
-      const queue = createJsonlProcessQueue(child);
-
-      try {
-        writeJson(child, {
-          id: 1,
-          method: "initialize",
-          params: {
-            capabilities: {
-              experimentalApi: true
-            },
-            clientInfo: {
-              name: "symphonika",
-              title: "Symphonika",
-              version: VERSION
-            }
-          }
-        });
-        const initialized = await readUntilResponse(
-          queue,
-          1,
-          spawnedRun,
-          (raw) => ({
-            raw
-          })
-        );
-        yield* initialized.events;
-        if (initialized.stopped) {
-          return;
-        }
-
-        writeJson(child, {
-          method: "initialized"
-        });
-        writeJson(child, {
-          id: 2,
-          method: "thread/start",
-          params: codexThreadStartParams(input.workspacePath)
-        });
-        const threadStarted = await readUntilResponse(
-          queue,
-          2,
-          spawnedRun,
-          (raw) => {
-            const result = objectField(raw, "result");
-            const thread = objectField(result, "thread");
-            const threadId = stringField(thread, "id");
-            if (threadId !== undefined) {
-              activeRun.threadId = threadId;
-            }
-
-            if (threadId === undefined) {
-              return {
-                raw
-              };
-            }
-
-            return {
-              normalized: {
-                cwd: stringField(result, "cwd") ?? input.workspacePath,
-                sessionId: threadId,
-                threadId,
-                type: "session_started"
-              },
-              raw
-            };
-          }
-        );
-        yield* threadStarted.events;
-        if (threadStarted.stopped) {
-          return;
-        }
-
-        const threadId = activeRun.threadId;
-        if (threadId === undefined) {
-          yield protocolFailure(
-            "thread/start response did not include thread.id"
-          );
-          await shutdownProviderProcess(child);
-          yield* await drainUntilExit(queue, activeRun);
-          return;
-        }
-
-        writeJson(child, {
-          id: 3,
-          method: "turn/start",
-          params: {
-            input: [
-              {
-                text: input.prompt,
-                text_elements: [],
-                type: "text"
-              }
-            ],
-            threadId
-          }
-        });
-        const turnStarted = await readUntilResponse(
-          queue,
-          3,
-          spawnedRun,
-          (raw) => {
-            const result = objectField(raw, "result");
-            const turn = objectField(result, "turn");
-            const turnId = stringField(turn, "id");
-            if (turnId !== undefined) {
-              activeRun.turnId = turnId;
-            }
-
-            return {
-              raw
-            };
-          }
-        );
-        yield* turnStarted.events;
-        if (turnStarted.stopped) {
-          return;
-        }
-
-        while (true) {
-          const event = providerEventFromQueueItem(
-            await queue.next(),
-            activeRun
-          );
-          yield event;
-          const type = event.normalized?.type;
-
-          if (type === "process_exit") {
-            return;
-          }
-
-          if (
-            type === "input_required" ||
-            type === "malformed_event" ||
-            type === "turn_completed" ||
-            type === "turn_failed"
-          ) {
-            await shutdownProviderProcess(child);
-          }
-        }
-      } finally {
-        activeRuns.delete(input.run.id);
-        // Runs unconditionally, not only on cancellation: the `process_exit`
-        // branch above returns directly on ordinary successful completion,
-        // bypassing terminateProcess entirely. A provider-spawned build tool
-        // (cargo, rustc, ...) can outlive that exit as a detached
-        // grandchild; stopping the run's scope here is what actually reaps
-        // it (see docs/adr/0064).
-        await confirmProviderScopeCleanup(
-          processScope,
-          input.run,
-          providerScopeWrapped,
-          input.recordProviderScopeCleanupPending
-        );
-        // Last, so scope teardown is never delayed by it: the caller reads
-        // the stderr log to explain an unclean exit as soon as this generator
-        // returns, and only this await orders that read after the tee's write
-        // (bounded, so a wedged sink cannot strand the attempt).
-        await stderrCapture.waitForFlush();
-      }
+      return activeRun;
     },
+    label: PROVIDER_LABEL,
+    name: "codex",
+    processScope,
+    runTurn: runCodexTurn
+  });
+
+  return {
+    ...session,
     validate: async (command, values = {}) => {
       const rendered = renderProviderCommandTemplate(command, values).rendered;
       const parsed = parseProviderCommand(rendered, PROVIDER_LABEL);
@@ -363,10 +117,135 @@ export function createCodexProvider(
   };
 }
 
+// The Codex JSON-RPC protocol: initialize, start a thread and a turn, then
+// stream events. The prologue, finally (ADR 0064), and cancel race (ADR 0052)
+// are owned by the shared provider session harness.
+async function* runCodexTurn(
+  turn: ProviderTurn<ActiveCodexRun, ProcessQueue>
+): AsyncGenerator<ProviderEvent> {
+  const { child, input, queue, run: activeRun } = turn;
+  writeJson(child, {
+    id: 1,
+    method: "initialize",
+    params: {
+      capabilities: {
+        experimentalApi: true
+      },
+      clientInfo: {
+        name: "symphonika",
+        title: "Symphonika",
+        version: VERSION
+      }
+    }
+  });
+  const initialized = await readUntilResponse(queue, 1, activeRun, (raw) => ({
+    raw
+  }));
+  yield* initialized.events;
+  if (initialized.stopped) {
+    return;
+  }
+
+  writeJson(child, {
+    method: "initialized"
+  });
+  writeJson(child, {
+    id: 2,
+    method: "thread/start",
+    params: codexThreadStartParams(input.workspacePath)
+  });
+  const threadStarted = await readUntilResponse(queue, 2, activeRun, (raw) => {
+    const result = objectField(raw, "result");
+    const thread = objectField(result, "thread");
+    const threadId = stringField(thread, "id");
+    if (threadId !== undefined) {
+      activeRun.threadId = threadId;
+    }
+
+    if (threadId === undefined) {
+      return {
+        raw
+      };
+    }
+
+    return {
+      normalized: {
+        cwd: stringField(result, "cwd") ?? input.workspacePath,
+        sessionId: threadId,
+        threadId,
+        type: "session_started"
+      },
+      raw
+    };
+  });
+  yield* threadStarted.events;
+  if (threadStarted.stopped) {
+    return;
+  }
+
+  const threadId = activeRun.threadId;
+  if (threadId === undefined) {
+    yield protocolFailure("thread/start response did not include thread.id");
+    await shutdownProviderProcess(child);
+    yield* await drainUntilExit(queue, activeRun);
+    return;
+  }
+
+  writeJson(child, {
+    id: 3,
+    method: "turn/start",
+    params: {
+      input: [
+        {
+          text: input.prompt,
+          text_elements: [],
+          type: "text"
+        }
+      ],
+      threadId
+    }
+  });
+  const turnStarted = await readUntilResponse(queue, 3, activeRun, (raw) => {
+    const result = objectField(raw, "result");
+    const turn = objectField(result, "turn");
+    const turnId = stringField(turn, "id");
+    if (turnId !== undefined) {
+      activeRun.turnId = turnId;
+    }
+
+    return {
+      raw
+    };
+  });
+  yield* turnStarted.events;
+  if (turnStarted.stopped) {
+    return;
+  }
+
+  while (true) {
+    const event = providerEventFromQueueItem(await queue.next(), activeRun);
+    yield event;
+    const type = event.normalized?.type;
+
+    if (type === "process_exit") {
+      return;
+    }
+
+    if (
+      type === "input_required" ||
+      type === "malformed_event" ||
+      type === "turn_completed" ||
+      type === "turn_failed"
+    ) {
+      await shutdownProviderProcess(child);
+    }
+  }
+}
+
 async function readUntilResponse(
   queue: ProcessQueue,
   requestId: number,
-  activeRun: SpawnedCodexRun,
+  activeRun: ActiveCodexRun & { child: ChildProcessWithoutNullStreams },
   mapResponse: (raw: unknown) => ProviderEvent
 ): Promise<ResponseReadResult> {
   const events: ProviderEvent[] = [];

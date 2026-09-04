@@ -5,35 +5,29 @@ import {
 } from "node:child_process";
 
 import {
-  confirmProviderScopeCleanup,
   createProcessScope,
-  markProviderScopeCleanupPending,
   type ProcessScope
 } from "../lifecycle/process-scope.js";
-import { providerScratchEnvironment } from "../lifecycle/provider-scratch.js";
-import type {
-  AgentProvider,
-  ProviderEvent,
-  ProviderRunInput
-} from "../provider.js";
+import type { AgentProvider, ProviderEvent } from "../provider.js";
 import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import { parseProviderCommand, type ProviderLabel } from "./command-parse.js";
 import { mapProcessQueueControlEvent } from "./jsonl-process-queue.js";
 import {
   providerProcessExitResult,
-  shutdownProviderProcess,
-  spawnProviderProcess
+  shutdownProviderProcess
 } from "./provider-process.js";
-import { attachProviderStderrLog } from "./provider-stderr.js";
+import {
+  createProviderSession,
+  type ProviderRunState,
+  type ProviderTurn
+} from "./provider-session.js";
 
 type JsonObject = Record<string, unknown>;
 
 const PROVIDER_LABEL: ProviderLabel = "Oh My Pi";
 
-type ActiveOmpRun = {
+type ActiveOmpRun = ProviderRunState & {
   assistantText?: string;
-  cancelled: boolean;
-  child?: ChildProcessWithoutNullStreams;
   completedAssistantText?: string;
   nextRequestId: number;
   promptDispatched: boolean;
@@ -104,239 +98,41 @@ export function createOmpProvider(
   options: OmpProviderOptions = {}
 ): AgentProvider {
   const processScope = options.processScope ?? createProcessScope();
-  const activeRuns = new Map<string, ActiveOmpRun>();
-
-  return {
-    cancel: (runId) => {
-      const activeRun = activeRuns.get(runId);
-      if (activeRun === undefined) {
-        return Promise.resolve();
-      }
-
-      activeRun.cancelled = true;
-      if (activeRun.child === undefined) {
-        return Promise.resolve();
-      }
-
+  const session = createProviderSession<ActiveOmpRun, ProcessQueue>({
+    cancelInterrupt: (activeRun, child) => {
       activeRun.queue?.discardBeforeFrameLimits();
-      const child = activeRun.child;
-      return shutdownProviderProcess(
-        child,
-        () => {
-          if (!child.stdin.destroyed && child.stdin.writable) {
-            writeJson(child, {
-              id: requestId(activeRun),
-              type: "abort"
-            });
-          }
-        },
-        "cancellation"
-      );
-    },
-    name: "omp",
-    runAttempt: async function* (
-      input: ProviderRunInput
-    ): AsyncGenerator<ProviderEvent> {
-      const activeRun: ActiveOmpRun = {
-        cancelled: false,
-        nextRequestId: 1,
-        promptDispatched: false,
-        sessionId: undefined,
-        terminalEventSeen: false
+      return () => {
+        if (!child.stdin.destroyed && child.stdin.writable) {
+          writeJson(child, {
+            id: requestId(activeRun),
+            type: "abort"
+          });
+        }
       };
-      activeRuns.set(input.run.id, activeRun);
-
-      const renderedCommand = renderProviderCommandTemplate(
-        input.provider.command,
-        input.routine ?? {}
-      ).rendered;
-      const command = await processScope.wrapForProviderScope(
-        input.run,
-        parseProviderCommand(renderedCommand, PROVIDER_LABEL)
-      );
-      if (activeRun.cancelled) {
-        activeRuns.delete(input.run.id);
-        yield processExitEvent(activeRun, null, null);
-        return;
-      }
-
-      const providerScopeWrapped = markProviderScopeCleanupPending(
-        command,
-        input.recordProviderScopeCleanupPending
-      );
-      const child = spawnProviderProcess(
-        command,
-        input.workspacePath,
-        providerScratchEnvironment(input.scratchPath, input.globalMaxInFlight)
-      );
-      activeRun.child = child;
-      const stderrCapture = attachProviderStderrLog(
-        child,
-        input.stderrLogPath,
-        input.stderrRedactSecrets === undefined
-          ? {}
-          : { redactSecrets: input.stderrRedactSecrets }
-      );
+    },
+    createQueue: (child, _input, activeRun) => {
       const queue = createProcessQueue(child, {
         isPromptDispatched: () => activeRun.promptDispatched
       });
       activeRun.queue = queue;
-
-      try {
-        const ready = yield* readUntilFrame(
-          queue,
-          activeRun,
-          (raw) => stringField(raw, "type") === "ready"
-        );
-        if (ready.stopped) {
-          return;
-        }
-        if (ready.response === undefined) {
-          queue.discardBeforeFrameLimits();
-          await shutdownProviderProcess(child);
-          yield* drainUntilExit(queue, activeRun);
-          return;
-        }
-        try {
-          validateReadyFrame(ready.response);
-          queue.setFrameLimits(
-            numberField(ready.response, "maxFrameBytes") ?? 0,
-            numberField(ready.response, "maxReassembledFrameBytes") ?? 0
-          );
-        } catch {
-          yield {
-            normalized: {
-              message: "Oh My Pi provider emitted an incompatible ready frame",
-              type: "turn_failed"
-            },
-            raw: ready.response,
-            ...(ready.receivedAt === undefined
-              ? {}
-              : { receivedAt: ready.receivedAt })
-          };
-          queue.discardBeforeFrameLimits();
-          await shutdownProviderProcess(child);
-          yield* drainUntilExit(queue, activeRun);
-          return;
-        }
-
-        if (
-          arrayField(ready.response, "supportedProtocolVersions").includes(2)
-        ) {
-          const id = requestId(activeRun);
-          writeJson(child, {
-            id,
-            protocolVersion: 2,
-            type: "negotiate_protocol"
-          });
-          const negotiated = yield* readUntilResponse(
-            queue,
-            id,
-            activeRun,
-            mapNegotiationResponse
-          );
-          if (negotiated.stopped) {
-            return;
-          }
-          if (!negotiatedV2Response(negotiated.response)) {
-            await shutdownProviderProcess(child);
-            yield* drainUntilExit(queue, activeRun);
-            return;
-          }
-          queue.setProtocolVersion(2);
-        }
-
-        const stateId = requestId(activeRun);
-        writeJson(child, { id: stateId, type: "get_state" });
-        const state = yield* readUntilResponse(
-          queue,
-          stateId,
-          activeRun,
-          (raw) => mapStateResponse(raw, activeRun)
-        );
-        if (state.stopped) {
-          return;
-        }
-        if (!successfulResponse(state.response)) {
-          await shutdownProviderProcess(child);
-          yield* drainUntilExit(queue, activeRun);
-          return;
-        }
-
-        const promptId = requestId(activeRun);
-        activeRun.promptDispatched = true;
-        writeJson(child, {
-          id: promptId,
-          message: input.prompt,
-          type: "prompt"
-        });
-        const prompt = yield* readUntilResponse(
-          queue,
-          promptId,
-          activeRun,
-          mapPromptResponse
-        );
-        if (prompt.stopped) {
-          return;
-        }
-        if (!agentInvokedResponse(prompt.response)) {
-          await shutdownProviderProcess(child);
-          yield* drainUntilExit(queue, activeRun);
-          return;
-        }
-
-        while (true) {
-          const item = await queue.next();
-          const event = providerEventFromQueueItem(item, activeRun);
-          const type = event.normalized?.type;
-
-          if (type === "process_exit") {
-            // The OMP lifecycle drains a session through a terminal
-            // agent_end; a clean exit without one is a protocol failure,
-            // not a successful turn. Cancellation and earlier terminal
-            // failures are already classified.
-            if (!activeRun.terminalEventSeen && !activeRun.cancelled) {
-              yield missingTerminalAgentEndEvent(item.receivedAt);
-            }
-            yield event;
-            return;
-          }
-
-          yield event;
-
-          if (isTerminalAgentEnd(event.raw)) {
-            await markTerminalAgentEnd(activeRun);
-            if (terminalAgentEndBeforePrompt(item)) {
-              yield terminalAgentEndBeforePromptEvent(
-                event.raw,
-                item.receivedAt
-              );
-              yield* drainUntilExit(queue, activeRun);
-              return;
-            }
-          }
-
-          if (isTerminalFailure(type)) {
-            activeRun.terminalEventSeen = true;
-            await shutdownProviderProcess(child);
-          }
-        }
-      } finally {
-        activeRuns.delete(input.run.id);
-        await shutdownProviderProcess(child);
-        await confirmProviderScopeCleanup(
-          processScope,
-          input.run,
-          providerScopeWrapped,
-          input.recordProviderScopeCleanupPending
-        );
-        // Last, so scope teardown is never delayed by it: the caller reads
-        // the stderr log to explain an unclean exit as soon as this generator
-        // returns, and only this await orders that read after the tee's write
-        // (bounded, so a wedged sink cannot strand the attempt).
-        await stderrCapture.waitForFlush();
-      }
+      return queue;
     },
+    createRunState: () => ({
+      cancelled: false,
+      nextRequestId: 1,
+      promptDispatched: false,
+      sessionId: undefined,
+      terminalEventSeen: false
+    }),
+    label: PROVIDER_LABEL,
+    name: "omp",
+    processScope,
+    runTurn: runOmpTurn,
+    shutdownChildOnFinish: true
+  });
+
+  return {
+    ...session,
     validate: async (command, values = {}) => {
       const rendered = renderProviderCommandTemplate(command, values).rendered;
       const parsed = parseProviderCommand(rendered, PROVIDER_LABEL);
@@ -344,6 +140,145 @@ export function createOmpProvider(
       await validateOmpRpcCommand(parsed);
     }
   };
+}
+
+// The Oh My Pi RPC protocol: ready/negotiate/get_state/prompt then stream
+// events, draining a terminal agent_end. The prologue, finally (ADR 0064), and
+// cancel race (ADR 0052) are owned by the shared provider session harness.
+async function* runOmpTurn(
+  turn: ProviderTurn<ActiveOmpRun, ProcessQueue>
+): AsyncGenerator<ProviderEvent> {
+  const { child, input, queue, run: activeRun } = turn;
+  const ready = yield* readUntilFrame(
+    queue,
+    activeRun,
+    (raw) => stringField(raw, "type") === "ready"
+  );
+  if (ready.stopped) {
+    return;
+  }
+  if (ready.response === undefined) {
+    queue.discardBeforeFrameLimits();
+    await shutdownProviderProcess(child);
+    yield* drainUntilExit(queue, activeRun);
+    return;
+  }
+  try {
+    validateReadyFrame(ready.response);
+    queue.setFrameLimits(
+      numberField(ready.response, "maxFrameBytes") ?? 0,
+      numberField(ready.response, "maxReassembledFrameBytes") ?? 0
+    );
+  } catch {
+    yield {
+      normalized: {
+        message: "Oh My Pi provider emitted an incompatible ready frame",
+        type: "turn_failed"
+      },
+      raw: ready.response,
+      ...(ready.receivedAt === undefined
+        ? {}
+        : { receivedAt: ready.receivedAt })
+    };
+    queue.discardBeforeFrameLimits();
+    await shutdownProviderProcess(child);
+    yield* drainUntilExit(queue, activeRun);
+    return;
+  }
+
+  if (arrayField(ready.response, "supportedProtocolVersions").includes(2)) {
+    const id = requestId(activeRun);
+    writeJson(child, {
+      id,
+      protocolVersion: 2,
+      type: "negotiate_protocol"
+    });
+    const negotiated = yield* readUntilResponse(
+      queue,
+      id,
+      activeRun,
+      mapNegotiationResponse
+    );
+    if (negotiated.stopped) {
+      return;
+    }
+    if (!negotiatedV2Response(negotiated.response)) {
+      await shutdownProviderProcess(child);
+      yield* drainUntilExit(queue, activeRun);
+      return;
+    }
+    queue.setProtocolVersion(2);
+  }
+
+  const stateId = requestId(activeRun);
+  writeJson(child, { id: stateId, type: "get_state" });
+  const state = yield* readUntilResponse(queue, stateId, activeRun, (raw) =>
+    mapStateResponse(raw, activeRun)
+  );
+  if (state.stopped) {
+    return;
+  }
+  if (!successfulResponse(state.response)) {
+    await shutdownProviderProcess(child);
+    yield* drainUntilExit(queue, activeRun);
+    return;
+  }
+
+  const promptId = requestId(activeRun);
+  activeRun.promptDispatched = true;
+  writeJson(child, {
+    id: promptId,
+    message: input.prompt,
+    type: "prompt"
+  });
+  const prompt = yield* readUntilResponse(
+    queue,
+    promptId,
+    activeRun,
+    mapPromptResponse
+  );
+  if (prompt.stopped) {
+    return;
+  }
+  if (!agentInvokedResponse(prompt.response)) {
+    await shutdownProviderProcess(child);
+    yield* drainUntilExit(queue, activeRun);
+    return;
+  }
+
+  while (true) {
+    const item = await queue.next();
+    const event = providerEventFromQueueItem(item, activeRun);
+    const type = event.normalized?.type;
+
+    if (type === "process_exit") {
+      // The OMP lifecycle drains a session through a terminal
+      // agent_end; a clean exit without one is a protocol failure,
+      // not a successful turn. Cancellation and earlier terminal
+      // failures are already classified.
+      if (!activeRun.terminalEventSeen && !activeRun.cancelled) {
+        yield missingTerminalAgentEndEvent(item.receivedAt);
+      }
+      yield event;
+      return;
+    }
+
+    yield event;
+
+    if (isTerminalAgentEnd(event.raw)) {
+      await markTerminalAgentEnd(activeRun);
+      if (terminalAgentEndBeforePrompt(item)) {
+        yield terminalAgentEndBeforePromptEvent(event.raw, item.receivedAt);
+        yield* drainUntilExit(queue, activeRun);
+        return;
+      }
+    }
+
+    if (isTerminalFailure(type)) {
+      activeRun.terminalEventSeen = true;
+      await shutdownProviderProcess(child);
+    }
+  }
 }
 
 function providerEventFromQueueItem(
@@ -686,27 +621,6 @@ function requestId(activeRun: ActiveOmpRun): string {
   const id = `symphonika-${activeRun.nextRequestId}`;
   activeRun.nextRequestId += 1;
   return id;
-}
-
-function processExitEvent(
-  activeRun: ActiveOmpRun,
-  exitCode: number | null,
-  signal: NodeJS.Signals | null
-): ProviderEvent {
-  return {
-    normalized: {
-      cancelled: activeRun.cancelled,
-      exitCode,
-      signal,
-      type: "process_exit"
-    },
-    raw: {
-      cancelled: activeRun.cancelled,
-      exitCode,
-      kind: "process_exit",
-      signal
-    }
-  };
 }
 
 const MALFORMED_EVIDENCE_MAX_BYTES = 4096;

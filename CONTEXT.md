@@ -488,6 +488,17 @@ _Avoid_: redaction inventory, secret list
 A normalized adapter that lets the orchestrator run a specific coding-agent implementation; v1 supports Codex, Claude, and Oh My Pi.
 _Avoid_: agent when referring to the adapter boundary
 
+**Agent Provider Session**:
+The shared per-attempt lifecycle every Agent Provider adapter runs one Run or Routine Firing through:
+register the run, wrap its command for the Provider Scope, re-check cancellation before spawning
+(the pre-spawn cancel race, ADR 0052), spawn, tee stderr, and on completion confirm Provider Scope
+Cleanup and flush evidence (ADR 0064) — plus the cancel handshake that shares the run state with the
+attempt. Each adapter supplies only what differs (its run state, transport queue, protocol body, and
+cancel interrupt); the session owns the prologue, the teardown, and the cancel race, so those
+invariants live in one module instead of once per provider.
+_Avoid_: Provider Event Reducer (that maps the raw stream to normalized events; the session drives the
+process around it)
+
 **Doctor Execution Environment**:
 The report-only view of local capabilities `doctor` checks before any dispatch: selected Project
 provider executables, the Codex headless profile contract, independent `gh` authentication, and the

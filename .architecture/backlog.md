@@ -60,8 +60,8 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Status**: proposed
 - **Score**: 18/25 (leverage 3, locality 4, blast radius 1, heat 3)
 - **Files**: ~3 estimated
-- **Modules**: `src/run-store.ts` (5711-5771 + descriptor builders at 4144, 5508), `src/http/pages.ts` (6907)
-- **Summary**: Replace the six parallel artifact-kind constructs (two identical arrays, a set, two identical path switches, a label switch) with one `{kind, column, label}` descriptor catalog.
+- **Modules**: `src/run-store.ts` (5711-5771 + descriptor builders at 4144, 5508), `src/http/pages.ts` (6907), `src/http/app.ts` (`RUN_ARTIFACT_CONTENT_TYPES` :363, `RUN_ARTIFACT_KINDS` :373, `resolveRoutineEvidenceFilePath` switch :1023 — a third site of the same catalog, folded into this item's scope by the 2026-09-04 fresh scan)
+- **Summary**: Replace the parallel artifact-kind constructs (identical arrays, a set, path switches, a content-type map, a label switch) across run-store, pages, and app with one `{kind, column, label, contentType}` descriptor catalog.
 - **First seen**: 2026-08-31
 
 ## routine-evidence-redaction
@@ -147,14 +147,14 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## watchdog-subject-port
 
-- **Status**: in-flight
+- **Status**: landed
 - **Score**: 20/25 (leverage 4, locality 4, blast radius 2, heat 4)
 - **Files**: 4 (new `watchdog-subject.ts`, new `watchdog-subject.test.ts`, `watchdog.ts`, `watchdog.test.ts` — the 4th an observer-throw characterization test)
 - **Modules**: `src/lifecycle/watchdog.ts` (run reconcile loop 179-273, firing reconcile loop 275-345, `sampleRun` 475-502, `sampleRoutineFiring` 504-529); new `src/lifecycle/watchdog-subject.ts` (port + driver)
 - **Summary**: Collapse the two near-identical ~85-line watchdog reconcile loops (run vs routine-firing, the second added by #622) into one `driveWatchdogSubject` driver behind a `WatchdogSubjectPort`; run-vs-firing knowledge lands in two thin adapters.
 - **First seen**: 2026-09-02
 - **PR**: #695
-- **Reason**: **Picked by the 2026-09-03 run** (top surviving candidate at 20/25, tied with `provider-run-harness` at 20/25; won the deterministic tie-break — blast tie, heat tie, then `watchdog.ts` most-recently-touched at #680 15:51 vs providers #672 14:21). Terminal policy differs (ADR 0091: firings get idle-grace only), so the port carries a `terminalReason` member (`watchdogTerminalReason` for runs, idle-grace-only for firings). **Scope refined**: the twinned run-store method pairs (`run-store.ts:1571-1872`) stay put — the adapters call them; unifying their table-specific SQL is `leaked-subject-sweep`'s separate concern. Implemented via design-it-twice winner C (9-member port + generic driver); runner-up design A (single `terminate` member) lost on test surface. Added the `Watchdog Subject` term to CONTEXT.md.
+- **Reason**: **Picked by the 2026-09-03 run** (top surviving candidate at 20/25, tied with `provider-run-harness` at 20/25; won the deterministic tie-break — blast tie, heat tie, then `watchdog.ts` most-recently-touched at #680 15:51 vs providers #672 14:21). Terminal policy differs (ADR 0091: firings get idle-grace only), so the port carries a `terminalReason` member (`watchdogTerminalReason` for runs, idle-grace-only for firings). **Scope refined**: the twinned run-store method pairs (`run-store.ts:1571-1872`) stay put — the adapters call them; unifying their table-specific SQL is `leaked-subject-sweep`'s separate concern. Implemented via design-it-twice winner C (9-member port + generic driver); runner-up design A (single `terminate` member) lost on test surface. Added the `Watchdog Subject` term to CONTEXT.md. PR #695 merged 2026-09-03T08:49:52Z (reconciled from `in-flight` by the 2026-09-04 run).
 
 ### Run 2026-09-03 — complete
 
@@ -187,13 +187,23 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## provider-run-harness
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 20/25 (leverage 4, locality 4, blast radius 2, heat 4)
+- **PR**: #701
 - **Files**: ~5 estimated (three providers + new `provider-session.ts` + test)
 - **Modules**: `src/providers/codex.ts` (`runAttempt` prologue 118-186, `finally` 325-339, `cancel` 83-116), `src/providers/claude.ts` (73-143, 167-180, 54-71), `src/providers/omp.ts` (135-178, 319-328, 108-133); new `src/providers/provider-session.ts`
 - **Summary**: Each provider's `runAttempt` opens with a byte-identical ~55-line ADR-0052 prologue (placeholder `activeRun` before the `wrapForProviderScope` await, cancel-recheck synthetic `process_exit`, spawn+stderr+queue) and closes with an identical ADR-0064 `finally` (delete → `stopProviderScope` → `waitForFlush`); a `runProviderSession(deps, input)` harness owns those once and takes the provider-specific protocol body + cancel-interrupt as hooks.
 - **First seen**: 2026-09-03
-- **Reason**: **Runner-up candidate to `watchdog-subject-port` this run — exactly tied at 20/25**, lost only the deterministic tie-break (provider files last touched at #672 14:21 vs `watchdog.ts` at #680 15:51). Natural next firing. **Divergence surface is wide** (activeRun factory, command transform, spawn env, cancel-interrupt body, synthetic-event shape all differ), so the harness needs ~7 hooks — real but depth-tempering. **Benign-drift finding (do not re-derive):** omp calls `stopProviderScope` on early-cancel (omp.ts:157) and adds a second `shutdownProviderProcess` in `finally` (omp.ts:321) that codex/claude omit, but `wrapForProviderScope` (`process-scope.ts:131`) only *builds* a `systemd-run` command — no durable scope exists pre-spawn — so it is a harmless no-op, not a behaviour decision. The harness can preserve all three via a hook; **not** `live-run-ownership-registry`-style bail territory.
+- **Reason**: **Picked by the 2026-09-04 run** (top surviving candidate at 20/25; runner-up `run-slot-lease` at 19/25, within 1 point). Was the exactly-tied runner-up to last firing's `watchdog-subject-port` (#695, merged 2026-09-03). Friction re-verified against the current tree this run: prologue/`finally`/cancel still near-identical across codex/claude/omp; stderr-attach, `confirmProviderScopeCleanup`, and `waitForFlush` still byte-identical. **Divergence surface is wide** (activeRun factory, command transform, spawn env, cancel-interrupt body, synthetic-event shape all differ), so the harness needs ~6-7 hooks — real but depth-tempering. **Benign-drift finding (do not re-derive):** omp calls `stopProviderScope` on early-cancel (omp.ts:157) and adds a second `shutdownProviderProcess` in `finally` (omp.ts:326) that codex/claude omit, but `wrapForProviderScope` (`process-scope.ts:131`) only *builds* a `systemd-run` command — no durable scope exists pre-spawn — so it is a harmless no-op, not a behaviour decision. The harness can preserve all three via a hook; **not** `live-run-ownership-registry`-style bail territory. Implemented via design-it-twice winner C (common-case-optimised: `createProviderSession` + `jsonlProviderSession`); runner-up design A (minimal interface) lost on common-case depth (forced codex+claude to name the shared JSONL queue, spent a general hook on omp's fixed shutdown). Added the `Agent Provider Session` term to CONTEXT.md. PR #701 opened 2026-09-04.
+
+### Run 2026-09-04 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M1MR2N06` (adopted; conditions 1-4 held — non-default, 0 unique commits, no upstream, unpublished on origin). Not renamed per the adopted-branch rule; slug recorded here and in the report instead.
+- **Committed**: report + backlog reconciliation (`62f9899`), design section (`80b4dc3`), implementation + CONTEXT.md term (`3b7d466`), this in-flight update.
+- **Evidence**: PR #701; quality gate green (lint, typecheck, format:check, knip, build; test 2695 passed — no flakes this run). Diff 6 files (est. ~5: three providers + `provider-session.ts` + test; the 6th is the `CONTEXT.md` term add, within tolerance). `create{Codex,Claude,Omp}Provider` + `AgentProvider` signatures unchanged.
+- **Next**: human review of #701; `run-slot-lease` (19/25, runner-up candidate) is the natural next firing.
 
 ## provider-attempt-runner
 
@@ -215,6 +225,16 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **First seen**: 2026-09-03
 - **Reason**: Leans toward *moves* on the deletion test — the SQL differs by table (`runs` has a `stale` state and `leaked_active_run_cleanup_pending`; `routine_firings` settle as `failed` with their own pending marker and `commits_ahead` case), so a shared port pushes differences into adapters rather than concentrating behaviour. Fold into the run-vs-firing duality story that `watchdog-subject-port` opens rather than picking standalone.
 
+## config-project-parse-outcome
+
+- **Status**: proposed
+- **Score**: 17/25 (leverage 3, locality 4, blast radius 1, heat 3)
+- **Files**: ~3 estimated
+- **Modules**: `src/reload.ts` (`loadDispatchProject` 1095-1195, `loadRoutineHostProject` 1200-1263; shared idiom at 651, 696), possible new `src/reload/project-config-parse.ts`
+- **Summary**: The dispatch-project and routine-host loaders are drifting twins repeating a byte-identical SPEC-5.1 watchdog-override whole-snapshot-rejection block (1121-1136 vs 1218-1233, second annotated `// Same …`) and a structurally identical reload-vs-first-load fatal-decision block; a shared `parseProjectSection` + `watchdogOverrideGate` seam would own both invariants once, leaving each loader its distinct tail.
+- **First seen**: 2026-09-04
+- **Reason**: New find by the 2026-09-04 fresh scan. Partial deletion test — the two invariants concentrate but the surrounding zod-error-push idiom and the loaders' tails (dispatch: polling + workflow load + `disabled`; host: `agent` + `mode`, no workflow) genuinely differ and stay separate. Sub-20, so not this firing's pick; natural mid-tier future candidate in an otherwise cold-for-the-backlog file.
+
 ## mutate-and-publish
 
 - **Status**: dropped
@@ -224,6 +244,16 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Summary**: A repeated transaction-then-publish epilogue that a `mutateAndPublish(fn)` helper could collapse.
 - **First seen**: 2026-09-03
 - **Reason**: Leverage 1 — the helper would be shallow (interface ≈ implementation), concentrating no behaviour. Same character as the dropped `provider-json-field-accessors`: a plain DRY cleanup, not a deepening candidate.
+
+## issue-polling-try-api-wrappers
+
+- **Status**: dropped
+- **Score**: n/a (leverage 1)
+- **Files**: ~1 estimated
+- **Modules**: `src/issue-polling.ts` (the ~11 `try*` API wrappers at 880-991: `tryAddLabelsToIssue`, `tryGetIssue`, `tryListPullRequests`, …)
+- **Summary**: Each wrapper is ~10 lines of `if (api.method === undefined) return sentinel; return api.method(input)`.
+- **First seen**: 2026-09-04
+- **Reason**: Leverage 1 — shallow-by-nature guards (interface ≈ implementation), same class as the dropped `provider-json-field-accessors`/`mutate-and-publish`. Collapsing to a generic invoker MOVES the guard, strips the `this` binding (see the explicit warning at :875-878), and the sentinel types differ (`false` vs `undefined`). Not a deepening candidate. Surfaced and rejected by the 2026-09-04 fresh scan; recorded so the next firing does not re-derive it.
 
 ## github-pr-enum-normalizers
 

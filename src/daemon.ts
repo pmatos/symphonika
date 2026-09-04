@@ -2583,7 +2583,19 @@ function projectIssueSnapshotRows(
       reasons: entry.reasons,
       title: entry.issue.title
     }));
-  return [...candidateRows, ...filteredRows];
+  // #692: two Project declarations sharing both name and repository are
+  // indistinguishable by this filter, so each contributes its own row for
+  // the same issue number -- the table's UNIQUE(project_name, issue_number)
+  // constraint accepts only one, so dedupe here rather than let the insert
+  // batch reject the whole tick's snapshot write.
+  const seenIssueNumbers = new Set<number>();
+  return [...candidateRows, ...filteredRows].filter((row) => {
+    if (seenIssueNumbers.has(row.issueNumber)) {
+      return false;
+    }
+    seenIssueNumbers.add(row.issueNumber);
+    return true;
+  });
 }
 
 // #309 (ADR 0077): mirrors persistProjectPollState's per-project

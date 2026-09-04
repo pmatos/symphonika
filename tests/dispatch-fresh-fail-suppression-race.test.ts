@@ -6,10 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { IssuePollStatus, IssueSnapshot } from "../src/issue-polling.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
-import {
-  createAsyncMutex,
-  type AsyncMutex
-} from "../src/lifecycle/async-mutex.js";
+import { createAsyncMutex } from "../src/lifecycle/async-mutex.js";
 import {
   RunController,
   type RunControllerProjectConfig
@@ -75,24 +72,13 @@ describe("dispatchOneFresh: failFreshDispatchBeforeProvider suppression race", (
       }
     };
 
-    // Held externally before dispatch starts; the instrumented wrapper
-    // records when the controller actually asks for it so the test can
-    // plant a concurrent verdict at the exact moment the fix's suppression
-    // re-check would observe it.
+    // Held externally before dispatch starts; the spy records when the
+    // controller actually asks for it so the test can plant a concurrent
+    // verdict at the exact moment the fix's suppression re-check would
+    // observe it.
     const realMutex = createAsyncMutex();
     await realMutex.acquire();
-    let acquireCalls = 0;
-    const instrumentedMutex: AsyncMutex = {
-      acquire: async () => {
-        acquireCalls += 1;
-        await realMutex.acquire();
-      },
-      get held() {
-        return realMutex.held;
-      },
-      release: () => realMutex.release(),
-      tryAcquire: () => realMutex.tryAcquire()
-    };
+    const acquireSpy = vi.spyOn(realMutex, "acquire");
 
     const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
     const provider: AgentProvider = {
@@ -116,7 +102,7 @@ describe("dispatchOneFresh: failFreshDispatchBeforeProvider suppression race", (
       agentProviders: { codex: provider },
       configDir: root,
       createRunId: () => "candidate-run-1",
-      dispatchMutex: instrumentedMutex,
+      dispatchMutex: realMutex,
       emailConfigLoader: () => undefined,
       env: { GITHUB_TOKEN: "secret-token" },
       githubIssuesApi: {
@@ -147,11 +133,11 @@ describe("dispatchOneFresh: failFreshDispatchBeforeProvider suppression race", (
       );
 
       // Pre-fix, failFreshDispatchBeforeProvider never touches dispatchMutex
-      // at all, so this observes acquireCalls staying at 0 and times out --
+      // at all, so this observes the spy staying uncalled and times out --
       // a genuine failure, not a vacuous assertion.
       await vi.waitFor(
         () => {
-          expect(acquireCalls).toBe(1);
+          expect(acquireSpy).toHaveBeenCalledTimes(1);
         },
         { timeout: 2000 }
       );

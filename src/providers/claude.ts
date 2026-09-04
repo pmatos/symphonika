@@ -5,12 +5,9 @@ import {
 } from "node:child_process";
 
 import {
-  confirmProviderScopeCleanup,
   createProcessScope,
-  markProviderScopeCleanupPending,
   type ProcessScope
 } from "../lifecycle/process-scope.js";
-import { providerScratchEnvironment } from "../lifecycle/provider-scratch.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -19,26 +16,25 @@ import type {
 import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import { parseProviderCommand, type ProviderLabel } from "./command-parse.js";
 import {
-  createJsonlProcessQueue,
   mapProcessQueueControlEvent,
+  type ProcessQueue,
   type ProcessQueueItem
 } from "./jsonl-process-queue.js";
-import {
-  shutdownProviderProcess,
-  spawnProviderProcess
-} from "./provider-process.js";
-import { attachProviderStderrLog } from "./provider-stderr.js";
+import { shutdownProviderProcess } from "./provider-process.js";
 import {
   createClaudeEventReducer,
   isTerminalFailure,
   type ClaudeEventReducer
 } from "./claude-events.js";
+import {
+  jsonlProviderSession,
+  type ProviderRunState,
+  type ProviderTurn
+} from "./provider-session.js";
 
 const PROVIDER_LABEL: ProviderLabel = "Claude";
 
-type ActiveClaudeRun = {
-  cancelled: boolean;
-  child?: ChildProcessWithoutNullStreams;
+type ActiveClaudeRun = ProviderRunState & {
   reducer: ClaudeEventReducer;
 };
 
@@ -50,146 +46,28 @@ export function createClaudeProvider(
   options: ClaudeProviderOptions = {}
 ): AgentProvider {
   const processScope = options.processScope ?? createProcessScope();
-  const activeRuns = new Map<string, ActiveClaudeRun>();
+  const session = jsonlProviderSession<ActiveClaudeRun>({
+    createRunState: () => ({
+      cancelled: false,
+      reducer: createClaudeEventReducer()
+    }),
+    extraEnv: (input) =>
+      input.routine === undefined
+        ? {}
+        : { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" },
+    label: PROVIDER_LABEL,
+    name: "claude",
+    processScope,
+    refineCommand: (command, input) =>
+      withOutputSchema(
+        applyRoutineArguments(command, input.routine),
+        input.outputSchema
+      ),
+    runTurn: runClaudeTurn
+  });
 
   return {
-    cancel: (runId) => {
-      const activeRun = activeRuns.get(runId);
-      if (activeRun === undefined) {
-        return Promise.resolve();
-      }
-
-      activeRun.cancelled = true;
-      if (activeRun.child === undefined) {
-        // Cancelled before the scope probe/spawn finished — runAttempt's own
-        // post-probe recheck (see below) is what stops it from launching.
-        return Promise.resolve();
-      }
-      return shutdownProviderProcess(
-        activeRun.child,
-        undefined,
-        "cancellation"
-      );
-    },
-    name: "claude",
-    runAttempt: async function* (
-      input: ProviderRunInput
-    ): AsyncGenerator<ProviderEvent> {
-      // Registered before the scope-probe await below so a cancel arriving
-      // during that await (up to probeTimeoutMs on the first, uncached
-      // call) has somewhere to land instead of being a silent no-op —
-      // cancel() finds this entry, sets cancelled, and the recheck right
-      // after the await stops the spawn from ever happening. Without this
-      // placeholder, a cancel here would be permanently lost: RunController
-      // only rechecks its own cancellation latch once, before runAttempt is
-      // called (see ADR 0052 at run-controller.ts:2274-2281), and this
-      // await reopens that exact race one level deeper.
-      const activeRun: ActiveClaudeRun = {
-        cancelled: false,
-        reducer: createClaudeEventReducer()
-      };
-      activeRuns.set(input.run.id, activeRun);
-
-      const renderedCommand = renderProviderCommandTemplate(
-        input.provider.command,
-        input.routine ?? {}
-      ).rendered;
-      const command = await processScope.wrapForProviderScope(
-        input.run,
-        withOutputSchema(
-          applyRoutineArguments(
-            parseProviderCommand(renderedCommand, PROVIDER_LABEL),
-            input.routine
-          ),
-          input.outputSchema
-        )
-      );
-      if (activeRun.cancelled) {
-        // Outside the try/finally below (which owns the only other
-        // activeRuns.delete call) -- without this, this placeholder would
-        // leak in the map for the lifetime of the provider instance.
-        activeRuns.delete(input.run.id);
-        yield {
-          normalized: {
-            cancelled: true,
-            exitCode: null,
-            signal: null,
-            type: "process_exit"
-          },
-          raw: {
-            cancelled: true,
-            exitCode: null,
-            kind: "process_exit",
-            signal: null
-          }
-        };
-        return;
-      }
-      const providerScopeWrapped = markProviderScopeCleanupPending(
-        command,
-        input.recordProviderScopeCleanupPending
-      );
-      const child = spawnProviderProcess(command, input.workspacePath, {
-        ...providerScratchEnvironment(
-          input.scratchPath,
-          input.globalMaxInFlight
-        ),
-        ...(input.routine === undefined
-          ? {}
-          : { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" })
-      });
-      activeRun.child = child;
-      const stderrCapture = attachProviderStderrLog(
-        child,
-        input.stderrLogPath,
-        input.stderrRedactSecrets === undefined
-          ? {}
-          : { redactSecrets: input.stderrRedactSecrets }
-      );
-      const queue = createJsonlProcessQueue(child);
-
-      try {
-        writeClaudeInput(child, input.prompt);
-        child.stdin.end();
-
-        while (true) {
-          const events = providerEventsFromQueueItem(
-            await queue.next(),
-            activeRun
-          );
-          for (const event of events) {
-            yield event;
-            const type = event.normalized?.type;
-
-            if (type === "process_exit") {
-              return;
-            }
-
-            if (isTerminalFailure(type)) {
-              await shutdownProviderProcess(child);
-            }
-          }
-        }
-      } finally {
-        activeRuns.delete(input.run.id);
-        // Runs unconditionally, not only on cancellation: the `process_exit`
-        // branch above returns directly on ordinary successful completion,
-        // bypassing terminateProcess entirely. A provider-spawned build tool
-        // can outlive that exit as a detached grandchild; stopping the
-        // run's scope here is what actually reaps it (see docs/adr/0064).
-        await confirmProviderScopeCleanup(
-          processScope,
-          input.run,
-          providerScopeWrapped,
-          input.recordProviderScopeCleanupPending
-        );
-        // Last, so scope teardown is never delayed by it: the caller reads
-        // the stderr log to explain an unclean exit as soon as this generator
-        // returns, and only this await orders that read after the tee's write
-        // (bounded, so a wedged sink cannot strand the attempt).
-        await stderrCapture.waitForFlush();
-      }
-    },
+    ...session,
     validate: async (command, values = {}) => {
       const rendered = renderProviderCommandTemplate(command, values).rendered;
       const parsed = parseProviderCommand(rendered, PROVIDER_LABEL);
@@ -197,6 +75,33 @@ export function createClaudeProvider(
       await validateClaudeStreamJsonCommand(parsed);
     }
   };
+}
+
+// The Claude stream-json protocol: write the prompt, then map the JSONL event
+// stream. The prologue, finally (ADR 0064), and cancel race (ADR 0052) are
+// owned by the shared provider session harness.
+async function* runClaudeTurn(
+  turn: ProviderTurn<ActiveClaudeRun, ProcessQueue>
+): AsyncGenerator<ProviderEvent> {
+  const { child, input, queue, run: activeRun } = turn;
+  writeClaudeInput(child, input.prompt);
+  child.stdin.end();
+
+  while (true) {
+    const events = providerEventsFromQueueItem(await queue.next(), activeRun);
+    for (const event of events) {
+      yield event;
+      const type = event.normalized?.type;
+
+      if (type === "process_exit") {
+        return;
+      }
+
+      if (isTerminalFailure(type)) {
+        await shutdownProviderProcess(child);
+      }
+    }
+  }
 }
 
 function providerEventsFromQueueItem(

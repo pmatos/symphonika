@@ -302,6 +302,67 @@ describe("Routine Firing notifications", () => {
       state: "failed"
     });
   });
+
+  it("does not start a second attempt while the first is still hung past the deadline", async () => {
+    const deliver = vi.fn(() => new Promise<void>(() => undefined));
+
+    const outcome = await deliverRoutineFiringNotification({
+      config: {
+        from: "symphonika@example.com",
+        on: "always",
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls",
+        to: "operator@example.com"
+      },
+      firing: routineFiringFixture(),
+      notifyEnabled: true,
+      sink: { deliver },
+      timeoutMs: 5
+    });
+
+    expect(outcome).toEqual({
+      error: "notification delivery timed out after 5ms",
+      state: "failed"
+    });
+    expect(deliver).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry once the first attempt rejects after the deadline has already passed", async () => {
+    const deliver = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("relay reset after deadline")), 20);
+        })
+    );
+
+    const outcome = await deliverRoutineFiringNotification({
+      config: {
+        from: "symphonika@example.com",
+        on: "always",
+        smtpHost: "smtp.example.com",
+        smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+        smtpPort: 587,
+        smtpSecurity: "starttls",
+        to: "operator@example.com"
+      },
+      firing: routineFiringFixture(),
+      notifyEnabled: true,
+      sink: { deliver },
+      timeoutMs: 5
+    });
+
+    expect(outcome).toEqual({
+      error: "notification delivery timed out after 5ms",
+      state: "failed"
+    });
+
+    // Let the delayed rejection settle in the background and confirm it
+    // did not trigger a second, concurrent delivery attempt.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(deliver).toHaveBeenCalledTimes(1);
+  });
 });
 
 function routineFiringFixture(): RoutineFiringNotification {

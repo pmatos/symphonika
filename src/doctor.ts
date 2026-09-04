@@ -1141,6 +1141,10 @@ const SYSTEMD_MEMORY_LIMIT_INFINITY = 2n ** 64n - 1n;
 // replicate that wraparound deliberately rather than computing it exactly.
 const SYSTEMD_UINT64_MODULUS = 2n ** 64n;
 
+// Scope is frozen: see ADR-2026-09-04-0814. Further grammar-fidelity gaps
+// against real systemd behavior are deferred by default, fixed only on
+// evidence of real operator impact, not chased on discovery.
+//
 // config_parse_memory_limit() drops an assignment two different ways, both
 // of which make systemd keep whatever limit was previously in force:
 //
@@ -1206,6 +1210,18 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
     const relative = relativePattern.pattern.exec(value);
     if (relative !== null) {
       const [, sign, wholeDigits, fractionPart] = relative;
+      // mangle_base() recognizes "0b"/"0o" prefixes via a plain startswith
+      // check *before* any sign is consumed, so a leading "+"/"-" hides the
+      // prefix from it: the value falls through to strtol()'s own base-0
+      // auto-detection instead, which has no binary support and treats a
+      // stray "b"/"o" as an invalid octal digit. A signed hex prefix
+      // ("+0x32") and signed bare-leading-zero octal ("+0144", no explicit
+      // "o") are unaffected — strtol() detects those itself regardless of
+      // sign. Confirmed on systemd 261: "+0o1%"/"-0o0.01%"/"+0b1%" are all
+      // rejected while "+0x32%" is accepted.
+      if (sign !== "" && /^0[bBoO]/.test(wholeDigits ?? "")) {
+        return true;
+      }
       const wholeNumber = parseSystemdRelativeWholeNumber(wholeDigits ?? "0");
       // safe_atoi() parses any base-prefixed spelling of zero ("-0", "-00",
       // "-0x0", "-0b0", ...) as plain 0, not negative, so any whole-number

@@ -3574,7 +3574,7 @@ function renderStaleIssuesCard(
   const rows = staleIssues
     .map(
       (entry) =>
-        `<tr><td>${escapeHtml(entry.project)}</td><td class="c-title"><a href="${escapeHtml(entry.issue.url)}">#${entry.issue.number}</a> ${escapeHtml(entry.issue.title)}</td><td class="c-detail">${escapeHtml(entry.reasons.join(", "))}</td></tr>`
+        `<tr><td>${escapeHtml(entry.project)}</td><td class="c-title"><a href="${escapeHtml(entry.issue.url)}" target="_blank" rel="noopener noreferrer">#${entry.issue.number}</a> ${escapeHtml(entry.issue.title)}</td><td class="c-detail">${escapeHtml(entry.reasons.join(", "))}</td></tr>`
     )
     .join("");
   return tableSection(
@@ -5535,7 +5535,7 @@ function renderPullRequestDetailPage(input: {
   const urlHtml =
     snapshot.url === null
       ? ""
-      : `<p class="note"><a href="${escapeHtml(snapshot.url)}">${escapeHtml(snapshot.url)}</a></p>`;
+      : `<p class="note"><a href="${escapeHtml(snapshot.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(snapshot.url)}</a></p>`;
   const branchHtml =
     snapshot.headRef === null
       ? ""
@@ -6818,7 +6818,7 @@ function renderPullRequestFollowupAttention(
   if (attention === null) {
     return "";
   }
-  return `<section class="banner banner--attention"><p class="banner-title">Manual attention required</p><p class="banner-reason">PR review follow-up reached its dispatch cap (${attention.dispatchCount} of ${attention.maxDispatches}) while unresolved feedback remains.</p><p class="banner-context"><a href="${escapeHtml(attention.prUrl)}">Open pull request #${attention.prNumber}</a></p></section>`;
+  return `<section class="banner banner--attention"><p class="banner-title">Manual attention required</p><p class="banner-reason">PR review follow-up reached its dispatch cap (${attention.dispatchCount} of ${attention.maxDispatches}) while unresolved feedback remains.</p><p class="banner-context"><a href="${escapeHtml(attention.prUrl)}" target="_blank" rel="noopener noreferrer">Open pull request #${attention.prNumber}</a></p></section>`;
 }
 
 function renderRunSummary(

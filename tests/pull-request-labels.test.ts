@@ -115,6 +115,9 @@ describe("GET /prs/:project/:number labels (#309 part 2, ADR 0078)", () => {
       expect(html).toContain("managed by Symphonika — not editable here");
       expect(html).toContain('name="snapshot_owner" value="pmatos"');
       expect(html).toContain('name="snapshot_repo" value="alpha"');
+      expect(html).toContain(
+        '<a href="https://github.com/pmatos/symphonika/pull/246" target="_blank" rel="noopener noreferrer">https://github.com/pmatos/symphonika/pull/246</a>'
+      );
     } finally {
       test.cleanup();
     }

@@ -1171,6 +1171,7 @@ type RunTransitionChangeEvent = Extract<
 >;
 
 type InsertRunRowInput = {
+  branchName?: string;
   evidenceIgnore?: readonly string[];
   id: string;
   isContinuation: boolean;
@@ -1273,12 +1274,17 @@ export class RunStore {
     });
   }
 
-  // workspacePath carries the parent's Workspace onto the waiting row. Without
-  // it the row's workspace_path is NULL, and an `artifact_exists` predicate in
-  // a wait/merge_pr state can never be evaluated (ADR 0087) — reEvaluateWaitingRun
-  // has no other route to the Workspace, since a wait->wait advance sets
-  // parentRunId to the *waiting* run, so walking parents just finds another NULL.
+  // workspacePath (and branchName) carry the parent's Workspace onto the
+  // waiting row. Without workspacePath the row's workspace_path is NULL, and
+  // an `artifact_exists` predicate in a wait/merge_pr state can never be
+  // evaluated (ADR 0087) — reEvaluateWaitingRun has no other route to the
+  // Workspace, since a wait->wait advance sets parentRunId to the *waiting*
+  // run, so walking parents just finds another NULL. branchName carries the
+  // same way so a later createContinuationRun off this waiting row inherits
+  // the Run chain's actual branch instead of falling through to a fresh
+  // recompute from a possibly-since-edited issue title. See issue #699.
   createWaitingRun(input: {
+    branchName?: string;
     currentStateId: string;
     id: string;
     issue: IssueSnapshot;
@@ -1293,6 +1299,9 @@ export class RunStore {
     // or not at all.
     const apply = this.database.transaction(() => {
       const event = this.insertRunRow({
+        ...(input.branchName === undefined
+          ? {}
+          : { branchName: input.branchName }),
         id: input.id,
         isContinuation: true,
         issue: input.issue,
@@ -1315,14 +1324,19 @@ export class RunStore {
   // has no predecessor -- it's the first (and only) Run in its chain, so
   // parentRunId is always null and isContinuation is always false. Unlike
   // createRun it must never dispatch a provider, so it parks directly in
-  // `waiting` the same way createWaitingRun does. workspacePath is required,
-  // not optional, because an adopted Run always has a prepared workspace by
-  // the time this is called. Uses recordWorkflowStateAdvance rather than the
-  // bare setRunCurrentState createWaitingRun uses, so the row's own
+  // `waiting` the same way createWaitingRun does. workspacePath and
+  // branchName are required, not optional, because an adopted Run always has
+  // a prepared workspace and the PR's own real branch by the time this is
+  // called -- persisting branchName here is what lets a later
+  // createContinuationRun off this Run inherit the adopted branch instead of
+  // falling through to a fresh recompute from a possibly-since-edited issue
+  // title (issue #699). Uses recordWorkflowStateAdvance rather than the bare
+  // setRunCurrentState createWaitingRun uses, so the row's own
   // state_transition_reason records *why* it's parked there for show-run and
   // the dashboard -- createWaitingRun's park has no such reason because its
   // caller is the FSM itself, not an operator.
   createAdoptedRun(input: {
+    branchName: string;
     currentStateId: string;
     id: string;
     issue: IssueSnapshot;
@@ -1339,6 +1353,7 @@ export class RunStore {
     });
     const apply = this.database.transaction(() => {
       const event = this.insertRunRow({
+        branchName: input.branchName,
         id: input.id,
         isContinuation: false,
         issue: input.issue,
@@ -1399,6 +1414,14 @@ export class RunStore {
   // a position has no business starting a raw-FSM run, and the one that used
   // to (PR review follow-up, which fell back to expandedWorkflow.initial and
   // replayed the pipeline) now defers to the workflow instead. See issue #616.
+  //
+  // Also inherits the parent's branch_name/workspace_path (when the parent
+  // ever established them) rather than leaving them null for a fresh
+  // recompute from `input.issue`. planWorkspacePaths derives a branch name
+  // from the issue title, which may be refreshed live before a continuation
+  // fires; recomputing from that live title would silently point the
+  // continuation's workspace preparation at a different branch than the one
+  // the Run chain has actually been working on. See issue #699.
   createContinuationRun(
     input: CreateRunInput & {
       parentRunId: string;
@@ -1410,10 +1433,24 @@ export class RunStore {
     // its state-inheritance lookup must commit or roll back together. See
     // ADR 0093.
     const apply = this.database.transaction(() => {
+      const parent = this.database
+        .prepare(
+          "select current_state_id, branch_name, workspace_path from runs where id = ?"
+        )
+        .get(input.parentRunId) as
+        | {
+            current_state_id: string | null;
+            branch_name: string | null;
+            workspace_path: string | null;
+          }
+        | undefined;
       const event = this.insertRunRow({
         ...(input.evidenceIgnore === undefined
           ? {}
           : { evidenceIgnore: input.evidenceIgnore }),
+        ...(parent?.branch_name == null
+          ? {}
+          : { branchName: parent.branch_name }),
         id: input.id,
         isContinuation: true,
         issue: input.issue,
@@ -1421,12 +1458,11 @@ export class RunStore {
         projectName: input.projectName,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
-        state: "queued"
+        state: "queued",
+        ...(parent?.workspace_path == null
+          ? {}
+          : { workspacePath: parent.workspace_path })
       });
-      const parent = this.database
-        .prepare("select current_state_id from runs where id = ?")
-        .get(input.parentRunId) as
-        { current_state_id: string | null } | undefined;
       if (parent?.current_state_id != null) {
         this.setRunCurrentState(input.id, parent.current_state_id);
       }
@@ -2121,18 +2157,19 @@ export class RunStore {
             "id, project_name, issue_number, issue_title, state, issue_snapshot_json,",
             "issue_owner, issue_repo,",
             "evidence_ignore_json, provider_name, provider_command,",
-            "is_continuation, continuation_parent_run_id, workspace_path,",
+            "is_continuation, continuation_parent_run_id, workspace_path, branch_name,",
             "created_at, updated_at",
             ") values (",
             "@id, @project_name, @issue_number, @issue_title, @state, @issue_snapshot_json,",
             "@issue_owner, @issue_repo,",
             "@evidence_ignore_json, @provider_name, @provider_command,",
-            "@is_continuation, @continuation_parent_run_id, @workspace_path,",
+            "@is_continuation, @continuation_parent_run_id, @workspace_path, @branch_name,",
             "@created_at, @updated_at",
             ")"
           ].join(" ")
         )
         .run({
+          branch_name: input.branchName ?? null,
           continuation_parent_run_id: input.parentRunId,
           created_at: now,
           evidence_ignore_json: JSON.stringify(input.evidenceIgnore ?? []),

@@ -385,6 +385,44 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("createContinuationRun inherits the parent run's branch name and workspace path, ignoring a changed issue title", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const parentId = seedRun(store, { id: "parent-branch", issueNumber: 14 });
+      store.updateRunEvidence(
+        parentId,
+        evidence("sym/symphonika/14-original-title")
+      );
+
+      store.createContinuationRun({
+        id: "cont-branch",
+        issue: {
+          body: "",
+          created_at: "2025-01-01T00:00:00Z",
+          id: 2014,
+          labels: ["agent-ready"],
+          number: 14,
+          priority: 1,
+          state: "open",
+          title: "renamed after the first attempt",
+          updated_at: "2025-01-01T00:00:00Z",
+          url: "https://example/14"
+        },
+        parentRunId: parentId,
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+
+      const continuation = store.getRun("cont-branch");
+      expect(continuation?.branchName).toBe("sym/symphonika/14-original-title");
+      expect(continuation?.workspacePath).toBe("/tmp/workspace");
+    } finally {
+      store.close();
+    }
+  });
+
   it("rolls back the row when state inheritance throws mid-createContinuationRun", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

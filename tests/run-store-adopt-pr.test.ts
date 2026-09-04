@@ -71,6 +71,7 @@ describe("RunStore adopt-pr helpers (ADR-2026-09-03-1158)", () => {
     const store = openRunStore({ stateRoot });
     try {
       store.createAdoptedRun({
+        branchName: "sym/alpha/246-fix-login",
         currentStateId: "wait_for_pr",
         id: "adopted-1",
         issue: sampleIssue(),
@@ -107,6 +108,7 @@ describe("RunStore adopt-pr helpers (ADR-2026-09-03-1158)", () => {
       expect(store.claimProgressEdge(edge, "fingerprint-a")).toBe("unchanged");
 
       store.createAdoptedRun({
+        branchName: "sym/alpha/246-fix-login",
         currentStateId: "wait_for_pr",
         id: "adopted-2",
         issue: sampleIssue(),
@@ -134,6 +136,7 @@ describe("RunStore adopt-pr helpers (ADR-2026-09-03-1158)", () => {
         providerName: "codex"
       });
       store.createAdoptedRun({
+        branchName: "sym/alpha/246-fix-login",
         currentStateId: "wait_for_pr",
         id: "adopted-run",
         issue: sampleIssue(),

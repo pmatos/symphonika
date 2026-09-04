@@ -181,6 +181,12 @@ sym/<project-name>/<issue-number>-<slug>
 
 The exact slugging algorithm must be deterministic and path-safe.
 
+The Issue Branch and Workspace are decided once, at the Run chain's first attempt, and persisted on
+the Run row. Every later attempt in the same chain — a continuation, a raw-FSM state advance, a wait
+re-evaluation — reuses that persisted branch/workspace rather than re-deriving it from the issue's
+title at that later moment, since the title may have been edited after the branch was created. See
+ADR-2026-09-04-0837.
+
 ### 4.7 Run
 
 A Run is one orchestrator-managed execution lifecycle for one issue in one workspace.

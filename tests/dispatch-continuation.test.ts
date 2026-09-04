@@ -283,6 +283,107 @@ describe("dispatch continuation cap", () => {
     }
   });
 
+  it("reuses the original branch/workspace plan on a continuation even after the issue title changes", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
+    await writeProject(root);
+
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    let getIssueCalls = 0;
+    const renamedTitle = "Renamed after the first attempt";
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      // The first refresh (deciding whether to schedule the continuation)
+      // still sees the original title; the second refresh (the scheduled
+      // continuation actually firing) sees a title edited in the meantime.
+      getIssue: vi.fn(() => {
+        getIssueCalls += 1;
+        return Promise.resolve({
+          ...baseIssue,
+          labels: ["agent-ready"],
+          title: getIssueCalls === 1 ? baseIssue.title : renamedTitle
+        });
+      }),
+      listBranchCommits: vi.fn().mockResolvedValue([]),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
+        .mockResolvedValue([
+          { ...baseIssue, labels: ["agent-ready", "sym:claimed"] }
+        ]),
+      listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve({ ...prepared, reused: true })
+    );
+
+    let runCounter = 0;
+    const createRunId = (): string => {
+      runCounter += 1;
+      return `run-title-drift-${runCounter}`;
+    };
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: fastContinuationPolicy,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      await waitForCondition(daemon.url, ({ runs }) =>
+        runs.some(
+          (run) =>
+            run["state"] === "succeeded" && run["isContinuation"] === true
+        )
+      );
+
+      expect(prepareIssueWorkspace.mock.calls.length).toBeGreaterThanOrEqual(2);
+      const [freshCallInput] = prepareIssueWorkspace.mock
+        .calls[0] as unknown as [
+        { existing?: unknown; issue: { title: string } }
+      ];
+      const [continuationCallInput] = prepareIssueWorkspace.mock
+        .calls[1] as unknown as [
+        {
+          existing?: { branchName: string; workspacePath: string };
+          issue: { title: string };
+        }
+      ];
+
+      // Sanity check the fixture: the continuation really did observe the
+      // edited title, so a passing `existing` assertion below proves the
+      // controller ignored it rather than the mock never having changed.
+      expect(freshCallInput.issue.title).toBe(baseIssue.title);
+      expect(continuationCallInput.issue.title).toBe(renamedTitle);
+      expect(continuationCallInput.existing).toEqual({
+        branchName: prepared.branchName,
+        workspacePath: prepared.workspacePath
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("does not schedule continuation when refreshed issue is closed", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);

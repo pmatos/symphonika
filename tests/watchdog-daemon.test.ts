@@ -79,6 +79,48 @@ describe("daemon watchdog", () => {
     }
   });
 
+  // Issue #690: reconcileWatchdog used to run only from inside the poll
+  // tick, so its drain cadence was bounded by whichever of
+  // polling.interval_ms / watchdog.sample_interval_seconds was larger. A
+  // one-hour poll interval delayed a settled Watchdog alert by up to an
+  // hour instead of the one sample interval SPEC.md §12.4 promises. With
+  // polling.interval_ms this large, the automatic poll timer never fires
+  // inside this test's timeout, and no /api/poll-now call is made either --
+  // so this only passes if the Watchdog now reconciles on its own schedule.
+  it("stales an idle provider from its own schedule, independent of any poll tick", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root, { pollingIntervalMs: 60_000 });
+    const prepared = preparedWorkspaceFixture(root);
+    await mkdir(prepared.workspacePath, { recursive: true });
+    const provider = idleUsageProvider();
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-watchdog-independent-timer",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi: githubIssuesApiFixture(),
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: prepareWorkspace(prepared)
+    });
+
+    try {
+      const run = await waitForRunState(daemon.url, "stale");
+      expect(run).toMatchObject({
+        id: "run-watchdog-independent-timer",
+        state: "stale",
+        terminalReason: "no_progress"
+      });
+      expect(provider.cancel).toHaveBeenCalledWith(
+        "run-watchdog-independent-timer"
+      );
+    } finally {
+      provider.stopAll();
+      await daemon.stop();
+    }
+  });
+
   it("stales a busy provider that burns its output-token budget without converging", async () => {
     const root = await makeTempRoot();
     // A long grace window, so only the convergence budget can end this Run.

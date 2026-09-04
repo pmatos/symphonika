@@ -529,6 +529,8 @@ export async function startDaemon(
   };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let systemdWatchdogTimer: ReturnType<typeof setInterval> | undefined;
+  let watchdogTimer: ReturnType<typeof setInterval> | undefined;
+  let watchdogIntervalMs: number | undefined;
   let lastTickAtMs: number | undefined;
   let lastTickAtMonotonicMs: number | undefined;
   let nextPollAtMonotonicMs: number | undefined;
@@ -551,7 +553,6 @@ export async function startDaemon(
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
-  let lastWatchdogSampleAt = Date.now();
   let recomputeRoutineSchedulesFromNow = true;
   let pendingPollNow: Promise<PollNowResult> | undefined;
   const inflightDispatches = new Set<Promise<void>>();
@@ -709,6 +710,12 @@ export async function startDaemon(
         }
       }
     }
+    // Re-arms the independent Watchdog reconciliation timer (below) against
+    // the freshly reloaded watchdog.sample_interval_seconds. This is the one
+    // call site every reload path shares -- the poll tick, an editor save,
+    // and the manual reload route -- so a config edit takes effect on the
+    // Watchdog's own schedule without waiting for the next poll tick.
+    refreshWatchdogTimer();
     return { errors: reloadStatus.errors, ok: !reloadBroken, snapshot };
   };
 
@@ -1076,46 +1083,6 @@ export async function startDaemon(
       }
     }
 
-    try {
-      const watchdog = serviceConfig.watchdog;
-      const nowMs = Date.now();
-      if (
-        nowMs - lastWatchdogSampleAt >=
-        watchdog.sampleIntervalSeconds * 1_000
-      ) {
-        lastWatchdogSampleAt = nowMs;
-        const watchdogTerminations: WatchdogTermination[] = [];
-        await reconcileWatchdog({
-          activeRuns,
-          config: watchdog,
-          evidenceIgnoreForProject: (projectName) => {
-            const workflow = projects.get(projectName)?.workflow;
-            return workflow !== undefined && "expandedWorkflow" in workflow
-              ? workflow.evidence.ignore
-              : undefined;
-          },
-          logger,
-          now: () => new Date(nowMs),
-          onTerminated: (run) => {
-            watchdogTerminations.push({ ...run, kind: "issue_run" });
-          },
-          onRoutineTerminated: (firing) => {
-            watchdogTerminations.push({
-              ...firing,
-              kind: "routine_firing"
-            });
-          },
-          projects: serviceConfig.projects,
-          runStore
-        });
-        daemonHealthNotifications.notifyWatchdogTerminations(
-          watchdogTerminations
-        );
-      }
-    } catch (error) {
-      logger.error({ err: error }, "symphonika watchdog reconcile failed");
-    }
-
     if (dispatchMutex.held) {
       return;
     }
@@ -1133,6 +1100,100 @@ export async function startDaemon(
     } catch (error) {
       logger.error({ err: error }, "symphonika stale-claim detection failed");
     }
+  };
+  // Runs on its own schedule (armed by refreshWatchdogTimer, cadence
+  // watchdog.sample_interval_seconds) rather than from reconcile()/tick(), so
+  // the drain bound SPEC.md §12.4 documents no longer depends on
+  // polling.interval_ms (issue #690, ADR 2026-09-04-0806). Queued through
+  // enqueueScheduledWork so it still serializes with poll ticks and other
+  // scheduled work under the same single scheduledWork chain reconcile()
+  // already relied on -- this preserves the "at most one reconcile-family
+  // pass in flight" invariant without a new mutex.
+  const reconcileWatchdogPass = async (): Promise<void> => {
+    if (!state.configExists) {
+      return;
+    }
+    const serviceConfig = runtimeConfig.getSnapshot();
+    if (serviceConfig === undefined) {
+      return;
+    }
+    const projects = runtimeConfig.projectsByName();
+    if (projects.size === 0) {
+      return;
+    }
+    try {
+      const watchdogTerminations: WatchdogTermination[] = [];
+      await reconcileWatchdog({
+        activeRuns,
+        config: serviceConfig.watchdog,
+        evidenceIgnoreForProject: (projectName) => {
+          const workflow = projects.get(projectName)?.workflow;
+          return workflow !== undefined && "expandedWorkflow" in workflow
+            ? workflow.evidence.ignore
+            : undefined;
+        },
+        logger,
+        onTerminated: (run) => {
+          watchdogTerminations.push({ ...run, kind: "issue_run" });
+        },
+        onRoutineTerminated: (firing) => {
+          watchdogTerminations.push({ ...firing, kind: "routine_firing" });
+        },
+        projects: serviceConfig.projects,
+        runStore
+      });
+      daemonHealthNotifications.notifyWatchdogTerminations(
+        watchdogTerminations
+      );
+    } catch (error) {
+      logger.error({ err: error }, "symphonika watchdog reconcile failed");
+    }
+  };
+  // Set only while a pass is queued in scheduledWork or actually running, so
+  // a timer fire landing while the previous pass is still in flight (e.g. a
+  // large workspace walk outlasting a short sample interval) is dropped
+  // instead of piling up a backlog of redundant queued passes -- the next
+  // fire after the flag clears picks reconciliation back up. Effective
+  // cadence is therefore max(sample_interval_seconds, pass duration), never
+  // faster than the configured interval.
+  let watchdogPassQueued = false;
+  const scheduleWatchdogPass = (): void => {
+    if (watchdogPassQueued) {
+      return;
+    }
+    watchdogPassQueued = true;
+    enqueueScheduledWork(async () => {
+      try {
+        await reconcileWatchdogPass();
+      } finally {
+        watchdogPassQueued = false;
+      }
+    });
+  };
+  const refreshWatchdogTimer = (): void => {
+    const sampleIntervalSeconds = state.configExists
+      ? runtimeConfig.watchdogServiceConfig()?.watchdog.sampleIntervalSeconds
+      : undefined;
+    // Armed regardless of watchdog.enabled: reconcileWatchdog still drains
+    // terminal pending Routine Firing notifications while sampling itself is
+    // disabled (see watchdog.ts's reconcileWatchdog / SPEC.md §12.4).
+    const nextIntervalMs =
+      sampleIntervalSeconds === undefined
+        ? undefined
+        : Math.max(1, Math.round(sampleIntervalSeconds * 1_000));
+    if (nextIntervalMs === watchdogIntervalMs) {
+      return;
+    }
+    watchdogIntervalMs = nextIntervalMs;
+    if (watchdogTimer !== undefined) {
+      clearInterval(watchdogTimer);
+      watchdogTimer = undefined;
+    }
+    if (nextIntervalMs === undefined) {
+      return;
+    }
+    watchdogTimer = setInterval(scheduleWatchdogPass, nextIntervalMs);
+    watchdogTimer.unref?.();
   };
   const launchWork = (): void => {
     if (
@@ -2344,6 +2405,9 @@ export async function startDaemon(
       }
       if (systemdWatchdogTimer !== undefined) {
         clearInterval(systemdWatchdogTimer);
+      }
+      if (watchdogTimer !== undefined) {
+        clearInterval(watchdogTimer);
       }
       if (legacyRecheckTimer !== undefined) {
         clearTimeout(legacyRecheckTimer);

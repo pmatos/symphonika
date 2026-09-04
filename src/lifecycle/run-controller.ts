@@ -950,47 +950,37 @@ export class RunController {
         `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
       );
     }
-    if (input.claimGuard?.() === false) {
-      throw new FreshClaimDeferredError(
-        `fresh issue claim deferred for project ${input.project.name}`
-      );
-    }
-    if (
-      this.runStore.latestRunSuppressesFreshDispatch({
-        issueNumber: input.issue.number,
-        projectName: input.project.name,
-        repository: input.repository
-      })
-    ) {
-      throw new FreshClaimDeferredError(
-        `fresh issue claim suppressed by latest no_workspace_changes outcome for ${input.project.name}#${input.issue.number}`
-      );
-    }
-    await this.bestEffort(
-      () =>
-        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
-          ...input.repository,
-          issueNumber: input.issue.number,
-          labels: ["sym:claimed"]
-        }),
-      {
-        issueNumber: input.issue.number,
-        label: "sym:claimed",
-        operation: "addLabel",
-        phase: "fresh-dispatch-provider-resolution",
-        project: input.project.name,
-        runId: input.runId
+    // Held from the claimGuard/suppression check through the terminal Run
+    // write, mirroring claimAndPersistRun's own claim boundary (and
+    // recordStateAdvanceTerminalTarget's). Without this, a concurrent run
+    // for the same issue can record its blocked/no_workspace_changes verdict
+    // between this method's suppression check and its `sym:claimed` +
+    // createRun writes, letting a stale "not suppressed" read through and
+    // re-open the redispatch loop the verdict was meant to close. See
+    // ADR 0052 / ADR 0053, issue #693.
+    await this.dispatchMutex.acquire();
+    try {
+      if (input.claimGuard?.() === false) {
+        throw new FreshClaimDeferredError(
+          `fresh issue claim deferred for project ${input.project.name}`
+        );
       }
-    );
-    if (this.activeRuns.isShuttingDown()) {
-      // The provider-resolution failure path does not reserve an in-flight
-      // slot, so reserveSlot cannot reject a shutdown-racing claim for it.
-      // Roll back the label before skipping row creation. See ADR 0052.
+      if (
+        this.runStore.latestRunSuppressesFreshDispatch({
+          issueNumber: input.issue.number,
+          projectName: input.project.name,
+          repository: input.repository
+        })
+      ) {
+        throw new FreshClaimDeferredError(
+          `fresh issue claim suppressed by latest no_workspace_changes outcome for ${input.project.name}#${input.issue.number}`
+        );
+      }
       await this.bestEffort(
         () =>
           (
             this.githubIssuesApi as LabelWritingGitHubIssuesApi
-          ).removeLabelsFromIssue({
+          ).addLabelsToIssue({
             ...input.repository,
             issueNumber: input.issue.number,
             labels: ["sym:claimed"]
@@ -998,50 +988,75 @@ export class RunController {
         {
           issueNumber: input.issue.number,
           label: "sym:claimed",
-          operation: "removeLabel",
-          phase: "fresh-dispatch-provider-resolution-shutdown",
+          operation: "addLabel",
+          phase: "fresh-dispatch-provider-resolution",
           project: input.project.name,
           runId: input.runId
         }
       );
-      throw new RegistryShutdownError(
-        `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      if (this.activeRuns.isShuttingDown()) {
+        // The provider-resolution failure path does not reserve an in-flight
+        // slot, so reserveSlot cannot reject a shutdown-racing claim for it.
+        // Roll back the label before skipping row creation. See ADR 0052.
+        await this.bestEffort(
+          () =>
+            (
+              this.githubIssuesApi as LabelWritingGitHubIssuesApi
+            ).removeLabelsFromIssue({
+              ...input.repository,
+              issueNumber: input.issue.number,
+              labels: ["sym:claimed"]
+            }),
+          {
+            issueNumber: input.issue.number,
+            label: "sym:claimed",
+            operation: "removeLabel",
+            phase: "fresh-dispatch-provider-resolution-shutdown",
+            project: input.project.name,
+            runId: input.runId
+          }
+        );
+        throw new RegistryShutdownError(
+          `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+        );
+      }
+      this.runStore.createRun({
+        id: input.runId,
+        issue: input.issue,
+        projectName: input.project.name,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName
+      });
+      this.runStore.recordTerminalReason(
+        input.runId,
+        input.reason,
+        "deterministic"
       );
-    }
-    this.runStore.createRun({
-      id: input.runId,
-      issue: input.issue,
-      projectName: input.project.name,
-      providerCommand: input.providerCommand,
-      providerName: input.providerName
-    });
-    this.runStore.recordTerminalReason(
-      input.runId,
-      input.reason,
-      "deterministic"
-    );
-    this.runStore.updateRunState(input.runId, "failed");
-    this.logger?.warn(
-      {
+      this.runStore.updateRunState(input.runId, "failed");
+      this.logger?.warn(
+        {
+          issueNumber: input.issue.number,
+          project: input.project.name,
+          provider: input.providerName,
+          reason: input.reason,
+          runId: input.runId
+        },
+        "symphonika fresh dispatch failed before provider launch"
+      );
+      await this.claimLabels.applyTerminal({
+        fsmContinuing: false,
         issueNumber: input.issue.number,
-        project: input.project.name,
-        provider: input.providerName,
-        reason: input.reason,
-        runId: input.runId
-      },
-      "symphonika fresh dispatch failed before provider launch"
-    );
-    await this.claimLabels.applyTerminal({
-      fsmContinuing: false,
-      issueNumber: input.issue.number,
-      outcome: {
-        classification: "deterministic",
-        kind: "failed",
-        reason: input.reason
-      },
-      repository: input.repository,
-      willRetry: false
-    });
+        outcome: {
+          classification: "deterministic",
+          kind: "failed",
+          reason: input.reason
+        },
+        repository: input.repository,
+        willRetry: false
+      });
+    } finally {
+      this.dispatchMutex.release();
+    }
   }
 
   async executeRetry(payload: RetryPayload): Promise<void> {

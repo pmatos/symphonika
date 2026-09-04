@@ -60,8 +60,8 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Status**: proposed
 - **Score**: 18/25 (leverage 3, locality 4, blast radius 1, heat 3)
 - **Files**: ~3 estimated
-- **Modules**: `src/run-store.ts` (5711-5771 + descriptor builders at 4144, 5508), `src/http/pages.ts` (6907)
-- **Summary**: Replace the six parallel artifact-kind constructs (two identical arrays, a set, two identical path switches, a label switch) with one `{kind, column, label}` descriptor catalog.
+- **Modules**: `src/run-store.ts` (5711-5771 + descriptor builders at 4144, 5508), `src/http/pages.ts` (6907), `src/http/app.ts` (`RUN_ARTIFACT_CONTENT_TYPES` :363, `RUN_ARTIFACT_KINDS` :373, `resolveRoutineEvidenceFilePath` switch :1023 — a third site of the same catalog, folded into this item's scope by the 2026-09-04 fresh scan)
+- **Summary**: Replace the parallel artifact-kind constructs (identical arrays, a set, path switches, a content-type map, a label switch) across run-store, pages, and app with one `{kind, column, label, contentType}` descriptor catalog.
 - **First seen**: 2026-08-31
 
 ## routine-evidence-redaction
@@ -202,7 +202,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Stopped at**: step 6 — PR opened
 - **Branch**: `sym/symphonika/routine/refactor-audit/01M1MR2N06` (adopted; conditions 1-4 held — non-default, 0 unique commits, no upstream, unpublished on origin). Not renamed per the adopted-branch rule; slug recorded here and in the report instead.
 - **Committed**: report + backlog reconciliation (`62f9899`), design section (`80b4dc3`), implementation + CONTEXT.md term (`3b7d466`), this in-flight update.
-- **Evidence**: PR #701; quality gate green (lint, typecheck, format:check, knip, build; test 2695 passed — no flakes this run). Diff 6 files (est. ~5; the 6th is the new harness test, within tolerance). `create{Codex,Claude,Omp}Provider` + `AgentProvider` signatures unchanged.
+- **Evidence**: PR #701; quality gate green (lint, typecheck, format:check, knip, build; test 2695 passed — no flakes this run). Diff 6 files (est. ~5: three providers + `provider-session.ts` + test; the 6th is the `CONTEXT.md` term add, within tolerance). `create{Codex,Claude,Omp}Provider` + `AgentProvider` signatures unchanged.
 - **Next**: human review of #701; `run-slot-lease` (19/25, runner-up candidate) is the natural next firing.
 
 ## provider-attempt-runner
@@ -244,6 +244,16 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Summary**: A repeated transaction-then-publish epilogue that a `mutateAndPublish(fn)` helper could collapse.
 - **First seen**: 2026-09-03
 - **Reason**: Leverage 1 — the helper would be shallow (interface ≈ implementation), concentrating no behaviour. Same character as the dropped `provider-json-field-accessors`: a plain DRY cleanup, not a deepening candidate.
+
+## issue-polling-try-api-wrappers
+
+- **Status**: dropped
+- **Score**: n/a (leverage 1)
+- **Files**: ~1 estimated
+- **Modules**: `src/issue-polling.ts` (the ~11 `try*` API wrappers at 880-991: `tryAddLabelsToIssue`, `tryGetIssue`, `tryListPullRequests`, …)
+- **Summary**: Each wrapper is ~10 lines of `if (api.method === undefined) return sentinel; return api.method(input)`.
+- **First seen**: 2026-09-04
+- **Reason**: Leverage 1 — shallow-by-nature guards (interface ≈ implementation), same class as the dropped `provider-json-field-accessors`/`mutate-and-publish`. Collapsing to a generic invoker MOVES the guard, strips the `this` binding (see the explicit warning at :875-878), and the sentinel types differ (`false` vs `undefined`). Not a deepening candidate. Surfaced and rejected by the 2026-09-04 fresh scan; recorded so the next firing does not re-derive it.
 
 ## github-pr-enum-normalizers
 

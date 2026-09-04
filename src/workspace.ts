@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import { raceAbortSignal } from "./abort-race.js";
 import {
   planWorkspacePaths,
+  type ExistingWorkspacePlan,
   type WorkspacePathPlan
 } from "./workspace-paths.js";
 
@@ -47,6 +48,9 @@ type WorkspaceIssue = {
 
 export type PrepareIssueWorkspaceInput = {
   configDir?: string;
+  // See ExistingWorkspacePlan / planWorkspacePaths (issue #699): when set,
+  // reuses this branch/workspace instead of deriving one from `issue.title`.
+  existing?: ExistingWorkspacePlan;
   issue: WorkspaceIssue;
   project: WorkspaceProject;
   signal?: AbortSignal;

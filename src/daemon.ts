@@ -1745,6 +1745,7 @@ export async function startDaemon(
           });
           const runId = randomUUID();
           runStore.createAdoptedRun({
+            branchName: workspace.branchName,
             currentStateId: input.entryStateId,
             id: runId,
             issue: issueSnapshot,

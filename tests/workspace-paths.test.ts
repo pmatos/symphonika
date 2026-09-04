@@ -146,4 +146,40 @@ describe("planWorkspacePaths", () => {
     expect(punctuationOnly.issueDirectoryName).not.toContain("/");
     expect(punctuationOnly.issueDirectoryName).not.toContain("..");
   });
+
+  it("reuses an existing branch/workspace plan instead of re-deriving from the current issue title", () => {
+    const original = planWorkspacePaths({
+      configDir: "/config",
+      issue: {
+        number: 146,
+        title: "Original title at first attempt"
+      },
+      project: {
+        name: "symphonika",
+        workspace: {
+          root: "./.symphonika/workspaces/symphonika"
+        }
+      }
+    });
+
+    const afterTitleEdit = planWorkspacePaths({
+      configDir: "/config",
+      existing: {
+        branchName: original.branchName,
+        workspacePath: original.workspacePath
+      },
+      issue: {
+        number: 146,
+        title: "Title edited before a later continuation"
+      },
+      project: {
+        name: "symphonika",
+        workspace: {
+          root: "./.symphonika/workspaces/symphonika"
+        }
+      }
+    });
+
+    expect(afterTitleEdit).toEqual(original);
+  });
 });

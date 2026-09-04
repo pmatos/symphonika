@@ -1889,6 +1889,9 @@ export class RunController {
       if (isParkedAction(next?.action?.kind)) {
         const nextWaitingRunId = this.createRunId();
         this.runStore.createWaitingRun({
+          ...(row.branchName.length === 0
+            ? {}
+            : { branchName: row.branchName }),
           currentStateId: decision.to,
           id: nextWaitingRunId,
           issue: refreshed,
@@ -3871,8 +3874,27 @@ export class RunController {
         }
       }
 
+      // Reuse the branch/workspace this Run's chain already decided on at an
+      // earlier attempt, instead of re-deriving it from input.issue.title --
+      // which may be a live, just-refreshed title that no longer matches the
+      // title in effect when the chain's branch was first created. See issue
+      // #699.
+      const existingRun = this.runStore.getRun(input.runId);
+      const existingWorkspace =
+        existingRun !== undefined &&
+        existingRun.branchName.length > 0 &&
+        existingRun.workspacePath.length > 0
+          ? {
+              branchName: existingRun.branchName,
+              workspacePath: existingRun.workspacePath
+            }
+          : undefined;
+
       workspaceOperation = this.prepareIssueWorkspace({
         configDir: this.configDir,
+        ...(existingWorkspace === undefined
+          ? {}
+          : { existing: existingWorkspace }),
         issue: {
           number: input.issue.number,
           title: input.issue.title
@@ -4112,6 +4134,7 @@ export class RunController {
         if (currentState !== undefined && loadedWorkflow !== undefined) {
           workflowOutcome = await this.applyWorkflowOutcome({
             actionExecuted: attemptCreated,
+            branchName: started?.evidence.branchName,
             currentState,
             deferRetryableTransientAdvance,
             issue: input.issue,
@@ -4356,6 +4379,7 @@ export class RunController {
 
   private async applyWorkflowOutcome(input: {
     actionExecuted: boolean;
+    branchName: string | undefined;
     currentState: ExpandedWorkflowState;
     deferRetryableTransientAdvance?: boolean;
     issue: IssueSnapshot;
@@ -4406,6 +4430,9 @@ export class RunController {
       if (isParkedAction(next?.action?.kind)) {
         const waitingRunId = this.createRunId();
         this.runStore.createWaitingRun({
+          ...(input.branchName === undefined
+            ? {}
+            : { branchName: input.branchName }),
           currentStateId: decision.to,
           id: waitingRunId,
           issue: input.issue,

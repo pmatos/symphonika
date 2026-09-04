@@ -5,7 +5,7 @@
 sub-agent sweep of `run-store.ts`, `run-controller.ts`, `daemon.ts`, `http/pages.ts`,
 `routines/dispatcher.ts`, `reload.ts`, `issue-polling.ts`, `http/app.ts`, and
 `pull-request-followup.ts`. Reconciled against `.architecture/backlog.md` and open/merged PRs.
-**Picked**: `provider-run-harness` — see [PR](#) and `.architecture/backlog.md`
+**Picked**: `provider-run-harness` — see [PR #701](https://github.com/pmatos/symphonika/pull/701) and `.architecture/backlog.md`
 **Degradations**: none — `gh` authenticated, sub-agent explore available, full quality gate discoverable.
 
 In the Mermaid diagrams, **solid edges are the interface** a caller wires by hand; **dashed edges are

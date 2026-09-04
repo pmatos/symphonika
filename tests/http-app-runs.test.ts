@@ -4469,6 +4469,7 @@ describe("HTTP app — firing detail page (#304 part 2/2)", () => {
         firingId: "fire-1",
         headSha: "abc123",
         prNumber: 248,
+        prUrl: "https://github.com/pmatos/symphonika/pull/248",
         projectName: "alpha",
         routineName: "audit"
       });

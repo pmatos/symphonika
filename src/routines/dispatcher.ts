@@ -2604,6 +2604,7 @@ function recordRoutinePullRequests(input: {
       firingId: input.firingId,
       headSha: pullRequest.head.sha,
       prNumber: pullRequest.number,
+      prUrl: pullRequest.html_url ?? null,
       projectName: input.projectName,
       routineName: input.routineName
     });

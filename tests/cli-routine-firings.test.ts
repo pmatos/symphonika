@@ -100,6 +100,7 @@ describe("CLI routine firing commands", () => {
       firingId: "01J-FIRING",
       headSha: "abc123",
       prNumber: 42,
+      prUrl: "https://github.com/example/alpha/pull/42",
       projectName: "alpha",
       routineName: "dependency-update"
     });

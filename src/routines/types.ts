@@ -77,6 +77,7 @@ export type RoutinePullRequestStatus = {
   firingId: string;
   headSha: string;
   prNumber: number;
+  prUrl: string | null;
   projectName: string;
   routineName: string;
 };

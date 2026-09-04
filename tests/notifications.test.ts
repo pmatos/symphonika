@@ -7,6 +7,172 @@ import {
   type RoutineFiringNotification
 } from "../src/notifications/routine-firing.js";
 import { createSmtpNotificationSink } from "../src/notifications/smtp.js";
+import { renderRoutineFanoutNotification } from "../src/routines/fanout-summary.js";
+import type {
+  RoutineFanoutStatus,
+  RoutineFanoutTargetStatus
+} from "../src/run-store.js";
+import type { RoutineFiringStatus } from "../src/run-store.js";
+
+function fakeFiring(
+  overrides: Partial<RoutineFiringStatus> = {}
+): RoutineFiringStatus {
+  return {
+    branchName: "sym/alpha/routine/refactor-audit/01J",
+    branchRef: "refs/heads/sym/alpha/routine/refactor-audit/01J",
+    cancelReason: null,
+    cancelRequested: false,
+    commitsAhead: true,
+    createdAt: "2026-09-03T23:00:00.000Z",
+    fanoutId: "fanout-1",
+    id: "fire-alpha",
+    kind: "git",
+    outcome: null,
+    projectName: "alpha",
+    provider: "codex",
+    providerCommand: "codex fake",
+    providerScopeCleanupPending: false,
+    pullRequests: [],
+    routineName: "refactor-audit",
+    scheduledAt: "2026-09-03T23:00:00.000Z",
+    state: "succeeded",
+    terminalReason: null,
+    triggerSource: "scheduled",
+    updatedAt: "2026-09-03T23:05:00.000Z",
+    workspacePath: "/tmp/routines/alpha",
+    workspacePrunedAt: null,
+    ...overrides
+  };
+}
+
+function fakeFanoutTarget(
+  overrides: Partial<RoutineFanoutTargetStatus> = {}
+): RoutineFanoutTargetStatus {
+  return {
+    deferredAttempts: 0,
+    deferredReason: null,
+    deferredSince: null,
+    disposition: "firing",
+    firing: fakeFiring(),
+    firingId: "fire-alpha",
+    holdReason: null,
+    projectName: "alpha",
+    skipReason: null,
+    ...overrides
+  };
+}
+
+function fakeFanout(targets: RoutineFanoutTargetStatus[]): RoutineFanoutStatus {
+  return {
+    createdAt: "2026-09-03T23:00:00.000Z",
+    failureCount: 0,
+    id: "01M1MR2MZTPPRGX4XFXVR93A6W",
+    issueCount: 0,
+    notificationError: null,
+    notificationState: "sent",
+    notifiedAt: "2026-09-03T23:06:00.000Z",
+    pullRequestCount: targets.reduce(
+      (count, target) => count + (target.firing?.pullRequests.length ?? 0),
+      0
+    ),
+    routineName: "refactor-audit",
+    scheduledAt: "2026-09-03T23:00:00.000Z",
+    subject: "[ptt] refactor-audit",
+    targets,
+    updatedAt: "2026-09-03T23:06:00.000Z"
+  };
+}
+
+describe("Routine Fan-out notifications", () => {
+  it("links a discovered pull request instead of leaving it as a bare number", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          pullRequests: [
+            {
+              firingId: "fire-alpha",
+              headSha: "abc123",
+              prNumber: 701,
+              prUrl: "https://github.com/pmatos/symphonika/pull/701",
+              projectName: "alpha",
+              routineName: "refactor-audit"
+            }
+          ]
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain(
+      "succeeded — PR #701 (https://github.com/pmatos/symphonika/pull/701)"
+    );
+    expect(message.html).toContain(
+      '<a href="https://github.com/pmatos/symphonika/pull/701">#701</a>'
+    );
+  });
+
+  it("explains a succeeded firing that opened no PR instead of leaving it unexplained", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "commit",
+            source: "codex",
+            status: "no_action",
+            summary: "Bailed at pick.",
+            title: "pm-deepen bailed — architecture PR #402 still in flight",
+            url: null,
+            verified: true
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain(
+      "succeeded — pm-deepen bailed — architecture PR #402 still in flight"
+    );
+    expect(message.html).toContain(
+      "succeeded — pm-deepen bailed — architecture PR #402 still in flight"
+    );
+  });
+
+  it("escapes an untrusted PR url and title instead of interpolating markup", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "commit",
+            source: "codex",
+            status: "no_action",
+            summary: "n/a",
+            title: "<img src=x onerror=alert(1)>",
+            url: null,
+            verified: true
+          },
+          pullRequests: [
+            {
+              firingId: "fire-alpha",
+              headSha: "abc123",
+              prNumber: 9,
+              prUrl: 'https://example.com/"><script>alert(1)</script>',
+              projectName: "alpha",
+              routineName: "refactor-audit"
+            }
+          ]
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.html).not.toContain("<script>");
+    expect(message.html).not.toContain("<img");
+  });
+});
 
 describe("Routine Firing notifications", () => {
   it("renders plain text and an HTML alternative without allowing interpolated markup", () => {

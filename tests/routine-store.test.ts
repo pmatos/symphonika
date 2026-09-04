@@ -1614,6 +1614,7 @@ describe("RunStore routines", () => {
         firingId: "fire-alpha",
         headSha: "abc123",
         prNumber: 42,
+        prUrl: "https://github.com/example/alpha/pull/42",
         projectName: "alpha",
         routineName: "refactor-audit"
       });
@@ -1661,6 +1662,7 @@ describe("RunStore routines", () => {
         firingId: "fire-git-1",
         headSha: "abc123",
         prNumber: 17,
+        prUrl: "https://github.com/example/alpha/pull/17",
         projectName: "alpha",
         routineName: "dependency-update"
       });
@@ -1668,6 +1670,7 @@ describe("RunStore routines", () => {
         firingId: "fire-git-1",
         headSha: "def456",
         prNumber: 18,
+        prUrl: "https://github.com/example/alpha/pull/18",
         projectName: "alpha",
         routineName: "dependency-update"
       });
@@ -1682,6 +1685,7 @@ describe("RunStore routines", () => {
               firingId: "fire-git-1",
               headSha: "abc123",
               prNumber: 17,
+              prUrl: "https://github.com/example/alpha/pull/17",
               projectName: "alpha",
               routineName: "dependency-update"
             },
@@ -1689,6 +1693,7 @@ describe("RunStore routines", () => {
               firingId: "fire-git-1",
               headSha: "def456",
               prNumber: 18,
+              prUrl: "https://github.com/example/alpha/pull/18",
               projectName: "alpha",
               routineName: "dependency-update"
             }

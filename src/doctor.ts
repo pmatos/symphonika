@@ -1224,9 +1224,10 @@ function isDefinitelyInvalidSystemdMemoryValue(value: string): boolean {
       }
       const wholeNumber = parseSystemdRelativeWholeNumber(wholeDigits ?? "0");
       // safe_atoi() parses any base-prefixed spelling of zero ("-0", "-00",
-      // "-0x0", "-0b0", ...) as plain 0, not negative, so any whole-number
-      // part that numerically evaluates to zero slips the sign past
-      // systemd's `v < 0` guard, not just the literal "0" spelling.
+      // "-0x0", ...) as plain 0, not negative, so any whole-number part that
+      // numerically evaluates to zero slips the sign past systemd's `v < 0`
+      // guard, not just the literal "0" spelling. (Signed "-0b0"/"-0o0" are
+      // already rejected by the guard above, before reaching this check.)
       if (sign === "-" && wholeNumber !== 0) {
         return true;
       }

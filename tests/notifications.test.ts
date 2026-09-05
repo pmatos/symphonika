@@ -140,6 +140,34 @@ describe("Routine Fan-out notifications", () => {
     );
   });
 
+  it("includes outcome.url for a no-PR outcome that has one, like formatRoutineOutcomeLine does", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "issue_opened",
+            source: "gh",
+            status: "success",
+            summary: "Opened a tracking issue.",
+            title: "Flaky test needs a real fix",
+            url: "https://github.com/pmatos/alpha/issues/5",
+            verified: true
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    // outcome.url is the only place a report-kind routine's issue_opened/
+    // issue_closed outcome can surface a link here — dropping it (as an
+    // earlier version of outcomeDetail did) silently loses that link.
+    expect(message.text).toContain(
+      "succeeded — Flaky test needs a real fix https://github.com/pmatos/alpha/issues/5"
+    );
+  });
+
   it("explains a genuine no-action outcome instead of a bare dash", () => {
     const fanout = fakeFanout([
       fakeFanoutTarget({

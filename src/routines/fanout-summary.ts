@@ -121,5 +121,6 @@ function outcomeDetail(outcome: RoutineFiringStatus["outcome"]): string {
   if (outcome.action === "none") {
     return ` — nothing to do${unverified}`;
   }
-  return ` — ${outcome.title}${unverified}`;
+  const url = outcome.url === null ? "" : ` ${outcome.url}`;
+  return ` — ${outcome.title}${url}${unverified}`;
 }

@@ -1,9 +1,13 @@
 import type {
   RoutineFanoutStatus,
-  RoutineFanoutTargetStatus
+  RoutineFanoutTargetStatus,
+  RoutineFiringStatus
 } from "../run-store.js";
-import { escapeHtml, htmlShell } from "../notifications/message.js";
-import type { RoutinePullRequestStatus } from "./types.js";
+import {
+  escapeHtml,
+  formatPullRequestReference,
+  htmlShell
+} from "../notifications/message.js";
 
 export type RoutineFanoutNotification = {
   fanout: RoutineFanoutStatus;
@@ -15,16 +19,19 @@ export type RoutineFanoutNotification = {
 export function renderRoutineFanoutNotification(
   fanout: RoutineFanoutStatus
 ): RoutineFanoutNotification {
-  const targetLines = fanout.targets.map(
-    (target) => `- ${target.projectName}: ${targetSummary(target).text}`
-  );
+  const summaries = fanout.targets.map((target) => ({
+    summary: targetSummary(target),
+    target
+  }));
   const text = [
     fanout.routineName,
     `Scheduled: ${fanout.scheduledAt}`,
     `Fan-out: ${fanout.id}`,
     "",
     "Projects:",
-    ...targetLines
+    ...summaries.map(
+      ({ target, summary }) => `- ${target.projectName}: ${summary.text}`
+    )
   ].join("\n");
   const html = htmlShell([
     `<h1>${escapeHtml(fanout.routineName)}</h1>`,
@@ -32,9 +39,9 @@ export function renderRoutineFanoutNotification(
     `<strong>Fan-out:</strong> ${escapeHtml(fanout.id)}</p>`,
     "<h2>Projects</h2>",
     "<ul>",
-    ...fanout.targets.map(
-      (target) =>
-        `<li><strong>${escapeHtml(target.projectName)}:</strong> ${targetSummary(target).html}</li>`
+    ...summaries.map(
+      ({ target, summary }) =>
+        `<li><strong>${escapeHtml(target.projectName)}:</strong> ${summary.html}</li>`
     ),
     "</ul>"
   ]);
@@ -46,6 +53,10 @@ export function renderRoutineFanoutNotification(
   };
 }
 
+function plain(text: string): { html: string; text: string } {
+  return { html: escapeHtml(text), text };
+}
+
 // Built together, not as separate text/html renderers, so the skip/missed/
 // held/PR-link branches can't drift out of sync with each other (a link
 // only the html half remembers to add is worse than no link).
@@ -54,8 +65,7 @@ function targetSummary(target: RoutineFanoutTargetStatus): {
   text: string;
 } {
   if (target.disposition === "skipped") {
-    const text = `skipped (${target.skipReason ?? "unspecified"})`;
-    return { html: escapeHtml(text), text };
+    return plain(`skipped (${target.skipReason ?? "unspecified"})`);
   }
   // A missed leg never ran at all, so it reads as the failure it is rather
   // than as one of the deliberate policy drops above (ADR 0093).
@@ -66,15 +76,15 @@ function targetSummary(target: RoutineFanoutTargetStatus): {
         : ` after ${target.deferredAttempts} admission ${
             target.deferredAttempts === 1 ? "attempt" : "attempts"
           }`;
-    const text = `did not run (${target.skipReason ?? "unspecified"})${attempts}`;
-    return { html: escapeHtml(text), text };
+    return plain(
+      `did not run (${target.skipReason ?? "unspecified"})${attempts}`
+    );
   }
   if (target.disposition === "held") {
-    const text = `held (${target.holdReason ?? "provider unavailable"})`;
-    return { html: escapeHtml(text), text };
+    return plain(`held (${target.holdReason ?? "provider unavailable"})`);
   }
   if (target.firing === null) {
-    return { html: escapeHtml(target.disposition), text: target.disposition };
+    return plain(target.disposition);
   }
   const { firing } = target;
   const terminalReason =
@@ -83,31 +93,31 @@ function targetSummary(target: RoutineFanoutTargetStatus): {
   // A succeeded firing with no discovered PR isn't necessarily a discovery
   // bug — a routine (e.g. pm-deepen) can legitimately commit a report and
   // stop short of opening one. Surface why so "succeeded" with no PR reads
-  // as an explained outcome rather than a silent gap.
+  // as an explained outcome rather than a silent gap. Route it through the
+  // same status/verified handling as formatRoutineOutcomeLine so an error
+  // or unverified claim never reads as an explained success here.
   if (pullRequests.length === 0) {
-    const outcomeDetail =
-      firing.outcome === null ? "" : ` — ${firing.outcome.title}`;
-    const text = `${firing.state}${terminalReason}${outcomeDetail}`;
-    return { html: escapeHtml(text), text };
+    return plain(
+      `${firing.state}${terminalReason}${outcomeDetail(firing.outcome)}`
+    );
   }
-  const text = `${firing.state}${terminalReason} — PR ${pullRequests
-    .map((pullRequest) => pullRequestText(pullRequest))
-    .join(", ")}`;
-  const html = `${escapeHtml(firing.state)}${escapeHtml(terminalReason)} — PR ${pullRequests
-    .map((pullRequest) => pullRequestHtml(pullRequest))
-    .join(", ")}`;
-  return { html, text };
+  const prefix = `${firing.state}${terminalReason}`;
+  const items = pullRequests.map((pullRequest) =>
+    formatPullRequestReference(pullRequest)
+  );
+  return {
+    html: `${escapeHtml(prefix)} — PR ${items.map((item) => item.html).join(", ")}`,
+    text: `${prefix} — PR ${items.map((item) => item.text).join(", ")}`
+  };
 }
 
-function pullRequestText(pullRequest: RoutinePullRequestStatus): string {
-  return pullRequest.prUrl === null
-    ? `#${pullRequest.prNumber}`
-    : `#${pullRequest.prNumber} (${pullRequest.prUrl})`;
-}
-
-function pullRequestHtml(pullRequest: RoutinePullRequestStatus): string {
-  const label = `#${pullRequest.prNumber}`;
-  return pullRequest.prUrl === null
-    ? escapeHtml(label)
-    : `<a href="${escapeHtml(pullRequest.prUrl)}">${escapeHtml(label)}</a>`;
+function outcomeDetail(outcome: RoutineFiringStatus["outcome"]): string {
+  if (outcome === null) {
+    return "";
+  }
+  const unverified = outcome.verified ? "" : " (unverified)";
+  if (outcome.status === "error") {
+    return ` — ${outcome.summary || "error"}${unverified}`;
+  }
+  return ` — ${outcome.title}${unverified}`;
 }

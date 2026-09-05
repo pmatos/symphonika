@@ -4508,7 +4508,9 @@ describe("HTTP app — firing detail page (#304 part 2/2)", () => {
       expect(body).toContain("State transitions");
       expect(body).toContain("Hello world.");
       expect(body).toContain("tool_call");
-      expect(body).toContain("PR #248");
+      expect(body).toContain(
+        '<a href="https://github.com/pmatos/symphonika/pull/248">#248</a>'
+      );
       expect(body).toContain("not a PR Follow-up");
       // fire-1 is in a terminal state (succeeded) -- no cancel form for it.
       expect(body).not.toContain("Cancel firing");

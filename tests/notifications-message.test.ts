@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   deliverSourceNotification,
   escapeHtml,
+  formatPullRequestReference,
   htmlShell,
   symphonikaSubject,
   type SourceNotificationDeliveryOutcome
@@ -23,6 +24,34 @@ describe("escapeHtml", () => {
     expect(escapeHtml("<script>alert('x')</script>")).toBe(
       "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;"
     );
+  });
+});
+
+describe("formatPullRequestReference", () => {
+  it("renders a bare, unlinked number when prUrl is null", () => {
+    expect(formatPullRequestReference({ prNumber: 42, prUrl: null })).toEqual({
+      html: "#42",
+      text: "#42"
+    });
+  });
+
+  it("treats an empty-string prUrl the same as null instead of a dead link", () => {
+    expect(formatPullRequestReference({ prNumber: 42, prUrl: "" })).toEqual({
+      html: "#42",
+      text: "#42"
+    });
+  });
+
+  it("links the number and escapes the url when prUrl is set", () => {
+    expect(
+      formatPullRequestReference({
+        prNumber: 7,
+        prUrl: "https://github.com/example/alpha/pull/7"
+      })
+    ).toEqual({
+      html: '<a href="https://github.com/example/alpha/pull/7">#7</a>',
+      text: "#7 (https://github.com/example/alpha/pull/7)"
+    });
   });
 });
 

@@ -10,8 +10,10 @@ import { DEFAULT_DELIVERY_TIMEOUT_MS } from "./delivery.js";
 import {
   deliverSourceNotification,
   escapeHtml,
+  formatPullRequestReference,
   htmlShell,
   symphonikaSubject,
+  type PullRequestReference,
   type SourceNotificationDeliveryOutcome
 } from "./message.js";
 
@@ -24,7 +26,7 @@ export type RoutineFiringNotification = {
   kind: RoutineKind;
   outcome: RoutineOutcome | null;
   projectName: string;
-  pullRequests: Array<{ prNumber: number }>;
+  pullRequests: PullRequestReference[];
   reportOutput: string;
   routineName: string;
   state: Extract<RoutineFiringState, "succeeded" | "failed" | "cancelled">;
@@ -53,12 +55,17 @@ export async function deliverRoutineFiringNotification(input: {
 export function renderRoutineFiringNotification(
   firing: RoutineFiringNotification
 ): NotificationMessage {
-  const pullRequests =
-    firing.pullRequests.length === 0
+  const pullRequestItems = firing.pullRequests.map((pullRequest) =>
+    formatPullRequestReference(pullRequest)
+  );
+  const pullRequestsText =
+    pullRequestItems.length === 0
       ? "none"
-      : firing.pullRequests
-          .map((pullRequest) => `#${pullRequest.prNumber}`)
-          .join(", ");
+      : pullRequestItems.map((item) => item.text).join(", ");
+  const pullRequestsHtml =
+    pullRequestItems.length === 0
+      ? "none"
+      : pullRequestItems.map((item) => item.html).join(", ");
   const duration = formatDuration(firing.durationMs);
   const terminal = firing.terminalReason ?? "none";
   const reportOutput =
@@ -82,7 +89,7 @@ export function renderRoutineFiringNotification(
     `Terminal reason: ${terminal}`,
     `Duration: ${duration}`,
     `Branch: ${firing.branchName}`,
-    `Pull requests: ${pullRequests}`,
+    `Pull requests: ${pullRequestsText}`,
     "",
     "Report output:",
     reportOutput
@@ -99,7 +106,7 @@ export function renderRoutineFiringNotification(
     detail("Terminal reason", terminal),
     detail("Duration", duration),
     detail("Branch", firing.branchName),
-    detail("Pull requests", pullRequests),
+    rawDetail("Pull requests", pullRequestsHtml),
     "</dl>",
     "<h2>Report output</h2>",
     renderMinimalMarkdown(reportOutput)
@@ -129,6 +136,13 @@ function shouldNotifyRoutineFiring(
 
 function detail(label: string, value: string): string {
   return `<dt><strong>${escapeHtml(label)}</strong></dt><dd>${escapeHtml(value)}</dd>`;
+}
+
+// Like detail(), but for a value that is already safe HTML (e.g. an anchor
+// built by formatPullRequestReference) — escaping it again would turn the
+// link back into literal text.
+function rawDetail(label: string, html: string): string {
+  return `<dt><strong>${escapeHtml(label)}</strong></dt><dd>${html}</dd>`;
 }
 
 function renderMinimalMarkdown(markdown: string): string {

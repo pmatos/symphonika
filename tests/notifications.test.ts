@@ -140,6 +140,36 @@ describe("Routine Fan-out notifications", () => {
     );
   });
 
+  it("surfaces an error outcome's summary instead of its unverified title when there is no PR", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "pr",
+            source: "codex",
+            status: "error",
+            summary: "claimed PR #9 but none was found on the branch",
+            title: "Opened PR #9",
+            url: null,
+            verified: false
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    // A rejected/unverified claim must never read as an explained success:
+    // show the reconciled error summary, not the provider's own (unverified)
+    // title, which here claims a PR that reconciliation determined does not
+    // exist.
+    expect(message.text).toContain(
+      "succeeded — claimed PR #9 but none was found on the branch (unverified)"
+    );
+    expect(message.text).not.toContain("Opened PR #9");
+  });
+
   it("escapes an untrusted PR url and title instead of interpolating markup", () => {
     const fanout = fakeFanout([
       fakeFanoutTarget({
@@ -217,6 +247,36 @@ describe("Routine Firing notifications", () => {
     );
     expect(message.html).not.toContain("<script>");
     expect(message.html).not.toContain("<img");
+  });
+
+  it("links a discovered pull request the same way the fan-out summary does", () => {
+    const message = renderRoutineFiringNotification({
+      branchName: "main",
+      durationMs: 1_234,
+      firingId: "fire-123",
+      kind: "git",
+      outcome: null,
+      projectName: "alpha",
+      pullRequests: [
+        {
+          prNumber: 55,
+          prUrl: 'https://example.com/"><script>alert(1)</script>'
+        }
+      ],
+      reportOutput: "",
+      routineName: "refactor-audit",
+      state: "succeeded",
+      terminalReason: null,
+      title: "refactor-audit"
+    });
+
+    expect(message.text).toContain(
+      'Pull requests: #55 (https://example.com/"><script>alert(1)</script>)'
+    );
+    expect(message.html).toContain(
+      '<a href="https://example.com/&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;">#55</a>'
+    );
+    expect(message.html).not.toContain("<script>");
   });
 
   it("reads the SMTP password from its named environment variable and sends a multipart message", async () => {

@@ -30,6 +30,29 @@ export function htmlShell(innerLines: readonly string[]): string {
   return [HTML_SHELL_OPEN, ...innerLines, HTML_SHELL_CLOSE].join("\n");
 }
 
+export type PullRequestReference = {
+  prNumber: number;
+  prUrl: string | null;
+};
+
+// Shared by every email renderer that mentions a discovered PR (fan-out
+// summaries and single-firing notifications alike) so a fix to escaping or
+// linking never has to be re-applied by hand in more than one place. An
+// empty-string prUrl is treated the same as null rather than as a real link.
+export function formatPullRequestReference(pullRequest: PullRequestReference): {
+  html: string;
+  text: string;
+} {
+  const label = `#${pullRequest.prNumber}`;
+  if (pullRequest.prUrl === null || pullRequest.prUrl === "") {
+    return { html: escapeHtml(label), text: label };
+  }
+  return {
+    html: `<a href="${escapeHtml(pullRequest.prUrl)}">${escapeHtml(label)}</a>`,
+    text: `${label} (${pullRequest.prUrl})`
+  };
+}
+
 export function symphonikaSubject(subject: string): string {
   return `[Symphonika] ${subject}`;
 }

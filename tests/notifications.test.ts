@@ -140,6 +140,33 @@ describe("Routine Fan-out notifications", () => {
     );
   });
 
+  it("explains a genuine no-action outcome instead of a bare dash", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "none",
+            source: "gh",
+            status: "no_action",
+            summary: "GitHub state diff observed no external action.",
+            title: "",
+            url: null,
+            verified: true
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    // reconcileRoutineOutcome leaves `title` empty for action:"none" outcomes
+    // (src/routines/outcome.ts), matching formatRoutineOutcomeLine's own
+    // "nothing to do" wording rather than an empty explanation.
+    expect(message.text).toContain("succeeded — nothing to do");
+    expect(message.html).toContain("succeeded — nothing to do");
+  });
+
   it("surfaces an error outcome's summary instead of its unverified title when there is no PR", () => {
     const fanout = fakeFanout([
       fakeFanoutTarget({

@@ -36,6 +36,7 @@ import {
   parseRoutineDeclaration
 } from "../routines/declaration-loader.js";
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
+import { formatPullRequestReference } from "../notifications/message.js";
 import { runSavePipeline, type ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
@@ -6577,11 +6578,8 @@ function renderFiringPullRequests(
   }
   const items = pullRequests
     .map((pullRequest) => {
-      const label =
-        pullRequest.prUrl === null || pullRequest.prUrl === ""
-          ? `PR #${pullRequest.prNumber}`
-          : `PR <a href="${escapeHtml(pullRequest.prUrl)}">#${pullRequest.prNumber}</a>`;
-      return `<li>${label} <code>${escapeHtml(pullRequest.headSha)}</code> <small>(informational — not a PR Follow-up)</small></li>`;
+      const label = formatPullRequestReference(pullRequest).html;
+      return `<li>PR ${label} <code>${escapeHtml(pullRequest.headSha)}</code> <small>(informational — not a PR Follow-up)</small></li>`;
     })
     .join("");
   return `<section>${sectionHead("Pull requests", pullRequests.length)}<ul class="files">${items}</ul></section>`;

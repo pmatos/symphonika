@@ -8,6 +8,7 @@ import {
   formatPullRequestReference,
   htmlShell
 } from "../notifications/message.js";
+import { unverifiedOutcomeSuffix } from "./outcome.js";
 
 export type RoutineFanoutNotification = {
   fanout: RoutineFanoutStatus;
@@ -89,19 +90,17 @@ function targetSummary(target: RoutineFanoutTargetStatus): {
   const { firing } = target;
   const terminalReason =
     firing.terminalReason === null ? "" : ` (${firing.terminalReason})`;
+  const prefix = `${firing.state}${terminalReason}`;
   const pullRequests = firing.pullRequests;
   // A succeeded firing with no discovered PR isn't necessarily a discovery
   // bug — a routine (e.g. pm-deepen) can legitimately commit a report and
   // stop short of opening one. Surface why so "succeeded" with no PR reads
-  // as an explained outcome rather than a silent gap. Route it through the
-  // same status/verified handling as formatRoutineOutcomeLine so an error
-  // or unverified claim never reads as an explained success here.
+  // as an explained outcome rather than a silent gap. The verified/unverified
+  // suffix is shared with formatRoutineOutcomeLine so an error or unverified
+  // claim never reads as an explained success here.
   if (pullRequests.length === 0) {
-    return plain(
-      `${firing.state}${terminalReason}${outcomeDetail(firing.outcome)}`
-    );
+    return plain(`${prefix}${outcomeDetail(firing.outcome)}`);
   }
-  const prefix = `${firing.state}${terminalReason}`;
   const items = pullRequests.map((pullRequest) =>
     formatPullRequestReference(pullRequest)
   );
@@ -115,9 +114,12 @@ function outcomeDetail(outcome: RoutineFiringStatus["outcome"]): string {
   if (outcome === null) {
     return "";
   }
-  const unverified = outcome.verified ? "" : " (unverified)";
+  const unverified = unverifiedOutcomeSuffix(outcome);
   if (outcome.status === "error") {
     return ` — ${outcome.summary || "error"}${unverified}`;
+  }
+  if (outcome.action === "none") {
+    return ` — nothing to do${unverified}`;
   }
   return ` — ${outcome.title}${unverified}`;
 }

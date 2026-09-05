@@ -53,6 +53,25 @@ export function formatPullRequestReference(pullRequest: PullRequestReference): {
   };
 }
 
+// Joins a list of references for display, falling back to "none" when
+// empty — the one thing every caller with a whole-list (rather than a
+// single-reference) rendering needs, kept here so the fallback text can't
+// drift between the text and HTML halves, or between callers.
+export function formatPullRequestReferences(
+  pullRequests: readonly PullRequestReference[]
+): { html: string; text: string } {
+  if (pullRequests.length === 0) {
+    return { html: "none", text: "none" };
+  }
+  const items = pullRequests.map((pullRequest) =>
+    formatPullRequestReference(pullRequest)
+  );
+  return {
+    html: items.map((item) => item.html).join(", "),
+    text: items.map((item) => item.text).join(", ")
+  };
+}
+
 export function symphonikaSubject(subject: string): string {
   return `[Symphonika] ${subject}`;
 }

@@ -10,7 +10,7 @@ import { DEFAULT_DELIVERY_TIMEOUT_MS } from "./delivery.js";
 import {
   deliverSourceNotification,
   escapeHtml,
-  formatPullRequestReference,
+  formatPullRequestReferences,
   htmlShell,
   symphonikaSubject,
   type PullRequestReference,
@@ -55,17 +55,7 @@ export async function deliverRoutineFiringNotification(input: {
 export function renderRoutineFiringNotification(
   firing: RoutineFiringNotification
 ): NotificationMessage {
-  const pullRequestItems = firing.pullRequests.map((pullRequest) =>
-    formatPullRequestReference(pullRequest)
-  );
-  const pullRequestsText =
-    pullRequestItems.length === 0
-      ? "none"
-      : pullRequestItems.map((item) => item.text).join(", ");
-  const pullRequestsHtml =
-    pullRequestItems.length === 0
-      ? "none"
-      : pullRequestItems.map((item) => item.html).join(", ");
+  const pullRequests = formatPullRequestReferences(firing.pullRequests);
   const duration = formatDuration(firing.durationMs);
   const terminal = firing.terminalReason ?? "none";
   const reportOutput =
@@ -89,7 +79,7 @@ export function renderRoutineFiringNotification(
     `Terminal reason: ${terminal}`,
     `Duration: ${duration}`,
     `Branch: ${firing.branchName}`,
-    `Pull requests: ${pullRequestsText}`,
+    `Pull requests: ${pullRequests.text}`,
     "",
     "Report output:",
     reportOutput
@@ -106,7 +96,7 @@ export function renderRoutineFiringNotification(
     detail("Terminal reason", terminal),
     detail("Duration", duration),
     detail("Branch", firing.branchName),
-    rawDetail("Pull requests", pullRequestsHtml),
+    rawDetail("Pull requests", pullRequests.html),
     "</dl>",
     "<h2>Report output</h2>",
     renderMinimalMarkdown(reportOutput)

@@ -136,7 +136,8 @@ import {
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
 import {
   buildCapReachedReason,
-  buildMergePrRefusedReason
+  buildMergePrRefusedReason,
+  buildNoPullRequestTrackedReason
 } from "./terminal-reason.js";
 
 export type WorkflowSnapshot = {
@@ -1538,14 +1539,42 @@ export class RunController {
         );
         return { signals: { provider_success: true } };
       }
+
+      const attempt = this.runStore.incrementPrUntrackedWaitCount(runId);
+      if (attempt >= MAX_PR_UNTRACKED_WAIT_ATTEMPTS) {
+        this.runStore.recordWorkflowTerminal(runId, {
+          terminalStateId: waitState.id,
+          transitionReason: buildNoPullRequestTrackedReason(
+            waitState.id,
+            attempt
+          )
+        });
+        await this.terminalizeBlocked({
+          issueNumber: input.issueNumber,
+          reason: buildNoPullRequestTrackedReason(waitState.id, attempt),
+          repository: input.repository,
+          runId
+        });
+        this.logger?.warn(
+          { attempt, issueNumber: input.issueNumber, runId },
+          "symphonika wait re-eval: no PR ever tracked, terminalizing as blocked"
+        );
+        return undefined;
+      }
+
       if (isMergePr) {
         this.runStore.recordWaitingActivity(
           runId,
-          `merge_pr awaiting Symphonika-tracked pull request for issue #${input.issueNumber}`
+          `merge_pr awaiting Symphonika-tracked pull request for issue #${input.issueNumber} (attempt ${attempt}/${MAX_PR_UNTRACKED_WAIT_ATTEMPTS})`
+        );
+      } else {
+        this.runStore.recordWaitingActivity(
+          runId,
+          `wait_for_pr: no pull request tracked yet (attempt ${attempt}/${MAX_PR_UNTRACKED_WAIT_ATTEMPTS})`
         );
       }
       this.logger?.debug(
-        { runId, issueNumber: input.issueNumber },
+        { attempt, runId, issueNumber: input.issueNumber },
         "symphonika wait re-eval skipped: no PR tracked yet"
       );
       return undefined;
@@ -5380,6 +5409,16 @@ function isPermanentMergeRefusal(error: unknown): boolean {
 // count parked there would reset to zero the moment a permanently refused
 // merge alternates with any intervening non-405 tick.
 const MAX_MERGE_REFUSAL_ATTEMPTS = 5;
+
+// 120 ticks at the default 30s poll interval (issue-polling.ts's
+// DEFAULT_POLLING_INTERVAL_MS, or a project's configured pollingIntervalMs)
+// is about an hour — comfortably above the ~10-attempt bound the separate
+// PR-discovery poller (pull-request-followup.ts) gives itself before giving
+// up, so a legitimately delayed push/PR-open still has time to be found.
+// Past that, a wait/merge_pr state that has never observed a tracked pull
+// request gives up and escalates to sym:blocked/sym:human-needed instead of
+// parking forever (see docs/adr for the incident this closes).
+const MAX_PR_UNTRACKED_WAIT_ATTEMPTS = 120;
 
 // True when every predicate a wait state names can be answered without
 // observing a pull request: at least one artifact predicate, and nothing beyond

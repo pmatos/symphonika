@@ -1632,6 +1632,20 @@ export class RunStore {
     return updated?.merge_refusal_count ?? 0;
   }
 
+  // A dedicated column for the same reason merge_refusal_count is dedicated
+  // (comment above): state_transition_reason is overwritten by every wait
+  // observation, so a park-with-count token there would reset the moment an
+  // unrelated observation intervenes.
+  incrementPrUntrackedWaitCount(runId: string): number {
+    const updated = this.database
+      .prepare(
+        "update runs set pr_untracked_wait_count = pr_untracked_wait_count + 1, updated_at = ? where id = ? returning pr_untracked_wait_count"
+      )
+      .get(timestamp(), runId) as
+      { pr_untracked_wait_count: number } | undefined;
+    return updated?.pr_untracked_wait_count ?? 0;
+  }
+
   isContinuationRun(runId: string): boolean {
     const row = this.database
       .prepare("select is_continuation from runs where id = ?")
@@ -6718,6 +6732,7 @@ export class RunStore {
       ["runs", "continuation_parent_run_id", "text"],
       ["runs", "retry_count", "integer not null default 0"],
       ["runs", "merge_refusal_count", "integer not null default 0"],
+      ["runs", "pr_untracked_wait_count", "integer not null default 0"],
       ["runs", "failure_classification", "text"],
       ["runs", "terminal_reason", "text"],
       ["runs", "cancel_requested", "integer not null default 0"],

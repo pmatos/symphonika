@@ -646,7 +646,7 @@ describe("pull request follow-up", () => {
     }
   });
 
-  it("preserves label immunity through a PR follow-up retry on a non-raw_fsm workflow", async () => {
+  it("does not double-release the claim via the eligibility-loss re-check after a label-immune PR follow-up retry succeeds (non-raw_fsm workflow)", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -912,7 +912,7 @@ describe("pull request follow-up", () => {
     }
   });
 
-  it("preserves the claim when a delayed label-immune continuation loses label eligibility", async () => {
+  it("does not double-release the claim when a delayed label-immune continuation loses label eligibility", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });

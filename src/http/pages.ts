@@ -5535,7 +5535,7 @@ function renderPullRequestDetailPage(input: {
   const urlHtml =
     snapshot.url === null
       ? ""
-      : `<p class="note">${externalLink(snapshot.url, escapeHtml(snapshot.url))}</p>`;
+      : `<p class="note">${externalLink(snapshot.url, snapshot.url)}</p>`;
   const branchHtml =
     snapshot.headRef === null
       ? ""
@@ -7666,11 +7666,8 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-// labelHtml is inserted as-is (not escaped here) since callers already
-// control its safety — some pass pre-escaped text, others pass markup
-// built from non-string values (e.g. an interpolated number).
-function externalLink(url: string, labelHtml: string): string {
-  return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${labelHtml}</a>`;
+function externalLink(url: string, label: string): string {
+  return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
 }
 
 // JSON.stringify does not escape "<", ">", "&", or the JS line-terminator

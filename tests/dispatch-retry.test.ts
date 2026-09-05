@@ -1184,7 +1184,7 @@ describe("dispatch retry policy", () => {
       }
 
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
-        expect.objectContaining({ labels: ["sym:claimed"] })
+        expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] })
       );
     } finally {
       await daemon.stop();
@@ -1275,17 +1275,20 @@ describe("dispatch retry policy", () => {
         .filter((call) => call.labels[0] === "sym:failed");
       expect(failedAddCalls.length).toBeGreaterThan(0);
 
+      // Permanent (non-retried, non-FSM-continuing) failure: the run is
+      // truly done with this issue, so the terminal claim release fires
+      // alongside the sym:failed/sym:human-needed marking.
       const claimedRemoveCalls =
         githubIssuesApi.removeLabelsFromIssue.mock.calls
           .map(([call]) => call as { labels: string[] })
           .filter((call) => call.labels[0] === "sym:claimed");
-      expect(claimedRemoveCalls).toHaveLength(0);
+      expect(claimedRemoveCalls).toHaveLength(1);
     } finally {
       await daemon.stop();
     }
   });
 
-  it("does not remove sym:claimed when adding sym:failed fails", async () => {
+  it("releases the claim after a failed sym:failed add because sym:human-needed still lands", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await mkdir(prepared.workspacePath, { recursive: true });
@@ -1360,14 +1363,23 @@ describe("dispatch retry policy", () => {
       );
       await new Promise((resolve) => setTimeout(resolve, 80));
 
-      // PR #62 review feedback: when the sym:failed add fails, sym:claimed
-      // must NOT be removed — otherwise the issue ends up with neither
-      // operational label and is re-eligible for dispatch.
+      // PR #62 review feedback was: when the sym:failed add fails, sym:claimed
+      // must not be removed, or the issue would end up with no operational
+      // label at all and become re-eligible for dispatch. markFailed's
+      // sym:human-needed fallback (added since) still lands here even though
+      // the sym:failed add itself failed, so the issue keeps a dispatch-
+      // blocking label regardless of whether the claim is released. The
+      // terminal release now fires alongside it.
+      const humanNeededAdds = githubIssuesApi.addLabelsToIssue.mock.calls
+        .map(([call]) => call as { labels: string[] })
+        .filter((call) => call.labels[0] === "sym:human-needed");
+      expect(humanNeededAdds.length).toBeGreaterThanOrEqual(1);
+
       const claimedRemoveCalls =
         githubIssuesApi.removeLabelsFromIssue.mock.calls
           .map(([call]) => call as { labels: string[] })
           .filter((call) => call.labels[0] === "sym:claimed");
-      expect(claimedRemoveCalls).toHaveLength(0);
+      expect(claimedRemoveCalls).toHaveLength(1);
     } finally {
       await daemon.stop();
     }

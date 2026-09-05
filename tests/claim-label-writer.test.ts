@@ -50,6 +50,7 @@ function terminal(
   input: Partial<ApplyLabelsInput> & { outcome: ApplyLabelsInput["outcome"] }
 ): ApplyLabelsInput {
   return {
+    deferReleaseToScheduler: false,
     fsmContinuing: false,
     issueNumber: 7,
     repository,
@@ -69,7 +70,7 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
     );
     expect(seq(calls)).toEqual([
       "remove:sym:running",
-      "remove:sym:claimed",
+      "remove:sym:claimed,sym:stale",
       "remove:sym:failed",
       "remove:sym:blocked",
       "remove:sym:human-needed"
@@ -84,7 +85,10 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
         outcome: { kind: "cancelled", reason: "cancelled" }
       })
     );
-    expect(seq(calls)).toEqual(["remove:sym:running", "remove:sym:claimed"]);
+    expect(seq(calls)).toEqual([
+      "remove:sym:running",
+      "remove:sym:claimed,sym:stale"
+    ]);
   });
 
   it("cancelled for any other reason removes only running", async () => {
@@ -92,6 +96,17 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
     await new ClaimLabelWriter({ api }).applyTerminal(
       terminal({
         cancelReason: CANCEL_REASONS.RUN_TIMEOUT,
+        outcome: { kind: "cancelled", reason: "cancelled" }
+      })
+    );
+    expect(seq(calls)).toEqual(["remove:sym:running"]);
+  });
+
+  it("cancelled for daemon shutdown removes only running -- the claim must survive for shutdown-resume.ts", async () => {
+    const { api, calls } = makeApi();
+    await new ClaimLabelWriter({ api }).applyTerminal(
+      terminal({
+        cancelReason: CANCEL_REASONS.DAEMON_SHUTDOWN,
         outcome: { kind: "cancelled", reason: "cancelled" }
       })
     );
@@ -106,6 +121,8 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
         outcome: { kind: "input_required", reason: "input_required" }
       })
     );
+    // fsmContinuing still owns the issue, so no claim release here even
+    // though input_required always marks the terminal label.
     expect(seq(calls)).toEqual([
       "remove:sym:running",
       "add:sym:failed",
@@ -113,7 +130,22 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
     ]);
   });
 
-  it("a terminal blocked outcome marks blocked + human-needed", async () => {
+  it("input_required releases the claim too when the FSM is not continuing", async () => {
+    const { api, calls } = makeApi();
+    await new ClaimLabelWriter({ api }).applyTerminal(
+      terminal({
+        outcome: { kind: "input_required", reason: "input_required" }
+      })
+    );
+    expect(seq(calls)).toEqual([
+      "remove:sym:running",
+      "add:sym:failed",
+      "add:sym:human-needed",
+      "remove:sym:claimed,sym:stale"
+    ]);
+  });
+
+  it("a terminal blocked outcome marks blocked + human-needed and releases the claim", async () => {
     const { api, calls } = makeApi();
     await new ClaimLabelWriter({ api }).applyTerminal(
       terminal({ outcome: { kind: "failed", reason: "no_workspace_changes" } })
@@ -121,11 +153,12 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
     expect(seq(calls)).toEqual([
       "remove:sym:running",
       "add:sym:blocked",
-      "add:sym:human-needed"
+      "add:sym:human-needed",
+      "remove:sym:claimed,sym:stale"
     ]);
   });
 
-  it("a terminal failed outcome marks failed + human-needed", async () => {
+  it("a terminal failed outcome marks failed + human-needed and releases the claim", async () => {
     const { api, calls } = makeApi();
     await new ClaimLabelWriter({ api }).applyTerminal(
       terminal({ outcome: { kind: "failed", reason: "provider_error" } })
@@ -133,11 +166,12 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
     expect(seq(calls)).toEqual([
       "remove:sym:running",
       "add:sym:failed",
-      "add:sym:human-needed"
+      "add:sym:human-needed",
+      "remove:sym:claimed,sym:stale"
     ]);
   });
 
-  it("suppresses the terminal label when the run will retry", async () => {
+  it("suppresses the terminal label and does not release the claim when the run will retry", async () => {
     const { api, calls } = makeApi();
     await new ClaimLabelWriter({ api }).applyTerminal(
       terminal({
@@ -148,7 +182,7 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
     expect(seq(calls)).toEqual(["remove:sym:running"]);
   });
 
-  it("suppresses the terminal label when the FSM is continuing", async () => {
+  it("suppresses the terminal label and does not release the claim when the FSM is continuing", async () => {
     const { api, calls } = makeApi();
     await new ClaimLabelWriter({ api }).applyTerminal(
       terminal({
@@ -159,15 +193,54 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
     expect(seq(calls)).toEqual(["remove:sym:running"]);
   });
 
-  it("removes only running on success", async () => {
+  it("success releases sym:claimed and sym:stale in addition to removing sym:running", async () => {
+    // deferReleaseToScheduler defaults to false here: either a raw-FSM
+    // terminal success (scheduleNext is a no-op for it via
+    // suppressContinuation) or a non-raw-FSM success the caller already
+    // knows carries no further continuation decision. Regression guard for
+    // the eager-release path -- see the deferred sibling test below for the
+    // non-raw-FSM case that must NOT release here.
     const { api, calls } = makeApi();
     await new ClaimLabelWriter({ api }).applyTerminal(
       terminal({ outcome: { kind: "success", reason: "success" } })
     );
+    expect(seq(calls)).toEqual([
+      "remove:sym:running",
+      "remove:sym:claimed,sym:stale"
+    ]);
+  });
+
+  it("defers the claim release to the scheduler for a non-raw-FSM success", async () => {
+    // A non-raw-FSM success routes through scheduleNext's continuation-
+    // scheduling logic (run-controller.ts) after this call returns, which may
+    // still schedule a real continuation `delayMs` later. Releasing here
+    // would leave the issue with zero operational labels -- and therefore
+    // poll-eligible -- for that whole window even though the continuation is
+    // about to reuse the same reservation. scheduleNext's own branches
+    // (closed issue, eligibility loss, cap reached) release once they know
+    // no continuation is coming.
+    const { api, calls } = makeApi();
+    await new ClaimLabelWriter({ api }).applyTerminal(
+      terminal({
+        deferReleaseToScheduler: true,
+        outcome: { kind: "success", reason: "success" }
+      })
+    );
     expect(seq(calls)).toEqual(["remove:sym:running"]);
   });
 
-  it("still marks the terminal label when the running removal fails (best-effort)", async () => {
+  it("does not release the claim on success when the FSM is continuing", async () => {
+    const { api, calls } = makeApi();
+    await new ClaimLabelWriter({ api }).applyTerminal(
+      terminal({
+        fsmContinuing: true,
+        outcome: { kind: "success", reason: "success" }
+      })
+    );
+    expect(seq(calls)).toEqual(["remove:sym:running"]);
+  });
+
+  it("still marks the terminal label and releases the claim when the running removal fails (best-effort)", async () => {
     const { api, calls } = makeApi({ remove: ["sym:running"] });
     await new ClaimLabelWriter({ api }).applyTerminal(
       terminal({ outcome: { kind: "failed", reason: "provider_error" } })
@@ -175,7 +248,8 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
     expect(seq(calls)).toEqual([
       "remove:sym:running",
       "add:sym:failed",
-      "add:sym:human-needed"
+      "add:sym:human-needed",
+      "remove:sym:claimed,sym:stale"
     ]);
   });
 });
@@ -199,14 +273,14 @@ describe("ClaimLabelWriter direct entries", () => {
     expect(seq(calls)).toEqual(["add:sym:blocked", "add:sym:human-needed"]);
   });
 
-  it("release removes only the claim label", async () => {
+  it("release removes both the claim and stale labels", async () => {
     const { api, calls } = makeApi();
     await new ClaimLabelWriter({ api }).release({
       issueNumber: 7,
       phase: "state-advance",
       repository
     });
-    expect(seq(calls)).toEqual(["remove:sym:claimed"]);
+    expect(seq(calls)).toEqual(["remove:sym:claimed,sym:stale"]);
   });
 
   it("still adds human-needed when the failed-label add throws, and never rejects", async () => {

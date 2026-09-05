@@ -1120,7 +1120,11 @@ const PARKED_ROUTINE_DEFERRAL_PREDICATE =
   "t.disposition in ('pending', 'held') and t.deferred_reason is not null";
 
 const PULL_REQUEST_DISCOVERY_LIMIT = 25;
-const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
+// Exported: pull-request-followup.ts's bounded fallback compares
+// recordPullRequestDiscoveryAttempt's returned count against this same
+// ceiling to recognize "gave up looking for a PR" and release a deferred
+// claim (see ADR reasoning in ClaimLabelWriter's deferReleaseToScheduler).
+export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
 export const INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS = 60_000;
 const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
   "provider requested input (legacy)";
@@ -5494,12 +5498,16 @@ export class RunStore {
     }));
   }
 
-  recordPullRequestDiscoveryAttempt(runId: string): void {
-    this.database
+  recordPullRequestDiscoveryAttempt(runId: string): number {
+    const updated = this.database
       .prepare(
-        "update runs set pr_discovery_attempts = pr_discovery_attempts + 1, updated_at = ? where id = ?"
+        [
+          "update runs set pr_discovery_attempts = pr_discovery_attempts + 1,",
+          "updated_at = ? where id = ? returning pr_discovery_attempts"
+        ].join(" ")
       )
-      .run(timestamp(), runId);
+      .get(timestamp(), runId) as { pr_discovery_attempts: number } | undefined;
+    return updated?.pr_discovery_attempts ?? 0;
   }
 
   hasPullRequestFollowupWork(options: { maxAttempts?: number } = {}): boolean {

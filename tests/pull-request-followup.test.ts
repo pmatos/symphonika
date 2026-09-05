@@ -31,7 +31,11 @@ import {
   runPullRequestFollowup
 } from "../src/pull-request-followup.js";
 import { interpretPullRequest } from "../src/pull-request-state.js";
-import { openRunStore, type RunStore } from "../src/run-store.js";
+import {
+  MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS,
+  openRunStore,
+  type RunStore
+} from "../src/run-store.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
@@ -827,11 +831,18 @@ describe("pull request follow-up", () => {
       expect(store.getRun("review-run-1")).toMatchObject({
         state: "succeeded"
       });
-      // The succeeded retry falls through to scheduleNext's continuation-
-      // scheduling eligibility re-check, which finds the issue ineligible
-      // (still missing `agent-ready`, its normal steady state while parked
-      // on PR review). That must not strip sym:claimed out from under this
-      // label-immune, still-live PR Follow-up reservation. See issue #475.
+      // The succeeded retry is a non-raw-FSM success, so applyTerminal defers
+      // its own release to scheduleNext (deferReleaseToScheduler) instead of
+      // releasing eagerly. scheduleNext's continuation-scheduling eligibility
+      // re-check then finds the issue ineligible (still missing `agent-ready`,
+      // its normal steady state while parked on PR review) -- but label-immune
+      // (PR Follow-up) work is exempt from releasing on that eligibility loss
+      // (see issue #475), since a still-live parked/waiting Run may share the
+      // same Issue Reservation. So the claim must survive this whole sequence
+      // untouched: neither a premature release from applyTerminal itself, nor
+      // one from the eligibility-loss re-check. The mid-retry reconcile tick
+      // not cancelling/suppressing the in-flight attempt is asserted directly
+      // above via respectsDuringRetry/cancelledDuringRetry.
       const claimRemovals = (
         githubIssuesApi.removeLabelsFromIssue as ReturnType<typeof vi.fn>
       ).mock.calls
@@ -899,7 +910,7 @@ describe("pull request follow-up", () => {
 
       expect(result).toEqual({ dispatched: true, runId: "review-run-1" });
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
-        expect.objectContaining({ labels: ["sym:claimed"] })
+        expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] })
       );
     } finally {
       store.close();
@@ -976,6 +987,16 @@ describe("pull request follow-up", () => {
 
       await scheduledContinuations[0]!();
 
+      // The initial dispatch's own success is deferred (deferReleaseToScheduler)
+      // rather than released eagerly by applyTerminal. scheduleNext's own
+      // continuation-scheduling eligibility check found the issue eligible
+      // (2nd getIssue call has `agent-ready`) and scheduled this continuation;
+      // by the time it fires, the issue has reverted to its steady state
+      // (3rd getIssue call, no `agent-ready`) and executeContinuation's own
+      // eligibility re-check finds it ineligible -- but label-immune work is
+      // exempt from releasing on that eligibility loss (issue #475), since a
+      // still-live parked/waiting Run may share the same Issue Reservation.
+      // So the claim must survive untouched throughout.
       const claimRemovals = (
         githubIssuesApi.removeLabelsFromIssue as ReturnType<typeof vi.fn>
       ).mock.calls
@@ -1348,7 +1369,8 @@ describe("pull request follow-up", () => {
             state: "open"
           }
         ]),
-        mergePullRequest: vi.fn().mockResolvedValue(undefined)
+        mergePullRequest: vi.fn().mockResolvedValue(undefined),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
       };
       const controller = runController({
         githubIssuesApi,
@@ -1379,6 +1401,190 @@ describe("pull request follow-up", () => {
         token: "secret-token"
       });
       expect(store.listOpenTrackedPullRequests()).toEqual([]);
+      // The parent run's success deferred its own release (see
+      // ClaimLabelWriter's `deferReleaseToScheduler`); observing the merge
+      // here is what finally closes it out.
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: 54,
+          labels: ["sym:claimed", "sym:stale"]
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("releases the claim once PR discovery exhausts its attempts without ever finding one", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-no-pr-ever";
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath: path.join(root, "workspace")
+      });
+      const run = store.getRun("parent-run");
+      // Fast-forward to one attempt short of the ceiling: this run has never
+      // had a PR found for its branch, matching every tick this test's own
+      // listPullRequestsForBranch mock will also report (empty).
+      for (let i = 0; i < MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS - 1; i += 1) {
+        store.recordPullRequestDiscoveryAttempt("parent-run");
+      }
+
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState: vi.fn(),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        // No PR ever shows up for this branch.
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        workspacePath: path.join(root, "workspace")
+      });
+
+      await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      // This one tick's own increment is the attempt that exhausts the
+      // ceiling -- "no PR ever showed up" needs no protection, so the
+      // bounded fallback releases the claim here instead of leaving it
+      // dangling forever.
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: run?.issueNumber,
+          labels: ["sym:claimed", "sym:stale"]
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("does not release the claim while PR discovery attempts remain", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-no-pr-yet";
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath: path.join(root, "workspace")
+      });
+      // Well short of the ceiling -- this tick's increment must not trip it.
+      for (let i = 0; i < MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS - 3; i += 1) {
+        store.recordPullRequestDiscoveryAttempt("parent-run");
+      }
+
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState: vi.fn(),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        workspacePath: path.join(root, "workspace")
+      });
+
+      await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      expect(githubIssuesApi.removeLabelsFromIssue).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("releases the claim when a tracked pull request is observed closed unmerged", async () => {
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-closed-pr";
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath: path.join(root, "workspace")
+      });
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        prNumber: 83,
+        prUrl: "https://github.com/pmatos/symphonika/pull/83",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        // A null follow-up state means the PR is gone (closed without
+        // merging) -- see loadRawPullRequestState / getPullRequestFollowupState.
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(null),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        workspacePath: path.join(root, "workspace")
+      });
+
+      await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      const tracked = store.findTrackedPullRequestByIssue({
+        issueNumber: 54,
+        projectName: "symphonika"
+      });
+      expect(tracked?.state).toBe("closed");
+      // Closed unmerged is the other resolution that closes out a deferred
+      // release, same as merged above.
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: 54,
+          labels: ["sym:claimed", "sym:stale"]
+        })
+      );
     } finally {
       store.close();
     }

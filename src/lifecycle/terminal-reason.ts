@@ -66,3 +66,17 @@ export function buildMergePrRefusedReason(
 export function isMergePrRefusedReason(reason: string | null): boolean {
   return reason !== null && reason.startsWith(MERGE_PR_REFUSED_PREFIX);
 }
+
+const NO_PULL_REQUEST_TRACKED_PREFIX = "no_pull_request_tracked:";
+
+// Written when a wait/merge_pr state's re-evaluation never finds a tracked
+// pull request after MAX_PR_UNTRACKED_WAIT_ATTEMPTS ticks (run-controller.ts).
+// Unlike merge_pr_refused, no reader needs to special-case this reason today
+// — it should surface through the ordinary failure-notification path, since
+// a silently-stuck issue surfacing is the whole point of the bound.
+export function buildNoPullRequestTrackedReason(
+  waitStateId: string,
+  attempts: number
+): string {
+  return `${NO_PULL_REQUEST_TRACKED_PREFIX} state "${waitStateId}" never observed a tracked pull request after ${attempts} checks`;
+}

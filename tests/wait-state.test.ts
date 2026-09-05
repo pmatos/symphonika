@@ -19,6 +19,7 @@ import {
   type RunControllerProjectConfig,
   type RunControllerProvidersConfig
 } from "../src/lifecycle/run-controller.js";
+import { buildNoPullRequestTrackedReason } from "../src/lifecycle/terminal-reason.js";
 import type {
   AgentProvider,
   ProviderEvent,
@@ -1741,6 +1742,80 @@ describe("wait state lifecycle", () => {
 
       const after = store.getRun("waiting-run");
       expect(after?.state).toBe("waiting");
+      expect(
+        githubIssuesApi.getPullRequestFollowupState
+      ).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("escalates a waiting run to blocked after repeated ticks with no tracked pull request", async () => {
+    const root = await makeTempRoot();
+    await writeWaitStateProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn(),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      // Seed the counter directly for the first 118 attempts (a plain sqlite
+      // increment) rather than driving 118 redundant controller ticks
+      // through the full re-eval pipeline; the next two calls below exercise
+      // the real boundary (119: still waiting, 120: escalate) through the
+      // actual controller path.
+      for (let i = 0; i < 118; i += 1) {
+        store.incrementPrUntrackedWaitCount("waiting-run");
+      }
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+      expect(store.getRun("waiting-run")?.state).toBe("waiting");
+      expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("blocked");
+      expect(after?.terminalStateId).toBe("holding");
+      expect(after?.terminalReason).toBe(
+        buildNoPullRequestTrackedReason("holding", 120)
+      );
+      expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:blocked"] })
+      );
+      expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:human-needed"] })
+      );
       expect(
         githubIssuesApi.getPullRequestFollowupState
       ).not.toHaveBeenCalled();

@@ -9,6 +9,12 @@ export type WorkflowActionKind =
   | "merge_pr"
   | "wait";
 
+export function isIssueContentActionKind(
+  kind: WorkflowActionKind | undefined
+): kind is "close_issue" | "comment" | "label_issue" {
+  return kind === "close_issue" || kind === "comment" || kind === "label_issue";
+}
+
 // `artifact_exists` takes a path or a list of paths; every other predicate is
 // a scalar compared by strict equality. See src/workflow/predicates.ts for
 // which keys evaluate which way.

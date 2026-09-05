@@ -19,6 +19,7 @@ import {
   validateWorkflowTemplate
 } from "./contract-loading.js";
 import type { WorkflowContract } from "./contract-loading.js";
+import { isIssueContentActionKind } from "./types.js";
 import type {
   ExpandedWorkflow,
   ExpandedWorkflowState,
@@ -508,6 +509,7 @@ async function expandRawStateMachineWorkflow(
     }
   }
   errors.push(...validateWaitStateCoverage(states, workflowPath));
+  errors.push(...validateIssueContentActionPredicates(states, workflowPath));
 
   return {
     errors,
@@ -556,6 +558,47 @@ function validateWaitStateCoverage(
     }
   }
   return errors;
+}
+
+// close_issue/label_issue/comment observe nothing external: their signal map
+// is always the constant {} (observeIssueContentAction never populates a
+// pr_signal or agent_signal key), so a complete_when or transition predicate
+// naming one of those keys can never match. Unlike a `wait` misconfiguration
+// -- caught here before any GitHub write happens -- a mismatch on one of
+// these three kinds would otherwise only surface as `decision.kind ===
+// "blocked"` *after* observeIssueContentAction has already performed the
+// GitHub mutation, since the action always executes before the transition
+// table is even consulted.
+function validateIssueContentActionPredicates(
+  states: ExpandedWorkflowState[],
+  workflowPath: string
+): string[] {
+  const errors: string[] = [];
+  for (const state of states) {
+    if (!isIssueContentActionKind(state.action?.kind)) {
+      continue;
+    }
+    for (const key of unreachablePredicateKeys(state.completeWhen)) {
+      errors.push(
+        `workflow state ${state.id} at ${workflowPath} ${state.action?.kind} action's complete_when names ${key}, which this action never produces and can never satisfy`
+      );
+    }
+    for (const transition of state.transitions) {
+      for (const key of unreachablePredicateKeys(transition.when)) {
+        errors.push(
+          `workflow state ${state.id} at ${workflowPath} ${state.action?.kind} action's transition to ${transition.to} names ${key}, which this action never produces and can never satisfy`
+        );
+      }
+    }
+  }
+  return errors;
+}
+
+function unreachablePredicateKeys(predicates: WorkflowPredicateMap): string[] {
+  return Object.keys(predicates).filter((key) => {
+    const evaluation = workflowPredicateEvaluation(key);
+    return evaluation === "pr_signal" || evaluation === "agent_signal";
+  });
 }
 
 // unresolved_review_threads is documented (docs/workflows.md) as "exact count
@@ -1252,6 +1295,13 @@ function parseWorkflowAction(
         `workflow state ${stateId} at ${workflowPath} agent action must define prompt`
       );
     }
+    errors.push(
+      ...rejectFields(stateId, workflowPath, "agent", {
+        body,
+        labels,
+        state_reason: stateReason
+      })
+    );
   }
 
   if (kind === "wait") {
@@ -1265,6 +1315,13 @@ function parseWorkflowAction(
         `workflow state ${stateId} at ${workflowPath} wait action must not define prompt`
       );
     }
+    errors.push(
+      ...rejectFields(stateId, workflowPath, "wait", {
+        body,
+        labels,
+        state_reason: stateReason
+      })
+    );
   }
 
   if (kind === "merge_pr") {
@@ -1283,11 +1340,36 @@ function parseWorkflowAction(
         `workflow state ${stateId} at ${workflowPath} merge_pr method must be one of ${[...mergeMethods].join(", ")}`
       );
     }
+    errors.push(
+      ...rejectFields(stateId, workflowPath, "merge_pr", {
+        body,
+        labels,
+        state_reason: stateReason
+      })
+    );
+  }
+
+  if (kind === "label_issue" || kind === "comment" || kind === "close_issue") {
+    errors.push(
+      ...rejectFields(stateId, workflowPath, kind, {
+        method,
+        prompt,
+        provider
+      })
+    );
   }
 
   if (kind === "label_issue" && (labels === undefined || labels.length === 0)) {
     errors.push(
       `workflow state ${stateId} at ${workflowPath} label_issue action must define a non-empty labels list`
+    );
+  }
+  if (kind === "label_issue") {
+    errors.push(
+      ...rejectFields(stateId, workflowPath, kind, {
+        body,
+        state_reason: stateReason
+      })
     );
   }
 
@@ -1296,7 +1378,18 @@ function parseWorkflowAction(
       `workflow state ${stateId} at ${workflowPath} comment action must define body`
     );
   }
+  if (kind === "comment") {
+    errors.push(
+      ...rejectFields(stateId, workflowPath, kind, {
+        labels,
+        state_reason: stateReason
+      })
+    );
+  }
 
+  if (kind === "close_issue") {
+    errors.push(...rejectFields(stateId, workflowPath, kind, { labels }));
+  }
   // close_issue needs nothing beyond kind -- default the GitHub close reason
   // so every close_issue action carries one, whether or not the author named
   // it explicitly.
@@ -1364,6 +1457,31 @@ function parseWorkflowActionStateReason(
     return undefined;
   }
   return raw;
+}
+
+// Rejects whichever of the given fields are defined -- every call site
+// passes only the fields that make no sense on `kind` (e.g. body/labels/
+// state_reason on agent/wait/merge_pr, or provider/prompt/method on
+// label_issue/comment/close_issue, or labels on close_issue), so a
+// copy-pasted field left behind by a kind edit is a validation error
+// instead of a silently-parsed, silently-ignored field. Object keys are
+// used verbatim in the message, so pass e.g. `state_reason` rather than
+// `stateReason`.
+function rejectFields(
+  stateId: string,
+  workflowPath: string,
+  kind: WorkflowActionKind,
+  fields: Record<string, unknown>
+): string[] {
+  const errors: string[] = [];
+  for (const [name, value] of Object.entries(fields)) {
+    if (value !== undefined) {
+      errors.push(
+        `workflow state ${stateId} at ${workflowPath} ${kind} action must not define ${name}`
+      );
+    }
+  }
+  return errors;
 }
 
 function parseWorkflowTransitions(

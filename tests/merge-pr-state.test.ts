@@ -1082,4 +1082,71 @@ describe("merge_pr chained into issue content actions", () => {
       store.close();
     }
   });
+
+  it("comment: records a failure activity message (not a false success claim) when the tracker call throws", async () => {
+    const root = await makeTempRoot();
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: comment_only",
+        "  initial: commenting",
+        "  states:",
+        "    commenting:",
+        "      action:",
+        "        kind: comment",
+        "        body: Partial slice landed; remaining scope tracked here.",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "commenting",
+        id: "commenting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addIssueComment: vi.fn().mockRejectedValue(new Error("tracker down")),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("commenting-run");
+
+      expect(githubIssuesApi.addIssueComment).toHaveBeenCalled();
+      const after = store.getRun("commenting-run");
+      expect(after?.state).toBe("succeeded");
+      expect(after?.terminalStateId).toBe("done");
+      expect(after?.stateTransitionReason).toContain("failed to post");
+      expect(after?.stateTransitionReason).not.toContain("comment posted");
+    } finally {
+      store.close();
+    }
+  });
 });

@@ -2297,6 +2297,253 @@ describe("state machine workflow definitions", () => {
       `workflow state commenting at ${workflowPath} comment action must define body`
     );
   });
+
+  it("rejects a label_issue action carrying a stray prompt field", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: label_stray_prompt",
+        "  initial: labeling",
+        "  states:",
+        "    labeling:",
+        "      action:",
+        "        kind: label_issue",
+        "        labels:",
+        "          - agent-ready",
+        "        prompt: prompts/oops.md",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state labeling at ${workflowPath} label_issue action must not define prompt`
+    );
+  });
+
+  it("rejects a comment action carrying a stray labels field", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: comment_stray_labels",
+        "  initial: commenting",
+        "  states:",
+        "    commenting:",
+        "      action:",
+        "        kind: comment",
+        '        body: "hello"',
+        "        labels:",
+        "          - agent-ready",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state commenting at ${workflowPath} comment action must not define labels`
+    );
+  });
+
+  it("rejects a close_issue action carrying a stray labels field", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: close_stray_labels",
+        "  initial: closing",
+        "  states:",
+        "    closing:",
+        "      action:",
+        "        kind: close_issue",
+        "        labels:",
+        "          - agent-ready",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state closing at ${workflowPath} close_issue action must not define labels`
+    );
+  });
+
+  it("rejects a wait action carrying a stray body field", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: wait_stray_body",
+        "  initial: waiting",
+        "  states:",
+        "    waiting:",
+        "      action:",
+        "        kind: wait",
+        '        body: "hello"',
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            pr_merged: true",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state waiting at ${workflowPath} wait action must not define body`
+    );
+  });
+
+  it("rejects a merge_pr action carrying a stray state_reason field", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: merge_stray_state_reason",
+        "  initial: merging",
+        "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "        state_reason: completed",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            pr_merged: true",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state merging at ${workflowPath} merge_pr action must not define state_reason`
+    );
+  });
+
+  it("rejects an agent action carrying a stray labels field", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: agent_stray_labels",
+        "  initial: implementing",
+        "  states:",
+        "    implementing:",
+        "      action:",
+        "        kind: agent",
+        "        prompt: prompts/implement.md",
+        "        labels:",
+        "          - agent-ready",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state implementing at ${workflowPath} agent action must not define labels`
+    );
+  });
+
+  it("rejects a label_issue transition that gates on a pull-request signal it can never produce", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: label_stray_pr_signal",
+        "  initial: labeling",
+        "  states:",
+        "    labeling:",
+        "      action:",
+        "        kind: label_issue",
+        "        labels:",
+        "          - agent-ready",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            pr_merged: true",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state labeling at ${workflowPath} label_issue action's transition to done names pr_merged, which this action never produces and can never satisfy`
+    );
+  });
+
+  it("rejects a close_issue complete_when that gates on an agent signal it can never produce", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: close_stray_agent_signal",
+        "  initial: closing",
+        "  states:",
+        "    closing:",
+        "      action:",
+        "        kind: close_issue",
+        "      complete_when:",
+        "        provider_success: true",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state closing at ${workflowPath} close_issue action's complete_when names provider_success, which this action never produces and can never satisfy`
+    );
+  });
 });
 
 describe("built-in workflow templates", () => {

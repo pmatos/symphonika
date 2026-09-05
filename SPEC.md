@@ -2397,8 +2397,7 @@ that write directly to the tracked Issue through `GitHubIssuesApi.closeIssue` an
 launches a provider. All three are poll-driven and reconciled through the same `reconcileWaitingRuns`
 → `reEvaluateWaitingRun` path as a wait or merge state, but unlike a wait or merge state they
 observe nothing external: the action executes once, on the state's first re-evaluation tick, and the
-walk always advances (or blocks) immediately afterward. See
-`docs/adr/2026-09-05-0807-issue-reconciliation-after-merge.md`.
+walk always advances (or blocks) immediately afterward. See ADR-2026-09-05-0807.
 
 DSL shape:
 

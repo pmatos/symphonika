@@ -49,10 +49,26 @@ type ReleaseClaimPhase =
   | "continuation"
   | "continuation-closed-issue"
   | "continuation-eligibility-loss"
+  | "continuation-scheduling-cap-reached"
   | "continuation-scheduling-closed-issue"
   | "continuation-scheduling-eligibility-loss"
   | "eligibility-loss-cleanup"
-  | "state-advance";
+  // A tracked pull request the PR Follow-up loop observed resolved --
+  // merged, or closed unmerged -- for an issue whose agent-hop-direct
+  // success terminal deferred its own release (see deferReleaseToScheduler).
+  | "pull-request-closed"
+  | "pull-request-discovery-exhausted"
+  | "pull-request-merged"
+  | "state-advance"
+  | "terminal"
+  // A raw-FSM wait/merge_pr park's own re-evaluation (reEvaluateWaitingRun)
+  // advanced or terminated straight into a genuine (non-blocked) terminal
+  // node. Unlike an agent-hop-direct terminal, the park's own signal
+  // observation already confirmed external resolution (the PR merged, or the
+  // workspace artifact appeared) before taking this edge, so releasing here
+  // is immediate and unconditional -- there is no PR-resolution deferral for
+  // this path.
+  | "wait-terminal";
 
 type IssueTarget = {
   issueNumber: number;
@@ -61,9 +77,11 @@ type IssueTarget = {
 
 // Owns the orchestrator-owned terminal-outcome operational labels: the
 // sym:running removal, the sym:failed/sym:blocked add-then-sym:human-needed
-// fallback cascade, the cancelled/closed-issue cleanup, and the sym:claimed
-// release. The whole matrix is exercised through this seam without a
-// RunController; label writes are best-effort so a terminal path never throws.
+// fallback cascade, the cancelled/closed-issue cleanup, and the
+// sym:claimed/sym:stale release once a run truly stops owning the issue
+// (not retrying, not continuing the FSM). The whole matrix is exercised
+// through this seam without a RunController; label writes are best-effort
+// so a terminal path never throws.
 export class ClaimLabelWriter {
   private readonly api: LabelWritingApi;
   private readonly logger?: Logger;
@@ -175,9 +193,7 @@ export class ClaimLabelWriter {
         issueNumber: input.issueNumber,
         repository: input.repository
       });
-      return;
-    }
-    if (
+    } else if (
       input.outcome.kind === "failed" &&
       !input.willRetry &&
       !input.fsmContinuing
@@ -193,6 +209,47 @@ export class ClaimLabelWriter {
           repository: input.repository
         });
       }
+    }
+
+    // A `success` outcome is deferred rather than released here whenever it
+    // was reached by an agent-hop attempt (this method's tail after running
+    // a provider), for two reasons that both boil down to "no external
+    // confirmation yet that a PR this attempt may have opened has resolved":
+    // a non-raw-FSM workflow's `scheduleNext` still has to decide whether to
+    // schedule a continuation (and releases itself once it knows), and a
+    // raw-FSM walk reaching its own terminal directly (`advancedToTerminal`)
+    // has no more confirmation than that. A *parked* wait/merge_pr run's own
+    // terminal reach is different -- its signal observation already
+    // confirmed external resolution, so it releases immediately from
+    // `reEvaluateWaitingRun` itself (phase "wait-terminal") without ever
+    // reaching this method. `input_required` and a permanent `failed` are
+    // never ambiguous this way, so only `success` defers.
+    //
+    // When deferred, the claim is released by whichever of these observes
+    // the run is truly done first: `pull-request-followup.ts`'s
+    // `processTrackedPullRequests` (phases "pull-request-merged" /
+    // "pull-request-closed"), or its bounded fallback in
+    // `discoverPullRequests` (phase "pull-request-discovery-exhausted").
+    // This list is load-bearing: an uncovered exit for a deferred success
+    // leaves the claim dangling forever (#709).
+    const deferReleaseToScheduler = input.outcome.kind === "success";
+
+    // The run is truly done with this issue -- not advancing the FSM to
+    // another state/wait, and not about to retry, and not a deferred
+    // success -- so give back the operational labels that made it eligible
+    // for dispatch in the first place. Excludes a pending retry, any FSM
+    // continuation, and a deferred success, all of which still own the
+    // issue (the last one via scheduleNext/pull-request-followup instead).
+    if (
+      !input.fsmContinuing &&
+      !(input.outcome.kind === "failed" && input.willRetry) &&
+      !deferReleaseToScheduler
+    ) {
+      await this.release({
+        issueNumber: input.issueNumber,
+        phase: "terminal",
+        repository: input.repository
+      });
     }
   }
 
@@ -243,16 +300,20 @@ export class ClaimLabelWriter {
   async release(
     input: IssueTarget & { phase: ReleaseClaimPhase }
   ): Promise<void> {
+    // Both operational labels the claim holds: sym:claimed itself, and
+    // sym:stale (set by detectStaleClaims when a claim outlives its run).
+    // removeLabelsFromIssue already loops per label and swallows a 404 for
+    // any label that isn't present, so one call safely covers both.
     await this.bestEffort(
       () =>
         this.api.removeLabelsFromIssue({
           ...input.repository,
           issueNumber: input.issueNumber,
-          labels: ["sym:claimed"]
+          labels: ["sym:claimed", "sym:stale"]
         }),
       {
         issueNumber: input.issueNumber,
-        label: "sym:claimed",
+        label: "sym:claimed,sym:stale",
         operation: "removeLabel",
         phase: input.phase
       }

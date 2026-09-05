@@ -1475,10 +1475,49 @@ export class RunController {
     return this.runStore.hasMergeRefusalForPullRequest(input);
   }
 
+  // Public seam onto ClaimLabelWriter's private `claimLabels` field, for the
+  // one class of caller outside this controller that needs to release a
+  // claim: pull-request-followup.ts, closing out a deferred agent-hop-direct
+  // success (see ClaimLabelWriter's `deferReleaseToScheduler` doc comment)
+  // once it independently observes the run's tracked PR resolve, or gives up
+  // looking for one.
+  async releaseIssueClaim(input: {
+    issueNumber: number;
+    reason:
+      | "pull-request-closed"
+      | "pull-request-discovery-exhausted"
+      | "pull-request-merged";
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    await this.claimLabels.release({
+      issueNumber: input.issueNumber,
+      phase: input.reason,
+      repository: input.repository
+    });
+  }
+
+  // A parked wait/merge_pr run's own re-evaluation reaching a genuine
+  // (non-blocked) terminal, or terminalizeBlocked below: the park's own
+  // signal observation already confirmed external resolution before taking
+  // that edge, so release immediately and unconditionally.
+  private async releaseWaitTerminalClaim(input: {
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    await this.claimLabels.release({
+      issueNumber: input.issueNumber,
+      phase: "wait-terminal",
+      repository: input.repository
+    });
+  }
+
   // Shared tail of every "terminalize this waiting Run as blocked" path (ADR
   // 0058): record the actionable reason, flip RunState, and label the issue.
   // A caller that also needs recordWorkflowTerminal runs that first, since
   // only it knows the terminal state id and its own transition reason.
+  // Every call site is reached exclusively from a parked wait/merge_pr run's
+  // own re-evaluation (reEvaluateWaitingRun / observeWaitPullRequestSignals /
+  // terminateMergePrRefusal), never from the provider-attempt path.
   private async terminalizeBlocked(input: {
     issueNumber: number;
     reason: string;
@@ -1495,6 +1534,7 @@ export class RunController {
       issueNumber: input.issueNumber,
       repository: input.repository
     });
+    await this.releaseWaitTerminalClaim(input);
   }
 
   private async terminateMergePrRefusal(input: {
@@ -2105,6 +2145,15 @@ export class RunController {
           return;
         }
         this.runStore.updateRunState(runId, "succeeded");
+        // This park's own signal observation (observeWaitPullRequestSignals,
+        // above) already confirmed external resolution before decideNextStep
+        // took this edge -- unlike an agent-hop success, which defers this
+        // same release until pull-request-followup.ts observes the PR itself
+        // resolve (see deferReleaseToScheduler).
+        await this.releaseWaitTerminalClaim({
+          issueNumber: refreshed.number,
+          repository
+        });
         return;
       }
       // The loop-breaker. A park can only make progress on what it observed,
@@ -2271,6 +2320,13 @@ export class RunController {
         return;
       }
       this.runStore.updateRunState(runId, "succeeded");
+      // See the matching release in the `advance` branch above: this park's
+      // own signal observation already confirmed external resolution before
+      // decideNextStep took this direct-terminate edge.
+      await this.releaseWaitTerminalClaim({
+        issueNumber: refreshed.number,
+        repository
+      });
     }
   }
 
@@ -5352,7 +5408,18 @@ export class RunController {
     }
 
     if (this.lifecyclePolicy.continuation.cap <= 0) {
-      // Continuations disabled; nothing to schedule and nothing to surface as cap-reached.
+      // Continuations disabled: no continuation will ever be scheduled for
+      // this success. An earlier version of this branch released the claim
+      // right here, but that is exactly the same risk as an unreleased
+      // raw-FSM agent-hop-direct terminal (see deferReleaseToScheduler):
+      // this success has no more built-in confirmation that whatever PR it
+      // opened has actually resolved than that case does, and releasing
+      // immediately would let a concurrent poll tick re-dispatch a duplicate
+      // run onto an issue whose first PR is still open. So this branch does
+      // nothing now -- the claim stays deferred, exactly like any other
+      // agent-hop success, until pull-request-followup.ts observes the
+      // tracked PR resolve (merged/closed) or its bounded fallback gives up
+      // looking for one.
       return;
     }
 
@@ -5390,6 +5457,16 @@ export class RunController {
       });
       await this.claimLabels.markFailed({
         issueNumber: input.issue.number,
+        repository: input.repository
+      });
+      // The continuation loop stops here -- no further continuation will be
+      // scheduled -- so this is the point a deferred non-raw-FSM success
+      // (see deferReleaseToScheduler) finally learns no more work is coming.
+      // sym:failed (just added) keeps the issue dispatch-ineligible even
+      // after sym:claimed/sym:stale are released.
+      await this.claimLabels.release({
+        issueNumber: input.issue.number,
+        phase: "continuation-scheduling-cap-reached",
         repository: input.repository
       });
       return;

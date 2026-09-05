@@ -624,10 +624,20 @@ describe("runSmoke", () => {
       repo: "symphonika",
       token: "test-token"
     });
-    expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledTimes(1);
+    // Permanent failure (no retry, no FSM continuation): sym:running is
+    // removed first, then the run's terminal claim release gives back
+    // sym:claimed/sym:stale.
+    expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledTimes(2);
     expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith({
       issueNumber,
       labels: ["sym:running"],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "test-token"
+    });
+    expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith({
+      issueNumber,
+      labels: ["sym:claimed", "sym:stale"],
       owner: "pmatos",
       repo: "symphonika",
       token: "test-token"

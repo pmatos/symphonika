@@ -279,7 +279,7 @@ describe("dispatch cancellation", () => {
       expect(removeCalls).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ labels: ["sym:running"] }),
-          expect.objectContaining({ labels: ["sym:claimed"] }),
+          expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] }),
           expect.objectContaining({ labels: ["sym:failed"] }),
           expect.objectContaining({ labels: ["sym:human-needed"] })
         ])

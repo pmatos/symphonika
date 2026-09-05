@@ -26,7 +26,11 @@ import {
   interpretPullRequest,
   type PullRequestState
 } from "./pull-request-state.js";
-import type { RunStore, TrackedPullRequest } from "./run-store.js";
+import {
+  MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS,
+  type RunStore,
+  type TrackedPullRequest
+} from "./run-store.js";
 
 export type PullRequestFollowupPolicy = {
   enabled: boolean;
@@ -122,6 +126,7 @@ export async function runPullRequestFollowup(
       ? {}
       : { onProjectRateLimited: options.onProjectRateLimited }),
     projects,
+    runController: options.runController,
     runStore: options.runStore,
     ...(options.shouldPollProject === undefined
       ? {}
@@ -245,6 +250,7 @@ async function discoverPullRequests(input: {
   logger?: Logger;
   onProjectRateLimited?: RunPullRequestFollowupOptions["onProjectRateLimited"];
   projects: Map<string, RunControllerProjectConfig>;
+  runController: RunController;
   runStore: RunStore;
   shouldPollProject?: RunPullRequestFollowupOptions["shouldPollProject"];
 }): Promise<number> {
@@ -281,7 +287,23 @@ async function discoverPullRequests(input: {
     }
     const pullRequest = selectOpenPullRequest(pullRequests, run.branchName);
     if (pullRequest === undefined) {
-      input.runStore.recordPullRequestDiscoveryAttempt(run.runId);
+      const attempts = input.runStore.recordPullRequestDiscoveryAttempt(
+        run.runId
+      );
+      // Bounded fallback for a deferred agent-hop-direct success (see
+      // ClaimLabelWriter's `deferReleaseToScheduler`): if no PR ever shows up
+      // for this run's branch within the discovery-attempt ceiling, there is
+      // nothing left to defer to -- "no PR ever showed up" needs no
+      // protection, so release the claim here instead of leaving it dangling
+      // forever. Harmless (best-effort, idempotent) for a run whose claim was
+      // already released some other way.
+      if (attempts >= MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS) {
+        await input.runController.releaseIssueClaim({
+          issueNumber: run.issueNumber,
+          reason: "pull-request-discovery-exhausted",
+          repository
+        });
+      }
       continue;
     }
     input.runStore.trackPullRequest({
@@ -333,6 +355,27 @@ async function processTrackedPullRequests(input: {
     if (rawState === undefined) {
       continue;
     }
+    // A raw-FSM workflow parked on this Issue decides what happens to its own
+    // pull request — both the merge (ADR 0048) and the review feedback. This
+    // loop observes and records; it does not act. Acting anyway is what gave
+    // one Issue two live FSM positions, the second replaying the pipeline from
+    // `initial` against a finished PR. See issue #616. Also gates every
+    // release below (see ClaimLabelWriter's `deferReleaseToScheduler`): a
+    // parked run still owns that release itself.
+    const workflowOwned = await input.runController.isIssueOwnedByWorkflow({
+      issueNumber: tracked.issueNumber,
+      project
+    });
+    const releaseClaimIfNotOwned = (
+      reason: "pull-request-closed" | "pull-request-merged"
+    ): Promise<void> =>
+      workflowOwned
+        ? Promise.resolve()
+        : input.runController.releaseIssueClaim({
+            issueNumber: tracked.issueNumber,
+            reason,
+            repository
+          });
     if (rawState === null) {
       input.runStore.recordPullRequestObservation({
         headSha: tracked.lastSeenHeadSha,
@@ -341,6 +384,9 @@ async function processTrackedPullRequests(input: {
         reviewFollowupCapReached: false,
         state: "closed"
       });
+      // The PR reference itself is gone (not merely closed -- a closed PR
+      // still resolves to a valid state below).
+      await releaseClaimIfNotOwned("pull-request-closed");
       continue;
     }
 
@@ -354,17 +400,6 @@ async function processTrackedPullRequests(input: {
     const headSha =
       state.headSha === "" ? tracked.lastSeenHeadSha : state.headSha;
     const trackingState = trackedStateFor(state);
-    // A raw-FSM workflow parked on this Issue decides what happens to its own
-    // pull request — both the merge (ADR 0048) and the review feedback. This
-    // loop observes and records; it does not act. Acting anyway is what gave
-    // one Issue two live FSM positions, the second replaying the pipeline from
-    // `initial` against a finished PR. See issue #616.
-    const workflowOwned =
-      trackingState === "open" &&
-      (await input.runController.isIssueOwnedByWorkflow({
-        issueNumber: tracked.issueNumber,
-        project
-      }));
     input.runStore.recordPullRequestObservation({
       headSha,
       id: tracked.id,
@@ -380,6 +415,13 @@ async function processTrackedPullRequests(input: {
       state: trackingState
     });
     if (trackingState !== "open") {
+      // Closed unmerged, or merged some other way than this loop's own
+      // tryMergePullRequest call below (e.g. a human merged it manually).
+      await releaseClaimIfNotOwned(
+        trackingState === "merged"
+          ? "pull-request-merged"
+          : "pull-request-closed"
+      );
       continue;
     }
     if (workflowOwned) {
@@ -472,6 +514,7 @@ async function processTrackedPullRequests(input: {
       reviewFollowupCapReached: false,
       state: "merged"
     });
+    await releaseClaimIfNotOwned("pull-request-merged");
     return { action: "merged", prNumber: tracked.prNumber };
   }
 

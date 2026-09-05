@@ -1501,6 +1501,33 @@ export class RunController {
     });
   }
 
+  // Mirrors terminateMergePrRefusal's shape for the other bounded-wait
+  // escalation: a wait/merge_pr state whose tracked pull request never
+  // showed up. Unlike the refusal path, one reason string covers both the
+  // transition record and the blocked outcome, so it's computed once here.
+  private async terminateNoPullRequestTracked(input: {
+    attempt: number;
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+    stateId: string;
+  }): Promise<void> {
+    const reason = buildNoPullRequestTrackedReason(
+      input.stateId,
+      input.attempt
+    );
+    this.runStore.recordWorkflowTerminal(input.runId, {
+      terminalStateId: input.stateId,
+      transitionReason: reason
+    });
+    await this.terminalizeBlocked({
+      issueNumber: input.issueNumber,
+      reason,
+      repository: input.repository,
+      runId: input.runId
+    });
+  }
+
   // Observes the tracked pull request and projects it into the wait state's
   // signal map, performing the merge attempt for a merge_pr state along the way.
   // undefined means the caller has nothing to decide this tick: observation
@@ -1541,19 +1568,24 @@ export class RunController {
       }
 
       const attempt = this.runStore.incrementPrUntrackedWaitCount(runId);
-      if (attempt >= MAX_PR_UNTRACKED_WAIT_ATTEMPTS) {
-        this.runStore.recordWorkflowTerminal(runId, {
-          terminalStateId: waitState.id,
-          transitionReason: buildNoPullRequestTrackedReason(
-            waitState.id,
-            attempt
-          )
-        });
-        await this.terminalizeBlocked({
+      // The shutdown guard below (reEvaluateWaitingRun, ahead of the
+      // decision handling) can't cover this branch: it always returns
+      // before ever reaching that guard. Check here instead so a tick that
+      // lands mid-shutdown falls through to the ordinary "still counting"
+      // path rather than terminalizing the run (DB terminal write + a live
+      // ClaimLabelWriter/GitHub call) while the daemon is stopping. The
+      // attempt is still recorded either way; escalation simply waits for a
+      // tick after the next daemon starts.
+      if (
+        attempt >= MAX_PR_UNTRACKED_WAIT_ATTEMPTS &&
+        !this.activeRuns.isShuttingDown()
+      ) {
+        await this.terminateNoPullRequestTracked({
+          attempt,
           issueNumber: input.issueNumber,
-          reason: buildNoPullRequestTrackedReason(waitState.id, attempt),
           repository: input.repository,
-          runId
+          runId,
+          stateId: waitState.id
         });
         this.logger?.warn(
           { attempt, issueNumber: input.issueNumber, runId },
@@ -1562,17 +1594,13 @@ export class RunController {
         return undefined;
       }
 
-      if (isMergePr) {
-        this.runStore.recordWaitingActivity(
-          runId,
-          `merge_pr awaiting Symphonika-tracked pull request for issue #${input.issueNumber} (attempt ${attempt}/${MAX_PR_UNTRACKED_WAIT_ATTEMPTS})`
-        );
-      } else {
-        this.runStore.recordWaitingActivity(
-          runId,
-          `${waitState.id}: no pull request tracked yet (attempt ${attempt}/${MAX_PR_UNTRACKED_WAIT_ATTEMPTS})`
-        );
-      }
+      const attemptSuffix = `(attempt ${attempt}/${MAX_PR_UNTRACKED_WAIT_ATTEMPTS})`;
+      this.runStore.recordWaitingActivity(
+        runId,
+        isMergePr
+          ? `merge_pr awaiting Symphonika-tracked pull request for issue #${input.issueNumber} ${attemptSuffix}`
+          : `${waitState.id}: no pull request tracked yet ${attemptSuffix}`
+      );
       this.logger?.debug(
         { attempt, runId, issueNumber: input.issueNumber },
         "symphonika wait re-eval skipped: no PR tracked yet"

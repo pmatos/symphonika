@@ -1789,9 +1789,16 @@ describe("wait state lifecycle", () => {
         runStore: store
       });
 
-      for (let i = 0; i < 119; i += 1) {
-        await controller.reEvaluateWaitingRun("waiting-run");
+      // Seed the counter directly for the first 118 attempts (a plain sqlite
+      // increment) rather than driving 118 redundant controller ticks
+      // through the full re-eval pipeline; the next two calls below exercise
+      // the real boundary (119: still waiting, 120: escalate) through the
+      // actual controller path.
+      for (let i = 0; i < 118; i += 1) {
+        store.incrementPrUntrackedWaitCount("waiting-run");
       }
+
+      await controller.reEvaluateWaitingRun("waiting-run");
       expect(store.getRun("waiting-run")?.state).toBe("waiting");
       expect(githubIssuesApi.addLabelsToIssue).not.toHaveBeenCalled();
 

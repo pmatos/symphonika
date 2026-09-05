@@ -1044,6 +1044,7 @@ export class RunController {
         "symphonika fresh dispatch failed before provider launch"
       );
       await this.claimLabels.applyTerminal({
+        deferReleaseToScheduler: false,
         fsmContinuing: false,
         issueNumber: input.issue.number,
         outcome: {
@@ -1357,6 +1358,7 @@ export class RunController {
     this.runStore.updateRunState(input.runId, "cancelled");
     await this.claimLabels.applyTerminal({
       cancelReason: input.reason,
+      deferReleaseToScheduler: false,
       fsmContinuing: false,
       issueNumber: input.issueNumber,
       outcome: { kind: "cancelled", reason: input.reason },
@@ -2516,6 +2518,7 @@ export class RunController {
       } failed before provider launch`
     );
     await this.claimLabels.applyTerminal({
+      deferReleaseToScheduler: false,
       fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: {
@@ -2623,6 +2626,7 @@ export class RunController {
         "symphonika state advance recorded reloaded terminal target without launching provider"
       );
       await this.claimLabels.applyTerminal({
+        deferReleaseToScheduler: false,
         fsmContinuing: false,
         issueNumber: input.issue.number,
         outcome,
@@ -3211,6 +3215,7 @@ export class RunController {
     this.runStore.updateRunState(input.runId, state);
     this.markNotificationPendingIfNeeded(input.runId, willRetry);
     await this.claimLabels.applyTerminal({
+      deferReleaseToScheduler: false,
       fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: terminal,
@@ -4078,6 +4083,7 @@ export class RunController {
           }
           await this.claimLabels.applyTerminal({
             cancelReason: watchdogTerminalReason,
+            deferReleaseToScheduler: false,
             fsmContinuing: false,
             issueNumber: input.issue.number,
             outcome: {
@@ -4236,7 +4242,18 @@ export class RunController {
             isRawFsm &&
             (workflowOutcome.advancedToState !== null ||
               workflowOutcome.parkAsWait === true);
+          // Only a non-raw-FSM `success` is ambiguous at this point: for those
+          // workflows `fsmContinuing` above is unconditionally false, but
+          // scheduleNext's success-path section (after this call returns)
+          // still decides whether to schedule a real continuation dispatch.
+          // `input_required` and a permanent `failed` are never ambiguous --
+          // scheduleNext returns immediately for both -- and a genuine
+          // raw-FSM terminal success independently makes scheduleNext a
+          // no-op via `suppressContinuation`, so neither needs deferral.
+          const deferReleaseToScheduler =
+            !isRawFsm && effectiveOutcome.kind === "success";
           const labelInput: ApplyLabelsInput = {
+            deferReleaseToScheduler,
             fsmContinuing,
             issueNumber: input.issue.number,
             outcome: effectiveOutcome,
@@ -5082,7 +5099,21 @@ export class RunController {
     }
 
     if (this.lifecyclePolicy.continuation.cap <= 0) {
-      // Continuations disabled; nothing to schedule and nothing to surface as cap-reached.
+      // Continuations disabled: no continuation will ever be scheduled for
+      // this success, so this is the point a deferred non-raw-FSM success
+      // (see deferReleaseToScheduler) learns no more work is coming. Without
+      // this release, a plain single-shot success on a cap-disabled project
+      // would never give back its claim (#709). Guarded the same way as the
+      // eligibility-loss branch above: label-immune (PR Follow-up) work may
+      // still share this Issue Reservation with a live parked/waiting Run,
+      // so releasing here would strip the claim out from under it.
+      if (input.respectsIssueLabels !== false) {
+        await this.claimLabels.release({
+          issueNumber: input.issue.number,
+          phase: "continuation-scheduling-disabled",
+          repository: input.repository
+        });
+      }
       return;
     }
 
@@ -5120,6 +5151,16 @@ export class RunController {
       });
       await this.claimLabels.markFailed({
         issueNumber: input.issue.number,
+        repository: input.repository
+      });
+      // The continuation loop stops here -- no further continuation will be
+      // scheduled -- so this is the point a deferred non-raw-FSM success
+      // (see deferReleaseToScheduler) finally learns no more work is coming.
+      // sym:failed (just added) keeps the issue dispatch-ineligible even
+      // after sym:claimed/sym:stale are released.
+      await this.claimLabels.release({
+        issueNumber: input.issue.number,
+        phase: "continuation-scheduling-cap-reached",
         repository: input.repository
       });
       return;

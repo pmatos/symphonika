@@ -264,6 +264,23 @@ describe("dispatch continuation cap", () => {
         .filter((call) => call.labels[0] === "sym:failed");
       expect(failedAdds.length).toBeGreaterThanOrEqual(1);
 
+      // This is a non-raw-FSM (markdown) workflow, so every one of the 3
+      // successful runs above (1 fresh + 2 continuations) is a
+      // deferReleaseToScheduler=true success: applyTerminal must NOT release
+      // sym:claimed for any of them -- scheduleNext's own continuation-
+      // scheduling logic owns that decision instead, and here it kept
+      // scheduling a next continuation each time (this is exactly the
+      // "continuation actually scheduled" fall-through, which correctly does
+      // nothing since the new continuation run is about to own the claim).
+      // Only once the cap is finally reached does scheduleNext's cap-reached
+      // branch release the claim -- so exactly one release call, not zero
+      // (the pre-fix bug) and not one-per-success (the race this fix closes).
+      const claimedRemoveLabelArgs =
+        githubIssuesApi.removeLabelsFromIssue.mock.calls
+          .map(([call]) => (call as { labels: string[] }).labels)
+          .filter((labels) => labels[0] === "sym:claimed");
+      expect(claimedRemoveLabelArgs).toEqual([["sym:claimed", "sym:stale"]]);
+
       const database = new Database(
         path.join(root, ".symphonika", "symphonika.db"),
         {
@@ -278,6 +295,85 @@ describe("dispatch continuation cap", () => {
       } finally {
         database.close();
       }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Regression for #709 on a non-raw-FSM (markdown) workflow with
+  // continuations disabled entirely (cap <= 0): applyTerminal defers the
+  // release for a non-raw-FSM success (deferReleaseToScheduler), expecting
+  // scheduleNext to release it once scheduleNext itself knows no
+  // continuation is coming. The `cap <= 0` early return is exactly such a
+  // point -- it must release too, or a plain single-shot success would never
+  // give back its claim, leaving the issue permanently undispatchable.
+  it("releases the claim on success when continuations are disabled (cap <= 0)", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
+    await writeProject(root);
+
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      // Still eligible (agent-ready) after the run finishes -- the point is
+      // that a disabled continuation cap must release regardless.
+      getIssue: vi
+        .fn()
+        .mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
+        .mockResolvedValue([
+          { ...baseIssue, labels: ["agent-ready", "sym:claimed"] }
+        ]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const prepareIssueWorkspace = vi.fn((): Promise<PreparedIssueWorkspace> =>
+      Promise.resolve(prepared)
+    );
+
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-cont-disabled",
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace
+    });
+
+    try {
+      await waitForCondition(daemon.url, ({ runs }) =>
+        runs.some((run) => run["state"] === "succeeded")
+      );
+
+      // Give scheduleNext's cap<=0 early return a moment to run past the
+      // applyTerminal call it follows.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      const claimedRemoveLabelArgs =
+        githubIssuesApi.removeLabelsFromIssue.mock.calls
+          .map(([call]) => (call as { labels: string[] }).labels)
+          .filter((labels) => labels[0] === "sym:claimed");
+      expect(claimedRemoveLabelArgs).toEqual([["sym:claimed", "sym:stale"]]);
     } finally {
       await daemon.stop();
     }
@@ -890,6 +986,20 @@ describe("dispatch continuation cap", () => {
       }),
       "symphonika workflow suppressed label-driven continuation"
     );
+
+    // Regression guard for deferReleaseToScheduler's raw-FSM half
+    // (`!isRawFsm && outcome.kind === "success"`): a genuine raw-FSM terminal
+    // success must still release the claim immediately from applyTerminal
+    // itself, since scheduleNext's suppressContinuation short-circuit above
+    // means it will never reach any of its own release branches. If that
+    // condition were ever flipped to `isRawFsm`, this run would defer to a
+    // scheduleNext call that never happens, and the claim would dangle
+    // forever.
+    const claimedRemoveLabelArgs =
+      githubIssuesApi.removeLabelsFromIssue.mock.calls
+        .map(([call]) => (call as { labels: string[] }).labels)
+        .filter((labels) => labels[0] === "sym:claimed");
+    expect(claimedRemoveLabelArgs).toEqual([["sym:claimed", "sym:stale"]]);
   });
 });
 

@@ -646,7 +646,7 @@ describe("pull request follow-up", () => {
     }
   });
 
-  it("does not double-release the claim via the eligibility-loss re-check after a label-immune PR follow-up retry succeeds (non-raw_fsm workflow)", async () => {
+  it("preserves label immunity through a PR follow-up retry on a non-raw_fsm workflow", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -827,23 +827,24 @@ describe("pull request follow-up", () => {
       expect(store.getRun("review-run-1")).toMatchObject({
         state: "succeeded"
       });
-      // The succeeded retry falls through to scheduleNext's continuation-
-      // scheduling eligibility re-check, which finds the issue ineligible
-      // (still missing `agent-ready`, its normal steady state while parked
-      // on PR review). Label-immune (PR Follow-up) work is exempt from that
-      // eligibility-loss release -- see issue #475 -- but the run itself has
-      // genuinely finished (succeeded, not retrying, not FSM-continuing), so
-      // the terminal claim release still fires exactly once. A length of 2
-      // here would mean the eligibility-loss re-check incorrectly released
-      // the claim a second time despite label immunity; the mid-retry
-      // reconcile tick not cancelling/suppressing the in-flight attempt is
-      // asserted directly above via respectsDuringRetry/cancelledDuringRetry.
+      // The succeeded retry is a non-raw-FSM success, so applyTerminal defers
+      // its own release to scheduleNext (deferReleaseToScheduler) instead of
+      // releasing eagerly. scheduleNext's continuation-scheduling eligibility
+      // re-check then finds the issue ineligible (still missing `agent-ready`,
+      // its normal steady state while parked on PR review) -- but label-immune
+      // (PR Follow-up) work is exempt from releasing on that eligibility loss
+      // (see issue #475), since a still-live parked/waiting Run may share the
+      // same Issue Reservation. So the claim must survive this whole sequence
+      // untouched: neither a premature release from applyTerminal itself, nor
+      // one from the eligibility-loss re-check. The mid-retry reconcile tick
+      // not cancelling/suppressing the in-flight attempt is asserted directly
+      // above via respectsDuringRetry/cancelledDuringRetry.
       const claimRemovals = (
         githubIssuesApi.removeLabelsFromIssue as ReturnType<typeof vi.fn>
       ).mock.calls
         .map(([call]) => call as { labels: string[] })
         .filter((call) => call.labels[0] === "sym:claimed");
-      expect(claimRemovals).toHaveLength(1);
+      expect(claimRemovals).toHaveLength(0);
     } finally {
       store.close();
     }
@@ -912,7 +913,7 @@ describe("pull request follow-up", () => {
     }
   });
 
-  it("does not double-release the claim when a delayed label-immune continuation loses label eligibility", async () => {
+  it("preserves the claim when a delayed label-immune continuation loses label eligibility", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -982,16 +983,22 @@ describe("pull request follow-up", () => {
 
       await scheduledContinuations[0]!();
 
-      // The scheduled continuation's own eligibility re-check (executeContinuation)
-      // finds the issue still missing `agent-ready`; label-immune work is exempt
-      // from that release (issue #475), so this must not add a *second* claim
-      // removal beyond the run's own genuine terminal release.
+      // The initial dispatch's own success is deferred (deferReleaseToScheduler)
+      // rather than released eagerly by applyTerminal. scheduleNext's own
+      // continuation-scheduling eligibility check found the issue eligible
+      // (2nd getIssue call has `agent-ready`) and scheduled this continuation;
+      // by the time it fires, the issue has reverted to its steady state
+      // (3rd getIssue call, no `agent-ready`) and executeContinuation's own
+      // eligibility re-check finds it ineligible -- but label-immune work is
+      // exempt from releasing on that eligibility loss (issue #475), since a
+      // still-live parked/waiting Run may share the same Issue Reservation.
+      // So the claim must survive untouched throughout.
       const claimRemovals = (
         githubIssuesApi.removeLabelsFromIssue as ReturnType<typeof vi.fn>
       ).mock.calls
         .map(([call]) => call as { labels: string[] })
         .filter((call) => call.labels[0] === "sym:claimed");
-      expect(claimRemovals).toHaveLength(1);
+      expect(claimRemovals).toHaveLength(0);
     } finally {
       store.close();
     }

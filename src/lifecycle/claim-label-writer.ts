@@ -35,6 +35,28 @@ export type ApplyLabelsInput = {
   // `sym:blocked` must be added on this transition or the issue will stay
   // externally marked failed/blocked even after a later state succeeds
   // (subsequent applyTerminal calls only remove `sym:running`).
+  // True only for a non-raw-FSM (markdown/legacy compat-graph) workflow's
+  // `success` outcome. For those workflows `fsmContinuing` is unconditionally
+  // false (it is computed only when `isRawFsm`), but `scheduleNext`'s success
+  // path (run-controller.ts) still decides -- after this call returns --
+  // whether to schedule a real continuation dispatch some `delayMs` later.
+  // Releasing the claim here would leave the issue with zero operational
+  // labels, and therefore poll-eligible, for that whole delay window even
+  // though a continuation may still land and reuse the same reservation.
+  // `input_required` and a permanent `failed` are never ambiguous this way
+  // -- `scheduleNext` returns immediately for both, regardless of
+  // raw-FSM-ness -- so only `success` needs this deferral. When true,
+  // `scheduleNext`'s own branches -- closed issue, eligibility loss,
+  // continuations disabled (cap <= 0), and cap reached -- call `release`
+  // themselves once they know no continuation is coming (the closed-issue
+  // and cap-reached branches unconditionally; the other two only when
+  // `respectsIssueLabels !== false`, since label-immune PR Follow-up work may
+  // still share the Issue Reservation with a live parked/waiting Run). The
+  // "continuation actually scheduled" fall-through intentionally does not
+  // release, since the new continuation run is about to own the claim. This
+  // list is load-bearing: an uncovered scheduleNext exit for a deferred
+  // success leaves the claim dangling forever (#709).
+  deferReleaseToScheduler: boolean;
   fsmContinuing: boolean;
   issueNumber: number;
   outcome: ClassifiedTerminal;
@@ -49,7 +71,9 @@ type ReleaseClaimPhase =
   | "continuation"
   | "continuation-closed-issue"
   | "continuation-eligibility-loss"
+  | "continuation-scheduling-cap-reached"
   | "continuation-scheduling-closed-issue"
+  | "continuation-scheduling-disabled"
   | "continuation-scheduling-eligibility-loss"
   | "eligibility-loss-cleanup"
   | "state-advance"
@@ -197,14 +221,18 @@ export class ClaimLabelWriter {
     }
 
     // The run is truly done with this issue -- not advancing the FSM to
-    // another state/wait, and not about to retry -- so give back the
-    // operational labels that made it eligible for dispatch in the first
-    // place. Covers plain success, input_required, and permanent
-    // failure/blocked; excludes a pending retry and any FSM continuation,
-    // both of which still own the issue.
+    // another state/wait, and not about to retry, and not a non-raw-FSM
+    // success whose continuation-or-not decision is still pending in
+    // scheduleNext -- so give back the operational labels that made it
+    // eligible for dispatch in the first place. Covers plain success (raw-FSM
+    // terminal, or non-raw-FSM with no continuation policy in play),
+    // input_required, and permanent failure/blocked; excludes a pending
+    // retry, any FSM continuation, and a deferred non-raw-FSM success, all of
+    // which still own the issue (the last one via scheduleNext instead).
     if (
       !input.fsmContinuing &&
-      !(input.outcome.kind === "failed" && input.willRetry)
+      !(input.outcome.kind === "failed" && input.willRetry) &&
+      !input.deferReleaseToScheduler
     ) {
       await this.release({
         issueNumber: input.issueNumber,

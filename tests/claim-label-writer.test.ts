@@ -50,6 +50,7 @@ function terminal(
   input: Partial<ApplyLabelsInput> & { outcome: ApplyLabelsInput["outcome"] }
 ): ApplyLabelsInput {
   return {
+    deferReleaseToScheduler: false,
     fsmContinuing: false,
     issueNumber: 7,
     repository,
@@ -95,6 +96,17 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
     await new ClaimLabelWriter({ api }).applyTerminal(
       terminal({
         cancelReason: CANCEL_REASONS.RUN_TIMEOUT,
+        outcome: { kind: "cancelled", reason: "cancelled" }
+      })
+    );
+    expect(seq(calls)).toEqual(["remove:sym:running"]);
+  });
+
+  it("cancelled for daemon shutdown removes only running -- the claim must survive for shutdown-resume.ts", async () => {
+    const { api, calls } = makeApi();
+    await new ClaimLabelWriter({ api }).applyTerminal(
+      terminal({
+        cancelReason: CANCEL_REASONS.DAEMON_SHUTDOWN,
         outcome: { kind: "cancelled", reason: "cancelled" }
       })
     );
@@ -182,6 +194,12 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
   });
 
   it("success releases sym:claimed and sym:stale in addition to removing sym:running", async () => {
+    // deferReleaseToScheduler defaults to false here: either a raw-FSM
+    // terminal success (scheduleNext is a no-op for it via
+    // suppressContinuation) or a non-raw-FSM success the caller already
+    // knows carries no further continuation decision. Regression guard for
+    // the eager-release path -- see the deferred sibling test below for the
+    // non-raw-FSM case that must NOT release here.
     const { api, calls } = makeApi();
     await new ClaimLabelWriter({ api }).applyTerminal(
       terminal({ outcome: { kind: "success", reason: "success" } })
@@ -190,6 +208,25 @@ describe("ClaimLabelWriter.applyTerminal — the terminal-outcome label matrix",
       "remove:sym:running",
       "remove:sym:claimed,sym:stale"
     ]);
+  });
+
+  it("defers the claim release to the scheduler for a non-raw-FSM success", async () => {
+    // A non-raw-FSM success routes through scheduleNext's continuation-
+    // scheduling logic (run-controller.ts) after this call returns, which may
+    // still schedule a real continuation `delayMs` later. Releasing here
+    // would leave the issue with zero operational labels -- and therefore
+    // poll-eligible -- for that whole window even though the continuation is
+    // about to reuse the same reservation. scheduleNext's own branches
+    // (closed issue, eligibility loss, cap reached) release once they know
+    // no continuation is coming.
+    const { api, calls } = makeApi();
+    await new ClaimLabelWriter({ api }).applyTerminal(
+      terminal({
+        deferReleaseToScheduler: true,
+        outcome: { kind: "success", reason: "success" }
+      })
+    );
+    expect(seq(calls)).toEqual(["remove:sym:running"]);
   });
 
   it("does not release the claim on success when the FSM is continuing", async () => {

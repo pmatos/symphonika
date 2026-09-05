@@ -65,8 +65,10 @@ notifies under the default "failures" email policy like any other blocked outcom
   worst case is now a bounded wait (~1 hour by default) before `sym:blocked` + `sym:human-needed`
   give an operator a clear signal and the usual blocked-outcome affordances (UI pill, notification,
   eligibility guard).
-- The two motivating `pmatos/jsse` runs (issues #314, #584) will resume ticking on daemon restart
-  and cross the threshold on their own; no manual cleanup needed.
+- The two motivating `pmatos/jsse` runs (issues #314, #584) are confirmed parked at exactly
+  `state = 'waiting'`, `current_state_id = 'wait_for_pr'` in the live run-store. Once this change
+  ships (merged, released, and the daemon running against them upgraded) they resume ticking and
+  cross the threshold on their own; no manual cleanup needed.
 - **Not fixed here**: `discoverPullRequests`'s own silent exhaustion of `pr_discovery_attempts`
   (`src/pull-request-followup.ts`) has the same shape of gap on a different row set
   (`state = 'succeeded'`, not `'waiting'`) and isn't what parked #314/#584 — this bound is a

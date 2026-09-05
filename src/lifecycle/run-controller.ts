@@ -1570,7 +1570,7 @@ export class RunController {
       } else {
         this.runStore.recordWaitingActivity(
           runId,
-          `wait_for_pr: no pull request tracked yet (attempt ${attempt}/${MAX_PR_UNTRACKED_WAIT_ATTEMPTS})`
+          `${waitState.id}: no pull request tracked yet (attempt ${attempt}/${MAX_PR_UNTRACKED_WAIT_ATTEMPTS})`
         );
       }
       this.logger?.debug(

@@ -150,6 +150,7 @@ function noopCodex(): AgentProvider {
 }
 
 function buildController(input: {
+  createRunId?: () => string;
   githubIssuesApi: GitHubIssuesApi;
   project: RunControllerProjectConfig;
   pullRequestPolicy?: typeof DEFAULT_PULL_REQUEST_FOLLOWUP_POLICY;
@@ -160,7 +161,7 @@ function buildController(input: {
     activeRuns: new ActiveRunRegistry(),
     agentProviders: { codex: noopCodex() },
     configDir: input.root,
-    createRunId: () => "merge-pr-rerun",
+    createRunId: input.createRunId ?? (() => "merge-pr-rerun"),
     emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret-token" },
     githubIssuesApi: input.githubIssuesApi,
@@ -893,6 +894,190 @@ describe("merge_pr state lifecycle", () => {
       const after = store.getRun("merge-pr-run");
       expect(after?.state).toBe("waiting");
       expect(after?.stateTransitionReason).toContain("merge.enabled is false");
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe("merge_pr chained into issue content actions", () => {
+  it("merge_pr -> close_issue: merges the PR, closes the issue, and reaches terminal success", async () => {
+    const root = await makeTempRoot();
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: merge_and_close",
+        "  initial: merging",
+        "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "        method: squash",
+        "      transitions:",
+        "        - to: closing",
+        "          when:",
+        "            pr_merged: true",
+        "    closing:",
+        "      action:",
+        "        kind: close_issue",
+        "        state_reason: completed",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      seedWaitingMergePrRun(store, issue);
+      store.trackPullRequest({
+        branchName: "sym/symphonika/97-merge-pr-acceptance-fixture",
+        headSha: "abc123",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        closeIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined)
+      };
+      let chainCounter = 0;
+      const controller = buildController({
+        createRunId: () => `chain-close-${++chainCounter}`,
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("merge-pr-run");
+
+      expect(githubIssuesApi.mergePullRequest).toHaveBeenCalled();
+      const afterMerge = store.getRun("merge-pr-run");
+      expect(afterMerge?.state).toBe("succeeded");
+      expect(afterMerge?.terminalStateId).toBeNull();
+
+      await controller.reEvaluateWaitingRun("chain-close-1");
+
+      expect(githubIssuesApi.closeIssue).toHaveBeenCalledWith({
+        issueNumber: 97,
+        owner: "pmatos",
+        repo: "symphonika",
+        stateReason: "completed",
+        token: "secret-token"
+      });
+      const afterClose = store.getRun("chain-close-1");
+      expect(afterClose?.state).toBe("succeeded");
+      expect(afterClose?.terminalStateId).toBe("done");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("merge_pr -> label_issue -> comment: labels and comments the issue, then reaches terminal success", async () => {
+    const root = await makeTempRoot();
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: merge_and_label",
+        "  initial: merging",
+        "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "      transitions:",
+        "        - to: labeling",
+        "          when:",
+        "            pr_merged: true",
+        "    labeling:",
+        "      action:",
+        "        kind: label_issue",
+        "        labels:",
+        "          - agent-ready",
+        "      transitions:",
+        "        - to: commenting",
+        "    commenting:",
+        "      action:",
+        "        kind: comment",
+        "        body: Partial slice landed; remaining scope tracked here.",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      seedWaitingMergePrRun(store, issue);
+      store.trackPullRequest({
+        branchName: "sym/symphonika/97-merge-pr-acceptance-fixture",
+        headSha: "abc123",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addIssueComment: vi.fn().mockResolvedValue(undefined),
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined)
+      };
+      let chainCounter = 0;
+      const controller = buildController({
+        createRunId: () => `chain-label-${++chainCounter}`,
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("merge-pr-run");
+      expect(githubIssuesApi.mergePullRequest).toHaveBeenCalled();
+
+      await controller.reEvaluateWaitingRun("chain-label-1");
+      expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith({
+        issueNumber: 97,
+        labels: ["agent-ready"],
+        owner: "pmatos",
+        repo: "symphonika",
+        token: "secret-token"
+      });
+
+      await controller.reEvaluateWaitingRun("chain-label-2");
+      expect(githubIssuesApi.addIssueComment).toHaveBeenCalledWith({
+        body: "Partial slice landed; remaining scope tracked here.",
+        issueNumber: 97,
+        owner: "pmatos",
+        repo: "symphonika",
+        token: "secret-token"
+      });
+
+      const after = store.getRun("chain-label-2");
+      expect(after?.state).toBe("succeeded");
+      expect(after?.terminalStateId).toBe("done");
     } finally {
       store.close();
     }

@@ -18,9 +18,16 @@ export type WorkflowPredicateMap = Record<string, WorkflowPredicateValue>;
 
 export type WorkflowAction = {
   kind: WorkflowActionKind;
+  // `close_issue`'s closing comment, or `comment`'s posted comment body.
+  body?: string;
+  // `label_issue`'s labels to add.
+  labels?: string[];
   method?: string;
   prompt?: string;
   provider?: AgentProviderName;
+  // `close_issue`'s GitHub close reason. Defaults to "completed" when omitted
+  // (see fsm-expansion.ts's parseWorkflowAction).
+  stateReason?: "completed" | "not_planned";
 };
 
 export type WorkflowTransition = {

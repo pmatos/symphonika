@@ -1222,6 +1222,19 @@ function parseWorkflowAction(
   const provider = stringProperty(rawAction, "provider");
   const prompt = stringProperty(rawAction, "prompt");
   const method = stringProperty(rawAction, "method");
+  const body = stringProperty(rawAction, "body");
+  const labels = parseWorkflowActionLabels(
+    stateId,
+    rawAction,
+    workflowPath,
+    errors
+  );
+  let stateReason = parseWorkflowActionStateReason(
+    stateId,
+    rawAction,
+    workflowPath,
+    errors
+  );
 
   if (kind === "agent") {
     if (
@@ -1272,14 +1285,85 @@ function parseWorkflowAction(
     }
   }
 
+  if (kind === "label_issue" && (labels === undefined || labels.length === 0)) {
+    errors.push(
+      `workflow state ${stateId} at ${workflowPath} label_issue action must define a non-empty labels list`
+    );
+  }
+
+  if (kind === "comment" && body === undefined) {
+    errors.push(
+      `workflow state ${stateId} at ${workflowPath} comment action must define body`
+    );
+  }
+
+  // close_issue needs nothing beyond kind -- default the GitHub close reason
+  // so every close_issue action carries one, whether or not the author named
+  // it explicitly.
+  if (kind === "close_issue" && stateReason === undefined) {
+    stateReason = "completed";
+  }
+
   return {
     kind,
+    ...(body === undefined ? {} : { body }),
+    ...(labels === undefined ? {} : { labels }),
     ...(method === undefined ? {} : { method }),
     ...(prompt === undefined ? {} : { prompt }),
     ...(provider === "codex" || provider === "claude" || provider === "omp"
       ? { provider }
-      : {})
+      : {}),
+    ...(stateReason === undefined ? {} : { stateReason })
   };
+}
+
+// Parses action.labels for a label_issue action: a sequence of non-empty
+// strings. Any other shape (missing is fine -- the label_issue kind check
+// above reports that) is a validation error rather than a silent empty list,
+// matching how parseWorkflowTransitions rejects a non-sequence `to`.
+function parseWorkflowActionLabels(
+  stateId: string,
+  rawAction: Record<string, unknown>,
+  workflowPath: string,
+  errors: string[]
+): string[] | undefined {
+  const rawLabels = rawAction.labels;
+  if (rawLabels === undefined) {
+    return undefined;
+  }
+  if (
+    !Array.isArray(rawLabels) ||
+    rawLabels.some(
+      (label) => typeof label !== "string" || label.trim().length === 0
+    )
+  ) {
+    errors.push(
+      `workflow state ${stateId} at ${workflowPath} action.labels must be a sequence of non-empty strings`
+    );
+    return undefined;
+  }
+  return rawLabels.map((label) => (label as string).trim());
+}
+
+// Parses action.state_reason (YAML snake_case, matching complete_when's own
+// mapping onto WorkflowAction's stateReason) for a close_issue action.
+function parseWorkflowActionStateReason(
+  stateId: string,
+  rawAction: Record<string, unknown>,
+  workflowPath: string,
+  errors: string[]
+): "completed" | "not_planned" | undefined {
+  const raw = stringProperty(rawAction, "state_reason");
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw !== "completed" && raw !== "not_planned") {
+    errors.push(
+      `workflow state ${stateId} at ${workflowPath} close_issue state_reason must be completed or not_planned`
+    );
+    return undefined;
+  }
+  return raw;
 }
 
 function parseWorkflowTransitions(
@@ -1429,6 +1513,15 @@ function formatWorkflowAction(action: WorkflowAction): string {
   }
   if (action.method !== undefined) {
     parts.push(`method=${action.method}`);
+  }
+  if (action.labels !== undefined) {
+    parts.push(`labels=[${action.labels.join(", ")}]`);
+  }
+  if (action.body !== undefined) {
+    parts.push(`body=${action.body}`);
+  }
+  if (action.stateReason !== undefined) {
+    parts.push(`state_reason=${action.stateReason}`);
   }
   return parts.join(" ");
 }

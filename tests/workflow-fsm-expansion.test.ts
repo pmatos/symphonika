@@ -2044,6 +2044,259 @@ describe("state machine workflow definitions", () => {
       `workflow state merging at ${workflowPath} merge_pr method must be one of merge, rebase, squash`
     );
   });
+
+  it("accepts a close_issue action and defaults state_reason to completed", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: close_when_done",
+        "  initial: closing",
+        "  states:",
+        "    closing:",
+        "      action:",
+        "        kind: close_issue",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    const closing = result.workflow.states.find(
+      (state) => state.id === "closing"
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(closing?.action).toEqual({
+      kind: "close_issue",
+      stateReason: "completed"
+    });
+  });
+
+  it("accepts a close_issue action with an explicit state_reason and closing comment body", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: close_not_planned",
+        "  initial: closing",
+        "  states:",
+        "    closing:",
+        "      action:",
+        "        kind: close_issue",
+        "        state_reason: not_planned",
+        '        body: "Closing as not planned; superseded by #900."',
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    const closing = result.workflow.states.find(
+      (state) => state.id === "closing"
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(closing?.action).toEqual({
+      body: "Closing as not planned; superseded by #900.",
+      kind: "close_issue",
+      stateReason: "not_planned"
+    });
+  });
+
+  it("rejects a close_issue action with an invalid state_reason", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: close_invalid",
+        "  initial: closing",
+        "  states:",
+        "    closing:",
+        "      action:",
+        "        kind: close_issue",
+        "        state_reason: wontfix",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state closing at ${workflowPath} close_issue state_reason must be completed or not_planned`
+    );
+  });
+
+  it("accepts a label_issue action with a non-empty labels list", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: label_after_merge",
+        "  initial: labeling",
+        "  states:",
+        "    labeling:",
+        "      action:",
+        "        kind: label_issue",
+        "        labels:",
+        "          - agent-ready",
+        "          - needs-triage",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    const labeling = result.workflow.states.find(
+      (state) => state.id === "labeling"
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(labeling?.action).toEqual({
+      kind: "label_issue",
+      labels: ["agent-ready", "needs-triage"]
+    });
+  });
+
+  it("rejects a label_issue action that omits labels", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: label_missing",
+        "  initial: labeling",
+        "  states:",
+        "    labeling:",
+        "      action:",
+        "        kind: label_issue",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state labeling at ${workflowPath} label_issue action must define a non-empty labels list`
+    );
+  });
+
+  it("rejects a label_issue action with an empty labels list", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: label_empty",
+        "  initial: labeling",
+        "  states:",
+        "    labeling:",
+        "      action:",
+        "        kind: label_issue",
+        "        labels: []",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state labeling at ${workflowPath} label_issue action must define a non-empty labels list`
+    );
+  });
+
+  it("accepts a comment action with a body", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: comment_after_merge",
+        "  initial: commenting",
+        "  states:",
+        "    commenting:",
+        "      action:",
+        "        kind: comment",
+        '        body: "Part of this issue landed in #252."',
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    const commenting = result.workflow.states.find(
+      (state) => state.id === "commenting"
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(commenting?.action).toEqual({
+      body: "Part of this issue landed in #252.",
+      kind: "comment"
+    });
+  });
+
+  it("rejects a comment action that omits body", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: comment_missing_body",
+        "  initial: commenting",
+        "  states:",
+        "    commenting:",
+        "      action:",
+        "        kind: comment",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state commenting at ${workflowPath} comment action must define body`
+    );
+  });
 });
 
 describe("built-in workflow templates", () => {

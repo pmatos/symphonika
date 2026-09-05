@@ -1459,6 +1459,27 @@ export class RunController {
     return this.runStore.hasMergeRefusalForPullRequest(input);
   }
 
+  // Public seam onto ClaimLabelWriter's private `claimLabels` field, for the
+  // one class of caller outside this controller that needs to release a
+  // claim: pull-request-followup.ts, closing out a deferred agent-hop-direct
+  // success (see ClaimLabelWriter's `deferReleaseToScheduler` doc comment)
+  // once it independently observes the run's tracked PR resolve, or gives up
+  // looking for one.
+  async releaseIssueClaim(input: {
+    issueNumber: number;
+    reason:
+      | "pull-request-closed"
+      | "pull-request-discovery-exhausted"
+      | "pull-request-merged";
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    await this.claimLabels.release({
+      issueNumber: input.issueNumber,
+      phase: input.reason,
+      repository: input.repository
+    });
+  }
+
   // Shared tail of every "terminalize this waiting Run as blocked" path (ADR
   // 0058): record the actionable reason, flip RunState, and label the issue.
   // A caller that also needs recordWorkflowTerminal runs that first, since
@@ -1848,6 +1869,17 @@ export class RunController {
           return;
         }
         this.runStore.updateRunState(runId, "succeeded");
+        // This park's own signal observation (observeWaitPullRequestSignals,
+        // above) already confirmed external resolution before decideNextStep
+        // took this edge -- unlike an agent-hop success, which defers this
+        // same release until pull-request-followup.ts observes the PR itself
+        // resolve (see deferReleaseToScheduler). Release immediately and
+        // unconditionally: nothing else in this walk still needs the claim.
+        await this.claimLabels.release({
+          issueNumber: refreshed.number,
+          phase: "wait-terminal",
+          repository
+        });
         return;
       }
       // The loop-breaker. A park can only make progress on what it observed,
@@ -2003,6 +2035,15 @@ export class RunController {
         return;
       }
       this.runStore.updateRunState(runId, "succeeded");
+      // See the matching release in the `advance` branch above: this park's
+      // own signal observation already confirmed external resolution before
+      // decideNextStep took this direct-terminate edge, so release
+      // immediately and unconditionally.
+      await this.claimLabels.release({
+        issueNumber: refreshed.number,
+        phase: "wait-terminal",
+        repository
+      });
     }
   }
 
@@ -4242,16 +4283,17 @@ export class RunController {
             isRawFsm &&
             (workflowOutcome.advancedToState !== null ||
               workflowOutcome.parkAsWait === true);
-          // Only a non-raw-FSM `success` is ambiguous at this point: for those
-          // workflows `fsmContinuing` above is unconditionally false, but
-          // scheduleNext's success-path section (after this call returns)
-          // still decides whether to schedule a real continuation dispatch.
-          // `input_required` and a permanent `failed` are never ambiguous --
-          // scheduleNext returns immediately for both -- and a genuine
-          // raw-FSM terminal success independently makes scheduleNext a
-          // no-op via `suppressContinuation`, so neither needs deferral.
-          const deferReleaseToScheduler =
-            !isRawFsm && effectiveOutcome.kind === "success";
+          // This whole function is the tail of an attempt that actually ran
+          // a provider, so every success reaching it is an agent-hop-direct
+          // success -- never a parked (wait/merge_pr) hop's own terminal
+          // reach, which is handled entirely inline in reEvaluateWaitingRun
+          // and releases immediately from there instead (see that method and
+          // ClaimLabelWriter's `deferReleaseToScheduler` doc comment for the
+          // full reasoning on why every agent-hop success -- both a
+          // non-raw-FSM workflow's and a raw-FSM one's own direct-to-terminal
+          // success -- must defer, while a parked hop's terminal reach must
+          // not).
+          const deferReleaseToScheduler = effectiveOutcome.kind === "success";
           const labelInput: ApplyLabelsInput = {
             deferReleaseToScheduler,
             fsmContinuing,
@@ -5100,20 +5142,17 @@ export class RunController {
 
     if (this.lifecyclePolicy.continuation.cap <= 0) {
       // Continuations disabled: no continuation will ever be scheduled for
-      // this success, so this is the point a deferred non-raw-FSM success
-      // (see deferReleaseToScheduler) learns no more work is coming. Without
-      // this release, a plain single-shot success on a cap-disabled project
-      // would never give back its claim (#709). Guarded the same way as the
-      // eligibility-loss branch above: label-immune (PR Follow-up) work may
-      // still share this Issue Reservation with a live parked/waiting Run,
-      // so releasing here would strip the claim out from under it.
-      if (input.respectsIssueLabels !== false) {
-        await this.claimLabels.release({
-          issueNumber: input.issue.number,
-          phase: "continuation-scheduling-disabled",
-          repository: input.repository
-        });
-      }
+      // this success. An earlier version of this branch released the claim
+      // right here, but that is exactly the same risk as an unreleased
+      // raw-FSM agent-hop-direct terminal (see deferReleaseToScheduler):
+      // this success has no more built-in confirmation that whatever PR it
+      // opened has actually resolved than that case does, and releasing
+      // immediately would let a concurrent poll tick re-dispatch a duplicate
+      // run onto an issue whose first PR is still open. So this branch does
+      // nothing now -- the claim stays deferred, exactly like any other
+      // agent-hop success, until pull-request-followup.ts observes the
+      // tracked PR resolve (merged/closed) or its bounded fallback gives up
+      // looking for one.
       return;
     }
 

@@ -26,7 +26,11 @@ import {
   interpretPullRequest,
   type PullRequestState
 } from "./pull-request-state.js";
-import type { RunStore, TrackedPullRequest } from "./run-store.js";
+import {
+  MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS,
+  type RunStore,
+  type TrackedPullRequest
+} from "./run-store.js";
 
 export type PullRequestFollowupPolicy = {
   enabled: boolean;
@@ -122,6 +126,7 @@ export async function runPullRequestFollowup(
       ? {}
       : { onProjectRateLimited: options.onProjectRateLimited }),
     projects,
+    runController: options.runController,
     runStore: options.runStore,
     ...(options.shouldPollProject === undefined
       ? {}
@@ -245,6 +250,7 @@ async function discoverPullRequests(input: {
   logger?: Logger;
   onProjectRateLimited?: RunPullRequestFollowupOptions["onProjectRateLimited"];
   projects: Map<string, RunControllerProjectConfig>;
+  runController: RunController;
   runStore: RunStore;
   shouldPollProject?: RunPullRequestFollowupOptions["shouldPollProject"];
 }): Promise<number> {
@@ -281,7 +287,23 @@ async function discoverPullRequests(input: {
     }
     const pullRequest = selectOpenPullRequest(pullRequests, run.branchName);
     if (pullRequest === undefined) {
-      input.runStore.recordPullRequestDiscoveryAttempt(run.runId);
+      const attempts = input.runStore.recordPullRequestDiscoveryAttempt(
+        run.runId
+      );
+      // Bounded fallback for a deferred agent-hop-direct success (see
+      // ClaimLabelWriter's `deferReleaseToScheduler`): if no PR ever shows up
+      // for this run's branch within the discovery-attempt ceiling, there is
+      // nothing left to defer to -- "no PR ever showed up" needs no
+      // protection, so release the claim here instead of leaving it dangling
+      // forever. Harmless (best-effort, idempotent) for a run whose claim was
+      // already released some other way.
+      if (attempts >= MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS) {
+        await input.runController.releaseIssueClaim({
+          issueNumber: run.issueNumber,
+          reason: "pull-request-discovery-exhausted",
+          repository
+        });
+      }
       continue;
     }
     input.runStore.trackPullRequest({
@@ -340,6 +362,16 @@ async function processTrackedPullRequests(input: {
         prUrl: tracked.prUrl,
         reviewFollowupCapReached: false,
         state: "closed"
+      });
+      // Closed unmerged: whatever deferred a release for this run's issue
+      // (see ClaimLabelWriter's `deferReleaseToScheduler`) has nothing left
+      // to wait for. Fires regardless of workflowOwned -- unreachable below
+      // anyway for a non-"open" trackingState, and the deferred case by
+      // construction has no FSM step left pending once its PR is gone.
+      await input.runController.releaseIssueClaim({
+        issueNumber: tracked.issueNumber,
+        reason: "pull-request-closed",
+        repository
       });
       continue;
     }
@@ -471,6 +503,15 @@ async function processTrackedPullRequests(input: {
       prUrl: state.url,
       reviewFollowupCapReached: false,
       state: "merged"
+    });
+    // Merged: whatever deferred a release for this run's issue (see
+    // ClaimLabelWriter's `deferReleaseToScheduler`) has nothing left to wait
+    // for. Fires regardless of workflowOwned, same reasoning as the closed
+    // transition above.
+    await input.runController.releaseIssueClaim({
+      issueNumber: tracked.issueNumber,
+      reason: "pull-request-merged",
+      repository
     });
     return { action: "merged", prNumber: tracked.prNumber };
   }

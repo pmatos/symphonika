@@ -307,7 +307,7 @@ describe("dispatch continuation cap", () => {
   // continuation is coming. The `cap <= 0` early return is exactly such a
   // point -- it must release too, or a plain single-shot success would never
   // give back its claim, leaving the issue permanently undispatchable.
-  it("releases the claim on success when continuations are disabled (cap <= 0)", async () => {
+  it("defers the claim release to PR-resolution when continuations are disabled (cap <= 0)", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await createGitWorkspaceAhead(prepared);
@@ -369,11 +369,17 @@ describe("dispatch continuation cap", () => {
       // applyTerminal call it follows.
       await new Promise((resolve) => setTimeout(resolve, 80));
 
+      // This success has no more built-in confirmation that its PR (if any)
+      // has resolved than a raw-FSM agent-hop-direct terminal does -- same
+      // risk category, so cap<=0 must NOT release immediately any more (see
+      // ClaimLabelWriter's `deferReleaseToScheduler`). Release is now the
+      // job of pull-request-followup.ts observing the tracked PR resolve, or
+      // its bounded fallback once no PR is ever found.
       const claimedRemoveLabelArgs =
         githubIssuesApi.removeLabelsFromIssue.mock.calls
           .map(([call]) => (call as { labels: string[] }).labels)
           .filter((labels) => labels[0] === "sym:claimed");
-      expect(claimedRemoveLabelArgs).toEqual([["sym:claimed", "sym:stale"]]);
+      expect(claimedRemoveLabelArgs).toEqual([]);
     } finally {
       await daemon.stop();
     }
@@ -904,7 +910,7 @@ describe("dispatch continuation cap", () => {
     }
   });
 
-  it("suppresses continuations after a raw FSM workflow reaches a terminal node", async () => {
+  it("suppresses continuations and defers the claim release when a raw FSM agent-hop reaches a terminal node directly", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await createGitWorkspaceAhead(prepared);
@@ -987,19 +993,23 @@ describe("dispatch continuation cap", () => {
       "symphonika workflow suppressed label-driven continuation"
     );
 
-    // Regression guard for deferReleaseToScheduler's raw-FSM half
-    // (`!isRawFsm && outcome.kind === "success"`): a genuine raw-FSM terminal
-    // success must still release the claim immediately from applyTerminal
-    // itself, since scheduleNext's suppressContinuation short-circuit above
-    // means it will never reach any of its own release branches. If that
-    // condition were ever flipped to `isRawFsm`, this run would defer to a
-    // scheduleNext call that never happens, and the claim would dangle
-    // forever.
+    // This is the exact builtin_single_agent_pr shape (agent -> done,
+    // gated on provider_success && branch_ahead_of_base): the terminal was
+    // reached the instant the agent finished, with no external confirmation
+    // that whatever PR it opened has been reviewed or merged yet. Releasing
+    // immediately here would let a concurrent poll tick (the issue still
+    // carries agent-ready) re-dispatch a duplicate run on that same open PR.
+    // deferReleaseToScheduler must defer this claim -- release is now the
+    // job of pull-request-followup.ts observing the PR resolve, or its
+    // bounded fallback. scheduleNext's suppressContinuation short-circuit
+    // above means scheduleNext itself never runs for this outcome, so this
+    // run's claim relies entirely on that PR-follow-up path, not on any
+    // scheduleNext branch.
     const claimedRemoveLabelArgs =
       githubIssuesApi.removeLabelsFromIssue.mock.calls
         .map(([call]) => (call as { labels: string[] }).labels)
         .filter((labels) => labels[0] === "sym:claimed");
-    expect(claimedRemoveLabelArgs).toEqual([["sym:claimed", "sym:stale"]]);
+    expect(claimedRemoveLabelArgs).toEqual([]);
   });
 });
 

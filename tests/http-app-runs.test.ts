@@ -433,7 +433,7 @@ describe("HTTP app — runs API and pages", () => {
         "PR review follow-up reached its dispatch cap (3 of 3) while unresolved feedback remains."
       );
       expect(page).toContain(
-        'href="https://github.com/pmatos/symphonika/pull/81"'
+        '<a href="https://github.com/pmatos/symphonika/pull/81" target="_blank" rel="noopener noreferrer">Open pull request #81</a>'
       );
 
       const raisedCapApp = createHttpApp({
@@ -2330,6 +2330,9 @@ describe("HTTP app — runs API and pages", () => {
       expect(body).toContain("alpha");
       expect(body).toContain("#44");
       expect(body).toContain("Stale claim");
+      expect(body).toContain(
+        '<a href="https://github.com/pmatos/symphonika/issues/44" target="_blank" rel="noopener noreferrer">#44</a>'
+      );
     } finally {
       test.cleanup();
     }

@@ -2389,6 +2389,64 @@ than one open tracked PR over its lifetime, and the guard must not let one PR's 
 fail to shadow, a different PR on the same issue — so every other blocked outcome keeps releasing
 ownership to the global loop unchanged.
 
+### 12.8 Issue Content Actions
+
+Raw FSM workflows may declare `action.kind: "close_issue"`, `"label_issue"`, or `"comment"` states
+that write directly to the tracked Issue through `GitHubIssuesApi.closeIssue` and
+`GitHubIssuesApi.addIssueComment` (alongside the existing `addLabelsToIssue`). None of the three
+launches a provider. All three are poll-driven and reconciled through the same `reconcileWaitingRuns`
+→ `reEvaluateWaitingRun` path as a wait or merge state, but unlike a wait or merge state they
+observe nothing external: the action executes once, on the state's first re-evaluation tick, and the
+walk always advances (or blocks) immediately afterward. See
+`docs/adr/2026-09-05-0807-issue-reconciliation-after-merge.md`.
+
+DSL shape:
+
+- `label_issue` requires a non-empty `labels` list (the labels to add).
+- `comment` requires a non-empty `body` (the comment text to post).
+- `close_issue` requires nothing extra. An optional `body` is posted as a comment before the issue
+  is closed, and an optional `state_reason` (`completed` or `not_planned`) selects GitHub's close
+  reason; omitted `state_reason` defaults to `completed`.
+
+A workflow author decides when to use these — for example a transition chain of
+`merge_pr → label_issue → comment → success` that re-labels an issue `agent-ready` and
+leaves a comment pointing at the PR that just merged, when a run only delivered part of an issue's
+scope. Symphonika never infers this from PR or checklist content (ADR 0090); the workflow names the
+labels and writes the comment body itself.
+
+Lifecycle:
+
+1. When the FSM advances into one of these states, Symphonika persists a new Run row with
+   `state = "waiting"` and `current_state_id` set to the state id, identical to a wait or merge_pr
+   parking.
+2. On the next re-evaluation (`reconcileWaitingRuns` tick or `/poll-now`), `reEvaluateWaitingRun`
+   performs the state's GitHub call(s) — `addLabelsToIssue` for `label_issue`, `addIssueComment` for
+   `comment`, and for `close_issue` an optional `addIssueComment` followed by `closeIssue` — then
+   reports back a constant, empty signal map. Each call is best-effort: a tracker without the method,
+   or a call that throws, is logged and the walk still advances, the same way `ClaimLabelWriter`'s own
+   label writes are best-effort. There is nothing to retry an issue-content mutation against on a
+   later tick, so failing the walk here would only strand it.
+3. `complete_when` and the state's transitions are evaluated against that empty signal map exactly
+   like any other state; an author normally writes `complete_when: {}` and an unconditional
+   transition so the state always advances on this first tick. If the destination is terminal, the
+   Run records the terminal and transitions to `succeeded`. If the destination is another
+   `wait`/`merge_pr`/issue-content state, Symphonika parks again. If the destination is an agent
+   state, Symphonika schedules a `state_advance` exactly as a wait state would.
+4. The progress guard (`§12.6` step 4) does not apply to an edge whose *source* state is one of
+   these three kinds. Their observation is always the same shape — an empty signal map and no
+   tracked pull request — so the guard's fingerprint cannot tell one walk's visit to the edge from
+   another's. Without this exemption the very first successful walk through, say,
+   `label_issue → comment` would claim that edge for the Issue permanently: the
+   `(project, issue, from state, to state)` key the guard persists against carries no run id, so a
+   later, separate dispatch of the same Issue reaching the identical edge — exactly the
+   reconciliation scenario these actions exist for — would be refused as `unchanged` and park
+   forever. Terminal destinations remain exempt for the pre-existing reason (`§12.6` step 4);
+   this is the same exemption extended to a source state that never observes anything to begin with.
+5. Cancellation, issue-close, and label-immunity semantics are inherited from wait states (`§12.6`
+   steps 6–7). A `close_issue` action that itself closes the tracked Issue mid-walk means any further
+   states after it observe a closed Issue on their own next continuation-eligibility check; a workflow
+   that continues past `close_issue` should treat it as the walk's last content-bearing step.
+
 ## 13. CLI
 
 Bootstrap CLI commands:

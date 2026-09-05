@@ -14,6 +14,9 @@ import type {
   RawGitHubPullRequestReviewThread
 } from "../issue-polling.js";
 import {
+  tryAddIssueComment,
+  tryAddLabelsToIssue,
+  tryCloseIssue,
   tryGetIssue,
   tryGetIssueDependencies,
   tryGetPullRequestFollowupState,
@@ -1699,6 +1702,119 @@ export class RunController {
     return { pullRequestState, signals };
   }
 
+  // Executes a close_issue/label_issue/comment action's GitHub call(s) once,
+  // then reports the constant `signals: {}` decideNextStep needs to move past
+  // this state's complete_when/transitions immediately -- unlike merge_pr,
+  // there is nothing external to poll here, so the state completes on its
+  // first re-evaluation tick. Each call is best-effort, matching how
+  // ClaimLabelWriter's own label writes are best-effort: a tracker failure is
+  // logged and the walk still advances, since retrying an already-authored
+  // issue mutation on a later tick would either duplicate a comment or wedge
+  // the FSM on a tracker outage this decision has no way to resolve. See
+  // docs/adr/2026-09-05-0807-issue-reconciliation-after-merge.md.
+  private async observeIssueContentAction(input: {
+    action: WorkflowAction;
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<WaitObservation> {
+    const { action, issueNumber, repository, runId } = input;
+
+    if (action.kind === "label_issue") {
+      const labels = action.labels ?? [];
+      if (labels.length > 0) {
+        await this.bestEffortIssueContentCall(
+          () =>
+            tryAddLabelsToIssue(this.githubIssuesApi, {
+              ...repository,
+              issueNumber,
+              labels
+            }),
+          { action: "label_issue", issueNumber, runId }
+        );
+        this.runStore.recordWaitingActivity(
+          runId,
+          `label_issue added [${labels.join(", ")}] to issue #${issueNumber}`
+        );
+      }
+      return { signals: {} };
+    }
+
+    if (action.kind === "comment") {
+      const body = action.body;
+      if (body !== undefined) {
+        await this.bestEffortIssueContentCall(
+          () =>
+            tryAddIssueComment(this.githubIssuesApi, {
+              ...repository,
+              body,
+              issueNumber
+            }),
+          { action: "comment", issueNumber, runId }
+        );
+        this.runStore.recordWaitingActivity(
+          runId,
+          `comment posted to issue #${issueNumber}`
+        );
+      }
+      return { signals: {} };
+    }
+
+    // close_issue: post the closing comment (if any) before closing, so the
+    // comment lands on a still-open issue rather than racing GitHub's own
+    // closed-issue comment handling.
+    const body = action.body;
+    if (body !== undefined) {
+      await this.bestEffortIssueContentCall(
+        () =>
+          tryAddIssueComment(this.githubIssuesApi, {
+            ...repository,
+            body,
+            issueNumber
+          }),
+        { action: "close_issue-comment", issueNumber, runId }
+      );
+    }
+    const stateReason = action.stateReason ?? "completed";
+    await this.bestEffortIssueContentCall(
+      () =>
+        tryCloseIssue(this.githubIssuesApi, {
+          ...repository,
+          issueNumber,
+          stateReason
+        }),
+      { action: "close_issue", issueNumber, runId }
+    );
+    this.runStore.recordWaitingActivity(
+      runId,
+      `close_issue closed issue #${issueNumber} as ${stateReason}`
+    );
+    return { signals: {} };
+  }
+
+  // Shared best-effort wrapper for the tryX GitHub calls above: logs and
+  // swallows both "tracker lacks this method" (false) and a thrown
+  // transport/API error, consistent with ClaimLabelWriter's own bestEffort.
+  private async bestEffortIssueContentCall(
+    fn: () => Promise<boolean>,
+    context: Record<string, unknown>
+  ): Promise<void> {
+    try {
+      const handled = await fn();
+      if (!handled) {
+        this.logger?.warn(
+          context,
+          "symphonika issue content action: tracker method unavailable"
+        );
+      }
+    } catch (err) {
+      this.logger?.warn(
+        { err, ...context },
+        "symphonika issue content action failed; continuing"
+      );
+    }
+  }
+
   async reEvaluateWaitingRun(runId: string): Promise<void> {
     const row = this.runStore.getRun(runId);
     if (row === undefined || row.state !== "waiting") {
@@ -1767,15 +1883,24 @@ export class RunController {
     }
 
     const isMergePr = waitState.action?.kind === "merge_pr";
+    const isContentAction = isIssueContentActionKind(waitState.action?.kind);
 
-    const observation = await this.observeWaitPullRequestSignals({
-      isMergePr,
-      issueNumber: row.issueNumber,
-      projectName: row.project,
-      repository,
-      runId,
-      waitState
-    });
+    const observation =
+      isContentAction && waitState.action !== undefined
+        ? await this.observeIssueContentAction({
+            action: waitState.action,
+            issueNumber: row.issueNumber,
+            repository,
+            runId
+          })
+        : await this.observeWaitPullRequestSignals({
+            isMergePr,
+            issueNumber: row.issueNumber,
+            projectName: row.project,
+            repository,
+            runId,
+            waitState
+          });
     if (observation === undefined) {
       return;
     }
@@ -1864,16 +1989,28 @@ export class RunController {
       const maxEdgeClaims =
         project.progressGuard?.maxClaimsPerEdge ??
         DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS;
-      const claim = this.runStore.claimProgressEdge(
-        edge,
-        progressFingerprint({
-          artifactExists: waitArtifactExists,
-          pullRequestState,
-          signals,
-          state: waitState
-        }),
-        maxEdgeClaims
-      );
+      // A content action's observation is always the same shape (constant
+      // signals, no tracked PR to fingerprint) -- there is nothing here for
+      // the guard to catch a genuine loop against. Worse, the persisted key
+      // is (project, issue, from-state, to-state) with no run id, so without
+      // this exemption a second, later walk through this exact edge on a
+      // redispatched Issue -- the reconciliation scenario this action exists
+      // for, see docs/adr/2026-09-05-0807-issue-reconciliation-after-merge.md
+      // -- would be refused as "unchanged" on its very first tick and park
+      // forever, reproducing the same stuck-issue symptom against the new
+      // action instead of fixing it.
+      const claim = isContentAction
+        ? "claimed"
+        : this.runStore.claimProgressEdge(
+            edge,
+            progressFingerprint({
+              artifactExists: waitArtifactExists,
+              pullRequestState,
+              signals,
+              state: waitState
+            }),
+            maxEdgeClaims
+          );
       if (claim !== "claimed") {
         this.runStore.recordWaitingActivity(
           runId,
@@ -5350,8 +5487,26 @@ function normalizeRawIssue(
   };
 }
 
+// Diverges deliberately from decideNextStep's own (unrelated) `isParked` set
+// in state-machine-dispatch.ts, which only decides stay_waiting vs blocked on
+// a no-match completeWhen/transition. This one decides park-vs-provider at
+// state-advance time: a close_issue/label_issue/comment action has no prompt
+// to run, so it must park into the wait-park/reEvaluateWaitingRun machinery
+// exactly like wait/merge_pr, even though it never itself "stays waiting".
 function isParkedAction(kind: string | undefined): boolean {
-  return kind === "wait" || kind === "merge_pr";
+  return (
+    kind === "wait" ||
+    kind === "merge_pr" ||
+    kind === "close_issue" ||
+    kind === "label_issue" ||
+    kind === "comment"
+  );
+}
+
+function isIssueContentActionKind(
+  kind: string | undefined
+): kind is "close_issue" | "comment" | "label_issue" {
+  return kind === "close_issue" || kind === "comment" || kind === "label_issue";
 }
 
 // GitHub documents 405 as "merge cannot be performed" — but gives no

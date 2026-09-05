@@ -452,7 +452,7 @@ describe("dispatch continuation cap", () => {
         .filter((call) => call.labels[0] === "sym:failed");
       expect(failedAdds).toHaveLength(0);
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
-        expect.objectContaining({ labels: ["sym:claimed"] })
+        expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] })
       );
     } finally {
       await daemon.stop();
@@ -530,7 +530,7 @@ describe("dispatch continuation cap", () => {
       expect(status.runs).toHaveLength(1);
       expect(runAttemptCount).toBe(1);
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
-        expect.objectContaining({ labels: ["sym:claimed"] })
+        expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] })
       );
     } finally {
       await daemon.stop();
@@ -609,7 +609,7 @@ describe("dispatch continuation cap", () => {
       expect(runAttemptCount).toBe(1);
       expect(prepareIssueWorkspace).toHaveBeenCalledTimes(1);
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
-        expect.objectContaining({ labels: ["sym:claimed"] })
+        expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] })
       );
     } finally {
       await daemon.stop();
@@ -801,7 +801,7 @@ describe("dispatch continuation cap", () => {
       expect(runAttemptCount).toBe(1);
       expect(prepareIssueWorkspace).toHaveBeenCalledTimes(1);
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
-        expect.objectContaining({ labels: ["sym:claimed"] })
+        expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] })
       );
     } finally {
       await daemon.stop();

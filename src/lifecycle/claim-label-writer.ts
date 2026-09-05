@@ -52,7 +52,8 @@ type ReleaseClaimPhase =
   | "continuation-scheduling-closed-issue"
   | "continuation-scheduling-eligibility-loss"
   | "eligibility-loss-cleanup"
-  | "state-advance";
+  | "state-advance"
+  | "terminal";
 
 type IssueTarget = {
   issueNumber: number;
@@ -61,9 +62,11 @@ type IssueTarget = {
 
 // Owns the orchestrator-owned terminal-outcome operational labels: the
 // sym:running removal, the sym:failed/sym:blocked add-then-sym:human-needed
-// fallback cascade, the cancelled/closed-issue cleanup, and the sym:claimed
-// release. The whole matrix is exercised through this seam without a
-// RunController; label writes are best-effort so a terminal path never throws.
+// fallback cascade, the cancelled/closed-issue cleanup, and the
+// sym:claimed/sym:stale release once a run truly stops owning the issue
+// (not retrying, not continuing the FSM). The whole matrix is exercised
+// through this seam without a RunController; label writes are best-effort
+// so a terminal path never throws.
 export class ClaimLabelWriter {
   private readonly api: LabelWritingApi;
   private readonly logger?: Logger;
@@ -175,9 +178,7 @@ export class ClaimLabelWriter {
         issueNumber: input.issueNumber,
         repository: input.repository
       });
-      return;
-    }
-    if (
+    } else if (
       input.outcome.kind === "failed" &&
       !input.willRetry &&
       !input.fsmContinuing
@@ -193,6 +194,23 @@ export class ClaimLabelWriter {
           repository: input.repository
         });
       }
+    }
+
+    // The run is truly done with this issue -- not advancing the FSM to
+    // another state/wait, and not about to retry -- so give back the
+    // operational labels that made it eligible for dispatch in the first
+    // place. Covers plain success, input_required, and permanent
+    // failure/blocked; excludes a pending retry and any FSM continuation,
+    // both of which still own the issue.
+    if (
+      !input.fsmContinuing &&
+      !(input.outcome.kind === "failed" && input.willRetry)
+    ) {
+      await this.release({
+        issueNumber: input.issueNumber,
+        phase: "terminal",
+        repository: input.repository
+      });
     }
   }
 
@@ -243,16 +261,20 @@ export class ClaimLabelWriter {
   async release(
     input: IssueTarget & { phase: ReleaseClaimPhase }
   ): Promise<void> {
+    // Both operational labels the claim holds: sym:claimed itself, and
+    // sym:stale (set by detectStaleClaims when a claim outlives its run).
+    // removeLabelsFromIssue already loops per label and swallows a 404 for
+    // any label that isn't present, so one call safely covers both.
     await this.bestEffort(
       () =>
         this.api.removeLabelsFromIssue({
           ...input.repository,
           issueNumber: input.issueNumber,
-          labels: ["sym:claimed"]
+          labels: ["sym:claimed", "sym:stale"]
         }),
       {
         issueNumber: input.issueNumber,
-        label: "sym:claimed",
+        label: "sym:claimed,sym:stale",
         operation: "removeLabel",
         phase: input.phase
       }

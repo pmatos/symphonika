@@ -830,14 +830,20 @@ describe("pull request follow-up", () => {
       // The succeeded retry falls through to scheduleNext's continuation-
       // scheduling eligibility re-check, which finds the issue ineligible
       // (still missing `agent-ready`, its normal steady state while parked
-      // on PR review). That must not strip sym:claimed out from under this
-      // label-immune, still-live PR Follow-up reservation. See issue #475.
+      // on PR review). Label-immune (PR Follow-up) work is exempt from that
+      // eligibility-loss release -- see issue #475 -- but the run itself has
+      // genuinely finished (succeeded, not retrying, not FSM-continuing), so
+      // the terminal claim release still fires exactly once. A length of 2
+      // here would mean the eligibility-loss re-check incorrectly released
+      // the claim a second time despite label immunity; the mid-retry
+      // reconcile tick not cancelling/suppressing the in-flight attempt is
+      // asserted directly above via respectsDuringRetry/cancelledDuringRetry.
       const claimRemovals = (
         githubIssuesApi.removeLabelsFromIssue as ReturnType<typeof vi.fn>
       ).mock.calls
         .map(([call]) => call as { labels: string[] })
         .filter((call) => call.labels[0] === "sym:claimed");
-      expect(claimRemovals).toHaveLength(0);
+      expect(claimRemovals).toHaveLength(1);
     } finally {
       store.close();
     }
@@ -899,7 +905,7 @@ describe("pull request follow-up", () => {
 
       expect(result).toEqual({ dispatched: true, runId: "review-run-1" });
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
-        expect.objectContaining({ labels: ["sym:claimed"] })
+        expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] })
       );
     } finally {
       store.close();
@@ -976,12 +982,16 @@ describe("pull request follow-up", () => {
 
       await scheduledContinuations[0]!();
 
+      // The scheduled continuation's own eligibility re-check (executeContinuation)
+      // finds the issue still missing `agent-ready`; label-immune work is exempt
+      // from that release (issue #475), so this must not add a *second* claim
+      // removal beyond the run's own genuine terminal release.
       const claimRemovals = (
         githubIssuesApi.removeLabelsFromIssue as ReturnType<typeof vi.fn>
       ).mock.calls
         .map(([call]) => call as { labels: string[] })
         .filter((call) => call.labels[0] === "sym:claimed");
-      expect(claimRemovals).toHaveLength(0);
+      expect(claimRemovals).toHaveLength(1);
     } finally {
       store.close();
     }

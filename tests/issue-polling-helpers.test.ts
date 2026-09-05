@@ -13,12 +13,16 @@ import {
   projectPollIdentityKey,
   rateLimitedTokens,
   swallowLabelNotFound,
+  tryAddIssueComment,
   tryAddLabelsToIssue,
+  tryCloseIssue,
   tryGetIssue,
   tryListBranchCommits,
   tryListPullRequests,
   tryListPullRequestsForBranch,
   tryRemoveLabelsFromIssue,
+  type GitHubIssueCloseInput,
+  type GitHubIssueCommentInput,
   type GitHubIssueLabelInput,
   type GitHubIssueRepositoryInput,
   type GitHubIssuesApi,
@@ -56,6 +60,22 @@ const labelInput: GitHubIssueLabelInput = {
 };
 
 const fetchInput: GitHubIssueRepositoryInput & { issueNumber: number } = {
+  issueNumber: 1,
+  owner: "pmatos",
+  repo: "symphonika",
+  token: "secret"
+};
+
+const closeInput: GitHubIssueCloseInput = {
+  issueNumber: 1,
+  owner: "pmatos",
+  repo: "symphonika",
+  stateReason: "completed",
+  token: "secret"
+};
+
+const commentInput: GitHubIssueCommentInput = {
+  body: "hello",
   issueNumber: 1,
   owner: "pmatos",
   repo: "symphonika",
@@ -130,6 +150,74 @@ describe("tryRemoveLabelsFromIssue", () => {
     await expect(tryRemoveLabelsFromIssue(api, labelInput)).rejects.toThrow(
       "Label does not exist"
     );
+  });
+});
+
+describe("tryCloseIssue", () => {
+  it("preserves `this` when invoking a class-based implementation", async () => {
+    class Api {
+      readonly received: GitHubIssueCloseInput[] = [];
+      closeIssue(input: GitHubIssueCloseInput): Promise<void> {
+        this.received.push(input);
+        return Promise.resolve();
+      }
+      listOpenIssues(): Promise<never[]> {
+        return Promise.resolve([]);
+      }
+    }
+    const api = new Api();
+    const called = await tryCloseIssue(api, closeInput);
+    expect(called).toBe(true);
+    expect(api.received).toEqual([closeInput]);
+  });
+
+  it("returns false when the implementation does not provide closeIssue", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([])
+    };
+    expect(await tryCloseIssue(api, closeInput)).toBe(false);
+  });
+
+  it("propagates errors thrown by the implementation", async () => {
+    const api: GitHubIssuesApi = {
+      closeIssue: () => Promise.reject(new Error("boom")),
+      listOpenIssues: () => Promise.resolve([])
+    };
+    await expect(tryCloseIssue(api, closeInput)).rejects.toThrow("boom");
+  });
+});
+
+describe("tryAddIssueComment", () => {
+  it("preserves `this` when invoking a class-based implementation", async () => {
+    class Api {
+      readonly received: GitHubIssueCommentInput[] = [];
+      addIssueComment(input: GitHubIssueCommentInput): Promise<void> {
+        this.received.push(input);
+        return Promise.resolve();
+      }
+      listOpenIssues(): Promise<never[]> {
+        return Promise.resolve([]);
+      }
+    }
+    const api = new Api();
+    const called = await tryAddIssueComment(api, commentInput);
+    expect(called).toBe(true);
+    expect(api.received).toEqual([commentInput]);
+  });
+
+  it("returns false when the implementation does not provide addIssueComment", async () => {
+    const api: GitHubIssuesApi = {
+      listOpenIssues: () => Promise.resolve([])
+    };
+    expect(await tryAddIssueComment(api, commentInput)).toBe(false);
+  });
+
+  it("propagates errors thrown by the implementation", async () => {
+    const api: GitHubIssuesApi = {
+      addIssueComment: () => Promise.reject(new Error("boom")),
+      listOpenIssues: () => Promise.resolve([])
+    };
+    await expect(tryAddIssueComment(api, commentInput)).rejects.toThrow("boom");
   });
 });
 

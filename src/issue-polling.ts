@@ -34,6 +34,16 @@ export type GitHubIssueLabelInput = GitHubIssueRepositoryInput & {
   labels: string[];
 };
 
+export type GitHubIssueCloseInput = GitHubIssueRepositoryInput & {
+  issueNumber: number;
+  stateReason: "completed" | "not_planned";
+};
+
+export type GitHubIssueCommentInput = GitHubIssueRepositoryInput & {
+  body: string;
+  issueNumber: number;
+};
+
 export type RawGitHubIssue = {
   body?: string | null;
   closed_at?: string | null;
@@ -121,6 +131,8 @@ export type GitHubPullRequestMergeInput = GitHubPullRequestInput & {
 
 export type GitHubIssuesApi = {
   addLabelsToIssue?: (input: GitHubIssueLabelInput) => Promise<void>;
+  addIssueComment?: (input: GitHubIssueCommentInput) => Promise<void>;
+  closeIssue?: (input: GitHubIssueCloseInput) => Promise<void>;
   getIssue?: (
     input: GitHubIssueRepositoryInput & { issueNumber: number }
   ) => Promise<RawGitHubIssue | null>;
@@ -300,6 +312,29 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       labels: input.labels,
       owner: input.owner,
       repo: input.repo,
+      ...requestOption(input)
+    });
+  }
+
+  async addIssueComment(input: GitHubIssueCommentInput): Promise<void> {
+    const octokit = this.octokit(input.token);
+    await octokit.rest.issues.createComment({
+      body: input.body,
+      issue_number: input.issueNumber,
+      owner: input.owner,
+      repo: input.repo,
+      ...requestOption(input)
+    });
+  }
+
+  async closeIssue(input: GitHubIssueCloseInput): Promise<void> {
+    const octokit = this.octokit(input.token);
+    await octokit.rest.issues.update({
+      issue_number: input.issueNumber,
+      owner: input.owner,
+      repo: input.repo,
+      state: "closed",
+      state_reason: input.stateReason,
       ...requestOption(input)
     });
   }
@@ -896,6 +931,28 @@ export async function tryRemoveLabelsFromIssue(
     return false;
   }
   await api.removeLabelsFromIssue(input);
+  return true;
+}
+
+export async function tryCloseIssue(
+  api: GitHubIssuesApi,
+  input: GitHubIssueCloseInput
+): Promise<boolean> {
+  if (api.closeIssue === undefined) {
+    return false;
+  }
+  await api.closeIssue(input);
+  return true;
+}
+
+export async function tryAddIssueComment(
+  api: GitHubIssuesApi,
+  input: GitHubIssueCommentInput
+): Promise<boolean> {
+  if (api.addIssueComment === undefined) {
+    return false;
+  }
+  await api.addIssueComment(input);
   return true;
 }
 

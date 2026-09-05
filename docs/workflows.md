@@ -210,7 +210,7 @@ give-up terminal explicitly handled by parked-state reconciliation.
 
 ## 5. Actions
 
-Three action kinds have complete runtime behavior.
+Six action kinds have complete runtime behavior.
 
 ### `agent`
 
@@ -287,6 +287,45 @@ The state remains parked when:
 
 After a successful merge, Symphonika projects the post-merge PR signals before evaluating
 transitions.
+
+### `close_issue`, `label_issue`, `comment`
+
+These three action kinds write directly to the tracked Issue instead of the tracked pull request.
+None of them launches a provider or observes anything external; each performs its GitHub call(s)
+once, on the state's first re-evaluation tick, and the walk always advances (or blocks)
+immediately afterward:
+
+```yaml
+action:
+  kind: label_issue
+  labels: [agent-ready]
+```
+
+```yaml
+action:
+  kind: comment
+  body: "Part of this issue landed in #252; remaining scope tracked here."
+```
+
+```yaml
+action:
+  kind: close_issue
+  state_reason: completed # or not_planned; defaults to completed
+  body: "Closing as complete." # optional, posted before the issue is closed
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `labels` (`label_issue`) | yes | Non-empty list of labels to add |
+| `body` (`comment`) | yes | Comment text to post |
+| `body` (`close_issue`) | no | Comment posted before the issue is closed |
+| `state_reason` (`close_issue`) | no | `completed` or `not_planned`; defaults to `completed` |
+
+Each GitHub call is best-effort: a tracker without the method, or a call that throws, is logged and
+the walk still advances, the same way `ClaimLabelWriter`'s own label writes are best-effort. There
+is nothing to retry an issue-content mutation against on a later tick, so failing the walk here
+would only strand it — an author normally writes `complete_when: {}` and an unconditional
+transition so the state always advances on this first tick. See ADR-2026-09-05-0807.
 
 ## 6. Predicates and signal availability
 
@@ -746,21 +785,21 @@ Common validation failures:
 ### Safe to use
 
 - Markdown single-agent contracts
-- Raw FSMs with `agent`, `wait`, and `merge_pr`
+- Raw FSMs with `agent`, `wait`, `merge_pr`, `close_issue`, `label_issue`, and `comment`
 - Ordered strict-equality transitions
 - Supported agent-result and PR predicates from the table above
 - Per-state Codex/Claude/OMP routing
 - Local templates and all six scalar input types
 - The five built-in templates
 - Poll-driven wait and policy-controlled merge loops
+- Issue content actions (`close_issue`, `label_issue`, `comment`) chained after a `merge_pr` or
+  `wait` state
 
 ### Parsed but not operational
 
-The current parser recognizes these action kinds from the broader workflow design:
+The current parser recognizes this action kind from the broader workflow design, but nothing
+executes it:
 
-- `comment`
-- `label_issue`
-- `close_issue`
 - `fail`
 
 Every predicate the parser accepts now has an evaluator behind it, so there are no reserved

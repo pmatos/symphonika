@@ -14,6 +14,9 @@ import type {
   RawGitHubPullRequestReviewThread
 } from "../issue-polling.js";
 import {
+  tryAddIssueComment,
+  tryAddLabelsToIssue,
+  tryCloseIssue,
   tryGetIssue,
   tryGetIssueDependencies,
   tryGetPullRequestFollowupState,
@@ -76,10 +79,12 @@ import {
 } from "../workflow/contract-loading.js";
 import { expandWorkflowDefinition } from "../workflow/fsm-expansion.js";
 import { workflowPredicateEvaluation } from "../workflow/predicates.js";
+import { isIssueContentActionKind } from "../workflow/types.js";
 import type {
   ExpandedWorkflow,
   ExpandedWorkflowState,
   WorkflowAction,
+  WorkflowActionKind,
   WorkflowPredicateMap
 } from "../workflow/types.js";
 
@@ -437,6 +442,18 @@ function respectsIssueLabelsFor(expandedWorkflow: ExpandedWorkflow): boolean {
 }
 
 type WaitObservation = {
+  // An observer-supplied note to fold into whichever transitionReason
+  // record* call ends up persisting (see withNote in reEvaluateWaitingRun).
+  // Currently only observeIssueContentAction sets this, to describe what its
+  // GitHub call(s) actually did (or failed to do): content-action states
+  // always advance or block on the same tick they observe (never
+  // stay_waiting), so a plain recordWaitingActivity call there would be
+  // overwritten before reEvaluateWaitingRun returns by the subsequent
+  // recordWorkflowStateAdvance / recordWorkflowTerminal /
+  // recordWorkflowBlocked write -- this note rides along on the observation
+  // so the caller can fold it into whichever of those ends up sticking. Any
+  // future observer can populate it the same way.
+  note?: string;
   pullRequestState?: PullRequestState;
   signals: WorkflowPredicateMap;
 };
@@ -1756,6 +1773,177 @@ export class RunController {
     return { pullRequestState, signals };
   }
 
+  // Executes a close_issue/label_issue/comment action's GitHub call(s) once,
+  // then reports the constant `signals: {}` decideNextStep needs to move past
+  // this state's complete_when/transitions immediately -- unlike merge_pr,
+  // there is nothing external to poll here, so the state completes on its
+  // first re-evaluation tick. Each call is best-effort, matching how
+  // ClaimLabelWriter's own label writes are best-effort: a tracker failure is
+  // logged and the walk still advances, since retrying an already-authored
+  // issue mutation on a later tick would either duplicate a comment or wedge
+  // the FSM on a tracker outage this decision has no way to resolve. See
+  // ADR-2026-09-05-0807.
+  private async observeIssueContentAction(input: {
+    action: WorkflowAction;
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<WaitObservation> {
+    const { action, issueNumber, repository, runId } = input;
+
+    switch (action.kind) {
+      case "label_issue": {
+        const labels = action.labels ?? [];
+        if (labels.length === 0) {
+          return { signals: {} };
+        }
+        const succeeded = await this.bestEffortIssueContentCall(
+          () =>
+            tryAddLabelsToIssue(this.githubIssuesApi, {
+              ...repository,
+              issueNumber,
+              labels
+            }),
+          { action: "label_issue", issueNumber, runId }
+        );
+        return {
+          note: succeeded
+            ? `label_issue added [${labels.join(", ")}] to issue #${issueNumber}`
+            : `label_issue failed to add [${labels.join(", ")}] to issue #${issueNumber}`,
+          signals: {}
+        };
+      }
+
+      case "comment": {
+        const body = action.body;
+        if (body === undefined) {
+          return { signals: {} };
+        }
+        const succeeded = await this.postIssueContentComment({
+          body,
+          context: { action: "comment", issueNumber, runId },
+          issueNumber,
+          repository
+        });
+        return {
+          note: succeeded
+            ? `comment posted to issue #${issueNumber}`
+            : `comment failed to post to issue #${issueNumber}`,
+          signals: {}
+        };
+      }
+
+      case "close_issue": {
+        // Post the closing comment (if any) before closing, so the comment
+        // lands on a still-open issue rather than racing GitHub's own
+        // closed-issue comment handling.
+        const body = action.body;
+        let commentNote: string | undefined;
+        if (body !== undefined) {
+          const commentSucceeded = await this.postIssueContentComment({
+            body,
+            context: { action: "close_issue-comment", issueNumber, runId },
+            issueNumber,
+            repository
+          });
+          commentNote = commentSucceeded
+            ? undefined
+            : `closing comment failed to post to issue #${issueNumber}`;
+        }
+        const stateReason = action.stateReason ?? "completed";
+        const succeeded = await this.bestEffortIssueContentCall(
+          () =>
+            tryCloseIssue(this.githubIssuesApi, {
+              ...repository,
+              issueNumber,
+              stateReason
+            }),
+          { action: "close_issue", issueNumber, runId }
+        );
+        const closeNote = succeeded
+          ? `close_issue closed issue #${issueNumber} as ${stateReason}`
+          : `close_issue failed to close issue #${issueNumber} as ${stateReason}`;
+        return {
+          note: [commentNote, closeNote].filter(Boolean).join("; "),
+          signals: {}
+        };
+      }
+
+      default:
+        // isIssueContentActionKind at the call site guarantees action.kind is
+        // one of the three cases above; this only exists so a future action
+        // kind added to WorkflowActionKind without updating this switch fails
+        // loudly here instead of silently falling through as a close_issue.
+        this.logger?.warn(
+          { action: action.kind, issueNumber, runId },
+          "symphonika issue content action: unsupported action kind"
+        );
+        return { signals: {} };
+    }
+  }
+
+  private async postIssueContentComment(input: {
+    body: string;
+    context: Record<string, unknown>;
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<boolean> {
+    return this.bestEffortIssueContentCall(
+      () =>
+        tryAddIssueComment(this.githubIssuesApi, {
+          ...input.repository,
+          body: input.body,
+          issueNumber: input.issueNumber
+        }),
+      input.context
+    );
+  }
+
+  // Shared best-effort wrapper for the tryX GitHub calls above: logs and
+  // swallows both "tracker lacks this method" (false) and a thrown
+  // transport/API error, consistent with ClaimLabelWriter's own bestEffort.
+  // Returns whether the call actually succeeded, so callers can record an
+  // accurate outcome instead of asserting success unconditionally.
+  //
+  // Every content-action GitHub write (label_issue, comment, close_issue's
+  // comment and its close) funnels through here, so this is also the single
+  // choke point for the shutdown guard: unlike observeWaitPullRequestSignals
+  // (a read plus an idempotent merge attempt), these writes are not all
+  // idempotent -- reposting a comment on retry creates a second, distinct
+  // comment. Bailing out here, before the write fires, stops a duplicate
+  // comment from being posted on the next daemon's reconciliation of this
+  // same still-"waiting" row; the later isShuttingDown() check in
+  // reEvaluateWaitingRun only stops the row from advancing, which is too
+  // late for a write that already happened.
+  private async bestEffortIssueContentCall(
+    fn: () => Promise<boolean>,
+    context: Record<string, unknown>
+  ): Promise<boolean> {
+    if (this.activeRuns.isShuttingDown()) {
+      this.logger?.debug(
+        context,
+        "symphonika issue content action skipped: daemon shutting down"
+      );
+      return false;
+    }
+    try {
+      const handled = await fn();
+      if (!handled) {
+        this.logger?.warn(
+          context,
+          "symphonika issue content action: tracker method unavailable"
+        );
+      }
+      return handled;
+    } catch (err) {
+      this.logger?.warn(
+        { err, ...context },
+        "symphonika issue content action failed; continuing"
+      );
+      return false;
+    }
+  }
+
   async reEvaluateWaitingRun(runId: string): Promise<void> {
     const row = this.runStore.getRun(runId);
     if (row === undefined || row.state !== "waiting") {
@@ -1824,19 +2012,28 @@ export class RunController {
     }
 
     const isMergePr = waitState.action?.kind === "merge_pr";
+    const isContentAction = isIssueContentActionKind(waitState.action?.kind);
 
-    const observation = await this.observeWaitPullRequestSignals({
-      isMergePr,
-      issueNumber: row.issueNumber,
-      projectName: row.project,
-      repository,
-      runId,
-      waitState
-    });
+    const observation =
+      isContentAction && waitState.action !== undefined
+        ? await this.observeIssueContentAction({
+            action: waitState.action,
+            issueNumber: row.issueNumber,
+            repository,
+            runId
+          })
+        : await this.observeWaitPullRequestSignals({
+            isMergePr,
+            issueNumber: row.issueNumber,
+            projectName: row.project,
+            repository,
+            runId,
+            waitState
+          });
     if (observation === undefined) {
       return;
     }
-    const { pullRequestState, signals } = observation;
+    const { note, pullRequestState, signals } = observation;
 
     const waitArtifactExists = await probeStateArtifacts({
       state: waitState,
@@ -1850,6 +2047,11 @@ export class RunController {
       signals,
       state: waitState
     });
+    // Whichever record* call below ends up persisting transitionReason is
+    // the only write that survives from this tick -- fold any observer note
+    // into it here. See the WaitObservation comment on `note`.
+    const withNote = (reason: string): string =>
+      note === undefined ? reason : `${reason} (${note})`;
 
     // Re-evaluation during shutdown must not mutate rows or arm timers:
     // the scheduler has been cancelled and stop() is closing the store.
@@ -1886,7 +2088,7 @@ export class RunController {
       if (next?.terminal !== undefined) {
         this.runStore.recordWorkflowTerminal(runId, {
           terminalStateId: next.id,
-          transitionReason: decision.reason
+          transitionReason: withNote(decision.reason)
         });
         // A wait/merge_pr row can advance straight into a workflow-authored
         // `terminal: blocked` node (e.g. a PR follow-up that gives up on
@@ -1921,16 +2123,27 @@ export class RunController {
       const maxEdgeClaims =
         project.progressGuard?.maxClaimsPerEdge ??
         DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS;
-      const claim = this.runStore.claimProgressEdge(
-        edge,
-        progressFingerprint({
-          artifactExists: waitArtifactExists,
-          pullRequestState,
-          signals,
-          state: waitState
-        }),
-        maxEdgeClaims
-      );
+      // A content action's observation is always the same shape (constant
+      // signals, no tracked PR to fingerprint) -- there is nothing here for
+      // the guard to catch a genuine loop against. Worse, the persisted key
+      // is (project, issue, from-state, to-state) with no run id, so without
+      // this exemption a second, later walk through this exact edge on a
+      // redispatched Issue -- the reconciliation scenario this action exists
+      // for, see ADR-2026-09-05-0807 -- would be refused as "unchanged" on
+      // its very first tick and park forever, reproducing the same
+      // stuck-issue symptom against the new action instead of fixing it.
+      const claim = isContentAction
+        ? "claimed"
+        : this.runStore.claimProgressEdge(
+            edge,
+            progressFingerprint({
+              artifactExists: waitArtifactExists,
+              pullRequestState,
+              signals,
+              state: waitState
+            }),
+            maxEdgeClaims
+          );
       if (claim !== "claimed") {
         this.runStore.recordWaitingActivity(
           runId,
@@ -1954,7 +2167,7 @@ export class RunController {
 
       this.runStore.recordWorkflowStateAdvance(runId, {
         nextStateId: decision.to,
-        transitionReason: decision.reason
+        transitionReason: withNote(decision.reason)
       });
       this.runStore.updateRunState(runId, "succeeded");
 
@@ -2034,7 +2247,7 @@ export class RunController {
     if (decision.kind === "blocked") {
       this.runStore.recordWorkflowBlocked(runId, {
         stateId: waitState.id,
-        transitionReason: decision.reason
+        transitionReason: withNote(decision.reason)
       });
       this.runStore.updateRunState(runId, "succeeded");
       return;
@@ -5407,8 +5620,18 @@ function normalizeRawIssue(
   };
 }
 
-function isParkedAction(kind: string | undefined): boolean {
-  return kind === "wait" || kind === "merge_pr";
+// Diverges deliberately from decideNextStep's own (unrelated) `isParked` set
+// in state-machine-dispatch.ts, which only decides stay_waiting vs blocked on
+// a no-match completeWhen/transition. This one decides park-vs-provider at
+// state-advance time: a close_issue/label_issue/comment action has no prompt
+// to run, so it must park into the wait-park/reEvaluateWaitingRun machinery
+// exactly like wait/merge_pr, even though it never itself "stays waiting".
+// Built on isIssueContentActionKind rather than re-listing the three content
+// kinds so the two never drift out of sync.
+function isParkedAction(kind: WorkflowActionKind | undefined): boolean {
+  return (
+    kind === "wait" || kind === "merge_pr" || isIssueContentActionKind(kind)
+  );
 }
 
 // GitHub documents 405 as "merge cannot be performed" — but gives no

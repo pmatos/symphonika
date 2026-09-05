@@ -988,6 +988,7 @@ function seedRoutine(store: ReturnType<typeof openRunStore>): void {
     firingId: "fire-1",
     headSha: "abc123",
     prNumber: 42,
+    prUrl: "https://github.com/example/alpha/pull/42",
     projectName: "alpha",
     routineName: "daily-report"
   });

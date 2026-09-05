@@ -172,20 +172,25 @@ export function diffRoutineGithubSnapshots(
   return null;
 }
 
+// Shared by every caller that renders an outcome claim (the per-project
+// outcome line here and the fan-out summary's no-PR explanation) so the
+// verified/unverified suffix can't drift between them.
+export function unverifiedOutcomeSuffix(outcome: RoutineOutcome): string {
+  return outcome.verified ? "" : " (unverified)";
+}
+
 export function formatRoutineOutcomeLine(
   projectName: string,
   outcome: RoutineOutcome
 ): string {
+  const unverified = unverifiedOutcomeSuffix(outcome);
   if (outcome.status === "error") {
-    const unverified = outcome.verified ? "" : " (unverified)";
     return `❌ ${projectName} — failed (${outcome.summary || "error"})${unverified}`;
   }
   if (outcome.action === "none") {
-    const unverified = outcome.verified ? "" : " (unverified)";
     return `⏭️  ${projectName} — nothing to do${unverified}`;
   }
   const url = outcome.url === null ? "" : ` ${outcome.url}`;
-  const unverified = outcome.verified ? "" : " (unverified)";
   return `✅ ${projectName} — ${outcome.action}: "${outcome.title}"${url}${unverified}`;
 }
 

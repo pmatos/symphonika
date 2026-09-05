@@ -7,6 +7,257 @@ import {
   type RoutineFiringNotification
 } from "../src/notifications/routine-firing.js";
 import { createSmtpNotificationSink } from "../src/notifications/smtp.js";
+import { renderRoutineFanoutNotification } from "../src/routines/fanout-summary.js";
+import type {
+  RoutineFanoutStatus,
+  RoutineFanoutTargetStatus
+} from "../src/run-store.js";
+import type { RoutineFiringStatus } from "../src/run-store.js";
+
+function fakeFiring(
+  overrides: Partial<RoutineFiringStatus> = {}
+): RoutineFiringStatus {
+  return {
+    branchName: "sym/alpha/routine/refactor-audit/01J",
+    branchRef: "refs/heads/sym/alpha/routine/refactor-audit/01J",
+    cancelReason: null,
+    cancelRequested: false,
+    commitsAhead: true,
+    createdAt: "2026-09-03T23:00:00.000Z",
+    fanoutId: "fanout-1",
+    id: "fire-alpha",
+    kind: "git",
+    outcome: null,
+    projectName: "alpha",
+    provider: "codex",
+    providerCommand: "codex fake",
+    providerScopeCleanupPending: false,
+    pullRequests: [],
+    routineName: "refactor-audit",
+    scheduledAt: "2026-09-03T23:00:00.000Z",
+    state: "succeeded",
+    terminalReason: null,
+    triggerSource: "scheduled",
+    updatedAt: "2026-09-03T23:05:00.000Z",
+    workspacePath: "/tmp/routines/alpha",
+    workspacePrunedAt: null,
+    ...overrides
+  };
+}
+
+function fakeFanoutTarget(
+  overrides: Partial<RoutineFanoutTargetStatus> = {}
+): RoutineFanoutTargetStatus {
+  return {
+    deferredAttempts: 0,
+    deferredReason: null,
+    deferredSince: null,
+    disposition: "firing",
+    firing: fakeFiring(),
+    firingId: "fire-alpha",
+    holdReason: null,
+    projectName: "alpha",
+    skipReason: null,
+    ...overrides
+  };
+}
+
+function fakeFanout(targets: RoutineFanoutTargetStatus[]): RoutineFanoutStatus {
+  return {
+    createdAt: "2026-09-03T23:00:00.000Z",
+    failureCount: 0,
+    id: "01M1MR2MZTPPRGX4XFXVR93A6W",
+    issueCount: 0,
+    notificationError: null,
+    notificationState: "sent",
+    notifiedAt: "2026-09-03T23:06:00.000Z",
+    pullRequestCount: targets.reduce(
+      (count, target) => count + (target.firing?.pullRequests.length ?? 0),
+      0
+    ),
+    routineName: "refactor-audit",
+    scheduledAt: "2026-09-03T23:00:00.000Z",
+    subject: "[ptt] refactor-audit",
+    targets,
+    updatedAt: "2026-09-03T23:06:00.000Z"
+  };
+}
+
+describe("Routine Fan-out notifications", () => {
+  it("links a discovered pull request instead of leaving it as a bare number", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          pullRequests: [
+            {
+              firingId: "fire-alpha",
+              headSha: "abc123",
+              prNumber: 701,
+              prUrl: "https://github.com/pmatos/symphonika/pull/701",
+              projectName: "alpha",
+              routineName: "refactor-audit"
+            }
+          ]
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain(
+      "succeeded — PR #701 (https://github.com/pmatos/symphonika/pull/701)"
+    );
+    expect(message.html).toContain(
+      '<a href="https://github.com/pmatos/symphonika/pull/701">#701</a>'
+    );
+  });
+
+  it("explains a succeeded firing that opened no PR instead of leaving it unexplained", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "commit",
+            source: "codex",
+            status: "no_action",
+            summary: "Bailed at pick.",
+            title: "pm-deepen bailed — architecture PR #402 still in flight",
+            url: null,
+            verified: true
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain(
+      "succeeded — pm-deepen bailed — architecture PR #402 still in flight"
+    );
+    expect(message.html).toContain(
+      "succeeded — pm-deepen bailed — architecture PR #402 still in flight"
+    );
+  });
+
+  it("includes outcome.url for a no-PR outcome that has one, like formatRoutineOutcomeLine does", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "issue_opened",
+            source: "gh",
+            status: "success",
+            summary: "Opened a tracking issue.",
+            title: "Flaky test needs a real fix",
+            url: "https://github.com/pmatos/alpha/issues/5",
+            verified: true
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    // outcome.url is the only place a report-kind routine's issue_opened/
+    // issue_closed outcome can surface a link here — dropping it (as an
+    // earlier version of outcomeDetail did) silently loses that link.
+    expect(message.text).toContain(
+      "succeeded — Flaky test needs a real fix https://github.com/pmatos/alpha/issues/5"
+    );
+  });
+
+  it("explains a genuine no-action outcome instead of a bare dash", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "none",
+            source: "gh",
+            status: "no_action",
+            summary: "GitHub state diff observed no external action.",
+            title: "",
+            url: null,
+            verified: true
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    // reconcileRoutineOutcome leaves `title` empty for action:"none" outcomes
+    // (src/routines/outcome.ts), matching formatRoutineOutcomeLine's own
+    // "nothing to do" wording rather than an empty explanation.
+    expect(message.text).toContain("succeeded — nothing to do");
+    expect(message.html).toContain("succeeded — nothing to do");
+  });
+
+  it("surfaces an error outcome's summary instead of its unverified title when there is no PR", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "pr",
+            source: "codex",
+            status: "error",
+            summary: "claimed PR #9 but none was found on the branch",
+            title: "Opened PR #9",
+            url: null,
+            verified: false
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    // A rejected/unverified claim must never read as an explained success:
+    // show the reconciled error summary, not the provider's own (unverified)
+    // title, which here claims a PR that reconciliation determined does not
+    // exist.
+    expect(message.text).toContain(
+      "succeeded — claimed PR #9 but none was found on the branch (unverified)"
+    );
+    expect(message.text).not.toContain("Opened PR #9");
+  });
+
+  it("escapes an untrusted PR url and title instead of interpolating markup", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "commit",
+            source: "codex",
+            status: "no_action",
+            summary: "n/a",
+            title: "<img src=x onerror=alert(1)>",
+            url: null,
+            verified: true
+          },
+          pullRequests: [
+            {
+              firingId: "fire-alpha",
+              headSha: "abc123",
+              prNumber: 9,
+              prUrl: 'https://example.com/"><script>alert(1)</script>',
+              projectName: "alpha",
+              routineName: "refactor-audit"
+            }
+          ]
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.html).not.toContain("<script>");
+    expect(message.html).not.toContain("<img");
+  });
+});
 
 describe("Routine Firing notifications", () => {
   it("renders plain text and an HTML alternative without allowing interpolated markup", () => {
@@ -51,6 +302,36 @@ describe("Routine Firing notifications", () => {
     );
     expect(message.html).not.toContain("<script>");
     expect(message.html).not.toContain("<img");
+  });
+
+  it("links a discovered pull request the same way the fan-out summary does", () => {
+    const message = renderRoutineFiringNotification({
+      branchName: "main",
+      durationMs: 1_234,
+      firingId: "fire-123",
+      kind: "git",
+      outcome: null,
+      projectName: "alpha",
+      pullRequests: [
+        {
+          prNumber: 55,
+          prUrl: 'https://example.com/"><script>alert(1)</script>'
+        }
+      ],
+      reportOutput: "",
+      routineName: "refactor-audit",
+      state: "succeeded",
+      terminalReason: null,
+      title: "refactor-audit"
+    });
+
+    expect(message.text).toContain(
+      'Pull requests: #55 (https://example.com/"><script>alert(1)</script>)'
+    );
+    expect(message.html).toContain(
+      '<a href="https://example.com/&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;">#55</a>'
+    );
+    expect(message.html).not.toContain("<script>");
   });
 
   it("reads the SMTP password from its named environment variable and sends a multipart message", async () => {

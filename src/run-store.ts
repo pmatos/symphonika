@@ -1076,6 +1076,7 @@ type RoutinePullRequestRow = {
   firing_id: string;
   head_sha: string;
   pr_number: number;
+  pr_url: string | null;
   project_name: string;
   routine_name: string;
 };
@@ -4603,12 +4604,12 @@ export class RunStore {
       .prepare(
         [
           "insert into routine_pull_requests (",
-          "project_name, routine_name, firing_id, pr_number, head_sha, created_at, updated_at",
+          "project_name, routine_name, firing_id, pr_number, pr_url, head_sha, created_at, updated_at",
           ") values (",
-          "@project_name, @routine_name, @firing_id, @pr_number, @head_sha, @created_at, @updated_at",
+          "@project_name, @routine_name, @firing_id, @pr_number, @pr_url, @head_sha, @created_at, @updated_at",
           ")",
           "on conflict(project_name, routine_name, firing_id, pr_number) do update set",
-          "head_sha = excluded.head_sha, updated_at = excluded.updated_at"
+          "pr_url = excluded.pr_url, head_sha = excluded.head_sha, updated_at = excluded.updated_at"
         ].join(" ")
       )
       .run({
@@ -4616,6 +4617,7 @@ export class RunStore {
         firing_id: input.firingId,
         head_sha: input.headSha,
         pr_number: input.prNumber,
+        pr_url: input.prUrl,
         project_name: input.projectName,
         routine_name: input.routineName,
         updated_at: timestamp()
@@ -4648,7 +4650,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select project_name, routine_name, firing_id, pr_number, head_sha",
+          "select project_name, routine_name, firing_id, pr_number, pr_url, head_sha",
           "from routine_pull_requests",
           where,
           "order by pr_number asc"
@@ -6671,6 +6673,7 @@ export class RunStore {
         routine_name text not null,
         firing_id text not null,
         pr_number integer not null,
+        pr_url text,
         head_sha text not null,
         created_at text not null,
         updated_at text not null,
@@ -6826,7 +6829,8 @@ export class RunStore {
       ["project_issue_snapshots", "repository_name", "text"],
       ["project_pull_request_snapshots", "labels", "text"],
       ["project_pull_request_snapshots", "repository_owner", "text"],
-      ["project_pull_request_snapshots", "repository_name", "text"]
+      ["project_pull_request_snapshots", "repository_name", "text"],
+      ["routine_pull_requests", "pr_url", "text"]
     ];
 
     const apply = this.database.transaction(() => {
@@ -7827,6 +7831,7 @@ function mapRoutinePullRequestRow(
     firingId: row.firing_id,
     headSha: row.head_sha,
     prNumber: row.pr_number,
+    prUrl: row.pr_url,
     projectName: row.project_name,
     routineName: row.routine_name
   };

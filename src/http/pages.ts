@@ -36,6 +36,7 @@ import {
   parseRoutineDeclaration
 } from "../routines/declaration-loader.js";
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
+import { formatPullRequestReference } from "../notifications/message.js";
 import { runSavePipeline, type ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
@@ -6565,9 +6566,10 @@ function renderFiringSummary(
 
 // Read-only association per CONTEXT.md: a Routine Pull Request is never a
 // PR Follow-up (that machinery is Run-only, driven by tracked_pull_requests
-// / review dispatch caps). Plain informational text, not a link — like the
-// show-firing CLI command's own rendering of the same data,
-// RoutinePullRequestStatus carries no prUrl to link to.
+// / review dispatch caps). Informational, not a Follow-up link — but link
+// to GitHub when prUrl is known, unlike the show-firing CLI command's own
+// rendering of the same data, which stays plain text since a terminal has
+// no clickable links.
 function renderFiringPullRequests(
   pullRequests: RoutinePullRequestStatus[]
 ): string {
@@ -6575,10 +6577,10 @@ function renderFiringPullRequests(
     return "";
   }
   const items = pullRequests
-    .map(
-      (pullRequest) =>
-        `<li>PR #${pullRequest.prNumber} <code>${escapeHtml(pullRequest.headSha)}</code> <small>(informational — not a PR Follow-up)</small></li>`
-    )
+    .map((pullRequest) => {
+      const label = formatPullRequestReference(pullRequest).html;
+      return `<li>PR ${label} <code>${escapeHtml(pullRequest.headSha)}</code> <small>(informational — not a PR Follow-up)</small></li>`;
+    })
     .join("");
   return `<section>${sectionHead("Pull requests", pullRequests.length)}<ul class="files">${items}</ul></section>`;
 }

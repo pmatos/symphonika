@@ -1524,7 +1524,7 @@ describe("pull request follow-up", () => {
     }
   });
 
-  it("releases the claim when a tracked pull request is observed closed unmerged", async () => {
+  it("releases the claim when a tracked pull request's reference is gone", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -1546,8 +1546,11 @@ describe("pull request follow-up", () => {
       });
       const project = projectConfig();
       const githubIssuesApi: GitHubIssuesApi = {
-        // A null follow-up state means the PR is gone (closed without
-        // merging) -- see loadRawPullRequestState / getPullRequestFollowupState.
+        // A null follow-up state means the PR reference itself is
+        // unresolvable (see loadRawPullRequestState /
+        // getPullRequestFollowupState / fetchPullRequestFollowupState) --
+        // distinct from a real closed-without-merge PR, which still resolves
+        // to a valid state (see the "real closed unmerged" test below).
         getPullRequestFollowupState: vi.fn().mockResolvedValue(null),
         listOpenIssues: vi.fn().mockResolvedValue([]),
         listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
@@ -1579,6 +1582,78 @@ describe("pull request follow-up", () => {
       expect(tracked?.state).toBe("closed");
       // Closed unmerged is the other resolution that closes out a deferred
       // release, same as merged above.
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueNumber: 54,
+          labels: ["sym:claimed", "sym:stale"]
+        })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("releases the claim when a tracked pull request is really observed closed unmerged", async () => {
+    // Regression for the mainline case: a real closed-without-merge PR
+    // resolves to a *valid* follow-up state (state: "CLOSED", merged: false),
+    // not a null one -- the null branch above only covers an unresolvable PR
+    // reference, which almost never happens for a real GitHub PR (the node
+    // persists after closing). Before this fix, this path fell through
+    // `if (trackingState !== "open") { continue; }` with no release call at
+    // all, leaving a deferred claim dangling forever for every real
+    // closed-without-merge PR. See #709.
+    const root = await makeTempRoot();
+    await writeProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-really-closed-pr";
+      seedSucceededRun(store, {
+        branchName,
+        runId: "parent-run",
+        workspacePath: path.join(root, "workspace")
+      });
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        prNumber: 84,
+        prUrl: "https://github.com/pmatos/symphonika/pull/84",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+      const project = projectConfig();
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState: vi
+          .fn()
+          .mockResolvedValue(prState({ merged: false, state: "CLOSED" })),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        githubIssuesApi,
+        project,
+        provider: fakeProvider([]),
+        root,
+        runStore: store,
+        workspacePath: path.join(root, "workspace")
+      });
+
+      await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      const tracked = store.findTrackedPullRequestByIssue({
+        issueNumber: 54,
+        projectName: "symphonika"
+      });
+      expect(tracked?.state).toBe("closed");
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
         expect.objectContaining({
           issueNumber: 54,

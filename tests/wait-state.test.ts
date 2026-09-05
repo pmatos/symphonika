@@ -2447,6 +2447,69 @@ describe("wait state lifecycle", () => {
     }
   });
 
+  it("defers the claim release for a state-advance terminal target reached without launching a provider", async () => {
+    // Regression: recordStateAdvanceTerminalTarget used to hardcode
+    // deferReleaseToScheduler: false even when its own outcome is
+    // kind: "success" (fuseTerminalLabel leaves a success outcome untouched
+    // for a `terminal: success` target, as `done` is here). The earlier
+    // agent hop that advanced into this state may have already opened a PR
+    // with no confirmation yet that it resolved -- releasing immediately
+    // reopens the concurrent-re-dispatch race ADR 0090 exists to prevent.
+    const root = await makeTempRoot();
+    // done is a terminal state, so the advance exits through
+    // recordStateAdvanceTerminalTarget.
+    await writeWaitStateProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.executeStateAdvance({
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        toStateId: "done"
+      });
+
+      expect(store.getRun("parent-run")).toMatchObject({ state: "succeeded" });
+      // sym:running is still removed unconditionally, but sym:claimed/
+      // sym:stale must NOT be released yet -- pull-request-followup.ts (or
+      // its bounded discovery-exhausted fallback) owns that once it confirms
+      // this run's PR resolved, or that none was ever opened.
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:running"] })
+      );
+      expect(githubIssuesApi.removeLabelsFromIssue).not.toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] })
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("classifies a cancellation landing during workflow load instead of parking into waiting", async () => {
     const root = await makeTempRoot();
     await writeWaitStateProject(root);

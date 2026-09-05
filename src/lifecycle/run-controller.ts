@@ -1044,7 +1044,6 @@ export class RunController {
         "symphonika fresh dispatch failed before provider launch"
       );
       await this.claimLabels.applyTerminal({
-        deferReleaseToScheduler: false,
         fsmContinuing: false,
         issueNumber: input.issue.number,
         outcome: {
@@ -1358,7 +1357,6 @@ export class RunController {
     this.runStore.updateRunState(input.runId, "cancelled");
     await this.claimLabels.applyTerminal({
       cancelReason: input.reason,
-      deferReleaseToScheduler: false,
       fsmContinuing: false,
       issueNumber: input.issueNumber,
       outcome: { kind: "cancelled", reason: input.reason },
@@ -1480,10 +1478,28 @@ export class RunController {
     });
   }
 
+  // A parked wait/merge_pr run's own re-evaluation reaching a genuine
+  // (non-blocked) terminal, or terminalizeBlocked below: the park's own
+  // signal observation already confirmed external resolution before taking
+  // that edge, so release immediately and unconditionally.
+  private async releaseWaitTerminalClaim(input: {
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<void> {
+    await this.claimLabels.release({
+      issueNumber: input.issueNumber,
+      phase: "wait-terminal",
+      repository: input.repository
+    });
+  }
+
   // Shared tail of every "terminalize this waiting Run as blocked" path (ADR
   // 0058): record the actionable reason, flip RunState, and label the issue.
   // A caller that also needs recordWorkflowTerminal runs that first, since
   // only it knows the terminal state id and its own transition reason.
+  // Every call site is reached exclusively from a parked wait/merge_pr run's
+  // own re-evaluation (reEvaluateWaitingRun / observeWaitPullRequestSignals /
+  // terminateMergePrRefusal), never from the provider-attempt path.
   private async terminalizeBlocked(input: {
     issueNumber: number;
     reason: string;
@@ -1500,6 +1516,7 @@ export class RunController {
       issueNumber: input.issueNumber,
       repository: input.repository
     });
+    await this.releaseWaitTerminalClaim(input);
   }
 
   private async terminateMergePrRefusal(input: {
@@ -1873,11 +1890,9 @@ export class RunController {
         // above) already confirmed external resolution before decideNextStep
         // took this edge -- unlike an agent-hop success, which defers this
         // same release until pull-request-followup.ts observes the PR itself
-        // resolve (see deferReleaseToScheduler). Release immediately and
-        // unconditionally: nothing else in this walk still needs the claim.
-        await this.claimLabels.release({
+        // resolve (see deferReleaseToScheduler).
+        await this.releaseWaitTerminalClaim({
           issueNumber: refreshed.number,
-          phase: "wait-terminal",
           repository
         });
         return;
@@ -2037,11 +2052,9 @@ export class RunController {
       this.runStore.updateRunState(runId, "succeeded");
       // See the matching release in the `advance` branch above: this park's
       // own signal observation already confirmed external resolution before
-      // decideNextStep took this direct-terminate edge, so release
-      // immediately and unconditionally.
-      await this.claimLabels.release({
+      // decideNextStep took this direct-terminate edge.
+      await this.releaseWaitTerminalClaim({
         issueNumber: refreshed.number,
-        phase: "wait-terminal",
         repository
       });
     }
@@ -2559,7 +2572,6 @@ export class RunController {
       } failed before provider launch`
     );
     await this.claimLabels.applyTerminal({
-      deferReleaseToScheduler: false,
       fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: {
@@ -2667,7 +2679,6 @@ export class RunController {
         "symphonika state advance recorded reloaded terminal target without launching provider"
       );
       await this.claimLabels.applyTerminal({
-        deferReleaseToScheduler: false,
         fsmContinuing: false,
         issueNumber: input.issue.number,
         outcome,
@@ -3256,7 +3267,6 @@ export class RunController {
     this.runStore.updateRunState(input.runId, state);
     this.markNotificationPendingIfNeeded(input.runId, willRetry);
     await this.claimLabels.applyTerminal({
-      deferReleaseToScheduler: false,
       fsmContinuing: false,
       issueNumber: input.issue.number,
       outcome: terminal,
@@ -4124,7 +4134,6 @@ export class RunController {
           }
           await this.claimLabels.applyTerminal({
             cancelReason: watchdogTerminalReason,
-            deferReleaseToScheduler: false,
             fsmContinuing: false,
             issueNumber: input.issue.number,
             outcome: {
@@ -4283,19 +4292,7 @@ export class RunController {
             isRawFsm &&
             (workflowOutcome.advancedToState !== null ||
               workflowOutcome.parkAsWait === true);
-          // This whole function is the tail of an attempt that actually ran
-          // a provider, so every success reaching it is an agent-hop-direct
-          // success -- never a parked (wait/merge_pr) hop's own terminal
-          // reach, which is handled entirely inline in reEvaluateWaitingRun
-          // and releases immediately from there instead (see that method and
-          // ClaimLabelWriter's `deferReleaseToScheduler` doc comment for the
-          // full reasoning on why every agent-hop success -- both a
-          // non-raw-FSM workflow's and a raw-FSM one's own direct-to-terminal
-          // success -- must defer, while a parked hop's terminal reach must
-          // not).
-          const deferReleaseToScheduler = effectiveOutcome.kind === "success";
           const labelInput: ApplyLabelsInput = {
-            deferReleaseToScheduler,
             fsmContinuing,
             issueNumber: input.issue.number,
             outcome: effectiveOutcome,

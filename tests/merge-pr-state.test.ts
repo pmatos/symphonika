@@ -591,6 +591,7 @@ describe("merge_pr state lifecycle", () => {
       });
 
       const addLabelsToIssue = vi.fn().mockResolvedValue(undefined);
+      const removeLabelsFromIssue = vi.fn().mockResolvedValue(undefined);
       const refusal = Object.assign(
         new Error("Protected branch update failed"),
         { status: 405 }
@@ -603,7 +604,8 @@ describe("merge_pr state lifecycle", () => {
         }),
         getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
         listOpenIssues: vi.fn().mockResolvedValue([]),
-        mergePullRequest: vi.fn().mockRejectedValue(refusal)
+        mergePullRequest: vi.fn().mockRejectedValue(refusal),
+        removeLabelsFromIssue
       };
       const controller = buildController({
         githubIssuesApi,
@@ -631,6 +633,14 @@ describe("merge_pr state lifecycle", () => {
       });
       expect(addLabelsToIssue).toHaveBeenCalledWith(
         expect.objectContaining({ labels: ["sym:blocked"] })
+      );
+      // Regression: a deterministic merge refusal is this park's own signal
+      // observation confirming resolution (the merge will never succeed),
+      // the same as the sibling "wait-terminal" success releases -- so
+      // terminalizeBlocked must release the claim immediately too, or it
+      // dangles forever (#709).
+      expect(removeLabelsFromIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] })
       );
     } finally {
       store.close();

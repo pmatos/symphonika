@@ -5501,10 +5501,7 @@ export class RunStore {
   recordPullRequestDiscoveryAttempt(runId: string): number {
     const updated = this.database
       .prepare(
-        [
-          "update runs set pr_discovery_attempts = pr_discovery_attempts + 1,",
-          "updated_at = ? where id = ? returning pr_discovery_attempts"
-        ].join(" ")
+        "update runs set pr_discovery_attempts = pr_discovery_attempts + 1, updated_at = ? where id = ? returning pr_discovery_attempts"
       )
       .get(timestamp(), runId) as { pr_discovery_attempts: number } | undefined;
     return updated?.pr_discovery_attempts ?? 0;

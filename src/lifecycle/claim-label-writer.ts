@@ -35,59 +35,6 @@ export type ApplyLabelsInput = {
   // `sym:blocked` must be added on this transition or the issue will stay
   // externally marked failed/blocked even after a later state succeeds
   // (subsequent applyTerminal calls only remove `sym:running`).
-  // True for every `success` outcome reached by an agent-hop attempt --
-  // i.e. every call at this method's one dynamic call site (run-controller.ts,
-  // the tail of an attempt that actually ran a provider). Two independent
-  // reasons converge on the same flag:
-  //
-  // 1. Non-raw-FSM (markdown/legacy compat-graph) workflows: `fsmContinuing`
-  //    is unconditionally false for these (computed only when `isRawFsm`),
-  //    but `scheduleNext`'s success path still decides -- after this call
-  //    returns -- whether to schedule a real continuation dispatch some
-  //    `delayMs` later. Releasing here would leave the issue poll-eligible
-  //    for that whole window even though a continuation may reuse the same
-  //    reservation. `scheduleNext`'s own closed-issue and eligibility-loss
-  //    branches release once they confirm no continuation is coming; its
-  //    cap-reached branch releases too (paired with `sym:failed`, which
-  //    independently blocks dispatch); its "continuation actually scheduled"
-  //    fall-through and its continuations-disabled (cap <= 0) branch do NOT
-  //    release -- the latter falls into the same bucket as reason 2 below,
-  //    since a markdown workflow's agent-hop success has no more built-in
-  //    confirmation that its own PR (if any) has resolved than a raw-FSM one
-  //    does.
-  //
-  // 2. Raw-FSM agent-hop success reaching its own terminal directly
-  //    (`advancedToTerminal`, e.g. `builtin_single_agent_pr`'s `agent -> done`
-  //    on `provider_success && branch_ahead_of_base`): the terminal was
-  //    reached the instant the agent finished, with no external confirmation
-  //    that whatever PR it opened has actually been reviewed or merged.
-  //    Releasing immediately would let a concurrent poll tick re-dispatch a
-  //    duplicate run on an issue whose first PR is still open (the failure
-  //    class ADR 0090 exists to prevent, via a different mechanism). This
-  //    does NOT apply to a raw-FSM walk reaching terminal from a *parked*
-  //    hop (wait/merge_pr, and future close_issue/label_issue/comment
-  //    actions): a park's own re-evaluation (`reEvaluateWaitingRun`) only
-  //    takes such an edge after its own signal observation already confirmed
-  //    external resolution, so that path releases immediately and
-  //    unconditionally from within `reEvaluateWaitingRun` itself (phase
-  //    "wait-terminal") -- it never reaches this flag at all, because a
-  //    parked hop's own terminal-reach never runs a provider and so never
-  //    reaches this method's one dynamic call site in the first place.
-  //
-  // `input_required` and a permanent `failed` are never ambiguous this way
-  // regardless of raw-FSM-ness -- `scheduleNext` returns immediately for
-  // both -- so only `success` ever sets this flag.
-  //
-  // When true, the claim is released by whichever of these observes the run
-  // is truly done first: `pull-request-followup.ts`'s `processTrackedPullRequests`
-  // (phases "pull-request-merged" / "pull-request-closed", the moment a
-  // tracked PR for this run's branch transitions to merged or closed), or its
-  // bounded fallback in `discoverPullRequests` (phase
-  // "pull-request-discovery-exhausted", once no PR is ever found for the
-  // branch within the discovery-attempt ceiling -- "no PR ever showed up"
-  // needs no protection). This list is load-bearing: an uncovered exit for a
-  // deferred success leaves the claim dangling forever (#709).
-  deferReleaseToScheduler: boolean;
   fsmContinuing: boolean;
   issueNumber: number;
   outcome: ClassifiedTerminal;
@@ -264,19 +211,39 @@ export class ClaimLabelWriter {
       }
     }
 
+    // A `success` outcome is deferred rather than released here whenever it
+    // was reached by an agent-hop attempt (this method's tail after running
+    // a provider), for two reasons that both boil down to "no external
+    // confirmation yet that a PR this attempt may have opened has resolved":
+    // a non-raw-FSM workflow's `scheduleNext` still has to decide whether to
+    // schedule a continuation (and releases itself once it knows), and a
+    // raw-FSM walk reaching its own terminal directly (`advancedToTerminal`)
+    // has no more confirmation than that. A *parked* wait/merge_pr run's own
+    // terminal reach is different -- its signal observation already
+    // confirmed external resolution, so it releases immediately from
+    // `reEvaluateWaitingRun` itself (phase "wait-terminal") without ever
+    // reaching this method. `input_required` and a permanent `failed` are
+    // never ambiguous this way, so only `success` defers.
+    //
+    // When deferred, the claim is released by whichever of these observes
+    // the run is truly done first: `pull-request-followup.ts`'s
+    // `processTrackedPullRequests` (phases "pull-request-merged" /
+    // "pull-request-closed"), or its bounded fallback in
+    // `discoverPullRequests` (phase "pull-request-discovery-exhausted").
+    // This list is load-bearing: an uncovered exit for a deferred success
+    // leaves the claim dangling forever (#709).
+    const deferReleaseToScheduler = input.outcome.kind === "success";
+
     // The run is truly done with this issue -- not advancing the FSM to
-    // another state/wait, and not about to retry, and not a non-raw-FSM
-    // success whose continuation-or-not decision is still pending in
-    // scheduleNext -- so give back the operational labels that made it
-    // eligible for dispatch in the first place. Covers plain success (raw-FSM
-    // terminal, or non-raw-FSM with no continuation policy in play),
-    // input_required, and permanent failure/blocked; excludes a pending
-    // retry, any FSM continuation, and a deferred non-raw-FSM success, all of
-    // which still own the issue (the last one via scheduleNext instead).
+    // another state/wait, and not about to retry, and not a deferred
+    // success -- so give back the operational labels that made it eligible
+    // for dispatch in the first place. Excludes a pending retry, any FSM
+    // continuation, and a deferred success, all of which still own the
+    // issue (the last one via scheduleNext/pull-request-followup instead).
     if (
       !input.fsmContinuing &&
       !(input.outcome.kind === "failed" && input.willRetry) &&
-      !input.deferReleaseToScheduler
+      !deferReleaseToScheduler
     ) {
       await this.release({
         issueNumber: input.issueNumber,

@@ -1203,11 +1203,12 @@ export async function startDaemon(
     ) {
       return;
     }
-    // The mutex is acquired INSIDE runController.dispatchOneFresh (and inside
-    // dispatchReviewFollowup) around the narrowed claim section. launchWork
-    // itself is re-entrant per tick; provider event streaming runs outside
-    // the mutex so two ticks' worth of fresh dispatches can overlap. See
-    // ADR 0052.
+    // The mutex is acquired INSIDE each pick runController.dispatchFresh
+    // makes (and inside dispatchReviewFollowup) around the narrowed claim
+    // section. launchWork itself is re-entrant per tick; provider event
+    // streaming runs outside the mutex so multiple picks within one tick,
+    // and two ticks' worth of fresh dispatches, can overlap. See ADR 0052
+    // and the fill-all-slots-per-tick ADR (issue #720).
     const promise = (async () => {
       try {
         const retentionSnapshot = runtimeConfig.getSnapshot();
@@ -1389,7 +1390,7 @@ export async function startDaemon(
         // shared evidence intact, but do not let a carried-over candidate
         // cross the fresh-claim boundary while its credential is backing
         // off: the claim itself is another GitHub label write.
-        const result = await runController.dispatchOneFresh(
+        const batch = await runController.dispatchFresh(
           {
             ...issuePollStatus,
             candidateIssues: issuePollStatus.candidateIssues.filter(
@@ -1398,18 +1399,38 @@ export async function startDaemon(
           },
           {
             // The fire-and-forget PR poll can engage backoff after the
-            // candidate view above is formed while dispatchOneFresh is still
-            // loading config or workflow state. Re-check from inside its
-            // narrowed claim section immediately before sym:claimed.
+            // candidate view above is formed while dispatchFresh is still
+            // loading config or workflow state. Re-checked per pick from
+            // inside its narrowed claim section immediately before
+            // sym:claimed.
             isClaimAllowed: (project) =>
               isProjectPollable(project, env, Date.now())
           }
         );
-        if (result.dispatched === false) {
-          logger.debug(
-            { reason: result.reason },
-            "symphonika dispatch skipped"
-          );
+        for (const result of batch.claims) {
+          if (result.dispatched === false) {
+            logger.debug(
+              { reason: result.reason },
+              "symphonika dispatch skipped"
+            );
+          }
+        }
+        // Each successful claim's agent run is detached (issue #720): track
+        // it in inflightDispatches alongside this tick's own promise so
+        // shutdown drain (see the `stop` handler's Promise.allSettled below)
+        // waits for it too, not just for the claim loop itself. Registered
+        // synchronously (no await between here and the loop start) so no
+        // gap exists for stop() to race ahead of a run kicked off mid-loop.
+        for (const lifecycle of batch.lifecycles) {
+          inflightDispatches.add(lifecycle);
+          void lifecycle
+            .catch((error: unknown) => {
+              issuePollStatus.errors.push(errorMessage(error));
+              logger.error({ err: error }, "symphonika dispatch failed");
+            })
+            .finally(() => {
+              inflightDispatches.delete(lifecycle);
+            });
         }
       } catch (error) {
         issuePollStatus.errors.push(errorMessage(error));

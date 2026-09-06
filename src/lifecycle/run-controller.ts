@@ -353,13 +353,6 @@ export type DispatchFreshResult = {
   lifecycles: Array<Promise<void>>;
 };
 
-function dispatchCandidateKey(candidate: {
-  issue: IssueSnapshot;
-  project: string;
-}): string {
-  return `${candidate.project}#${candidate.issue.number}`;
-}
-
 export type ReviewFollowupContext = {
   headSha: string;
   pullRequestNumber: number;
@@ -834,23 +827,16 @@ export class RunController {
       };
     }
 
-    try {
-      const outcome = await this.resolveAndClaim(
-        target,
-        providersConfig,
-        options
-      );
-      if (outcome.kind === "terminal") {
-        return outcome.result;
-      }
-      await this.runAttemptLifecycle(outcome.lifecycleInput);
-      return { dispatched: true, runId: outcome.runId };
-    } catch (error) {
-      if (error instanceof RegistryShutdownError) {
-        return { dispatched: false, reason: error.message };
-      }
-      throw error;
+    const outcome = await this.resolveAndClaim(
+      target,
+      providersConfig,
+      options
+    );
+    if (outcome.kind === "terminal") {
+      return outcome.result;
     }
+    await this.runAttemptLifecycle(outcome.lifecycleInput);
+    return { dispatched: true, runId: outcome.runId };
   }
 
   // Claims fresh candidates in a loop within one call, instead of the single
@@ -867,27 +853,26 @@ export class RunController {
   // the returned `lifecycles` promises themselves (see daemon.ts's
   // inflightDispatches) since dispatchFresh does not wait for them.
   //
-  // `attempted` bounds the loop regardless of outcome: every picked
-  // candidate is excluded from later picks this call, whether it was
-  // claimed, rejected at the claim boundary, or failed before a provider
-  // ran -- this is what prevents an infinite spin on a candidate whose
-  // rejection reason pickTargetFromCandidates itself cannot see (a
-  // misconfigured provider, a claimGuard/isClaimAllowed rejection, or a
-  // shutdown-in-progress). `excludedProjects` additionally drops a whole
-  // project once resolveAndClaim reports excludeProject: true, since a
-  // misconfigured-provider rejection is project-wide and tick-invariant --
-  // without it, every remaining candidate for that project would still get
+  // `candidates` is narrowed in place after every pick, bounding the loop
+  // regardless of outcome: the picked candidate is always dropped (by
+  // reference -- pickTargetFromCandidates hands back the exact object it was
+  // given), whether it was claimed, rejected at the claim boundary, or
+  // failed before a provider ran -- this is what prevents an infinite spin
+  // on a candidate whose rejection reason pickTargetFromCandidates itself
+  // cannot see (a misconfigured provider, a claimGuard/isClaimAllowed
+  // rejection, or a shutdown-in-progress). When resolveAndClaim reports
+  // excludeProject: true, every remaining candidate for that whole Project
+  // is dropped too, since a misconfigured-provider rejection is
+  // project-wide and tick-invariant -- without it, each would still get
   // claimed-and-failed via real GitHub label-write calls before the loop
   // naturally bounds.
   async dispatchFresh(
     pollStatus: IssuePollStatus,
     options: DispatchFreshOptions = {}
   ): Promise<DispatchFreshResult> {
-    const candidates = pollStatus.candidateIssues.slice();
+    let candidates = pollStatus.candidateIssues.slice();
     const projects = await this.projectsLoader();
     const providersConfig = await this.providersLoader();
-    const attempted = new Set<string>();
-    const excludedProjects = new Set<string>();
     const claims: DispatchOneFreshResult[] = [];
     const lifecycles: Array<Promise<void>> = [];
 
@@ -916,12 +901,7 @@ export class RunController {
         break;
       }
 
-      const remaining = candidates.filter(
-        (candidate) =>
-          !attempted.has(dispatchCandidateKey(candidate)) &&
-          !excludedProjects.has(candidate.project)
-      );
-      const target = await this.pickTargetFromCandidates(remaining, projects);
+      const target = await this.pickTargetFromCandidates(candidates, projects);
       if (target === undefined) {
         // Mirrors dispatchOneFresh's own fallback reason so an idle tick
         // (no dispatchable candidate at all -- the common case) still
@@ -936,49 +916,81 @@ export class RunController {
         }
         break;
       }
-      attempted.add(dispatchCandidateKey(target.candidate));
+      candidates = candidates.filter(
+        (candidate) => candidate !== target.candidate
+      );
 
-      try {
-        const outcome = await this.resolveAndClaim(
-          target,
-          providersConfig,
-          options
-        );
-        if (outcome.kind === "terminal") {
-          claims.push(outcome.result);
-          if (outcome.excludeProject === true) {
-            excludedProjects.add(target.project.name);
-          }
-          continue;
+      const outcome = await this.resolveAndClaim(
+        target,
+        providersConfig,
+        options
+      );
+      if (outcome.kind === "terminal") {
+        claims.push(outcome.result);
+        if (outcome.excludeProject === true) {
+          candidates = candidates.filter(
+            (candidate) => candidate.project !== target.project.name
+          );
         }
-        claims.push({ dispatched: true, runId: outcome.runId });
-        const lifecycle = this.runAttemptLifecycle(outcome.lifecycleInput);
-        // No await between creation and this callback: a caller's
-        // onLifecycle registers the promise (e.g. into daemon.ts's
-        // inflightDispatches) before the loop's next await gives shutdown
-        // a chance to run, and before any rejection could go unhandled
-        // across the loop's remaining picks. See DispatchFreshOptions.
-        options.onLifecycle?.(lifecycle);
-        lifecycles.push(lifecycle);
-      } catch (error) {
-        if (error instanceof RegistryShutdownError) {
-          claims.push({ dispatched: false, reason: error.message });
+        if (outcome.stopLoop === true) {
           break;
         }
-        throw error;
+        continue;
       }
+      claims.push({ dispatched: true, runId: outcome.runId });
+      const lifecycle = this.runAttemptLifecycle(outcome.lifecycleInput);
+      // No await between creation and this callback: a caller's
+      // onLifecycle registers the promise (e.g. into daemon.ts's
+      // inflightDispatches) before the loop's next await gives shutdown
+      // a chance to run, and before any rejection could go unhandled
+      // across the loop's remaining picks. See DispatchFreshOptions.
+      options.onLifecycle?.(lifecycle);
+      lifecycles.push(lifecycle);
     }
 
     return { claims, lifecycles };
+  }
+
+  // Shared by resolveAndClaim's two provider-misconfiguration branches
+  // (missing command, unregistered provider): reports the fresh-dispatch
+  // failure via failFreshDispatchBeforeProvider, then builds the terminal
+  // result both branches return. excludeProject is always true here because
+  // that call never advances this Project's scheduler_current_weight (no
+  // recordProjectDispatchSelection), so a multi-pick loop must exclude the
+  // whole Project, not just this candidate, or it would re-win every
+  // remaining pick this tick.
+  private async excludeProjectAfterProviderFailure(input: {
+    claimGuard?: () => boolean;
+    issue: IssueSnapshot;
+    project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    reason: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<{
+    kind: "terminal";
+    result: DispatchOneFreshResult;
+    excludeProject: true;
+  }> {
+    await this.failFreshDispatchBeforeProvider(input);
+    return {
+      kind: "terminal",
+      result: { dispatched: true, runId: input.runId },
+      excludeProject: true
+    };
   }
 
   // Shared by dispatchOneFresh (single-shot) and dispatchFresh (multi-pick
   // loop): resolves a picked DispatchTarget down to either a claimed slot
   // ready for runAttemptLifecycle, or a terminal DispatchOneFreshResult. Logs
   // and classifies every claim-boundary error the same way dispatchOneFresh
-  // did before this was extracted; RegistryShutdownError is rethrown so each
-  // caller decides its own control flow (dispatchOneFresh returns, the
-  // dispatchFresh loop breaks) since runId is only in scope here.
+  // did before this was extracted, including a shutdown-in-progress
+  // (RegistryShutdownError) -- returned as a terminal result with
+  // stopLoop: true rather than thrown, so every claim-boundary outcome shares
+  // one return-value protocol and neither caller needs its own try/catch.
+  // Any OTHER exception (createRunId, loadWorkflow, a runStore write) is not
+  // caught here and propagates to the caller unchanged.
   private async resolveAndClaim(
     target: DispatchTarget,
     providersConfig: RunControllerProvidersConfig,
@@ -993,6 +1005,7 @@ export class RunController {
         kind: "terminal";
         result: DispatchOneFreshResult;
         excludeProject?: boolean;
+        stopLoop?: boolean;
       }
   > {
     // Routine Hosts never produce polling candidates, so a selected target
@@ -1090,7 +1103,7 @@ export class RunController {
         providerCommand === undefined ||
         providerCommand.trim().length === 0
       ) {
-        await this.failFreshDispatchBeforeProvider({
+        return await this.excludeProjectAfterProviderFailure({
           ...(claimGuard === undefined ? {} : { claimGuard }),
           issue: target.candidate.issue,
           project: target.project,
@@ -1100,20 +1113,11 @@ export class RunController {
           repository,
           runId
         });
-        // This project's scheduler_current_weight never advances (no
-        // recordProjectDispatchSelection call in the path above), so a
-        // multi-pick loop must exclude the whole project, not just this
-        // candidate, or it would re-win every remaining pick this tick.
-        return {
-          kind: "terminal",
-          result: { dispatched: true, runId },
-          excludeProject: true
-        };
       }
 
       const provider = this.agentProviders[providerName];
       if (provider === undefined) {
-        await this.failFreshDispatchBeforeProvider({
+        return await this.excludeProjectAfterProviderFailure({
           ...(claimGuard === undefined ? {} : { claimGuard }),
           issue: target.candidate.issue,
           project: target.project,
@@ -1123,11 +1127,6 @@ export class RunController {
           repository,
           runId
         });
-        return {
-          kind: "terminal",
-          result: { dispatched: true, runId },
-          excludeProject: true
-        };
       }
 
       const deadline = await this.claimFreshTarget({
@@ -1167,7 +1166,11 @@ export class RunController {
           { reason: error.message, runId },
           "symphonika fresh dispatch skipped: daemon shutting down"
         );
-        throw error;
+        return {
+          kind: "terminal",
+          result: { dispatched: false, reason: error.message },
+          stopLoop: true
+        };
       }
       if (
         error instanceof CapBreachedError ||

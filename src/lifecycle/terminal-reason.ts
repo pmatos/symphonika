@@ -80,3 +80,19 @@ export function buildNoPullRequestTrackedReason(
 ): string {
   return `${NO_PULL_REQUEST_TRACKED_PREFIX} state "${waitStateId}" never observed a tracked pull request after ${attempts} checks`;
 }
+
+const PULL_REQUEST_DISCOVERY_EXHAUSTED_PREFIX =
+  "pull_request_discovery_exhausted:";
+
+// Written when discoverPullRequests (pull-request-followup.ts) never finds a
+// pull request for a succeeded run's branch after
+// MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS ticks. Mirrors
+// buildNoPullRequestTrackedReason's shape for the other row set (`state =
+// 'succeeded'`, not `'waiting'`) sharing the same silent-give-up gap; like
+// that reason, no reader needs to special-case this one today.
+export function buildPullRequestDiscoveryExhaustedReason(
+  branchName: string,
+  attempts: number
+): string {
+  return `${PULL_REQUEST_DISCOVERY_EXHAUSTED_PREFIX} branch "${branchName}" never had a discoverable pull request after ${attempts} checks`;
+}

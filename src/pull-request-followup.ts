@@ -290,18 +290,21 @@ async function discoverPullRequests(input: {
       const attempts = input.runStore.recordPullRequestDiscoveryAttempt(
         run.runId
       );
-      // Bounded fallback for a deferred agent-hop-direct success (see
+      // Bounded escalation for a deferred agent-hop-direct success (see
       // ClaimLabelWriter's `deferReleaseToScheduler`): if no PR ever shows up
       // for this run's branch within the discovery-attempt ceiling, there is
-      // nothing left to defer to -- "no PR ever showed up" needs no
-      // protection, so release the claim here instead of leaving it dangling
-      // forever. Harmless (best-effort, idempotent) for a run whose claim was
-      // already released some other way.
+      // nothing left to defer to, so terminalize the run as blocked here
+      // instead of leaving it sitting at `state = 'succeeded'` forever,
+      // unmonitored (issue #713). Mirrors the wait/merge_pr bound
+      // (terminateNoPullRequestTracked, ADR 2026-09-05-1205) for this
+      // separate row set.
       if (attempts >= MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS) {
-        await input.runController.releaseIssueClaim({
+        await input.runController.terminalizePullRequestDiscoveryExhausted({
+          attempts,
+          branchName: run.branchName,
           issueNumber: run.issueNumber,
-          reason: "pull-request-discovery-exhausted",
-          repository
+          repository,
+          runId: run.runId
         });
       }
       continue;

@@ -16,13 +16,17 @@ describe("WORKFLOW.md", () => {
       "Do not commit, push, or open a PR for this path"
     );
 
-    const stopStepIndex = workflow.indexOf(
-      "duplicate of already-merged work, or is already fixed"
+    // Anchor on the numbered step markers, not the shared duplicate/already-fixed
+    // phrase alone -- that phrase recurs in the Constraints section.
+    const stepThreeIndex = workflow.indexOf(
+      "\n3. If that investigation shows the issue is a duplicate"
     );
+    const stepFourIndex = workflow.indexOf("\n4. Implement the change");
     const closeCommandIndex = workflow.indexOf(
       "gh issue close {{issue.number}}"
     );
-    expect(stopStepIndex).toBeGreaterThan(-1);
-    expect(closeCommandIndex).toBeGreaterThan(stopStepIndex);
+    expect(stepThreeIndex).toBeGreaterThan(-1);
+    expect(closeCommandIndex).toBeGreaterThan(stepThreeIndex);
+    expect(closeCommandIndex).toBeLessThan(stepFourIndex);
   });
 });

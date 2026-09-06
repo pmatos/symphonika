@@ -1,5 +1,25 @@
 # Changelog
 
+# [0.4.0](https://github.com/pmatos/symphonika/compare/v0.3.0...v0.4.0) (2026-09-06)
+
+
+### Bug Fixes
+
+* decide a run's branch/workspace once and reuse it on continuation ([#707](https://github.com/pmatos/symphonika/issues/707)) ([6e1edd8](https://github.com/pmatos/symphonika/commit/6e1edd873809714e852d3463af99229041029d71))
+* decouple watchdog reconciliation from the daemon poll tick ([#704](https://github.com/pmatos/symphonika/issues/704)) ([3f7f9c3](https://github.com/pmatos/symphonika/commit/3f7f9c39d9b18db8d331fae95a960c2c7f8ff176))
+* dedupe issue snapshot rows for fully duplicate project declarations ([#703](https://github.com/pmatos/symphonika/issues/703)) ([1404e36](https://github.com/pmatos/symphonika/commit/1404e3632715d3e3ac1336a2b9ca6182812df726))
+* escalate wait_for_pr to sym:blocked after an issue's PR never gets tracked ([#715](https://github.com/pmatos/symphonika/issues/715)) ([9f6e937](https://github.com/pmatos/symphonika/commit/9f6e93794016b1a10b527417ce913e508473ac77))
+* freeze isDefinitelyInvalidSystemdMemoryValue scope, close signed-0o/0b gap ([#705](https://github.com/pmatos/symphonika/issues/705)) ([0c2f991](https://github.com/pmatos/symphonika/commit/0c2f991b5d79695989fe36de04bd5ef55f1aaf87))
+* link PRs and explain no-PR successes in fan-out email ([#710](https://github.com/pmatos/symphonika/issues/710)) ([42bc882](https://github.com/pmatos/symphonika/commit/42bc882f397bcfa77cf50e2ae86a10d6960b5daf))
+* open external github links in a new tab ([#708](https://github.com/pmatos/symphonika/issues/708)) ([fd547f8](https://github.com/pmatos/symphonika/commit/fd547f8a0e923698550e213407ce9dece677b550))
+* release sym:claimed/sym:stale on run terminal completion ([#711](https://github.com/pmatos/symphonika/issues/711)) ([b4b3f5e](https://github.com/pmatos/symphonika/commit/b4b3f5e0627f2f7b60b21520e2091431302dba7c))
+* serialize failFreshDispatchBeforeProvider's suppression check under dispatchMutex ([#706](https://github.com/pmatos/symphonika/issues/706)) ([cf302e0](https://github.com/pmatos/symphonika/commit/cf302e0212d41561c3e97c3f475dc0a70c403391))
+
+
+### Features
+
+* add close_issue/label_issue/comment workflow actions ([#712](https://github.com/pmatos/symphonika/issues/712)) ([76ffb15](https://github.com/pmatos/symphonika/commit/76ffb156b04ece9da863ed61e458e7f5ddba4940))
+
 # [0.3.0](https://github.com/pmatos/symphonika/compare/v0.2.0...v0.3.0) (2026-09-03)
 
 

@@ -298,7 +298,8 @@ immediately afterward:
 ```yaml
 action:
   kind: label_issue
-  labels: [agent-ready]
+  labels: [agent-complete]
+  method: add # or remove; defaults to add
 ```
 
 ```yaml
@@ -314,9 +315,26 @@ action:
   body: "Closing as complete." # optional, posted before the issue is closed
 ```
 
+A `label_issue` state is a System state, not a terminal state — it cannot declare `terminal`
+alongside its `action`. Reaching `agent-complete` on success typically looks like a non-terminal
+labeling state that transitions unconditionally into the terminal state:
+
+```yaml
+states:
+  labeling_complete:
+    action:
+      kind: label_issue
+      labels: [agent-complete]
+    transitions:
+      - to: done
+  done:
+    terminal: success
+```
+
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `labels` (`label_issue`) | yes | Non-empty list of labels to add |
+| `labels` (`label_issue`) | yes | Non-empty list of labels to add or remove |
+| `method` (`label_issue`) | no | `add` or `remove`; defaults to `add` |
 | `body` (`comment`) | yes | Comment text to post |
 | `body` (`close_issue`) | no | Comment posted before the issue is closed |
 | `state_reason` (`close_issue`) | no | `completed` or `not_planned`; defaults to `completed` |

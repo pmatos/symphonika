@@ -93,6 +93,7 @@ const actionKinds = new Set<WorkflowActionKind>([
 ]);
 
 const mergeMethods = new Set<string>(["merge", "rebase", "squash"]);
+const labelMethods = new Set<string>(["add", "remove"]);
 
 const terminalStates = new Set(["blocked", "failure", "success"]);
 
@@ -1264,7 +1265,7 @@ function parseWorkflowAction(
   const kind = rawKind as WorkflowActionKind;
   const provider = stringProperty(rawAction, "provider");
   const prompt = stringProperty(rawAction, "prompt");
-  const method = stringProperty(rawAction, "method");
+  let method = stringProperty(rawAction, "method");
   const body = stringProperty(rawAction, "body");
   const labels = parseWorkflowActionLabels(
     stateId,
@@ -1349,10 +1350,19 @@ function parseWorkflowAction(
     );
   }
 
-  if (kind === "label_issue" || kind === "comment" || kind === "close_issue") {
+  if (kind === "comment" || kind === "close_issue") {
     errors.push(
       ...rejectFields(stateId, workflowPath, kind, {
         method,
+        prompt,
+        provider
+      })
+    );
+  }
+
+  if (kind === "label_issue") {
+    errors.push(
+      ...rejectFields(stateId, workflowPath, kind, {
         prompt,
         provider
       })
@@ -1363,6 +1373,18 @@ function parseWorkflowAction(
     errors.push(
       `workflow state ${stateId} at ${workflowPath} label_issue action must define a non-empty labels list`
     );
+  }
+  if (
+    kind === "label_issue" &&
+    method !== undefined &&
+    !labelMethods.has(method)
+  ) {
+    errors.push(
+      `workflow state ${stateId} at ${workflowPath} label_issue method must be one of ${[...labelMethods].join(", ")}`
+    );
+  }
+  if (kind === "label_issue" && method === undefined) {
+    method = "add";
   }
   if (kind === "label_issue") {
     errors.push(

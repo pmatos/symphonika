@@ -2175,8 +2175,77 @@ describe("state machine workflow definitions", () => {
     expect(result.errors).toEqual([]);
     expect(labeling?.action).toEqual({
       kind: "label_issue",
-      labels: ["agent-ready", "needs-triage"]
+      labels: ["agent-ready", "needs-triage"],
+      method: "add"
     });
+  });
+
+  it("accepts a label_issue action with an explicit remove method", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: label_remove",
+        "  initial: labeling",
+        "  states:",
+        "    labeling:",
+        "      action:",
+        "        kind: label_issue",
+        "        labels:",
+        "          - agent-ready",
+        "        method: remove",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+    const labeling = result.workflow.states.find(
+      (state) => state.id === "labeling"
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(labeling?.action).toEqual({
+      kind: "label_issue",
+      labels: ["agent-ready"],
+      method: "remove"
+    });
+  });
+
+  it("rejects a label_issue action with an invalid method", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: label_bad_method",
+        "  initial: labeling",
+        "  states:",
+        "    labeling:",
+        "      action:",
+        "        kind: label_issue",
+        "        labels:",
+        "          - agent-ready",
+        "        method: rename",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state labeling at ${workflowPath} label_issue method must be one of add, remove`
+    );
   });
 
   it("rejects a label_issue action that omits labels", async () => {

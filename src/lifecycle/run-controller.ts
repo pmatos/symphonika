@@ -17,6 +17,7 @@ import {
   tryAddIssueComment,
   tryAddLabelsToIssue,
   tryCloseIssue,
+  tryRemoveLabelsFromIssue,
   tryGetIssue,
   tryGetIssueDependencies,
   tryGetPullRequestFollowupState,
@@ -1837,19 +1838,28 @@ export class RunController {
         if (labels.length === 0) {
           return { signals: {} };
         }
+        const method = action.method ?? "add";
         const succeeded = await this.bestEffortIssueContentCall(
           () =>
-            tryAddLabelsToIssue(this.githubIssuesApi, {
-              ...repository,
-              issueNumber,
-              labels
-            }),
+            method === "remove"
+              ? tryRemoveLabelsFromIssue(this.githubIssuesApi, {
+                  ...repository,
+                  issueNumber,
+                  labels
+                })
+              : tryAddLabelsToIssue(this.githubIssuesApi, {
+                  ...repository,
+                  issueNumber,
+                  labels
+                }),
           { action: "label_issue", issueNumber, runId }
         );
+        const verb = method === "remove" ? "removed" : "added";
+        const preposition = method === "remove" ? "from" : "to";
         return {
           note: succeeded
-            ? `label_issue added [${labels.join(", ")}] to issue #${issueNumber}`
-            : `label_issue failed to add [${labels.join(", ")}] to issue #${issueNumber}`,
+            ? `label_issue ${verb} [${labels.join(", ")}] ${preposition} issue #${issueNumber}`
+            : `label_issue failed to ${method} [${labels.join(", ")}] ${preposition} issue #${issueNumber}`,
           signals: {}
         };
       }

@@ -73,16 +73,17 @@ export function evaluateConcurrencyCapacity(
       scope: "global"
     };
   }
+  const resolvedProjectMax = resolveProjectMaxInFlight(
+    input.configuredProjectMax,
+    input.globalMax
+  );
   if (
-    isProjectCapReached(
-      input.configuredProjectMax,
-      input.projectInFlight,
-      input.globalMax
-    )
+    resolvedProjectMax !== undefined &&
+    input.projectInFlight >= resolvedProjectMax
   ) {
     return {
       admitted: false,
-      reason: `project ${input.projectName} max_in_flight (${resolveProjectMaxInFlight(input.configuredProjectMax, input.globalMax)}) reached`,
+      reason: `project ${input.projectName} max_in_flight (${resolvedProjectMax}) reached`,
       scope: "project"
     };
   }

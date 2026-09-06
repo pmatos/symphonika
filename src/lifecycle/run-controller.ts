@@ -330,6 +330,29 @@ export type DispatchOneFreshOptions = {
   isClaimAllowed?: (project: DispatchProjectConfig) => boolean;
 };
 
+export type DispatchFreshOptions = DispatchOneFreshOptions & {
+  // Invoked synchronously, in the same tick the lifecycle promise is
+  // created (no await in between) -- NOT after dispatchFresh returns.
+  // Callers needing shutdown-drain tracking (daemon.ts's inflightDispatches)
+  // or rejection handling must register from here: attaching after
+  // dispatchFresh resolves would miss a lifecycle whose shutdown-drain
+  // window starts mid-loop, and would leave every earlier lifecycle
+  // unhandled for the loop's remaining awaits, wide enough for Node to
+  // report it as an unhandled rejection if one rejects before this returns.
+  // See ADR 2026-09-06-1100.
+  onLifecycle?: (lifecycle: Promise<void>) => void;
+};
+
+// One dispatchFresh() call's worth of claim attempts. `lifecycles` holds the
+// detached runAttemptLifecycle promise for each successful claim, for
+// convenience (e.g. tests awaiting them all) -- callers needing shutdown
+// drain or rejection handling should use `onLifecycle` instead, since these
+// are only available once dispatchFresh has already returned.
+export type DispatchFreshResult = {
+  claims: DispatchOneFreshResult[];
+  lifecycles: Array<Promise<void>>;
+};
+
 export type ReviewFollowupContext = {
   headSha: string;
   pullRequestNumber: number;
@@ -804,28 +827,227 @@ export class RunController {
       };
     }
 
+    const outcome = await this.resolveAndClaim(
+      target,
+      providersConfig,
+      options
+    );
+    if (outcome.kind === "terminal") {
+      return outcome.result;
+    }
+    await this.runAttemptLifecycle(outcome.lifecycleInput);
+    return { dispatched: true, runId: outcome.runId };
+  }
+
+  // Claims fresh candidates in a loop within one call, instead of the single
+  // pick dispatchOneFresh makes, until the global cap is reached or no
+  // Project has a remaining dispatchable candidate (issue #720). Each pick
+  // (pickTargetFromCandidates + the mutex-guarded claim in resolveAndClaim)
+  // runs strictly sequentially -- never Promise.all -- because
+  // pickTargetFromCandidates reads scheduler_current_weight lock-free and
+  // claimAndPersistRun only persists a pick's updated weight once its mutex
+  // hold releases; pick N+1 must observe pick N's persisted weight for
+  // weighted-round-robin fairness to hold across a multi-pick tick (ADR
+  // 0005 / ADR 0053). A successful claim's runAttemptLifecycle is detached
+  // (not awaited here) so it cannot block the next pick; callers must track
+  // the returned `lifecycles` promises themselves (see daemon.ts's
+  // inflightDispatches) since dispatchFresh does not wait for them.
+  //
+  // `candidates` is narrowed in place after every pick, bounding the loop
+  // regardless of outcome: the picked candidate is always dropped (by
+  // reference -- pickTargetFromCandidates hands back the exact object it was
+  // given), whether it was claimed, rejected at the claim boundary, or
+  // failed before a provider ran -- this is what prevents an infinite spin
+  // on a candidate whose rejection reason pickTargetFromCandidates itself
+  // cannot see (a misconfigured provider, a claimGuard/isClaimAllowed
+  // rejection, or a shutdown-in-progress). When resolveAndClaim reports
+  // excludeProject: true, every remaining candidate for that whole Project
+  // is dropped too, since a misconfigured-provider rejection is
+  // project-wide and tick-invariant -- without it, each would still get
+  // claimed-and-failed via real GitHub label-write calls before the loop
+  // naturally bounds.
+  async dispatchFresh(
+    pollStatus: IssuePollStatus,
+    options: DispatchFreshOptions = {}
+  ): Promise<DispatchFreshResult> {
+    let candidates = pollStatus.candidateIssues.slice();
+    const projects = await this.projectsLoader();
+    const providersConfig = await this.providersLoader();
+    const claims: DispatchOneFreshResult[] = [];
+    const lifecycles: Array<Promise<void>> = [];
+
+    for (;;) {
+      // Re-checked every iteration, not just once before the loop: a
+      // multi-pick tick can keep looping long enough for the host to become
+      // pressured mid-tick, and without this check every remaining candidate
+      // across every Project would still get picked, workflow-loaded, and
+      // mutex-acquired before being refused at claimAndPersistRun's own
+      // pressure re-check -- exactly the per-candidate GitHub/DB churn ADR
+      // 0088 exists to avoid. The gate's own TTL keeps a re-check on every
+      // iteration cheap (at most one /proc read per configured interval).
+      const pressure = await this.refreshHostPressure();
+      if (!pressure.admitted) {
+        this.logger?.info(
+          {
+            observed: pressure.observed,
+            resource: pressure.resource,
+            threshold: pressure.threshold
+          },
+          "symphonika dispatch deferred: host pressure"
+        );
+        if (claims.length === 0) {
+          claims.push({ dispatched: false, reason: pressure.reason });
+        }
+        break;
+      }
+
+      const target = await this.pickTargetFromCandidates(candidates, projects);
+      if (target === undefined) {
+        // Mirrors dispatchOneFresh's own fallback reason so an idle tick
+        // (no dispatchable candidate at all -- the common case) still
+        // produces the one debug-logged claims entry daemon.ts's callers
+        // have always relied on, instead of an empty batch that logs
+        // nothing for a tick where nothing was dispatchable.
+        if (claims.length === 0) {
+          claims.push({
+            dispatched: false,
+            reason: "no eligible issue has a registered provider"
+          });
+        }
+        break;
+      }
+      candidates = candidates.filter(
+        (candidate) => candidate !== target.candidate
+      );
+
+      const outcome = await this.resolveAndClaim(
+        target,
+        providersConfig,
+        options
+      );
+      if (outcome.kind === "terminal") {
+        claims.push(outcome.result);
+        if (outcome.excludeProject === true) {
+          candidates = candidates.filter(
+            (candidate) => candidate.project !== target.project.name
+          );
+        }
+        if (outcome.stopLoop === true) {
+          break;
+        }
+        continue;
+      }
+      claims.push({ dispatched: true, runId: outcome.runId });
+      const lifecycle = this.runAttemptLifecycle(outcome.lifecycleInput);
+      // No await between creation and this callback: a caller's
+      // onLifecycle registers the promise (e.g. into daemon.ts's
+      // inflightDispatches) before the loop's next await gives shutdown
+      // a chance to run, and before any rejection could go unhandled
+      // across the loop's remaining picks. See DispatchFreshOptions.
+      options.onLifecycle?.(lifecycle);
+      lifecycles.push(lifecycle);
+    }
+
+    return { claims, lifecycles };
+  }
+
+  // Shared by resolveAndClaim's two provider-misconfiguration branches
+  // (missing command, unregistered provider): reports the fresh-dispatch
+  // failure via failFreshDispatchBeforeProvider, then builds the terminal
+  // result both branches return. excludeProject is always true here because
+  // that call never advances this Project's scheduler_current_weight (no
+  // recordProjectDispatchSelection), so a multi-pick loop must exclude the
+  // whole Project, not just this candidate, or it would re-win every
+  // remaining pick this tick.
+  private async excludeProjectAfterProviderFailure(input: {
+    claimGuard?: () => boolean;
+    issue: IssueSnapshot;
+    project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    reason: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<{
+    kind: "terminal";
+    result: DispatchOneFreshResult;
+    excludeProject: true;
+  }> {
+    await this.failFreshDispatchBeforeProvider(input);
+    return {
+      kind: "terminal",
+      result: { dispatched: true, runId: input.runId },
+      excludeProject: true
+    };
+  }
+
+  // Shared by dispatchOneFresh (single-shot) and dispatchFresh (multi-pick
+  // loop): resolves a picked DispatchTarget down to either a claimed slot
+  // ready for runAttemptLifecycle, or a terminal DispatchOneFreshResult. Logs
+  // and classifies every claim-boundary error the same way dispatchOneFresh
+  // did before this was extracted, including a shutdown-in-progress
+  // (RegistryShutdownError) -- returned as a terminal result with
+  // stopLoop: true rather than thrown, so every claim-boundary outcome shares
+  // one return-value protocol and neither caller needs its own try/catch.
+  // Any OTHER exception (createRunId, loadWorkflow, a runStore write) is not
+  // caught here and propagates to the caller unchanged.
+  private async resolveAndClaim(
+    target: DispatchTarget,
+    providersConfig: RunControllerProvidersConfig,
+    options: DispatchOneFreshOptions
+  ): Promise<
+    | {
+        kind: "ready";
+        runId: string;
+        lifecycleInput: Parameters<RunController["runAttemptLifecycle"]>[0];
+      }
+    | {
+        kind: "terminal";
+        result: DispatchOneFreshResult;
+        excludeProject?: boolean;
+        stopLoop?: boolean;
+      }
+  > {
     // Routine Hosts never produce polling candidates, so a selected target
     // is always a Dispatch Project. The guard is unreachable in practice but
     // narrows target.project for the tracker/workflow reads below. See ADR 0062.
+    // excludeProject: true because project.kind is fixed for the whole tick --
+    // every other candidate for this Project would hit the identical branch.
     if (!isDispatchProject(target.project)) {
       return {
-        dispatched: false,
-        reason: `project ${target.project.name} is not a dispatch project`
+        kind: "terminal",
+        excludeProject: true,
+        result: {
+          dispatched: false,
+          reason: `project ${target.project.name} is not a dispatch project`
+        }
       };
     }
 
     if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
       return {
-        dispatched: false,
-        reason: "GitHub tracker does not support operational label writes"
+        kind: "terminal",
+        result: {
+          dispatched: false,
+          reason: "GitHub tracker does not support operational label writes"
+        }
       };
     }
 
     const token = resolveTokenFromEnv(target.project.tracker.token, this.env);
     if (token === undefined) {
+      // excludeProject: true: an unresolvable tracker token is a per-Project
+      // config/env property, invariant for the rest of this tick -- same
+      // reasoning as the provider_command_missing/provider_not_registered
+      // exclusions below, so every remaining candidate for this Project
+      // would otherwise hit the identical branch one pick at a time.
       return {
-        dispatched: false,
-        reason: `projects.${target.project.name}.tracker.token is not available`
+        kind: "terminal",
+        excludeProject: true,
+        result: {
+          dispatched: false,
+          reason: `projects.${target.project.name}.tracker.token is not available`
+        }
       };
     }
 
@@ -881,7 +1103,7 @@ export class RunController {
         providerCommand === undefined ||
         providerCommand.trim().length === 0
       ) {
-        await this.failFreshDispatchBeforeProvider({
+        return await this.excludeProjectAfterProviderFailure({
           ...(claimGuard === undefined ? {} : { claimGuard }),
           issue: target.candidate.issue,
           project: target.project,
@@ -891,12 +1113,11 @@ export class RunController {
           repository,
           runId
         });
-        return { dispatched: true, runId };
       }
 
       const provider = this.agentProviders[providerName];
       if (provider === undefined) {
-        await this.failFreshDispatchBeforeProvider({
+        return await this.excludeProjectAfterProviderFailure({
           ...(claimGuard === undefined ? {} : { claimGuard }),
           issue: target.candidate.issue,
           project: target.project,
@@ -906,17 +1127,15 @@ export class RunController {
           repository,
           runId
         });
-        return { dispatched: true, runId };
       }
 
-      await this.runFreshLifecycle({
+      const deadline = await this.claimFreshTarget({
         attemptNumber: 1,
         ...(claimGuard === undefined ? {} : { claimGuard }),
         isContinuation: false,
         issue: target.candidate.issue,
         parentRunId: null,
         project: target.project,
-        provider,
         providerCommand,
         providerName,
         repository,
@@ -924,13 +1143,34 @@ export class RunController {
         schedulerWeights: target.schedulerWeights,
         verifyFileOverlap: target.project.dispatch?.overlap_guard === true
       });
+
+      return {
+        kind: "ready",
+        runId,
+        lifecycleInput: {
+          attemptNumber: 1,
+          isContinuation: false,
+          issue: target.candidate.issue,
+          project: target.project,
+          provider,
+          providerCommand,
+          providerName,
+          repository,
+          deadline,
+          runId
+        }
+      };
     } catch (error) {
       if (error instanceof RegistryShutdownError) {
         this.logger?.debug(
           { reason: error.message, runId },
           "symphonika fresh dispatch skipped: daemon shutting down"
         );
-        return { dispatched: false, reason: error.message };
+        return {
+          kind: "terminal",
+          result: { dispatched: false, reason: error.message },
+          stopLoop: true
+        };
       }
       if (
         error instanceof CapBreachedError ||
@@ -947,12 +1187,13 @@ export class RunController {
           { reason: error.message, runId },
           "symphonika fresh dispatch skipped at claim boundary"
         );
-        return { dispatched: false, reason: error.message };
+        return {
+          kind: "terminal",
+          result: { dispatched: false, reason: error.message }
+        };
       }
       throw error;
     }
-
-    return { dispatched: true, runId };
   }
 
   private async failFreshDispatchBeforeProvider(input: {
@@ -3480,6 +3721,50 @@ export class RunController {
     return undefined;
   }
 
+  // Shared by runFreshLifecycle (continuation / state-advance / PR-followup /
+  // single-shot fresh dispatch) and dispatchFresh's per-pick loop, both of
+  // which need to claim first and decide separately how to run the attempt.
+  private async claimFreshTarget(input: {
+    attemptNumber: number;
+    claimGuard?: () => boolean;
+    extraInstructions?: string;
+    isContinuation: boolean;
+    issue: IssueSnapshot;
+    parentRunId: string | null;
+    project: DispatchProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    repository: GitHubIssueRepositoryInput;
+    respectsIssueLabels?: boolean;
+    runId: string;
+    schedulerWeights?: Array<{
+      currentWeight: number;
+      projectName: string;
+      weight: number;
+    }>;
+    verifyFileOverlap?: boolean;
+  }): Promise<RunSlotDeadline> {
+    // Narrowed critical section: claim label + scheduler cursor + createRun
+    // + reserveSlot all happen while the mutex is held. Provider event
+    // streaming runs AFTER mutex release. CapBreachedError and
+    // IssueReservedError propagate to the caller, which decides whether to
+    // silently no-op (fresh dispatch) or reschedule (continuation / state
+    // advance / PR followup). See ADR 0052 / ADR 0053. A failure after
+    // claimAndPersistRun's own createRun call reconciles the orphaned Run row
+    // (label writes and scheduleNext included) before rethrowing, so that
+    // reconciliation also runs inside this same mutex hold. See ADR 0093.
+    await this.dispatchMutex.acquire();
+    try {
+      return await this.claimAndPersistRun({
+        ...input,
+        onPostCreateClaimFailure: (error) =>
+          this.reconcilePostCreateClaimFailure({ ...input, error })
+      });
+    } finally {
+      this.dispatchMutex.release();
+    }
+  }
+
   private async runFreshLifecycle(input: {
     attemptNumber: number;
     claimGuard?: () => boolean;
@@ -3501,26 +3786,7 @@ export class RunController {
     }>;
     verifyFileOverlap?: boolean;
   }): Promise<void> {
-    // Narrowed critical section: claim label + scheduler cursor + createRun
-    // + reserveSlot all happen while the mutex is held. Provider event
-    // streaming runs AFTER mutex release. CapBreachedError and
-    // IssueReservedError propagate to the caller, which decides whether to
-    // silently no-op (fresh dispatch) or reschedule (continuation / state
-    // advance / PR followup). See ADR 0052 / ADR 0053. A failure after
-    // claimAndPersistRun's own createRun call reconciles the orphaned Run row
-    // (label writes and scheduleNext included) before rethrowing, so that
-    // reconciliation also runs inside this same mutex hold. See ADR 0093.
-    let deadline: RunSlotDeadline;
-    await this.dispatchMutex.acquire();
-    try {
-      deadline = await this.claimAndPersistRun({
-        ...input,
-        onPostCreateClaimFailure: (error) =>
-          this.reconcilePostCreateClaimFailure({ ...input, error })
-      });
-    } finally {
-      this.dispatchMutex.release();
-    }
+    const deadline = await this.claimFreshTarget(input);
 
     await this.runAttemptLifecycle({
       attemptNumber: input.attemptNumber,

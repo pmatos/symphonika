@@ -1203,11 +1203,12 @@ export async function startDaemon(
     ) {
       return;
     }
-    // The mutex is acquired INSIDE runController.dispatchOneFresh (and inside
-    // dispatchReviewFollowup) around the narrowed claim section. launchWork
-    // itself is re-entrant per tick; provider event streaming runs outside
-    // the mutex so two ticks' worth of fresh dispatches can overlap. See
-    // ADR 0052.
+    // The mutex is acquired INSIDE each pick runController.dispatchFresh
+    // makes (and inside dispatchReviewFollowup) around the narrowed claim
+    // section. launchWork itself is re-entrant per tick; provider event
+    // streaming runs outside the mutex so multiple picks within one tick,
+    // and two ticks' worth of fresh dispatches, can overlap. See ADR 0052
+    // and the fill-all-slots-per-tick ADR (issue #720).
     const promise = (async () => {
       try {
         const retentionSnapshot = runtimeConfig.getSnapshot();
@@ -1389,7 +1390,7 @@ export async function startDaemon(
         // shared evidence intact, but do not let a carried-over candidate
         // cross the fresh-claim boundary while its credential is backing
         // off: the claim itself is another GitHub label write.
-        const result = await runController.dispatchOneFresh(
+        const batch = await runController.dispatchFresh(
           {
             ...issuePollStatus,
             candidateIssues: issuePollStatus.candidateIssues.filter(
@@ -1398,18 +1399,45 @@ export async function startDaemon(
           },
           {
             // The fire-and-forget PR poll can engage backoff after the
-            // candidate view above is formed while dispatchOneFresh is still
-            // loading config or workflow state. Re-check from inside its
-            // narrowed claim section immediately before sym:claimed.
+            // candidate view above is formed while dispatchFresh is still
+            // loading config or workflow state. Re-checked per pick from
+            // inside its narrowed claim section immediately before
+            // sym:claimed.
             isClaimAllowed: (project) =>
-              isProjectPollable(project, env, Date.now())
+              isProjectPollable(project, env, Date.now()),
+            // Each successful claim's agent run is detached (issue #720):
+            // track it in inflightDispatches alongside this tick's own
+            // promise so shutdown drain (see the `stop` handler's
+            // Promise.allSettled below) waits for it too, not just for the
+            // claim loop itself. Registering here -- inside dispatchFresh's
+            // own loop, the instant each lifecycle promise is created --
+            // rather than from a loop over the returned `batch.lifecycles`
+            // afterward closes two races a post-return loop cannot: a
+            // shutdown beginning mid-loop would otherwise snapshot
+            // inflightDispatches before an already-created-but-unregistered
+            // lifecycle lands in it, and a lifecycle rejecting before the
+            // whole loop finishes would otherwise have no handler attached
+            // for the loop's remaining iterations.
+            onLifecycle: (lifecycle) => {
+              inflightDispatches.add(lifecycle);
+              void lifecycle
+                .catch((error: unknown) => {
+                  issuePollStatus.errors.push(errorMessage(error));
+                  logger.error({ err: error }, "symphonika dispatch failed");
+                })
+                .finally(() => {
+                  inflightDispatches.delete(lifecycle);
+                });
+            }
           }
         );
-        if (result.dispatched === false) {
-          logger.debug(
-            { reason: result.reason },
-            "symphonika dispatch skipped"
-          );
+        for (const result of batch.claims) {
+          if (result.dispatched === false) {
+            logger.debug(
+              { reason: result.reason },
+              "symphonika dispatch skipped"
+            );
+          }
         }
       } catch (error) {
         issuePollStatus.errors.push(errorMessage(error));

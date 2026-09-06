@@ -1072,6 +1072,16 @@ Dispatch uses weighted round-robin across Projects. Within each Project, issues 
 2. oldest creation time
 3. issue number
 
+A single poll tick claims fresh candidates in a loop, not just one: the daemon keeps picking and
+claiming until either `global.max_in_flight` is reached or no Project has a remaining dispatchable
+candidate this tick. Each pick still applies weighted round-robin and updates the winning (and
+losing) Projects' scheduler cursors exactly as a single pick would, and picks within one tick are
+strictly sequential, so a Project that wins twice in one tick is exactly as disfavored on the next
+tick as if it had won across two separate ticks. Claiming a candidate does not wait for its agent
+run to finish before the next candidate is considered — only the short, mutex-serialized claim
+itself (label write, scheduler cursor update, Run row creation) blocks the next pick. See
+ADR 2026-09-06-1100.
+
 Before the concurrency caps, admission consults the host itself. The orchestrator reads Linux's
 pressure-stall counters (`/proc/pressure/memory` and `/proc/pressure/io`) and defers claiming new
 work while a gated resource's `full avg60` percentage is at or above its configured ceiling. This

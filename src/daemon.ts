@@ -1996,13 +1996,15 @@ export async function startDaemon(
       const { maxInFlight } = runtimeConfig.globalConcurrency();
       const perProject: Array<{
         inFlight: number;
-        maxInFlight: number;
+        maxInFlight: number | null;
         projectName: string;
       }> = [];
       for (const project of runtimeConfig.projectsByName().values()) {
         perProject.push({
           inFlight: activeRuns.countInFlightByProject(project.name),
-          maxInFlight: resolveProjectMaxInFlight(project.max_in_flight),
+          maxInFlight:
+            resolveProjectMaxInFlight(project.max_in_flight, maxInFlight) ??
+            null,
           projectName: project.name
         });
       }

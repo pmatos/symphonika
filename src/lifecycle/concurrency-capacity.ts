@@ -1,22 +1,23 @@
 // Concurrency-cap admission policy for dispatch. This is the single home for
 // the daemon-wide and per-project max_in_flight checks that gate whether a run
 // may start: the ">=" comparisons, the canonical reason strings surfaced to the
-// run store / routine skip records / CapBreachedError, and the serial default
-// that applies when a project omits max_in_flight (ADR 0053). Keeping the
-// policy here means the dispatcher and run-controller share one source of truth
-// instead of re-deriving it at each call site.
+// run store / routine skip records / CapBreachedError, and the default that
+// applies when a project omits max_in_flight (ADR 0053, superseded by
+// ADR-2026-09-06-1010). Keeping the policy here means the dispatcher and
+// run-controller share one source of truth instead of re-deriving it at each
+// call site.
 
 /**
- * Per-project concurrency cap applied when a project omits `max_in_flight`.
- * A cap of 1 preserves the legacy serial dispatch behavior. See ADR 0053.
+ * Resolve a project's effective concurrency cap. An explicit per-project
+ * `max_in_flight` always wins; an omitted one falls back to the resolved
+ * global cap; if both are omitted the project is unbounded (`undefined`).
+ * See ADR-2026-09-06-1010.
  */
-export const DEFAULT_PROJECT_MAX_IN_FLIGHT = 1;
-
-/** Resolve a project's effective concurrency cap, applying the serial default. */
 export function resolveProjectMaxInFlight(
-  configured: number | undefined
-): number {
-  return configured ?? DEFAULT_PROJECT_MAX_IN_FLIGHT;
+  configured: number | undefined,
+  globalMax: number | undefined
+): number | undefined {
+  return configured ?? globalMax;
 }
 
 /**
@@ -30,16 +31,18 @@ export function isGlobalCapReached(
   return globalMax !== undefined && globalInFlight >= globalMax;
 }
 
-/** Whether a project's cap is reached, applying the serial default when omitted. */
+/** Whether a project's cap is reached, applying the global-default fallback when omitted. */
 export function isProjectCapReached(
   configuredProjectMax: number | undefined,
-  projectInFlight: number
+  projectInFlight: number,
+  globalMax: number | undefined
 ): boolean {
-  return projectInFlight >= resolveProjectMaxInFlight(configuredProjectMax);
+  const resolved = resolveProjectMaxInFlight(configuredProjectMax, globalMax);
+  return resolved !== undefined && projectInFlight >= resolved;
 }
 
 export type ConcurrencyCapacityInput = {
-  /** Configured per-project cap, or undefined to apply the serial default. */
+  /** Configured per-project cap, or undefined to fall back to the global cap. */
   configuredProjectMax: number | undefined;
   /** Runs currently in flight across all projects. */
   globalInFlight: number;
@@ -70,10 +73,17 @@ export function evaluateConcurrencyCapacity(
       scope: "global"
     };
   }
-  if (isProjectCapReached(input.configuredProjectMax, input.projectInFlight)) {
+  const resolvedProjectMax = resolveProjectMaxInFlight(
+    input.configuredProjectMax,
+    input.globalMax
+  );
+  if (
+    resolvedProjectMax !== undefined &&
+    input.projectInFlight >= resolvedProjectMax
+  ) {
     return {
       admitted: false,
-      reason: `project ${input.projectName} max_in_flight (${resolveProjectMaxInFlight(input.configuredProjectMax)}) reached`,
+      reason: `project ${input.projectName} max_in_flight (${resolvedProjectMax}) reached`,
       scope: "project"
     };
   }

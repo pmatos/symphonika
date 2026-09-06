@@ -321,6 +321,7 @@ describe("RoutineFiringDispatcher", () => {
             "alpha",
             {
               ...runStoreProjectFixture(),
+              max_in_flight: 1,
               routines: [routine]
             }
           ]
@@ -8527,6 +8528,11 @@ function recurringDispatchInput(input: {
         "alpha",
         {
           ...runStoreProjectFixture(),
+          // Explicit serial cap: this suite tests concurrency-cap
+          // enforcement, not the ADR-2026-09-06-1010 default-to-global
+          // resolution, so it needs a concrete cap regardless of that
+          // default.
+          max_in_flight: 1,
           routines: [{ ...input.routine, projectName: "alpha" }]
         }
       ]

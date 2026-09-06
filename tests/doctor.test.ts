@@ -1990,6 +1990,36 @@ describe("doctor", () => {
       expect(report.ok).toBe(true);
     });
 
+    it("inherits the global cap as the effective per-project default when a project omits max_in_flight", async () => {
+      // ADR-2026-09-06-1010: an omitted per-project max_in_flight now
+      // resolves to the global cap instead of a hardcoded 1.
+      const report = await runProviderCapacityDoctor({
+        globalLines: ["global:", "  max_in_flight: 8"],
+        hostParallelism: 24,
+        projectLines: []
+      });
+
+      const warning = report.warnings.find((entry) =>
+        entry.includes("provider build memory estimate")
+      );
+      expect(warning).toContain("symphonika max_in_flight=8");
+      expect(warning).toContain("effective max_in_flight=8");
+    });
+
+    it("skips the estimate when no cap is configured anywhere and the effective cap is unbounded", async () => {
+      const report = await runProviderCapacityDoctor({
+        globalLines: [],
+        hostParallelism: 24,
+        projectLines: []
+      });
+
+      expect(
+        report.warnings.some((entry) =>
+          entry.includes("provider build memory estimate")
+        )
+      ).toBe(false);
+    });
+
     it("does not warn when the build memory estimate exceeds MemoryMax by less than the 10% margin", async () => {
       const report = await runProviderCapacityDoctor({
         hostParallelism: 22
@@ -2582,15 +2612,17 @@ async function runDoctorCommand(
 async function runProviderCapacityDoctor(input: {
   dropInMemoryMax?: string;
   dropInBom?: boolean;
+  globalLines?: string[];
   hostParallelism: number;
+  projectLines?: string[];
 }) {
   const root = await makeTempRoot();
   const configPath = path.join(root, "symphonika.yml");
   const unitDir = path.join(root, ".config", "systemd", "user");
   const unitBin = path.join(root, "bin");
   await writeValidConfig(configPath, {
-    globalLines: ["global:", "  max_in_flight: 8"],
-    projectLines: ["    max_in_flight: 1"]
+    globalLines: input.globalLines ?? ["global:", "  max_in_flight: 8"],
+    projectLines: input.projectLines ?? ["    max_in_flight: 1"]
   });
   await writeFile(
     path.join(root, "WORKFLOW.md"),

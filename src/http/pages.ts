@@ -131,7 +131,7 @@ export type RegisterPagesOptions = {
     global: { inFlight: number; maxInFlight: number | null };
     perProject: Array<{
       inFlight: number;
-      maxInFlight: number;
+      maxInFlight: number | null;
       projectName: string;
     }>;
   };
@@ -1537,6 +1537,9 @@ export function registerPages(options: RegisterPagesOptions): void {
     const projectCapacity = concurrency?.perProject.find(
       (entry) => entry.projectName === name
     );
+    // Normalize the API's "unbounded" sentinel (`null`) to the render
+    // helpers' own `undefined` convention once, here — not at each call site.
+    const projectMaxInFlight = projectCapacity?.maxInFlight ?? undefined;
     const nextPollAtMonotonicMs = options.getNextPollAtMonotonic?.();
     const nextPollAtMs =
       nextPollAtMonotonicMs === undefined
@@ -1570,7 +1573,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           globalCapacity: concurrency?.global,
           inFlight,
           issueNumber,
-          maxInFlight: projectCapacity?.maxInFlight,
+          maxInFlight: projectMaxInFlight,
           nowMs,
           projectName: name,
           run: latestRunByIssue.get(issueNumber),
@@ -1588,7 +1591,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           name,
           projectState,
           inFlight,
-          projectCapacity?.maxInFlight,
+          projectMaxInFlight,
           concurrency?.global,
           nextPollAtMs,
           options.startedAtMs,

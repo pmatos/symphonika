@@ -883,22 +883,6 @@ export class RunController {
     pollStatus: IssuePollStatus,
     options: DispatchFreshOptions = {}
   ): Promise<DispatchFreshResult> {
-    const pressure = await this.refreshHostPressure();
-    if (!pressure.admitted) {
-      this.logger?.info(
-        {
-          observed: pressure.observed,
-          resource: pressure.resource,
-          threshold: pressure.threshold
-        },
-        "symphonika dispatch deferred: host pressure"
-      );
-      return {
-        claims: [{ dispatched: false, reason: pressure.reason }],
-        lifecycles: []
-      };
-    }
-
     const candidates = pollStatus.candidateIssues.slice();
     const projects = await this.projectsLoader();
     const providersConfig = await this.providersLoader();
@@ -908,6 +892,30 @@ export class RunController {
     const lifecycles: Array<Promise<void>> = [];
 
     for (;;) {
+      // Re-checked every iteration, not just once before the loop: a
+      // multi-pick tick can keep looping long enough for the host to become
+      // pressured mid-tick, and without this check every remaining candidate
+      // across every Project would still get picked, workflow-loaded, and
+      // mutex-acquired before being refused at claimAndPersistRun's own
+      // pressure re-check -- exactly the per-candidate GitHub/DB churn ADR
+      // 0088 exists to avoid. The gate's own TTL keeps a re-check on every
+      // iteration cheap (at most one /proc read per configured interval).
+      const pressure = await this.refreshHostPressure();
+      if (!pressure.admitted) {
+        this.logger?.info(
+          {
+            observed: pressure.observed,
+            resource: pressure.resource,
+            threshold: pressure.threshold
+          },
+          "symphonika dispatch deferred: host pressure"
+        );
+        if (claims.length === 0) {
+          claims.push({ dispatched: false, reason: pressure.reason });
+        }
+        break;
+      }
+
       const remaining = candidates.filter(
         (candidate) =>
           !attempted.has(dispatchCandidateKey(candidate)) &&
@@ -915,6 +923,17 @@ export class RunController {
       );
       const target = await this.pickTargetFromCandidates(remaining, projects);
       if (target === undefined) {
+        // Mirrors dispatchOneFresh's own fallback reason so an idle tick
+        // (no dispatchable candidate at all -- the common case) still
+        // produces the one debug-logged claims entry daemon.ts's callers
+        // have always relied on, instead of an empty batch that logs
+        // nothing for a tick where nothing was dispatchable.
+        if (claims.length === 0) {
+          claims.push({
+            dispatched: false,
+            reason: "no eligible issue has a registered provider"
+          });
+        }
         break;
       }
       attempted.add(dispatchCandidateKey(target.candidate));
@@ -979,9 +998,12 @@ export class RunController {
     // Routine Hosts never produce polling candidates, so a selected target
     // is always a Dispatch Project. The guard is unreachable in practice but
     // narrows target.project for the tracker/workflow reads below. See ADR 0062.
+    // excludeProject: true because project.kind is fixed for the whole tick --
+    // every other candidate for this Project would hit the identical branch.
     if (!isDispatchProject(target.project)) {
       return {
         kind: "terminal",
+        excludeProject: true,
         result: {
           dispatched: false,
           reason: `project ${target.project.name} is not a dispatch project`
@@ -1001,8 +1023,14 @@ export class RunController {
 
     const token = resolveTokenFromEnv(target.project.tracker.token, this.env);
     if (token === undefined) {
+      // excludeProject: true: an unresolvable tracker token is a per-Project
+      // config/env property, invariant for the rest of this tick -- same
+      // reasoning as the provider_command_missing/provider_not_registered
+      // exclusions below, so every remaining candidate for this Project
+      // would otherwise hit the identical branch one pick at a time.
       return {
         kind: "terminal",
+        excludeProject: true,
         result: {
           dispatched: false,
           reason: `projects.${target.project.name}.tracker.token is not available`

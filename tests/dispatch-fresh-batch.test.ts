@@ -7,6 +7,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IssuePollStatus, IssueSnapshot } from "../src/issue-polling.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import {
+  createHostPressureGate,
+  type HostPressureGate,
+  type HostPressurePolicy,
+  type HostPressureSample
+} from "../src/lifecycle/host-pressure.js";
+import {
   RunController,
   type RunControllerProjectConfig,
   type RunControllerProvidersConfig
@@ -79,6 +85,7 @@ async function createHarness(
     globalConcurrencyLoader?: () => Promise<{
       maxInFlight: number | undefined;
     }>;
+    hostPressureGate?: HostPressureGate;
     // Empty map simulates every project's provider having no configured
     // command (provider_command_missing), without needing a project whose
     // provider isn't registered in agentProviders -- pickTargetFromCandidates
@@ -122,6 +129,9 @@ async function createHarness(
     ...(options.globalConcurrencyLoader === undefined
       ? {}
       : { globalConcurrencyLoader: options.globalConcurrencyLoader }),
+    ...(options.hostPressureGate === undefined
+      ? {}
+      : { hostPressureGate: options.hostPressureGate }),
     lifecyclePolicy: {
       continuation: { cap: 0, delayMs: 0 },
       retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
@@ -188,6 +198,30 @@ function pollStatus(
     filteredIssues: [],
     projects: []
   };
+}
+
+// sampleIntervalMs: 0 means every refreshHostPressure() call re-samples
+// (no TTL caching), so the loop's per-iteration re-check actually observes
+// readPressure's next queued value instead of a cached admitted verdict.
+const ALWAYS_SAMPLE_POLICY: HostPressurePolicy = {
+  enabled: true,
+  sampleIntervalMs: 0,
+  thresholds: { io: undefined, memory: 10 }
+};
+
+// Admits the first `admitCount` samples, then reports stalled memory
+// pressure forever after -- lets a test simulate the host becoming
+// pressured partway through a multi-pick dispatchFresh call.
+function gateAdmittingThenStalling(admitCount: number): HostPressureGate {
+  let sampleCount = 0;
+  return createHostPressureGate({
+    policy: () => ALWAYS_SAMPLE_POLICY,
+    readPressure: (): Promise<HostPressureSample> => {
+      sampleCount += 1;
+      const memory = sampleCount <= admitCount ? 0 : 42;
+      return Promise.resolve({ fullAvg60: { memory }, unavailable: {} });
+    }
+  });
 }
 
 function succeedingProvider(): AgentProvider {
@@ -332,6 +366,37 @@ describe("RunController.dispatchFresh", () => {
     );
     expect(touchedIssues).toEqual(new Set([1]));
     expect(harness.runStore.listRuns({})).toHaveLength(1);
+  });
+
+  it("re-checks host pressure on every iteration and stops claiming once it trips mid-loop", async () => {
+    // With sampleIntervalMs: 0 every refreshHostPressure() call re-samples,
+    // including claimAndPersistRun's own in-mutex re-check -- so alpha's
+    // single successful claim consumes 2 samples (the loop's own check, then
+    // the mutex-internal one) before the loop's NEXT iteration (beta's) sees
+    // the 3rd sample, now stalled. If dispatchFresh only checked pressure
+    // once, up front, it would keep claiming beta and gamma regardless.
+    const harness = await createHarness(
+      [{ name: "alpha" }, { name: "beta" }, { name: "gamma" }],
+      { hostPressureGate: gateAdmittingThenStalling(2) }
+    );
+
+    const batch = await harness.controller.dispatchFresh(
+      pollStatus([
+        { issueNumber: 1, project: "alpha" },
+        { issueNumber: 2, project: "beta" },
+        { issueNumber: 3, project: "gamma" }
+      ])
+    );
+
+    expect(batch.claims).toEqual([{ dispatched: true, runId: "run-1" }]);
+    expect(batch.lifecycles).toHaveLength(1);
+    const touchedIssues = new Set(
+      harness.addLabelsToIssue.mock.calls.map(
+        (call: unknown[]) => (call[0] as { issueNumber: number }).issueNumber
+      )
+    );
+    expect(touchedIssues).toEqual(new Set([1]));
+    await Promise.all(batch.lifecycles);
   });
 
   it("preserves weighted round-robin fairness across a multi-pick call", async () => {

@@ -142,7 +142,8 @@ import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
 import {
   buildCapReachedReason,
   buildMergePrRefusedReason,
-  buildNoPullRequestTrackedReason
+  buildNoPullRequestTrackedReason,
+  buildPullRequestDiscoveryExhaustedReason
 } from "./terminal-reason.js";
 
 export type WorkflowSnapshot = {
@@ -1483,15 +1484,44 @@ export class RunController {
   // looking for one.
   async releaseIssueClaim(input: {
     issueNumber: number;
-    reason:
-      | "pull-request-closed"
-      | "pull-request-discovery-exhausted"
-      | "pull-request-merged";
+    reason: "pull-request-closed" | "pull-request-merged";
     repository: GitHubIssueRepositoryInput;
   }): Promise<void> {
     await this.claimLabels.release({
       issueNumber: input.issueNumber,
       phase: input.reason,
+      repository: input.repository
+    });
+  }
+
+  // Mirrors terminalizeBlocked's shape for the other side of the same gap
+  // (issue #713, following on from ADR 2026-09-05-1205's wait/merge_pr
+  // bound): a succeeded run whose branch never got a discoverable pull
+  // request within MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS. Unlike a wait/merge_pr
+  // park, this run already reached its own terminal state when it succeeded,
+  // so this does not call recordWorkflowTerminal -- doing so would clobber
+  // that run's real terminal_state_id. Only the RunState and the
+  // blocked-outcome labels change.
+  async terminalizePullRequestDiscoveryExhausted(input: {
+    attempts: number;
+    branchName: string;
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    const reason = buildPullRequestDiscoveryExhaustedReason(
+      input.branchName,
+      input.attempts
+    );
+    this.runStore.recordTerminalReason(input.runId, reason, "deterministic");
+    this.runStore.updateRunState(input.runId, "blocked");
+    await this.claimLabels.markBlocked({
+      issueNumber: input.issueNumber,
+      repository: input.repository
+    });
+    await this.claimLabels.release({
+      issueNumber: input.issueNumber,
+      phase: "pull-request-discovery-exhausted",
       repository: input.repository
     });
   }

@@ -30,6 +30,7 @@ import {
   pullRequestReadyToMerge,
   runPullRequestFollowup
 } from "../src/pull-request-followup.js";
+import { buildPullRequestDiscoveryExhaustedReason } from "../src/lifecycle/terminal-reason.js";
 import { interpretPullRequest } from "../src/pull-request-state.js";
 import {
   MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS,
@@ -1415,7 +1416,7 @@ describe("pull request follow-up", () => {
     }
   });
 
-  it("releases the claim once PR discovery exhausts its attempts without ever finding one", async () => {
+  it("escalates a succeeded run to blocked once PR discovery exhausts its attempts without ever finding one", async () => {
     const root = await makeTempRoot();
     await writeProject(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -1436,6 +1437,7 @@ describe("pull request follow-up", () => {
 
       const project = projectConfig();
       const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
         getPullRequestFollowupState: vi.fn(),
         listOpenIssues: vi.fn().mockResolvedValue([]),
         // No PR ever shows up for this branch.
@@ -1463,8 +1465,22 @@ describe("pull request follow-up", () => {
 
       // This one tick's own increment is the attempt that exhausts the
       // ceiling -- "no PR ever showed up" needs no protection, so the
-      // bounded fallback releases the claim here instead of leaving it
-      // dangling forever.
+      // bounded escalation terminalizes the run as blocked here instead of
+      // leaving it sitting at `state = 'succeeded'` forever, unmonitored.
+      const after = store.getRun("parent-run");
+      expect(after?.state).toBe("blocked");
+      expect(after?.terminalReason).toBe(
+        buildPullRequestDiscoveryExhaustedReason(
+          branchName,
+          MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS
+        )
+      );
+      expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:blocked"] })
+      );
+      expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ labels: ["sym:human-needed"] })
+      );
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
         expect.objectContaining({
           issueNumber: run?.issueNumber,

@@ -1404,7 +1404,31 @@ export async function startDaemon(
             // inside its narrowed claim section immediately before
             // sym:claimed.
             isClaimAllowed: (project) =>
-              isProjectPollable(project, env, Date.now())
+              isProjectPollable(project, env, Date.now()),
+            // Each successful claim's agent run is detached (issue #720):
+            // track it in inflightDispatches alongside this tick's own
+            // promise so shutdown drain (see the `stop` handler's
+            // Promise.allSettled below) waits for it too, not just for the
+            // claim loop itself. Registering here -- inside dispatchFresh's
+            // own loop, the instant each lifecycle promise is created --
+            // rather than from a loop over the returned `batch.lifecycles`
+            // afterward closes two races a post-return loop cannot: a
+            // shutdown beginning mid-loop would otherwise snapshot
+            // inflightDispatches before an already-created-but-unregistered
+            // lifecycle lands in it, and a lifecycle rejecting before the
+            // whole loop finishes would otherwise have no handler attached
+            // for the loop's remaining iterations.
+            onLifecycle: (lifecycle) => {
+              inflightDispatches.add(lifecycle);
+              void lifecycle
+                .catch((error: unknown) => {
+                  issuePollStatus.errors.push(errorMessage(error));
+                  logger.error({ err: error }, "symphonika dispatch failed");
+                })
+                .finally(() => {
+                  inflightDispatches.delete(lifecycle);
+                });
+            }
           }
         );
         for (const result of batch.claims) {
@@ -1414,23 +1438,6 @@ export async function startDaemon(
               "symphonika dispatch skipped"
             );
           }
-        }
-        // Each successful claim's agent run is detached (issue #720): track
-        // it in inflightDispatches alongside this tick's own promise so
-        // shutdown drain (see the `stop` handler's Promise.allSettled below)
-        // waits for it too, not just for the claim loop itself. Registered
-        // synchronously (no await between here and the loop start) so no
-        // gap exists for stop() to race ahead of a run kicked off mid-loop.
-        for (const lifecycle of batch.lifecycles) {
-          inflightDispatches.add(lifecycle);
-          void lifecycle
-            .catch((error: unknown) => {
-              issuePollStatus.errors.push(errorMessage(error));
-              logger.error({ err: error }, "symphonika dispatch failed");
-            })
-            .finally(() => {
-              inflightDispatches.delete(lifecycle);
-            });
         }
       } catch (error) {
         issuePollStatus.errors.push(errorMessage(error));

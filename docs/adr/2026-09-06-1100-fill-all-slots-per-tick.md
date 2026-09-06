@@ -43,8 +43,9 @@ A new method, `RunController.dispatchFresh(pollStatus, options)`, loops:
 2. If it returns `undefined` (global cap reached, or no Project has a dispatchable candidate this
    tick), stop — the loop's natural termination.
 3. Otherwise call `resolveAndClaim`. On success, the candidate's `runAttemptLifecycle` is kicked off
-   **without awaiting it** — the promise is collected into a `lifecycles` array the caller must
-   track, but the loop itself moves straight to the next `pickTargetFromCandidates` call.
+   **without awaiting it** — the promise is both collected into a `lifecycles` array for the
+   caller's convenience and, synchronously in the same step, handed to an `onLifecycle` callback
+   (see below) — but the loop itself moves straight to the next `pickTargetFromCandidates` call.
 4. On `RegistryShutdownError`, stop immediately (the daemon is shutting down; nothing further should
    even be attempted). On any other outcome (claimed, or any of the existing claim-boundary
    rejections: `CapBreachedError`, `FileOverlapDetectedError`, `IssueReservedError`,
@@ -76,15 +77,24 @@ drops every remaining candidate for that Project from `attempted` (not just the 
 
 ### `daemon.ts` wiring and shutdown drain
 
-`launchWork` now calls `dispatchFresh` instead of `dispatchOneFresh`, logs each terminal
-(`dispatched: false`) claim the same way it logged the single result before, and — synchronously,
-with no intervening `await` — registers every returned `lifecycles` promise into the existing
-`inflightDispatches` Set (the same Set the outer per-tick promise already occupies), with its own
-`.catch()`/`.finally()` pair mirroring the existing pattern used for API-triggered dispatch
-acceptance. This matters for ADR 0052's shutdown-drain guarantee: `stop()`'s
-`await Promise.allSettled(Array.from(inflightDispatches))` must wait for every detached run kicked
-off mid-loop, not just for the claim loop's own (now much shorter) promise — otherwise a shutdown
-could close the RunStore/HTTP server while a claimed-but-still-running provider attempt is mid-write.
+`launchWork` now calls `dispatchFresh` instead of `dispatchOneFresh`, logging each terminal
+(`dispatched: false`) claim the same way it logged the single result before.
+
+Registering a detached lifecycle for shutdown drain cannot wait until `dispatchFresh` returns and
+the caller loops over the returned `lifecycles` array: `stop()`'s
+`await Promise.allSettled(Array.from(inflightDispatches))` snapshots the Set at call time, and a
+multi-pick loop can still be awaiting a later pick's claim (real GitHub-label I/O) when shutdown
+begins — a lifecycle already created by an earlier pick but not yet registered would be invisible
+to that snapshot, and the same gap leaves an earlier lifecycle's rejection with no handler attached
+across the loop's remaining picks, wide enough for Node to report it as unhandled. `dispatchFresh`
+therefore takes an `onLifecycle` callback (`DispatchFreshOptions`) invoked synchronously — no
+`await` in between — the instant each successful claim's `runAttemptLifecycle` promise is created,
+before the loop's next pick even starts. `daemon.ts` registers into `inflightDispatches` and
+attaches its `.catch()`/`.finally()` pair from inside that callback, mirroring the existing pattern
+used for API-triggered dispatch acceptance. This closes the gap regardless of how long any
+individual claim takes, and regardless of whether `dispatchFresh` itself later returns normally or
+rejects (an uncaught error from one pick no longer drops the callback registration already done for
+every earlier successful pick in the same call).
 
 ## Consequences
 

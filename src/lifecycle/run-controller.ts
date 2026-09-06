@@ -330,10 +330,24 @@ export type DispatchOneFreshOptions = {
   isClaimAllowed?: (project: DispatchProjectConfig) => boolean;
 };
 
+export type DispatchFreshOptions = DispatchOneFreshOptions & {
+  // Invoked synchronously, in the same tick the lifecycle promise is
+  // created (no await in between) -- NOT after dispatchFresh returns.
+  // Callers needing shutdown-drain tracking (daemon.ts's inflightDispatches)
+  // or rejection handling must register from here: attaching after
+  // dispatchFresh resolves would miss a lifecycle whose shutdown-drain
+  // window starts mid-loop, and would leave every earlier lifecycle
+  // unhandled for the loop's remaining awaits, wide enough for Node to
+  // report it as an unhandled rejection if one rejects before this returns.
+  // See ADR 2026-09-06-1100.
+  onLifecycle?: (lifecycle: Promise<void>) => void;
+};
+
 // One dispatchFresh() call's worth of claim attempts. `lifecycles` holds the
-// detached runAttemptLifecycle promise for each successful claim -- callers
-// must track these (e.g. daemon.ts's inflightDispatches) for shutdown drain,
-// since dispatchFresh itself does not await them. See ADR 0052.
+// detached runAttemptLifecycle promise for each successful claim, for
+// convenience (e.g. tests awaiting them all) -- callers needing shutdown
+// drain or rejection handling should use `onLifecycle` instead, since these
+// are only available once dispatchFresh has already returned.
 export type DispatchFreshResult = {
   claims: DispatchOneFreshResult[];
   lifecycles: Array<Promise<void>>;
@@ -867,7 +881,7 @@ export class RunController {
   // naturally bounds.
   async dispatchFresh(
     pollStatus: IssuePollStatus,
-    options: DispatchOneFreshOptions = {}
+    options: DispatchFreshOptions = {}
   ): Promise<DispatchFreshResult> {
     const pressure = await this.refreshHostPressure();
     if (!pressure.admitted) {
@@ -919,7 +933,14 @@ export class RunController {
           continue;
         }
         claims.push({ dispatched: true, runId: outcome.runId });
-        lifecycles.push(this.runAttemptLifecycle(outcome.lifecycleInput));
+        const lifecycle = this.runAttemptLifecycle(outcome.lifecycleInput);
+        // No await between creation and this callback: a caller's
+        // onLifecycle registers the promise (e.g. into daemon.ts's
+        // inflightDispatches) before the loop's next await gives shutdown
+        // a chance to run, and before any rejection could go unhandled
+        // across the loop's remaining picks. See DispatchFreshOptions.
+        options.onLifecycle?.(lifecycle);
+        lifecycles.push(lifecycle);
       } catch (error) {
         if (error instanceof RegistryShutdownError) {
           claims.push({ dispatched: false, reason: error.message });

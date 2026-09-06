@@ -75,6 +75,7 @@ function projectConfig(
 async function createHarness(
   specs: ProjectSpec[],
   options: {
+    createRunId?: () => string;
     globalConcurrencyLoader?: () => Promise<{
       maxInFlight: number | undefined;
     }>;
@@ -109,7 +110,7 @@ async function createHarness(
     activeRuns,
     agentProviders: { codex: succeedingProvider() },
     configDir: root,
-    createRunId: () => `run-${++runCounter}`,
+    createRunId: options.createRunId ?? (() => `run-${++runCounter}`),
     emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret" },
     githubIssuesApi: {
@@ -224,6 +225,44 @@ describe("RunController.dispatchFresh", () => {
     expect(batch.claims.every((claim) => claim.dispatched === true)).toBe(true);
     expect(batch.lifecycles).toHaveLength(3);
     await Promise.all(batch.lifecycles);
+  });
+
+  it("registers each lifecycle via onLifecycle as it is created, even when a later pick throws", async () => {
+    // createRunId throws on its 3rd call (gamma's pick, given equal weights
+    // and insertion-order tie-breaking) -- an error resolveAndClaim does not
+    // catch, so it propagates out of dispatchFresh entirely. A caller that
+    // only reads the returned `lifecycles` array (as daemon.ts originally
+    // did, registering into inflightDispatches after dispatchFresh returned)
+    // would never see alpha's and beta's lifecycles in that case. onLifecycle
+    // must have already registered them before the throw.
+    let runCounter = 0;
+    const harness = await createHarness(
+      [{ name: "alpha" }, { name: "beta" }, { name: "gamma" }],
+      {
+        createRunId: () => {
+          runCounter += 1;
+          if (runCounter === 3) {
+            throw new Error("boom-3");
+          }
+          return `run-${runCounter}`;
+        }
+      }
+    );
+    const registered: Array<Promise<void>> = [];
+
+    await expect(
+      harness.controller.dispatchFresh(
+        pollStatus([
+          { issueNumber: 1, project: "alpha" },
+          { issueNumber: 2, project: "beta" },
+          { issueNumber: 3, project: "gamma" }
+        ]),
+        { onLifecycle: (lifecycle) => registered.push(lifecycle) }
+      )
+    ).rejects.toThrow("boom-3");
+
+    expect(registered).toHaveLength(2);
+    await Promise.all(registered);
   });
 
   it("stops claiming once the global cap is reached, leaving later candidates untouched", async () => {

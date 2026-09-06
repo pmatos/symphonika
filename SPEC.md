@@ -2401,7 +2401,8 @@ walk always advances (or blocks) immediately afterward. See ADR-2026-09-05-0807.
 
 DSL shape:
 
-- `label_issue` requires a non-empty `labels` list (the labels to add).
+- `label_issue` requires a non-empty `labels` list and an optional `method` (`add` or `remove`,
+  defaulting to `add`).
 - `comment` requires a non-empty `body` (the comment text to post).
 - `close_issue` requires nothing extra. An optional `body` is posted as a comment before the issue
   is closed, and an optional `state_reason` (`completed` or `not_planned`) selects GitHub's close
@@ -2419,8 +2420,9 @@ Lifecycle:
    `state = "waiting"` and `current_state_id` set to the state id, identical to a wait or merge_pr
    parking.
 2. On the next re-evaluation (`reconcileWaitingRuns` tick or `/poll-now`), `reEvaluateWaitingRun`
-   performs the state's GitHub call(s) — `addLabelsToIssue` for `label_issue`, `addIssueComment` for
-   `comment`, and for `close_issue` an optional `addIssueComment` followed by `closeIssue` — then
+   performs the state's GitHub call(s) — `addLabelsToIssue` or `removeLabelsFromIssue` for
+   `label_issue`, selected by its `method`, `addIssueComment` for `comment`, and for `close_issue` an
+   optional `addIssueComment` followed by `closeIssue` — then
    reports back a constant, empty signal map. Each call is best-effort: a tracker without the method,
    or a call that throws, is logged and the walk still advances, the same way `ClaimLabelWriter`'s own
    label writes are best-effort. There is nothing to retry an issue-content mutation against on a

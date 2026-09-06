@@ -1109,6 +1109,88 @@ describe("merge_pr chained into issue content actions", () => {
     }
   });
 
+  it("merge_pr -> label_issue (method: remove): removes the label from the issue, then reaches terminal success", async () => {
+    const root = await makeTempRoot();
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: merge_and_unlabel",
+        "  initial: merging",
+        "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "      transitions:",
+        "        - to: unlabeling",
+        "          when:",
+        "            pr_merged: true",
+        "    unlabeling:",
+        "      action:",
+        "        kind: label_issue",
+        "        labels:",
+        "          - agent-ready",
+        "        method: remove",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      seedWaitingMergePrRun(store, issue);
+      store.trackPullRequest({
+        branchName: "sym/symphonika/97-merge-pr-acceptance-fixture",
+        headSha: "abc123",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      let chainCounter = 0;
+      const controller = buildController({
+        createRunId: () => `chain-unlabel-${++chainCounter}`,
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("merge-pr-run");
+      expect(githubIssuesApi.mergePullRequest).toHaveBeenCalled();
+
+      await controller.reEvaluateWaitingRun("chain-unlabel-1");
+      expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith({
+        issueNumber: 97,
+        labels: ["agent-ready"],
+        owner: "pmatos",
+        repo: "symphonika",
+        token: "secret-token"
+      });
+
+      const after = store.getRun("chain-unlabel-1");
+      expect(after?.state).toBe("succeeded");
+      expect(after?.terminalStateId).toBe("done");
+    } finally {
+      store.close();
+    }
+  });
+
   it("comment: records a failure activity message (not a false success claim) when the tracker call throws", async () => {
     const root = await makeTempRoot();
     await writeFile(

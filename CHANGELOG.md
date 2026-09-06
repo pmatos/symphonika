@@ -1,5 +1,20 @@
 # Changelog
 
+# [0.5.0](https://github.com/pmatos/symphonika/compare/v0.4.0...v0.5.0) (2026-09-06)
+
+
+### Bug Fixes
+
+* escalate discoverPullRequests to blocked after discovery attempts exhaust ([#717](https://github.com/pmatos/symphonika/issues/717)) ([02b9c80](https://github.com/pmatos/symphonika/commit/02b9c80fe48a58b8edb709fafcbb027693d8d0ec))
+
+
+### Features
+
+* close duplicate/already-fixed issues from WORKFLOW.md's implement stage ([#718](https://github.com/pmatos/symphonika/issues/718)) ([6bb521f](https://github.com/pmatos/symphonika/commit/6bb521f7e7d4a34416e4ab40da9410f4f6ee5290))
+* default project max_in_flight to global.max_in_flight instead of 1 ([#721](https://github.com/pmatos/symphonika/issues/721)) ([25f7184](https://github.com/pmatos/symphonika/commit/25f718468d577fa5689a49fdd17fdaa07c7109a0))
+* fill all available slots per tick instead of one fresh dispatch per tick ([#722](https://github.com/pmatos/symphonika/issues/722)) ([2c205f1](https://github.com/pmatos/symphonika/commit/2c205f13f79f67a49f9d661f35353e15d0afb38f))
+* support method: add/remove on label_issue workflow action ([#716](https://github.com/pmatos/symphonika/issues/716)) ([e0f1154](https://github.com/pmatos/symphonika/commit/e0f115461332e3cf4b427bb1110552c4e2a2b0bc))
+
 # [0.4.0](https://github.com/pmatos/symphonika/compare/v0.3.0...v0.4.0) (2026-09-06)
 
 

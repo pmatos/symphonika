@@ -3388,7 +3388,7 @@ export class RunController {
       }
       // Per-project concurrency cap. An omitted max_in_flight falls back to
       // the global cap (or is unbounded if that is also omitted). See
-      // See ADR-2026-09-06-1010.
+      // ADR-2026-09-06-1010.
       if (
         isProjectCapReached(
           project.max_in_flight,

@@ -219,7 +219,7 @@ export type HttpAppOptions = {
     global: { inFlight: number; maxInFlight: number | null };
     perProject: Array<{
       inFlight: number;
-      maxInFlight: number;
+      maxInFlight: number | null;
       projectName: string;
     }>;
   };

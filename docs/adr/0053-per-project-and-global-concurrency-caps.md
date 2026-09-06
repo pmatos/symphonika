@@ -1,5 +1,8 @@
 # Per-Project and global concurrency caps
 
+Status: Accepted; per-Project default (omitted `max_in_flight` → 1) superseded by
+ADR-2026-09-06-1010, which defaults it to the resolved `global.max_in_flight` instead.
+
 Slice 1 (ADR 0052) narrowed `dispatchMutex` so multiple provider runs can execute concurrently in
 the daemon. With no further controls in place, the only limit on concurrent runs would be the
 number of eligible Project Issues — which is rarely what an operator wants. Bounded concurrency is

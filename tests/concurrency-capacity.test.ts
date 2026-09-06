@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  DEFAULT_PROJECT_MAX_IN_FLIGHT,
   evaluateConcurrencyCapacity,
   isGlobalCapReached,
   isProjectCapReached,
@@ -9,14 +8,18 @@ import {
 } from "../src/lifecycle/concurrency-capacity.js";
 
 describe("resolveProjectMaxInFlight", () => {
-  it("defaults an omitted per-project cap to the serial default of 1", () => {
-    // ADR 0053: omitting max_in_flight preserves legacy serial behavior.
-    expect(DEFAULT_PROJECT_MAX_IN_FLIGHT).toBe(1);
-    expect(resolveProjectMaxInFlight(undefined)).toBe(1);
+  it("passes a configured per-project cap through unchanged, even with a global cap set", () => {
+    expect(resolveProjectMaxInFlight(4, 16)).toBe(4);
   });
 
-  it("passes a configured per-project cap through unchanged", () => {
-    expect(resolveProjectMaxInFlight(4)).toBe(4);
+  it("falls back to the resolved global cap when the project cap is omitted", () => {
+    // ADR-2026-09-06-1010: an omitted per-project cap now inherits the
+    // fleet-wide cap instead of hardcoding a serial default of 1.
+    expect(resolveProjectMaxInFlight(undefined, 16)).toBe(16);
+  });
+
+  it("is unbounded when both the project and global caps are omitted", () => {
+    expect(resolveProjectMaxInFlight(undefined, undefined)).toBeUndefined();
   });
 });
 
@@ -39,15 +42,20 @@ describe("isGlobalCapReached", () => {
 });
 
 describe("isProjectCapReached", () => {
-  it("uses the serial default when the cap is omitted", () => {
-    expect(isProjectCapReached(undefined, 0)).toBe(false);
-    expect(isProjectCapReached(undefined, 1)).toBe(true);
+  it("falls back to the global cap when the project cap is omitted", () => {
+    expect(isProjectCapReached(undefined, 15, 16)).toBe(false);
+    expect(isProjectCapReached(undefined, 16, 16)).toBe(true);
   });
 
-  it("is reached at or above the configured cap", () => {
-    expect(isProjectCapReached(2, 1)).toBe(false);
-    expect(isProjectCapReached(2, 2)).toBe(true);
-    expect(isProjectCapReached(2, 3)).toBe(true);
+  it("is never reached when both project and global caps are omitted", () => {
+    expect(isProjectCapReached(undefined, 0, undefined)).toBe(false);
+    expect(isProjectCapReached(undefined, 1_000_000, undefined)).toBe(false);
+  });
+
+  it("is reached at or above the configured cap regardless of the global cap", () => {
+    expect(isProjectCapReached(2, 1, undefined)).toBe(false);
+    expect(isProjectCapReached(2, 2, undefined)).toBe(true);
+    expect(isProjectCapReached(2, 3, 16)).toBe(true);
   });
 });
 
@@ -84,16 +92,16 @@ describe("evaluateConcurrencyCapacity", () => {
     });
   });
 
-  it("reports the default project cap in the reason when omitted", () => {
+  it("reports the resolved global cap in the reason when the project cap is omitted", () => {
     expect(
       evaluateConcurrencyCapacity({
         ...base,
         configuredProjectMax: undefined,
-        projectInFlight: 1
+        projectInFlight: 5
       })
     ).toEqual({
       admitted: false,
-      reason: "project alpha max_in_flight (1) reached",
+      reason: "project alpha max_in_flight (5) reached",
       scope: "project"
     });
   });
@@ -114,9 +122,20 @@ describe("evaluateConcurrencyCapacity", () => {
     });
   });
 
-  it("admits when the global cap is undefined and the project has headroom", () => {
+  it("admits when the global cap is undefined and the project has an explicit cap with headroom", () => {
     expect(
       evaluateConcurrencyCapacity({ ...base, globalMax: undefined })
+    ).toEqual({ admitted: true });
+  });
+
+  it("admits an unbounded project regardless of in-flight count when both caps are omitted", () => {
+    expect(
+      evaluateConcurrencyCapacity({
+        ...base,
+        configuredProjectMax: undefined,
+        globalMax: undefined,
+        projectInFlight: 1_000_000
+      })
     ).toEqual({ admitted: true });
   });
 });

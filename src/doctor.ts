@@ -886,21 +886,29 @@ async function checkProviderBuildMemoryCapacity(
     return [];
   }
 
+  const globalMaxInFlight = config.global?.max_in_flight;
   const projectCaps = config.projects
     .filter((project) => project.disabled !== true)
     .map((project) => ({
-      maxInFlight: resolveProjectMaxInFlight(project.max_in_flight),
+      maxInFlight:
+        resolveProjectMaxInFlight(project.max_in_flight, globalMaxInFlight) ??
+        Number.POSITIVE_INFINITY,
       name: project.name
     }));
   const projectCapTotal = projectCaps.reduce(
     (total, project) => total + project.maxInFlight,
     0
   );
-  const globalMaxInFlight = config.global?.max_in_flight;
   const effectiveMaxInFlight = Math.min(
     globalMaxInFlight ?? Number.POSITIVE_INFINITY,
     projectCapTotal
   );
+  // An unbounded effective cap (no global cap and at least one Project with
+  // no override, ADR-2026-09-06-1010) has no finite byte estimate to compare
+  // against MemoryMax — skip rather than emit an always-true warning.
+  if (!Number.isFinite(effectiveMaxInFlight)) {
+    return [];
+  }
 
   const estimatedBytes =
     hostParallelism * PEAK_COMPILER_RSS_BYTES * effectiveMaxInFlight;

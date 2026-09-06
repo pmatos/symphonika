@@ -131,7 +131,7 @@ export type RegisterPagesOptions = {
     global: { inFlight: number; maxInFlight: number | null };
     perProject: Array<{
       inFlight: number;
-      maxInFlight: number;
+      maxInFlight: number | null;
       projectName: string;
     }>;
   };
@@ -1570,7 +1570,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           globalCapacity: concurrency?.global,
           inFlight,
           issueNumber,
-          maxInFlight: projectCapacity?.maxInFlight,
+          maxInFlight: projectCapacity?.maxInFlight ?? undefined,
           nowMs,
           projectName: name,
           run: latestRunByIssue.get(issueNumber),
@@ -1588,7 +1588,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           name,
           projectState,
           inFlight,
-          projectCapacity?.maxInFlight,
+          projectCapacity?.maxInFlight ?? undefined,
           concurrency?.global,
           nextPollAtMs,
           options.startedAtMs,

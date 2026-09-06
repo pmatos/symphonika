@@ -77,4 +77,7 @@ notifies under the default "failures" email policy like any other blocked outcom
   determines "no PR needed, duplicate" would resolve that specific case immediately instead of
   waiting out this bound, but touches a prompt template rolled out separately to each fan-out target
   (jsse/vow/s11/forseti) — a materially different scope/risk than this orchestrator-only fix. Filed
-  as a follow-up issue.
+  as a follow-up issue. Done in issue #714: `WORKFLOW.md` step 3 now has the `implement` stage
+  `gh issue close` a duplicate/already-fixed issue directly, relying on this same repo's existing
+  `CANCEL_REASONS.CLOSED_ISSUE` reconciliation to pick it up. The rollout to fan-out targets is
+  still separate and unchanged by that issue.

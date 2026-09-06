@@ -77,4 +77,18 @@ notifies under the default "failures" email policy like any other blocked outcom
   determines "no PR needed, duplicate" would resolve that specific case immediately instead of
   waiting out this bound, but touches a prompt template rolled out separately to each fan-out target
   (jsse/vow/s11/forseti) — a materially different scope/risk than this orchestrator-only fix. Filed
-  as a follow-up issue.
+  as a follow-up issue. Done in issue #714: `WORKFLOW.md` step 3 now has the `implement` stage
+  `gh issue close` a duplicate/already-fixed issue directly instead of drifting into `wait_for_pr`.
+  In this repo's own `workflow.yml`, that path does not actually
+  resolve through `CANCEL_REASONS.CLOSED_ISSUE` reconciliation as first assumed here: with no
+  commit, `branch_ahead_of_base` is false, so `implement`'s pre-existing unconditional `to: failed`
+  transition fires immediately and terminalizes the run as `blocked` (`workflow_terminal_blocked`,
+  already in `NON_FAILURE_TERMINAL_REASONS`, so no failure email fires) before `reconcileActiveRuns`
+  ever runs against it — the run unregisters itself from `activeRuns` first. It still avoids the
+  ~1-hour park this ADR bounds, but `sym:blocked`/`sym:human-needed` land on the now-closed issue
+  with no automatic removal: `claim-label-writer.ts`'s terminal label path only strips those labels
+  for the `CLOSED_ISSUE`/`ELIGIBILITY_LOSS` cancel reasons, while its `blocked`-outcome branch
+  (`markBlocked`) applies them unconditionally with no closed-issue check. This predates #714 — any
+  run that terminalizes as `blocked` on an already-closed issue orphans labels the same way; #714
+  only makes the race more reachable. Not yet tracked as a follow-up. The rollout to fan-out targets
+  is still separate and unchanged by that issue.

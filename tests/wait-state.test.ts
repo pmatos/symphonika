@@ -2648,9 +2648,11 @@ describe("wait state lifecycle", () => {
         schedule
       });
 
-      // Defer the SECOND loadWorkflow (the one inside runAttemptLifecycle,
-      // after cancelBeforeAttach was captured; the first is dispatchOneFresh's
-      // initial-action probe) so the shutdown cancel lands mid-load.
+      // Defer the THIRD loadWorkflow (the one inside runAttemptLifecycle,
+      // after cancelBeforeAttach was captured) so the shutdown cancel lands
+      // mid-load. The first is pickProjectCandidate's wait-park guard
+      // (issue #731); the second is dispatchOneFresh's initial-action
+      // probe.
       const loadGate = createDeferred();
       const internals = controller as unknown as {
         loadWorkflow: (workflow: unknown) => Promise<unknown>;
@@ -2659,7 +2661,7 @@ describe("wait state lifecycle", () => {
       let loadCalls = 0;
       internals.loadWorkflow = async (workflow: unknown) => {
         loadCalls += 1;
-        if (loadCalls === 2) {
+        if (loadCalls === 3) {
           await loadGate.promise;
         }
         return originalLoad(workflow);
@@ -2678,7 +2680,7 @@ describe("wait state lifecycle", () => {
         projects: []
       });
       await vi.waitFor(() => {
-        expect(loadCalls).toBe(2);
+        expect(loadCalls).toBe(3);
       });
 
       // Mirror stop(): mark the row first, then supersede + cancel the

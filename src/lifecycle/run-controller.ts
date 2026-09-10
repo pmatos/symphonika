@@ -1684,9 +1684,23 @@ export class RunController {
     ) {
       return false;
     }
-    const waiting = this.runStore.findWaitingRunByIssue({
+    return this.isIssueParkedAtRawFsmState(loaded, {
       issueNumber: input.issueNumber,
       projectName: project.name
+    });
+  }
+
+  // Shared by isIssueOwnedByWorkflow and pickProjectCandidate's wait-park
+  // guard: once a raw_fsm workflow is loaded, both ask the same question for
+  // a given issue -- does a waiting row park it at a state that workflow
+  // still has?
+  private isIssueParkedAtRawFsmState(
+    loaded: LoadedWorkflow,
+    input: { issueNumber: number; projectName: string }
+  ): boolean {
+    const waiting = this.runStore.findWaitingRunByIssue({
+      issueNumber: input.issueNumber,
+      projectName: input.projectName
     });
     if (waiting === undefined || waiting.currentStateId === null) {
       return false;
@@ -1698,6 +1712,42 @@ export class RunController {
       findWorkflowState(loaded.expandedWorkflow, waiting.currentStateId) !==
       undefined
     );
+  }
+
+  // Loads the project's workflow once per pickProjectCandidate call instead
+  // of once per candidate -- isIssueOwnedByWorkflow's own per-issue load is
+  // fine for its one-issue-at-a-time PR-follow-up callers, but the fresh
+  // dispatch loop can evaluate many candidates from the same project bucket
+  // in one pick.
+  //
+  // Fails CLOSED on a load error (`"load_failed"`), unlike
+  // isIssueOwnedByWorkflow's fail-open: a transient read failure here would
+  // otherwise silently reopen the exact race this guards (issue #731), same
+  // as the reasoning dispatchReviewFollowup already applies to its own
+  // load failure (see the comment there, run-controller.ts:3484-3489).
+  // Fails OPEN (`undefined`, meaning "no wait park to guard against") only
+  // for a disabled project, a non-dispatch project, or a workflow that is
+  // not raw_fsm -- none of those can ever have a waiting row worth refusing
+  // a fresh claim over.
+  private async loadRawFsmWorkflowForWaitParkGuard(
+    project: RunControllerProjectConfig
+  ): Promise<LoadedWorkflow | "load_failed" | undefined> {
+    if (project.disabled === true || !isDispatchProject(project)) {
+      return undefined;
+    }
+    let loaded: LoadedWorkflow;
+    try {
+      loaded = await this.loadWorkflow(project.workflow);
+    } catch {
+      return "load_failed";
+    }
+    if (
+      loaded.errors.length > 0 ||
+      loaded.expandedWorkflow.source.kind !== "raw_fsm"
+    ) {
+      return undefined;
+    }
+    return loaded;
   }
 
   // A sibling to isIssueOwnedByWorkflow, for a case that predicate cannot
@@ -3694,6 +3744,16 @@ export class RunController {
     project: RunControllerProjectConfig
   ): Promise<{ issue: IssueSnapshot; project: string } | undefined> {
     const guarded = project.dispatch?.overlap_guard === true;
+    // Loaded once per bucket, not once per candidate: isIssueReserved only
+    // sees in-flight and scheduled work, not a durable `waiting` row -- the
+    // same gap #616 found in dispatchReviewFollowup, generalized by
+    // isIssueOwnedByWorkflow. A raw FSM run parked at a wait-kind state
+    // (e.g. wait_for_pr) has no entry in either in-memory registry between
+    // wait_park re-evaluations, so without this check a fresh claim can
+    // restart the workflow from `initial` while the parked run still owns
+    // the Issue. See issue #731.
+    const rawFsmWorkflow =
+      await this.loadRawFsmWorkflowForWaitParkGuard(project);
     for (const entry of bucket.slice().sort(compareCandidateIssues)) {
       if (this.activeRuns.isIssueReserved(entry.project, entry.issue.number)) {
         continue;
@@ -3704,6 +3764,22 @@ export class RunController {
           issueNumber: entry.issue.number,
           projectName: project.name,
           repository: project.tracker
+        })
+      ) {
+        continue;
+      }
+      // "load_failed" fails closed: cannot confirm no wait park owns this
+      // candidate, so every candidate in this project's bucket is skipped
+      // for this pick rather than risking the double-claim the load would
+      // otherwise have caught.
+      if (rawFsmWorkflow === "load_failed") {
+        continue;
+      }
+      if (
+        rawFsmWorkflow !== undefined &&
+        this.isIssueParkedAtRawFsmState(rawFsmWorkflow, {
+          issueNumber: entry.issue.number,
+          projectName: project.name
         })
       ) {
         continue;

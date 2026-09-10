@@ -1794,7 +1794,7 @@ async function makeTempRoot(): Promise<string> {
 }
 
 async function flushPromises(): Promise<void> {
-  for (let index = 0; index < 20; index += 1) {
+  for (let index = 0; index < 40; index += 1) {
     await Promise.resolve();
   }
 }

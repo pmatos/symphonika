@@ -72,7 +72,10 @@ _Avoid_: active issue unless referring to tracker state
 **Dispatch Eligibility**:
 The question "may this Dispatch Project freshly claim this Issue?", including open state, required
 labels, excluded labels, blocking operational labels, the newest Run's durable no-workspace-changes
-guard, and the Dependency Gate.
+guard, the Dependency Gate, and the wait-park guard: a raw FSM run already parked at a wait-kind
+state for this Issue refuses a fresh claim even when the label-based candidate list still surfaces
+the Issue, the same deference `isIssueOwnedByWorkflow` already gives PR Follow-up (issue #616),
+generalized to the fresh-dispatch path (issue #731).
 _Avoid_: continuation eligibility when referring to first claim selection
 
 **Dependency Gate**:
@@ -138,7 +141,9 @@ _Avoid_: outcome projection, label handling
 The orchestrator's exclusive claim on a Dispatch Project's Issue, whether currently in flight as an
 executing Run or scheduled for imminent dispatch as a delayed retry, Continuation, State Advance,
 or wait park. When Continuation Eligibility rejects label-controlled work and no active or scheduled
-step remains, the reservation ends and the orchestrator releases `sym:claimed`.
+step remains, the reservation ends and the orchestrator releases `sym:claimed`. A wait park's share of
+this concept is enforced by Dispatch Eligibility's parked-wait-park guard, not by the in-memory
+`isIssueReserved` check alone -- that check only sees in-flight and scheduled work (issue #731).
 _Avoid_: lock, in-flight when the claim spans both in-flight and scheduled work
 
 **Workspace**:

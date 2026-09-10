@@ -560,6 +560,75 @@ describe("RunController.dispatchFresh", () => {
     expect(batch.lifecycles).toEqual([]);
     expect(harness.runStore.listRuns({})).toHaveLength(0);
   });
+
+  it("issue #731: fails closed (skips the whole project) when the wait-park guard's workflow fails validation", async () => {
+    // Distinct from the load-error case above: loadWorkflow doesn't throw
+    // here, it successfully reads and parses the file but expansion reports
+    // validation errors (an edited wait state with uncovered PR-signal
+    // transitions). Without treating errors the same as a load throw, the
+    // guard falls open on `undefined` and reopens exactly the race issue
+    // #731 closes: a parked run's issue could still be claimed fresh.
+    const harness = await createHarness([
+      { name: "alpha", workflowPath: "raw-fsm.yml" }
+    ]);
+    await mkdir(path.join(harness.root, "prompts"), { recursive: true });
+    await writeFile(
+      path.join(harness.root, "prompts", "implement.md"),
+      "# Issue {{issue.number}}\n"
+    );
+    await writeFile(
+      path.join(harness.root, "raw-fsm.yml"),
+      [
+        "workflow:",
+        "  name: wait_park_regression",
+        "  initial: implement",
+        "  states:",
+        "    implement:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/implement.md",
+        "      transitions:",
+        "        - to: wait_for_pr",
+        "          when:",
+        "            provider_success: true",
+        "    wait_for_pr:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: merged",
+        "          when:",
+        "            pr_merged: true",
+        "    merged:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    seedWaitingRun(harness.runStore, {
+      currentStateId: "wait_for_pr",
+      issueNumber: 1,
+      projectName: "alpha",
+      runId: "parked-run"
+    });
+
+    const batch = await harness.controller.dispatchFresh(
+      pollStatus([{ issueNumber: 1, project: "alpha" }])
+    );
+
+    expect(batch.claims).toEqual([
+      {
+        dispatched: false,
+        reason: "no eligible issue has a registered provider"
+      }
+    ]);
+    expect(batch.lifecycles).toEqual([]);
+    expect(harness.runStore.listRuns({})).toHaveLength(1);
+    expect(harness.runStore.getRun("parked-run")).toMatchObject({
+      currentStateId: "wait_for_pr",
+      state: "waiting"
+    });
+  });
 });
 
 function seedWaitingRun(

@@ -629,6 +629,38 @@ describe("RunController.dispatchFresh", () => {
       state: "waiting"
     });
   });
+
+  it("issue #731: does not fail closed for a non-raw_fsm workflow that fails validation -- only raw_fsm has a wait park to guard", async () => {
+    // The wait-park guard exists to refuse a fresh claim only when a raw_fsm
+    // workflow might have a waiting row it can no longer confirm. A markdown
+    // compatibility-graph workflow has no FSM position to be "parked" at
+    // (see the comment on isIssueOwnedByWorkflow), so a validation error on
+    // one must not broaden the guard into refusing every fresh claim for the
+    // whole project -- that would be a different, out-of-scope behavior
+    // change (workflow contract validation belongs elsewhere, e.g. the
+    // daemon's config reload, not this guard).
+    const harness = await createHarness([{ name: "alpha" }]);
+    await writeFile(
+      path.join(harness.root, "WORKFLOW.md"),
+      ["---", "workflow contract front matter with no closing marker", ""].join(
+        "\n"
+      )
+    );
+
+    const batch = await harness.controller.dispatchFresh(
+      pollStatus([{ issueNumber: 1, project: "alpha" }])
+    );
+
+    // The picker claims the issue -- proving the fix under test: the guard
+    // does not fail closed here. The claimed attempt then fails downstream
+    // once startAttempt reloads the same broken workflow contract, which is
+    // the correct, unrelated failure mode for an actually-invalid workflow
+    // and out of scope for this guard.
+    expect(batch.claims).toEqual([{ dispatched: true, runId: "run-1" }]);
+    await expect(Promise.all(batch.lifecycles)).rejects.toThrow(
+      "missing a closing ---"
+    );
+  });
 });
 
 function seedWaitingRun(

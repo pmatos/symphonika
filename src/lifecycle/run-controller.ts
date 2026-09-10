@@ -1710,16 +1710,20 @@ export class RunController {
   // Callers disagree on how to treat a load error: isIssueOwnedByWorkflow
   // fails OPEN (`"load_failed"` collapses to false, same as a non-raw_fsm
   // workflow), while pickProjectCandidate's guard fails CLOSED on
-  // `"load_failed"` -- a read failure or a validation error there would
-  // otherwise silently reopen the exact race this guards (issue #731), same
-  // as the reasoning dispatchReviewFollowup already applies to its own load
-  // failure (see the comment there, run-controller.ts:3522-3531), and as
-  // SPEC.md:619-620 requires generally: a Dispatch Project's workflow
-  // contract must not be dispatched against while missing or invalid.
-  // Returns `undefined` (meaning "no wait park to guard against") only for a
-  // disabled project, a non-dispatch project, or a successfully-validated
-  // workflow that is not raw_fsm -- none of those can ever have a waiting
-  // row worth refusing a fresh claim over.
+  // `"load_failed"` -- a read failure, or a validation error on a raw_fsm
+  // workflow, would otherwise silently reopen the exact race this guards
+  // (issue #731), same as the reasoning dispatchReviewFollowup already
+  // applies to its own load failure (see the comment there,
+  // run-controller.ts:3522-3531). Scoped to raw_fsm: only a raw_fsm workflow
+  // can have a wait-park position at all, so a validation error on any other
+  // kind still returns `undefined` -- broadening fail-closed to every
+  // workflow kind would refuse fresh dispatch for a reason this guard has no
+  // business enforcing (that belongs to whatever validates the workflow
+  // contract generally, e.g. SPEC.md:619-620, not to the wait-park guard).
+  // Returns `undefined` (meaning "no wait park to guard against") for a
+  // disabled project, a non-dispatch project, or a workflow that is not
+  // raw_fsm -- none of those can ever have a waiting row worth refusing a
+  // fresh claim over.
   private async loadRawFsmWorkflow(
     project: RunControllerProjectConfig
   ): Promise<LoadedWorkflow | "load_failed" | undefined> {
@@ -1739,10 +1743,13 @@ export class RunController {
       );
       return "load_failed";
     }
+    if (loaded.expandedWorkflow.source.kind !== "raw_fsm") {
+      return undefined;
+    }
     // A raw FSM workflow that fails validation is exactly the "cannot
     // confirm no wait park owns any candidate" case this guard exists for --
     // treat it the same as a load throw rather than falling through to the
-    // fail-open `undefined` branch below.
+    // fail-open `undefined` branch above.
     if (loaded.errors.length > 0) {
       this.logger?.warn(
         {
@@ -1752,9 +1759,6 @@ export class RunController {
         "wait-park guard: workflow validation failed; refusing fresh claims for project"
       );
       return "load_failed";
-    }
-    if (loaded.expandedWorkflow.source.kind !== "raw_fsm") {
-      return undefined;
     }
     return loaded;
   }

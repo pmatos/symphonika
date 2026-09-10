@@ -375,6 +375,10 @@ type DispatchTarget = {
   candidate: { issue: IssueSnapshot; project: string };
   project: RunControllerProjectConfig;
   provider: AgentProvider;
+  // Carried from pickProjectCandidate's own fail-closed load so the
+  // mutex-guarded claim can repeat the wait-park predicate against the same
+  // workflow without a second load. See issue #737.
+  rawFsmWorkflow: LoadedWorkflow | undefined;
   schedulerWeights: Array<{
     currentWeight: number;
     projectName: string;
@@ -974,6 +978,7 @@ export class RunController {
     project: RunControllerProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
+    rawFsmWorkflow?: LoadedWorkflow;
     reason: string;
     repository: GitHubIssueRepositoryInput;
     runId: string;
@@ -1118,6 +1123,9 @@ export class RunController {
           project: target.project,
           providerCommand: providerCommand ?? "",
           providerName,
+          ...(target.rawFsmWorkflow === undefined
+            ? {}
+            : { rawFsmWorkflow: target.rawFsmWorkflow }),
           reason: `provider_command_missing: ${providerName}`,
           repository,
           runId
@@ -1132,6 +1140,9 @@ export class RunController {
           project: target.project,
           providerCommand,
           providerName,
+          ...(target.rawFsmWorkflow === undefined
+            ? {}
+            : { rawFsmWorkflow: target.rawFsmWorkflow }),
           reason: `provider_not_registered: ${providerName}`,
           repository,
           runId
@@ -1147,6 +1158,9 @@ export class RunController {
         project: target.project,
         providerCommand,
         providerName,
+        ...(target.rawFsmWorkflow === undefined
+          ? {}
+          : { rawFsmWorkflow: target.rawFsmWorkflow }),
         repository,
         runId,
         schedulerWeights: target.schedulerWeights,
@@ -1211,6 +1225,7 @@ export class RunController {
     project: RunControllerProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
+    rawFsmWorkflow?: LoadedWorkflow;
     reason: string;
     repository: GitHubIssueRepositoryInput;
     runId: string;
@@ -1246,6 +1261,16 @@ export class RunController {
           `fresh issue claim suppressed by latest no_workspace_changes outcome for ${input.project.name}#${input.issue.number}`
         );
       }
+      // Same recheck claimAndPersistRun applies, against the same
+      // already-loaded workflow -- this path is also a mutex-serialized
+      // claim (it writes sym:claimed and a terminal Run row), so it needs
+      // the identical defense against a wait park that appeared after
+      // pickProjectCandidate's check. See issue #737.
+      this.throwIfIssueParkedAtRawFsmState({
+        issueNumber: input.issue.number,
+        projectName: input.project.name,
+        rawFsmWorkflow: input.rawFsmWorkflow
+      });
       await this.bestEffort(
         () =>
           (
@@ -1708,6 +1733,37 @@ export class RunController {
     return (
       findWorkflowState(loaded.expandedWorkflow, waiting.currentStateId) !==
       undefined
+    );
+  }
+
+  // Shared by claimAndPersistRun and failFreshDispatchBeforeProvider: repeats
+  // pickProjectCandidate's wait-park predicate against the same
+  // already-loaded workflow, synchronously and as the last check before
+  // either claim path's own commit (label write + Run creation). Closes the
+  // window between the picker's check and the mutex-guarded claim where a
+  // concurrent run can finish, park at a raw_fsm wait state, and unregister
+  // from activeRuns before this claim writes. See issue #737.
+  //
+  // Reuses the picker's fail-closed load rather than re-loading: a
+  // "load_failed" workflow never reaches here (pickProjectCandidate skips the
+  // whole bucket for it), so `rawFsmWorkflow` is either undefined (no wait
+  // park possible for this project) or a validated raw_fsm workflow.
+  private throwIfIssueParkedAtRawFsmState(input: {
+    issueNumber: number;
+    projectName: string;
+    rawFsmWorkflow: LoadedWorkflow | undefined;
+  }): void {
+    if (
+      input.rawFsmWorkflow === undefined ||
+      !this.isIssueParkedAtRawFsmState(input.rawFsmWorkflow, {
+        issueNumber: input.issueNumber,
+        projectName: input.projectName
+      })
+    ) {
+      return;
+    }
+    throw new FreshClaimDeferredError(
+      `fresh issue claim deferred: issue ${input.projectName}#${input.issueNumber} is parked at a raw_fsm wait state`
     );
   }
 
@@ -3705,6 +3761,7 @@ export class RunController {
       nextWeight: number;
       project: RunControllerProjectConfig;
       provider: AgentProvider;
+      rawFsmWorkflow: LoadedWorkflow | undefined;
       weight: number;
     }> = [];
 
@@ -3729,8 +3786,8 @@ export class RunController {
       ) {
         continue;
       }
-      const candidate = await this.pickProjectCandidate(bucket, project);
-      if (candidate === undefined) {
+      const picked = await this.pickProjectCandidate(bucket, project);
+      if (picked === undefined) {
         continue;
       }
       const weight = normalizeProjectWeight(
@@ -3739,11 +3796,12 @@ export class RunController {
       const currentWeight =
         states.get(projectName)?.schedulerCurrentWeight ?? 0;
       dispatchable.push({
-        candidate,
+        candidate: picked.candidate,
         currentWeight,
         nextWeight: currentWeight + weight,
         project,
         provider,
+        rawFsmWorkflow: picked.rawFsmWorkflow,
         weight
       });
     }
@@ -3773,6 +3831,7 @@ export class RunController {
       candidate: selected.candidate,
       project: selected.project,
       provider: selected.provider,
+      rawFsmWorkflow: selected.rawFsmWorkflow,
       schedulerWeights
     };
   }
@@ -3782,7 +3841,13 @@ export class RunController {
   private async pickProjectCandidate(
     bucket: ReadonlyArray<{ issue: IssueSnapshot; project: string }>,
     project: RunControllerProjectConfig
-  ): Promise<{ issue: IssueSnapshot; project: string } | undefined> {
+  ): Promise<
+    | {
+        candidate: { issue: IssueSnapshot; project: string };
+        rawFsmWorkflow: LoadedWorkflow | undefined;
+      }
+    | undefined
+  > {
     const guarded = project.dispatch?.overlap_guard === true;
     // Loaded once per bucket, not once per candidate: isIssueReserved only
     // sees in-flight and scheduled work, not a durable `waiting` row -- the
@@ -3832,7 +3897,7 @@ export class RunController {
           project
         }))
       ) {
-        return entry;
+        return { candidate: entry, rawFsmWorkflow };
       }
     }
     return undefined;
@@ -3851,6 +3916,10 @@ export class RunController {
     project: DispatchProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
+    // Undefined for continuation/state-advance/PR-followup callers, which
+    // claimAndPersistRun's own wait-park recheck skips regardless -- see
+    // issue #737.
+    rawFsmWorkflow?: LoadedWorkflow;
     repository: GitHubIssueRepositoryInput;
     respectsIssueLabels?: boolean;
     runId: string;
@@ -4105,6 +4174,10 @@ export class RunController {
     project: RunControllerProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
+    // Undefined for continuation/state-advance/PR-followup callers, which the
+    // wait-park recheck below skips regardless (isContinuation gate). See
+    // issue #737.
+    rawFsmWorkflow?: LoadedWorkflow;
     repository: GitHubIssueRepositoryInput;
     respectsIssueLabels?: boolean;
     runId: string;
@@ -4210,6 +4283,21 @@ export class RunController {
       throw new FreshClaimDeferredError(
         `fresh issue claim deferred for project ${input.project.name}`
       );
+    }
+
+    // No further await between here and the sym:claimed write below: the
+    // wait-park write a concurrent run makes (runAttemptLifecycle, outside
+    // this mutex) is a synchronous runStore write, so this re-read sees it
+    // if it landed anywhere between pickProjectCandidate's own check and
+    // here. Continuations are exempt, same as the suppression recheck above:
+    // they are FSM-owned work, not a fresh claim that could double up
+    // against a wait park. See issue #737.
+    if (!input.isContinuation) {
+      this.throwIfIssueParkedAtRawFsmState({
+        issueNumber: input.issue.number,
+        projectName: input.project.name,
+        rawFsmWorkflow: input.rawFsmWorkflow
+      });
     }
 
     let claimed = false;

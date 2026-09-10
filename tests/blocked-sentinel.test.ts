@@ -70,4 +70,27 @@ describe("clearBlockedSentinel provenance check (issue #739)", () => {
       readFile(path.join(workspacePath, "BLOCKED.md"), "utf8")
     ).rejects.toThrow();
   });
+
+  // ADR-2026-09-10-2018's documented "Known limitation": when the git-tracked
+  // check itself can't run (here, workspacePath isn't a git repository at
+  // all), that failure is indistinguishable from "untracked" and falls back
+  // to the prior, pre-#739 behavior of deleting the file. Pinned so a future
+  // refactor of isGitTracked's error handling can't silently change this
+  // disclosed tradeoff without a test noticing.
+  it("deletes BLOCKED.md when the workspace isn't a git repository at all", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "symphonika-blocked-sentinel-no-git-")
+    );
+    tempRoots.push(root);
+    await writeFile(
+      path.join(root, "BLOCKED.md"),
+      "# Blocked\nNo git repository backs this workspace.\n"
+    );
+
+    await clearBlockedSentinel(root);
+
+    await expect(
+      readFile(path.join(root, "BLOCKED.md"), "utf8")
+    ).rejects.toThrow();
+  });
 });

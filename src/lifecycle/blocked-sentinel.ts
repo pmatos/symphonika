@@ -1,10 +1,7 @@
-import { execFile } from "node:child_process";
-import { rm } from "node:fs/promises";
-import { promisify } from "node:util";
+import { lstat, rm } from "node:fs/promises";
 
 import { resolveArtifactPath } from "../workflow/predicates.js";
-
-const execFileAsync = promisify(execFile);
+import { git } from "../workspace.js";
 
 // Mirrors src/http/git-status.ts and src/lifecycle/file-overlap-guard.ts: a
 // wedged `git` must not hang the pre-attempt hook this runs from.
@@ -20,13 +17,13 @@ const GIT_COMMAND_TIMEOUT_MS = 30_000;
 // block a later, genuinely successful one.
 export const BLOCKED_SENTINEL_FILENAME = "BLOCKED.md";
 
-// Resolves once the sentinel is gone or was never there (`force: true`
-// swallows ENOENT); a permission or I/O error still rejects. Unlike the
-// headShaAtAttemptStart snapshot's inspection failure, which is deferred into
-// a distinct workspace_inspection_failed classification, the caller only
-// warn-logs a rejection here and proceeds, so a stale sentinel can survive
-// and misroute a later successful attempt. Runs once per attempt, after the
-// headShaAtAttemptStart snapshot, before the provider executes.
+// Resolves once the sentinel is gone or was never there; a permission or I/O
+// error still rejects. Unlike the headShaAtAttemptStart snapshot's inspection
+// failure, which is deferred into a distinct workspace_inspection_failed
+// classification, the caller only warn-logs a rejection here and proceeds, so
+// a stale sentinel can survive and misroute a later successful attempt. Runs
+// once per attempt, after the headShaAtAttemptStart snapshot, before the
+// provider executes.
 //
 // Issue #739 / ADR-2026-09-10-2018: the caller only runs this for a state
 // that declares the BLOCKED.md gate, but that alone doesn't prove the file at
@@ -41,27 +38,51 @@ export async function clearBlockedSentinel(
     workspacePath,
     BLOCKED_SENTINEL_FILENAME
   );
-  if (resolved === undefined) {
+  if (resolved === undefined || !(await fileExists(resolved))) {
     return;
   }
-  if (await isGitTracked(workspacePath, BLOCKED_SENTINEL_FILENAME)) {
+  if (await isGitTracked(workspacePath)) {
     return;
   }
   await rm(resolved, { force: true });
 }
 
-async function isGitTracked(
-  workspacePath: string,
-  relativePath: string
-): Promise<boolean> {
+// `lstat`, not `stat`: a symlinked BLOCKED.md is judged by the link itself,
+// matching how the `rm()` below treats it. Skips the git spawn below entirely
+// on the common path (most attempts never got blocked, so nothing was ever
+// written here) rather than always paying a subprocess spawn to answer "is
+// this absent file tracked" before finding out it's absent.
+async function fileExists(path: string): Promise<boolean> {
   try {
-    await execFileAsync(
-      "git",
-      ["-C", workspacePath, "ls-files", "--error-unmatch", "--", relativePath],
-      { timeout: GIT_COMMAND_TIMEOUT_MS }
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function isGitTracked(workspacePath: string): Promise<boolean> {
+  try {
+    await git(
+      [
+        "-C",
+        workspacePath,
+        "ls-files",
+        "--error-unmatch",
+        "--",
+        BLOCKED_SENTINEL_FILENAME
+      ],
+      AbortSignal.timeout(GIT_COMMAND_TIMEOUT_MS)
     );
     return true;
   } catch {
     return false;
   }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }

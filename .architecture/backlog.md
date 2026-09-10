@@ -6,13 +6,23 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## tracked-pull-request-lookup
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
+- **PR**: #747
 - **Files**: ~3 estimated (`src/run-store.ts`, `src/lifecycle/run-controller.ts`, one store test)
 - **Modules**: `src/run-store.ts` (`findTrackedPullRequestByIssue` 5770-5790 + its twin `findTrackedPullRequestByIssueAndBranch` 5800-5821, added by #736), sole branch-scoped caller `src/lifecycle/run-controller.ts` `observeWaitPullRequestSignals` 2024-2034; unaffected unscoped callers `src/http/pages.ts:3785,6754`, `src/lifecycle/file-overlap-guard.ts:303`
 - **Summary**: Merge the issue-wide and branch-scoped Tracked-PR lookups into one `findTrackedPullRequestByIssue({issueNumber, projectName, branchName?})` where the Run Store owns branch-scoping and the "absent branch" notion (undefined and "" both unscoped); the wait re-eval caller drops its ternary, the twin is removed, and the #736 branch-scoping fix gains a unit test.
 - **First seen**: 2026-09-11
-- **Reason**: Picked by the 2026-09-11 run (top surviving candidate at 20/25; runner-up candidate `create-waiting-run-normalization` at 18/25, 2 points back — not within 1). Only candidate with this-week-hot lines (#736, 2026-09-10). Out of scope: the 16-column `tracked_pull_requests` select list is duplicated ~6× across run-store query methods (5782/5813/5832/5859 and below) — a shared column constant is a pure DRY cleanup, deliberately left for a follow-up so blast stays at 1.
+- **Reason**: Picked by the 2026-09-11 run (top surviving candidate at 20/25; runner-up candidate `create-waiting-run-normalization` at 18/25, 2 points back — not within 1). Only candidate with this-week-hot lines (#736, 2026-09-10). Out of scope: the 16-column `tracked_pull_requests` select list is duplicated ~6× across run-store query methods (5782/5813/5832/5859 and below) — a shared column constant is a pure DRY cleanup, deliberately left for a follow-up so blast stays at 1. Implemented via design-it-twice winner A (optional `branchName?`, store owns "absent"); runner-up design C (typed `TrackedPrScope` union) lost on depth + blast. PR #747 opened 2026-09-11.
+
+### Run 2026-09-11 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M26RZFX4` (adopted; conditions 1-4 held — non-default, 0 unique commits ahead of `origin/main`, no upstream, unpublished on origin). Not renamed per the adopted-branch rule; slug recorded here and in the report instead.
+- **Committed**: report + backlog reconciliation + design section (`bcd8e2d`), implementation + CONTEXT.md term (`1e024c3`), this in-flight update.
+- **Evidence**: PR #747; quality gate green (lint, typecheck, format:check, knip, build; test 2806 passed — no flakes this run). Diff 4 files (est. ~3: `run-store.ts`, `run-controller.ts`, one store test; the 4th is the `CONTEXT.md` term add, within tolerance). No published/exported interface changed. Reconciled `provider-run-harness` #701 → landed; re-scored `run-slot-lease` 19→16 on heat drop.
+- **Next**: human review of #747; `create-waiting-run-normalization` (18/25, runner-up candidate) is the natural next firing.
 
 ## create-waiting-run-normalization
 

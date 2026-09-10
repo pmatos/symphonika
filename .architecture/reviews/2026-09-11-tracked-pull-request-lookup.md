@@ -7,7 +7,7 @@ commits) and the wait-park / blocked-sentinel / PR-existence-gate cluster
 `state-machine-dispatch.ts`, `pull-request-followup.ts`). PRs #735/#736/#741/#743/#744
 all landed there. YAGNI: deepening pays off through *future* change, so the scan
 weighted that area first.
-**Picked**: `tracked-pull-request-lookup` — see PR (opened at step 6) and `.architecture/backlog.md`
+**Picked**: `tracked-pull-request-lookup` — see PR #747 and `.architecture/backlog.md`
 **Degradations**: none — `gh` authenticated, quality gate discoverable, sub-agent
 exploration available. The step-4 design pass was produced **inline** rather than
 via parallel design sub-agents (the design space is a two-method merge, tightly

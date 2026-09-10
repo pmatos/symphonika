@@ -1116,6 +1116,65 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("suppresses discovery once a descendant continuation tracks the chain's own PR (issue #738 follow-up)", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const branchName = "sym/symphonika/60-descendant-owns-pr";
+
+      // The chain's original run succeeded and accrued discovery attempts
+      // without finding a PR of its own yet.
+      const ancestorId = seedRun(store, { id: "ancestor", issueNumber: 60 });
+      store.updateRunEvidence(ancestorId, evidence(branchName));
+      store.updateRunState(ancestorId, "succeeded");
+      store.recordPullRequestDiscoveryAttempt(ancestorId);
+      store.recordPullRequestDiscoveryAttempt(ancestorId);
+
+      // A later continuation of that same chain (e.g. a review-followup run)
+      // is the one that actually opens/tracks the PR -- a descendant of the
+      // still-discovery-eligible ancestor, not one of its ancestors.
+      store.createContinuationRun({
+        id: "descendant",
+        issue: {
+          body: "",
+          created_at: "2025-01-01T00:00:00Z",
+          id: 1000,
+          labels: ["agent-ready"],
+          number: 60,
+          priority: 1,
+          state: "open",
+          title: "fixture",
+          updated_at: "2025-01-01T00:00:00Z",
+          url: "https://example/1"
+        },
+        parentRunId: ancestorId,
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.trackPullRequest({
+        branchName,
+        headSha: "new-sha",
+        issueNumber: 60,
+        projectName: "symphonika",
+        prNumber: 99,
+        prUrl: "https://github.com/pmatos/symphonika/pull/99",
+        runId: "descendant"
+      });
+
+      // An ancestor-only join would miss this descendant-owned row and keep
+      // "ancestor" discovery-eligible until it exhausted its attempt cap,
+      // even though the chain's PR already succeeded. Chain-root matching
+      // must suppress it immediately.
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual([]);
+      expect(store.hasPullRequestFollowupWork()).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
   it("PR discovery prefers least-attempted runs and excludes ones that hit the attempt cap", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

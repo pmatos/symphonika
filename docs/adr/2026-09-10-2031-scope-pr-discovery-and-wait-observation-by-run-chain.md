@@ -54,17 +54,22 @@ change):
   has been deleted.
 - `listRunsAwaitingPullRequestDiscovery` and `hasPullRequestFollowupWork` (the same suppression
   shape, gating whether the poller bothers looking at all) replace their branch-name `not exists`
-  check with one scoped the same way: a shared `run_chain_ancestry` CTE
-  (`RUN_CHAIN_ANCESTRY_CTE`) computes, for every run, the full set of its own chain ancestors, and
-  the suppression check requires a tracked row whose `run_id` is among *this* run's own ancestors
-  — not merely a row sharing its branch name.
+  check with one scoped the same way: a shared CTE (`RUN_CHAIN_ANCESTRY_CTE`) walks
+  `continuation_parent_run_id` to resolve, for every candidate run and every run that has ever
+  tracked a PR, the single root run at the top of its chain, and the suppression check requires a
+  tracked row whose owning run resolves to the *same root* as the candidate — not merely a row
+  sharing its branch name. Root equality (rather than "the tracked row's run is among the
+  candidate's own ancestors") is what catches both directions: an ancestor-only join missed the
+  case where a *descendant* continuation (e.g. a review-followup run) is the one that actually
+  opened the PR, leaving the earlier, already-succeeded candidate blind to its own chain's PR and
+  discovery-eligible until it exhausted its attempt cap despite the PR having succeeded.
 
 An intra-chain hop (a review-followup Continuation, or a wait state that advances to another wait
 state) still correctly finds its own chain's tracked PR through this lineage — `run_id` on the
 tracked row was already always the originating (`succeeded`) run's own id (`trackPullRequest`'s
 upsert never touches `run_id` on conflict, by design — see the comment at its definition), and
 every descendant row's `continuation_parent_run_id` chain leads back to it. Two unrelated chains
-that happen to share a branch name no longer share ancestry, so neither lookup crosses between
+that happen to share a branch name resolve to different roots, so neither lookup crosses between
 them.
 
 ### Why not a materialized `chain_root_run_id` column

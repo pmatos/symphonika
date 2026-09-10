@@ -1127,23 +1127,37 @@ const PULL_REQUEST_DISCOVERY_LIMIT = 25;
 export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
 // Scopes PR-discovery suppression to "has *this chain* already tracked a
 // PR" rather than "has this branch name ever had one" (see CONTEXT.md's
-// "Run Chain" entry and ADR-2026-09-10-2031, issue #738). The anchor
-// mirrors both call sites' own `runs` filter (state/branch/attempts) rather
-// than selecting every run: `runs` is never pruned, so an unfiltered anchor
-// would walk the whole table's history on every poll tick instead of just
-// the currently-eligible candidates.
-const RUN_CHAIN_ANCESTRY_CTE = [
-  "with recursive run_chain_ancestry(member_id, ancestor_id) as (",
+// "Run Chain" entry and ADR-2026-09-10-2031, issue #738). Chain membership
+// is matched by shared chain root rather than by walking only the candidate
+// run's own ancestors: a candidate's tracked PR can be owned by a
+// *descendant* continuation (e.g. a review-followup run that opened the PR
+// after the candidate succeeded), and an ancestor-only join can never see a
+// descendant-owned row. The anchor mirrors both call sites' own `runs`
+// filter (state/branch/attempts), plus every run that has ever tracked a
+// PR, rather than selecting every run: `runs` is never pruned, so an
+// unfiltered anchor would walk the whole table's history on every poll
+// tick instead of just the currently-relevant candidates and PR owners.
+const RUN_CHAIN_ROOT_CTE = [
+  "with recursive run_chain_walk(id, ancestor_id) as (",
   "  select id, id from runs",
-  "  where state = 'succeeded'",
-  "  and branch_name is not null",
-  "  and branch_name <> ''",
-  "  and pr_discovery_attempts < @maxAttempts",
+  "  where (",
+  "    state = 'succeeded'",
+  "    and branch_name is not null",
+  "    and branch_name <> ''",
+  "    and pr_discovery_attempts < @maxAttempts",
+  "  )",
+  "  or id in (select run_id from tracked_pull_requests)",
   "  union all",
-  "  select run_chain_ancestry.member_id, r.continuation_parent_run_id",
-  "  from run_chain_ancestry",
-  "  join runs r on r.id = run_chain_ancestry.ancestor_id",
+  "  select run_chain_walk.id, r.continuation_parent_run_id",
+  "  from run_chain_walk",
+  "  join runs r on r.id = run_chain_walk.ancestor_id",
   "  where r.continuation_parent_run_id is not null",
+  "),",
+  "run_chain_root(id, root_id) as (",
+  "  select run_chain_walk.id, run_chain_walk.ancestor_id",
+  "  from run_chain_walk",
+  "  join runs root_run on root_run.id = run_chain_walk.ancestor_id",
+  "  where root_run.continuation_parent_run_id is null",
   ")"
 ].join(" ");
 export const INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS = 60_000;
@@ -5508,7 +5522,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          RUN_CHAIN_ANCESTRY_CTE,
+          RUN_CHAIN_ROOT_CTE,
           "select id, project_name, issue_number, branch_name",
           "from runs",
           "where state = 'succeeded'",
@@ -5517,9 +5531,10 @@ export class RunStore {
           "and pr_discovery_attempts < @maxAttempts",
           "and not exists (",
           "  select 1 from tracked_pull_requests pr",
-          "  join run_chain_ancestry a on a.ancestor_id = pr.run_id",
+          "  join run_chain_root pr_root on pr_root.id = pr.run_id",
+          "  join run_chain_root runs_root on runs_root.id = runs.id",
           "  where pr.project_name = runs.project_name",
-          "  and a.member_id = runs.id",
+          "  and pr_root.root_id = runs_root.root_id",
           ")",
           "order by pr_discovery_attempts asc, updated_at asc, id asc",
           "limit @limit"
@@ -5552,7 +5567,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          RUN_CHAIN_ANCESTRY_CTE,
+          RUN_CHAIN_ROOT_CTE,
           "select 1 as found from tracked_pull_requests where state = 'open'",
           "union all",
           "select 1 as found from runs",
@@ -5562,9 +5577,10 @@ export class RunStore {
           "and pr_discovery_attempts < @maxAttempts",
           "and not exists (",
           "  select 1 from tracked_pull_requests pr",
-          "  join run_chain_ancestry a on a.ancestor_id = pr.run_id",
+          "  join run_chain_root pr_root on pr_root.id = pr.run_id",
+          "  join run_chain_root runs_root on runs_root.id = runs.id",
           "  where pr.project_name = runs.project_name",
-          "  and a.member_id = runs.id",
+          "  and pr_root.root_id = runs_root.root_id",
           ")",
           "limit 1"
         ].join(" ")
@@ -5817,7 +5833,7 @@ export class RunStore {
   // Scopes to this run's own continuation chain rather than branch name
   // (see CONTEXT.md's "Run Chain" entry and ADR-2026-09-10-2031, issue
   // #738). Seeds its own single-run recursive walk from @runId instead of
-  // joining against RUN_CHAIN_ANCESTRY_CTE: that CTE's anchor spans every
+  // joining against RUN_CHAIN_ROOT_CTE: that CTE's anchor spans every
   // discovery-eligible run, so filtering it down to one run's ancestry
   // afterward would still materialize the whole set first -- more work than
   // this bounded, chain-length-only walk needs.

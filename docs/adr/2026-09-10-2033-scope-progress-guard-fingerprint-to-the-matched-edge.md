@@ -30,12 +30,16 @@ the **entire projected signal map** (`pr_open`, `mergeable`, `checks`, `review_d
 `unresolved_review_threads`, `has_unresolved_reviews`) for every re-evaluation of a parked `wait`
 state. `wait_for_pr -> autofix` is gated solely on `has_unresolved_reviews: true`, but the
 fingerprint that decides whether retaking that edge counts as "progress" also includes `mergeable`
-and `checks` — both of which can (and, against this repository's own fast-moving `main`, routinely
-do) flip transiently for reasons that have nothing to do with review feedback: GitHub recomputing
-mergeability against a base branch that just advanced, or a check re-running. Each such flip changed
-the hash even though the one fact the edge's own predicate depends on — whether the thread was still
-unresolved — never changed, so `claimProgressEdge`'s exact-fingerprint comparison kept reading
-"new observation" and re-dispatched `autofix` again.
+and `checks` — both of which can flip transiently for reasons that have nothing to do with review
+feedback: GitHub recomputing mergeability against a base branch that just advanced, or a check
+re-running. `workflow_progress` only persists the latest fingerprint per edge, not a full history,
+so which of these specifically flipped between each of the six re-claims could not be reconstructed
+after the fact; `mergeable`/`checks` churn against this repository's own fast-moving `main` is the
+most plausible candidate given everything else observable (thread comments, head SHA, PR reviews)
+was confirmed static across the whole window. Whichever signal it was, the fix is the same: each
+such flip changed the hash even though the one fact the edge's own predicate depends on — whether
+the thread was still unresolved — never changed, so `claimProgressEdge`'s exact-fingerprint
+comparison kept reading "new observation" and re-dispatched `autofix` again.
 
 ## Decision
 

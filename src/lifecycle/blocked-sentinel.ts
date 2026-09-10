@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises";
-import path from "node:path";
+
+import { resolveArtifactPath } from "../workflow/predicates.js";
 
 // The workspace-relative artifact a raw-FSM agent prompt writes to signal
 // "blocked" (issue #730): exiting non-zero from a Bash tool call only ends
@@ -21,7 +22,12 @@ const BLOCKED_SENTINEL_FILENAME = "BLOCKED.md";
 export async function clearBlockedSentinel(
   workspacePath: string
 ): Promise<void> {
-  await rm(path.join(workspacePath, BLOCKED_SENTINEL_FILENAME), {
-    force: true
-  });
+  const resolved = resolveArtifactPath(
+    workspacePath,
+    BLOCKED_SENTINEL_FILENAME
+  );
+  if (resolved === undefined) {
+    return;
+  }
+  await rm(resolved, { force: true });
 }

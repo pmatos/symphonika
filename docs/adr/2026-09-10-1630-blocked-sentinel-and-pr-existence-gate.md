@@ -10,8 +10,9 @@ pianosight, and finnie, had two compounding gaps (issue #730), reconstructed fro
 (2026-09-06):
 
 1. **The "exit non-zero to signal blocked" instruction in `prompts/code-review-fix.md`,
-   `prompts/autofix-pr.md`, `prompts/resolve-conflicts.md`, `prompts/red-team.md`,
-   `prompts/refactor.md`, and `prompts/verify.md` cannot work as written.** Each told the agent to
+   `prompts/autofix-pr.md`, `prompts/resolve-conflicts.md`, `prompts/simplify.md`,
+   `prompts/red-team.md`, `prompts/refactor.md`, and `prompts/verify.md` cannot work as written.**
+   Each told the agent to
    post a comment and "exit non-zero (e.g. `exit 1`)", claiming this routes the FSM through
    `provider_success: false`. But the agent can only run `exit 1` as a Bash **tool call**, which
    exits that subshell, not the wrapping provider session — the session's real `process_exit` event
@@ -38,7 +39,7 @@ This ADR is that follow-up.
 Symphonika already has a working, generic mechanism for gating a raw-FSM transition on Workspace
 state: `artifact_exists`, the same predicate `plan-tdd-pr`'s `planning -> implementing` transition
 uses to require a written `PLAN.md` (issue #583) rather than trusting `provider_success` alone. The
-six affected prompts now tell the agent to write `BLOCKED.md` (uncommitted) with its explanation and
+seven affected prompts now tell the agent to write `BLOCKED.md` (uncommitted) with its explanation and
 exit 0, instead of exiting non-zero. `workflow.yml`'s `code_review_fix`, `simplify`, `autofix`, and
 `resolve_conflicts` states, and the `refactor-swarm` built-in template's `red_team`, `refactoring`,
 and `verifying` states (`src/builtin-templates.ts`), each gained a
@@ -122,7 +123,12 @@ new state in the graph.
 bound (~1 hour), not immediately the moment `implement`'s turn ends, the way a synchronous live
 check would. Immediate detection was judged not worth a live GitHub call inside the FSM decision
 path for an unattended run; a bounded wait with an established, already-notifying escalation path is
-the more defensible choice here. `builtin:plan-tdd-pr` (`src/builtin-templates.ts`) is unaffected:
+the more defensible choice here. The `implement` attempt's own run row also becomes `state =
+'succeeded'` with no tracked PR, so it is independently subject to `discoverPullRequests`'s own
+`MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS` bound (`pull-request-followup.ts`,
+`terminalizePullRequestDiscoveryExhausted`) — a pre-existing bound on that row set, unchanged by this
+ADR, that may terminalize before `wait_for_pr_open`'s own ~1-hour bound does. `builtin:plan-tdd-pr`
+(`src/builtin-templates.ts`) is unaffected:
 its `implementing` state has no `code_review_fix`-equivalent downstream state that assumes an open
 PR, so the gap this ADR closes does not apply to it.
 

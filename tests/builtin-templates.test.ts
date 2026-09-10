@@ -158,7 +158,7 @@ describe("shipped refactor-swarm prompts", () => {
     expect(redTeam).toContain("git status --porcelain");
     expect(refactor).toContain("Do not edit, delete, rename, skip, or weaken");
     expect(verify).toContain("distinct refactor commit");
-    expect(verify).toContain("Do not modify files or create commits");
+    expect(verify).toContain("Do not modify tracked files or create commits");
     // Every state must spell out the concrete blocked-exit signal: writing
     // BLOCKED.md is what actually routes the FSM to its blocked exit (issue
     // #730) -- exiting non-zero from a Bash tool call cannot, since it only

@@ -5767,41 +5767,24 @@ export class RunStore {
   // waiting on `pr_merged: true` can advance after the PR follow-up
   // dispatcher has marked the tracked row "merged". Returns the most-recent
   // tracked PR for the (project, issue) pair regardless of `state`.
-  findTrackedPullRequestByIssue(input: {
-    issueNumber: number;
-    projectName: string;
-  }): TrackedPullRequest | undefined {
-    const row = this.database
-      .prepare(
-        [
-          "select id, project_name, issue_number, run_id, pr_number, pr_url,",
-          "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
-          "last_review_dispatch_fingerprint, review_dispatch_count,",
-          "review_followup_cap_reached,",
-          "last_followup_run_id, state, last_observed_at, created_at, updated_at",
-          "from tracked_pull_requests",
-          "where project_name = ? and issue_number = ?",
-          "order by id desc limit 1"
-        ].join(" ")
-      )
-      .get(input.projectName, input.issueNumber) as
-      TrackedPullRequestRow | undefined;
-    return row === undefined ? undefined : mapTrackedPullRequestRow(row);
-  }
-
-  // Branch-scoped counterpart to findTrackedPullRequestByIssue (issue #736
-  // review): an issue can carry more than one tracked_pull_requests row --
+  //
+  // Scope to `branchName` when the run's own Issue Branch is known (issue
+  // #736): an issue can carry more than one tracked_pull_requests row --
   // trackPullRequest upserts by (project, pr_number) and rows are never
-  // deleted, so a redispatched issue can accumulate one row per chain's own
-  // branch. Filtering the unscoped issue-wide lookup after the fact can miss
-  // a real, branch-matching row when a *different* branch's row happens to
-  // be the newest by id. Querying by branch directly finds it regardless of
-  // insertion order.
-  findTrackedPullRequestByIssueAndBranch(input: {
-    branchName: string;
+  // deleted, so a redispatched issue accumulates one row per chain's own
+  // branch. Taking the newest issue-wide row by id can return a *different*
+  // branch's row; querying by branch finds the right one regardless of
+  // insertion order. `branchName` absent -- undefined *or* "" (the caller's
+  // "branch unknown" sentinel) -- keeps the unscoped issue-wide lookup.
+  findTrackedPullRequestByIssue(input: {
+    branchName?: string;
     issueNumber: number;
     projectName: string;
   }): TrackedPullRequest | undefined {
+    const branchName =
+      input.branchName !== undefined && input.branchName.length > 0
+        ? input.branchName
+        : undefined;
     const row = this.database
       .prepare(
         [
@@ -5811,12 +5794,17 @@ export class RunStore {
           "review_followup_cap_reached,",
           "last_followup_run_id, state, last_observed_at, created_at, updated_at",
           "from tracked_pull_requests",
-          "where project_name = ? and issue_number = ? and branch_name = ?",
+          branchName === undefined
+            ? "where project_name = ? and issue_number = ?"
+            : "where project_name = ? and issue_number = ? and branch_name = ?",
           "order by id desc limit 1"
         ].join(" ")
       )
-      .get(input.projectName, input.issueNumber, input.branchName) as
-      TrackedPullRequestRow | undefined;
+      .get(
+        ...(branchName === undefined
+          ? [input.projectName, input.issueNumber]
+          : [input.projectName, input.issueNumber, branchName])
+      ) as TrackedPullRequestRow | undefined;
     return row === undefined ? undefined : mapTrackedPullRequestRow(row);
   }
 

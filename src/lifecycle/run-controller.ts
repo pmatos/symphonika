@@ -2013,25 +2013,17 @@ export class RunController {
     // open-only listing would strand the wait. The dispatcher's own open-only
     // loop is unaffected — only wait re-evaluation widens the lookup.
     //
-    // Query by (project, issue, branch) when the run's own branch is known,
-    // rather than fetching the newest issue-wide row and discarding it on a
-    // mismatch (issue #736 review, round 2): an issue can carry more than
-    // one tracked row across redispatches, and the newest by id is not
-    // necessarily the one for this run's branch -- fetch-then-discard could
-    // miss a real, older, branch-matching row entirely. An empty run
-    // branchName means the caller doesn't know it yet, so the unscoped
-    // lookup is used as before.
-    const tracked =
-      input.branchName.length > 0
-        ? this.runStore.findTrackedPullRequestByIssueAndBranch({
-            branchName: input.branchName,
-            issueNumber: input.issueNumber,
-            projectName: input.projectName
-          })
-        : this.runStore.findTrackedPullRequestByIssue({
-            issueNumber: input.issueNumber,
-            projectName: input.projectName
-          });
+    // Pass the run's own branch so the Run Store scopes the lookup to it when
+    // known (issue #736): an issue can carry more than one tracked row across
+    // redispatches, and the newest by id is not necessarily this run's branch,
+    // so fetching the newest issue-wide row could miss a real, older,
+    // branch-matching row. An empty branchName means the branch is not known
+    // yet -- the store treats it as unscoped, the issue-wide lookup as before.
+    const tracked = this.runStore.findTrackedPullRequestByIssue({
+      branchName: input.branchName,
+      issueNumber: input.issueNumber,
+      projectName: input.projectName
+    });
     if (tracked === undefined) {
       if (!isMergePr && isArtifactOnlyWaitState(waitState)) {
         this.logger?.debug(

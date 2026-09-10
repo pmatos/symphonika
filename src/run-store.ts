@@ -1125,6 +1125,26 @@ const PULL_REQUEST_DISCOVERY_LIMIT = 25;
 // ceiling to recognize "gave up looking for a PR" and release a deferred
 // claim (see ADR reasoning in ClaimLabelWriter's deferReleaseToScheduler).
 export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
+// Branch names are deterministic from the issue title (planWorkspacePaths),
+// so a redispatch of the same issue with an unchanged title reuses the same
+// branch name as an earlier, unrelated (and possibly already-terminal)
+// dispatch chain. A `not exists (... branch_name = ...)` discovery-
+// suppression check therefore treats that earlier chain's tracked PR as
+// "this branch already has a PR" and never discovers the fresh chain's own.
+// This CTE instead computes, for every run, the full set of its own
+// continuation-chain ancestors (including itself), so discovery suppression
+// can be scoped to "has *this chain* already tracked a PR" rather than "has
+// this branch name ever had one". See issue #738.
+const RUN_CHAIN_ANCESTRY_CTE = [
+  "with recursive run_chain_ancestry(member_id, ancestor_id) as (",
+  "  select id, id from runs",
+  "  union all",
+  "  select run_chain_ancestry.member_id, r.continuation_parent_run_id",
+  "  from run_chain_ancestry",
+  "  join runs r on r.id = run_chain_ancestry.ancestor_id",
+  "  where r.continuation_parent_run_id is not null",
+  ")"
+].join(" ");
 export const INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS = 60_000;
 const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
   "provider requested input (legacy)";
@@ -5487,6 +5507,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
+          RUN_CHAIN_ANCESTRY_CTE,
           "select id, project_name, issue_number, branch_name",
           "from runs",
           "where state = 'succeeded'",
@@ -5495,8 +5516,9 @@ export class RunStore {
           "and pr_discovery_attempts < @maxAttempts",
           "and not exists (",
           "  select 1 from tracked_pull_requests pr",
+          "  join run_chain_ancestry a on a.ancestor_id = pr.run_id",
           "  where pr.project_name = runs.project_name",
-          "  and pr.branch_name = runs.branch_name",
+          "  and a.member_id = runs.id",
           ")",
           "order by pr_discovery_attempts asc, updated_at asc, id asc",
           "limit @limit"
@@ -5529,6 +5551,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
+          RUN_CHAIN_ANCESTRY_CTE,
           "select 1 as found from tracked_pull_requests where state = 'open'",
           "union all",
           "select 1 as found from runs",
@@ -5538,8 +5561,9 @@ export class RunStore {
           "and pr_discovery_attempts < @maxAttempts",
           "and not exists (",
           "  select 1 from tracked_pull_requests pr",
+          "  join run_chain_ancestry a on a.ancestor_id = pr.run_id",
           "  where pr.project_name = runs.project_name",
-          "  and pr.branch_name = runs.branch_name",
+          "  and a.member_id = runs.id",
           ")",
           "limit 1"
         ].join(" ")
@@ -5789,33 +5813,41 @@ export class RunStore {
     return row === undefined ? undefined : mapTrackedPullRequestRow(row);
   }
 
-  // Branch-scoped counterpart to findTrackedPullRequestByIssue (issue #736
-  // review): an issue can carry more than one tracked_pull_requests row --
-  // trackPullRequest upserts by (project, pr_number) and rows are never
-  // deleted, so a redispatched issue can accumulate one row per chain's own
-  // branch. Filtering the unscoped issue-wide lookup after the fact can miss
-  // a real, branch-matching row when a *different* branch's row happens to
-  // be the newest by id. Querying by branch directly finds it regardless of
-  // insertion order.
-  findTrackedPullRequestByIssueAndBranch(input: {
-    branchName: string;
-    issueNumber: number;
+  // Branch names are not a unique run-chain identity: a redispatched issue
+  // whose title hasn't changed reuses the same deterministic branch name
+  // (planWorkspacePaths), so an earlier, unrelated dispatch chain's tracked
+  // PR row can share this run's own branch even though it belongs to a
+  // different, possibly already-terminal, chain. Scope the lookup to this
+  // run's own continuation chain instead: walk continuation_parent_run_id
+  // back through every ancestor (including the run itself) and match
+  // tracked_pull_requests rows whose run_id is one of those ancestors --
+  // trackPullRequest always records the discovering run's own id, so this
+  // is exact regardless of branch reuse. See issue #738.
+  findTrackedPullRequestForRunChain(input: {
     projectName: string;
+    runId: string;
   }): TrackedPullRequest | undefined {
     const row = this.database
       .prepare(
         [
+          "with recursive chain(id) as (",
+          "  select @runId",
+          "  union all",
+          "  select r.continuation_parent_run_id from runs r",
+          "  join chain on r.id = chain.id",
+          "  where r.continuation_parent_run_id is not null",
+          ")",
           "select id, project_name, issue_number, run_id, pr_number, pr_url,",
           "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
           "last_review_dispatch_fingerprint, review_dispatch_count,",
           "review_followup_cap_reached,",
           "last_followup_run_id, state, last_observed_at, created_at, updated_at",
           "from tracked_pull_requests",
-          "where project_name = ? and issue_number = ? and branch_name = ?",
+          "where project_name = @projectName and run_id in (select id from chain)",
           "order by id desc limit 1"
         ].join(" ")
       )
-      .get(input.projectName, input.issueNumber, input.branchName) as
+      .get({ projectName: input.projectName, runId: input.runId }) as
       TrackedPullRequestRow | undefined;
     return row === undefined ? undefined : mapTrackedPullRequestRow(row);
   }

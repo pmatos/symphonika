@@ -585,4 +585,92 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
       store.close();
     }
   });
+
+  it("does not treat a stale merged PR from an earlier run chain on the SAME reused branch as this run's PR (issue #738)", async () => {
+    const root = await makeTempRoot();
+    await writeWaitForPrOpenProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      // An earlier, unrelated top-level dispatch chain for this same issue
+      // (no continuation link to the fresh chain below) already tracked and
+      // merged its own PR on this exact branch name -- redispatching an
+      // issue whose title hasn't changed reuses the same deterministic
+      // branch name (planWorkspacePaths).
+      store.createRun({
+        id: "earlier-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.trackPullRequest({
+        branchName: "sym/symphonika/10-wait-for-pr-open-fixture",
+        headSha: "old-sha",
+        issueNumber: issue.number,
+        prNumber: 77,
+        prUrl: "https://example.test/pr/77",
+        projectName: "symphonika",
+        runId: "earlier-run"
+      });
+      store.recordPullRequestObservation({
+        headSha: "old-sha",
+        id: 1,
+        prUrl: "https://example.test/pr/77",
+        reviewFollowupCapReached: false,
+        state: "merged"
+      });
+
+      // A fresh, unrelated top-level dispatch chain reuses the same branch
+      // and has not pushed or opened a PR of its own yet.
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        branchName: "sym/symphonika/10-wait-for-pr-open-fixture",
+        currentStateId: "wait_for_pr_open",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi
+          .fn()
+          .mockResolvedValue(prState({ merged: true, state: "MERGED" })),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      // The stale, merged PR from the earlier chain must not resolve this
+      // wait -- it falls through to the untracked-wait counting path and
+      // stays parked on wait_for_pr_open instead of falsely reading
+      // pr_merged and terminalizing this fresh chain as already merged.
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("waiting");
+      expect(after?.currentStateId).toBe("wait_for_pr_open");
+      expect(
+        githubIssuesApi.getPullRequestFollowupState
+      ).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
 });

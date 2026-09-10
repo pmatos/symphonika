@@ -230,6 +230,16 @@ _Avoid_: event log when referring to scheduler state
 One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
+**Run Chain**:
+The full lineage of Runs linked by `continuation_parent_run_id`: one root Run (created fresh, with no
+parent) plus every Continuation, State Advance, and waiting Run that descends from it. A branch name
+is not a Run Chain identity — it is deterministic from the issue title (`planWorkspacePaths`,
+ADR-2026-09-04-0837), so a redispatched issue whose title has not changed reuses the same branch name
+across otherwise-unrelated chains. Anything that must recognize "this chain's own" tracked pull
+request — PR Follow-up discovery suppression, `wait`/`merge_pr` re-evaluation — walks this lineage
+instead of matching on branch name (see ADR-2026-09-10-2031).
+_Avoid_: branch, issue when identifying which chain owns a tracked pull request
+
 **Adopted Run**:
 A Run created by `adopt-pr` rather than the normal issue-dispatch path, attaching an already-open
 pull request to a fresh Run parked directly at an operator-named `wait`/`merge_pr` state instead of

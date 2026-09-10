@@ -1072,6 +1072,50 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("does not suppress discovery for a fresh unrelated chain reusing an earlier chain's branch (issue #738)", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const branchName = "sym/symphonika/54-pr-followup";
+
+      // An earlier, unrelated top-level dispatch chain (no continuation
+      // link) for the same issue already tracked and merged its own PR on
+      // this exact branch name.
+      seedRun(store, { id: "earlier-run", issueNumber: 54 });
+      store.trackPullRequest({
+        branchName,
+        headSha: "old-sha",
+        issueNumber: 54,
+        projectName: "symphonika",
+        prNumber: 77,
+        prUrl: "https://github.com/pmatos/symphonika/pull/77",
+        runId: "earlier-run"
+      });
+      store.recordPullRequestObservation({
+        headSha: "old-sha",
+        id: 1,
+        prUrl: "https://github.com/pmatos/symphonika/pull/77",
+        reviewFollowupCapReached: false,
+        state: "merged"
+      });
+
+      // A fresh, unrelated top-level dispatch chain reuses the same branch
+      // name (redispatch of the same issue with an unchanged title) and has
+      // succeeded its own implementation without a PR of its own yet.
+      const freshId = seedRun(store, { id: "fresh-run", issueNumber: 54 });
+      store.updateRunEvidence(freshId, evidence(branchName));
+      store.updateRunState(freshId, "succeeded");
+
+      // The stale tracked row from the unrelated earlier chain must not
+      // suppress discovery for this fresh chain's own run.
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual(["fresh-run"]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("PR discovery prefers least-attempted runs and excludes ones that hit the attempt cap", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

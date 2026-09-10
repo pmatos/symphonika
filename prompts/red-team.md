@@ -33,4 +33,6 @@ exists now.
 
 Leave the workspace with one focused characterization-test commit on `{{branch.name}}` that the
 next states can identify in Git history. If a trustworthy baseline cannot be established, make no
-commit and **exit non-zero (e.g. `exit 1`)** so the workflow takes its blocked exit.
+commit, **write `BLOCKED.md` in the workspace root** with an explanation, and exit 0. A Bash tool
+call's `exit 1` only ends that subshell, not the provider session, so it cannot make
+`provider_success` false; the FSM gates this state's advance on `BLOCKED.md` not existing instead.

@@ -195,6 +195,13 @@ Run success means the provider process completed successfully and the issue bran
 commit ahead of the configured base branch in the Workspace. It does not mean the GitHub issue is
 closed, merged, pushed, or represented by a pull request.
 
+A raw-FSM agent state's own transition can only observe local git state the same way — it cannot
+tell whether the branch reached origin or a pull request exists. A workflow author whose next state
+assumes an open pull request (code review, autofix, merge) should insert a `wait` state gating on
+`pr_open`/`pr_merged` between them, the same pattern `wait_for_pr` already uses later in the walk,
+rather than handing off on `provider_success` and `branch_ahead_of_base` alone. See
+ADR-2026-09-10-1630 and ADR-2026-09-05-1205.
+
 ### 4.8 Continuation
 
 A Continuation is a follow-up run for the same issue after the provider completed successfully but
@@ -577,7 +584,11 @@ Raw FSM workflows may reference five built-in Workflow Templates through the `bu
 and evidence path as repository-local templates. `refactor-swarm` runs three serial agent states:
 `red_team` and `refactoring` each require provider success, `branch_ahead_of_base`, and
 `branch_advanced_since_attempt_start`, then `verifying` requires provider success alone because
-verification is read-only. `plan-tdd-pr`'s `planning` state requires provider success **and**
+verification is read-only. Each of the three states is also gated on a `BLOCKED.md` sentinel,
+checked before its own success transition: a rejected red-team, refactor, or verify pass writes
+that file instead of relying on its process exit code, and the state routes to the `blocked` exit
+regardless of `provider_success`. See ADR-2026-09-10-1630. `plan-tdd-pr`'s `planning` state requires
+provider success **and**
 `artifact_exists` on its `plan_artifact` input (default `PLAN.md`), so a planner that returns
 success having written no plan takes the `blocked` exit instead of advancing to an unplanned
 implementation stage. `branch_ahead_of_base` remains the cumulative branch-vs-base signal.
@@ -602,6 +613,16 @@ Run has no prepared Workspace cannot satisfy an `artifact_exists` predicate. In 
 wait state whose predicates are only artefact predicates is polled without a tracked pull request,
 while a wait state that also names PR predicates and every `merge_pr` state still require one. See
 ADR 0087.
+
+`BLOCKED.md` is a reserved artefact name, not an author-chosen one: a raw-FSM agent prompt that
+determines it is blocked writes that file (uncommitted) instead of relying on its process exit
+code — exiting non-zero from a Bash tool call only ends that subshell, not the provider session, so
+`provider_success` reads true regardless of the agent's own verdict. A `when: artifact_exists:
+BLOCKED.md` transition, checked before the state's success transition, is what actually routes the
+run to its blocked exit. Unlike an ordinary artefact, `BLOCKED.md` does not benefit from Workspace
+reuse across attempts (ADR 0040): Symphonika removes it from the Workspace immediately before each
+attempt's provider execution, so a sentinel left by an earlier blocked attempt cannot gate a later,
+genuinely successful one. See ADR-2026-09-10-1630.
 
 Expanded-graph validation rejects a `wait` state whose PR-signal transitions leave a settled,
 actionable pull-request observation uncovered. The validator enumerates successful or failed

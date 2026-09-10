@@ -5789,6 +5789,37 @@ export class RunStore {
     return row === undefined ? undefined : mapTrackedPullRequestRow(row);
   }
 
+  // Branch-scoped counterpart to findTrackedPullRequestByIssue (issue #736
+  // review): an issue can carry more than one tracked_pull_requests row --
+  // trackPullRequest upserts by (project, pr_number) and rows are never
+  // deleted, so a redispatched issue can accumulate one row per chain's own
+  // branch. Filtering the unscoped issue-wide lookup after the fact can miss
+  // a real, branch-matching row when a *different* branch's row happens to
+  // be the newest by id. Querying by branch directly finds it regardless of
+  // insertion order.
+  findTrackedPullRequestByIssueAndBranch(input: {
+    branchName: string;
+    issueNumber: number;
+    projectName: string;
+  }): TrackedPullRequest | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, run_id, pr_number, pr_url,",
+          "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
+          "last_review_dispatch_fingerprint, review_dispatch_count,",
+          "review_followup_cap_reached,",
+          "last_followup_run_id, state, last_observed_at, created_at, updated_at",
+          "from tracked_pull_requests",
+          "where project_name = ? and issue_number = ? and branch_name = ?",
+          "order by id desc limit 1"
+        ].join(" ")
+      )
+      .get(input.projectName, input.issueNumber, input.branchName) as
+      TrackedPullRequestRow | undefined;
+    return row === undefined ? undefined : mapTrackedPullRequestRow(row);
+  }
+
   listOpenTrackedPullRequests(): TrackedPullRequest[] {
     const rows = this.database
       .prepare(

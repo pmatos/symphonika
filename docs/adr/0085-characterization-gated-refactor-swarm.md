@@ -77,8 +77,10 @@ two distinct commits while rejecting commit amendment or history replacement as 
 
 The read-only `verifying` state deliberately omits both commit predicates and gates on
 `provider_success` alone. The verifier still re-checks Git history and characterization-test
-integrity independently. A rejection uses the existing provider-failure signal and blocked exit;
-the template does not add a comment action.
+integrity independently. A rejection is signaled by writing `BLOCKED.md`, checked before the
+`provider_success` transition — a non-zero exit from a Bash tool call only ends that subshell, not
+the provider session, so `provider_success` reads true regardless (see ADR-2026-09-10-1630); the
+template does not add a comment action.
 
 ### Blindness is prompt isolation, not a security boundary
 

@@ -29,7 +29,10 @@ characterization-test commit and the later refactor commit from repository evide
 5. The production diff is confined to the requested refactor and preserves public interfaces,
    outputs, side effects, and error behavior.
 
-Do not modify files or create commits. Approve only when every check succeeds. If no distinct
-refactor commit exists, behavior changed, a characterization test was weakened, evidence is
-ambiguous, or a required check fails, clearly describe the rejection and exit with a non-zero
-status (e.g. `exit 1`) so the workflow takes its blocked exit.
+Do not modify tracked files or create commits; the only file you may write is `BLOCKED.md`, and
+only on rejection. Approve only when every check succeeds. If no distinct refactor commit exists,
+behavior changed, a characterization test was weakened, evidence is ambiguous, or a required check
+fails, clearly describe the rejection, **write `BLOCKED.md` in the workspace root** with that
+description, and exit 0. A Bash tool call's `exit 1` only ends that subshell, not the provider
+session, so it cannot make `provider_success` false; the FSM gates this state's advance on
+`BLOCKED.md` not existing instead.

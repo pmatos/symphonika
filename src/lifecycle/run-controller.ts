@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import { appendFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  BLOCKED_SENTINEL_FILENAME,
+  clearBlockedSentinel
+} from "./blocked-sentinel.js";
+
 import type { Logger } from "pino";
 
 import type {
@@ -98,7 +103,11 @@ import {
   type LifecyclePolicy
 } from "./active-runs.js";
 import { raceAbortSignal } from "../abort-race.js";
-import { probeStateArtifacts, statePredicateKeys } from "./artifact-probe.js";
+import {
+  collectArtifactPaths,
+  probeStateArtifacts,
+  statePredicateKeys
+} from "./artifact-probe.js";
 import {
   buildEdgeBudgetExhaustedReason,
   buildNoProgressReason,
@@ -1870,6 +1879,7 @@ export class RunController {
   // unmet under strict equality, so evaluating early would drop such a state
   // onto a catch-all transition on its first poll.
   private async observeWaitPullRequestSignals(input: {
+    branchName: string;
     isMergePr: boolean;
     issueNumber: number;
     projectName: string;
@@ -1883,10 +1893,26 @@ export class RunController {
     // still see the tracked row after PR follow-up has marked it "merged"; an
     // open-only listing would strand the wait. The dispatcher's own open-only
     // loop is unaffected — only wait re-evaluation widens the lookup.
-    const tracked = this.runStore.findTrackedPullRequestByIssue({
-      issueNumber: input.issueNumber,
-      projectName: input.projectName
-    });
+    //
+    // Query by (project, issue, branch) when the run's own branch is known,
+    // rather than fetching the newest issue-wide row and discarding it on a
+    // mismatch (issue #736 review, round 2): an issue can carry more than
+    // one tracked row across redispatches, and the newest by id is not
+    // necessarily the one for this run's branch -- fetch-then-discard could
+    // miss a real, older, branch-matching row entirely. An empty run
+    // branchName means the caller doesn't know it yet, so the unscoped
+    // lookup is used as before.
+    const tracked =
+      input.branchName.length > 0
+        ? this.runStore.findTrackedPullRequestByIssueAndBranch({
+            branchName: input.branchName,
+            issueNumber: input.issueNumber,
+            projectName: input.projectName
+          })
+        : this.runStore.findTrackedPullRequestByIssue({
+            issueNumber: input.issueNumber,
+            projectName: input.projectName
+          });
     if (tracked === undefined) {
       if (!isMergePr && isArtifactOnlyWaitState(waitState)) {
         this.logger?.debug(
@@ -2344,6 +2370,7 @@ export class RunController {
             runId
           })
         : await this.observeWaitPullRequestSignals({
+            branchName: row.branchName,
             isMergePr,
             issueNumber: row.issueNumber,
             projectName: row.project,
@@ -4634,6 +4661,35 @@ export class RunController {
         // exit. Cancellation, input-required, and provider failures must retain
         // their own higher-priority classification.
         headInspectionFailed = true;
+      }
+
+      // Only clear the sentinel for a state that actually declares the
+      // BLOCKED.md gate (issue #736 review): most workflows never reference
+      // it, and an unconditional rm on a repo-root file would silently
+      // delete a managed repository's own unrelated BLOCKED.md.
+      const currentStateDeclaresBlockedGate =
+        currentState !== undefined &&
+        collectArtifactPaths(currentState).has(BLOCKED_SENTINEL_FILENAME);
+      if (currentStateDeclaresBlockedGate) {
+        const workspacePathForBlockedSentinel = started.evidence.workspacePath;
+        // Raced like every other pre-provider op in this method (e.g.
+        // addLabelsBounded above): rm() takes no AbortSignal, so a stalled
+        // clear (an unresponsive network/FUSE-backed workspace) would
+        // otherwise suspend this await forever, and the slot's own finally
+        // block -- reachable only once this line settles -- would never run
+        // (issue #736 review, round 2). Racing abandons the wait on deadline
+        // expiry rather than cancelling the underlying rm(); bestEffort's own
+        // try/catch still swallows an ordinary rm failure.
+        await input.deadline.race(
+          this.bestEffort(
+            () => clearBlockedSentinel(workspacePathForBlockedSentinel),
+            {
+              issue: input.issue.number,
+              operation: "clearBlockedSentinel",
+              runId: input.runId
+            }
+          )
+        );
       }
 
       await this.iterateAttempt({

@@ -86,6 +86,16 @@ const PLAN_TDD_PR = [
   ""
 ].join("\n");
 
+// A rejected pass writes BLOCKED.md instead of relying on a non-zero exit
+// code -- exiting non-zero from a Bash tool call only ends that subshell,
+// not the provider session, so provider_success reads true regardless
+// (issue #730).
+const BLOCKED_TRANSITION = [
+  "      - to: failed",
+  "        when:",
+  "          artifact_exists: BLOCKED.md"
+];
+
 const REFACTOR_SWARM = [
   "name: builtin_refactor_swarm",
   "entry: red_team",
@@ -118,6 +128,7 @@ const REFACTOR_SWARM = [
   '      provider: "{{ red_teamer }}"',
   '      prompt: "{{ red_team_prompt }}"',
   "    transitions:",
+  ...BLOCKED_TRANSITION,
   "      - to: refactoring",
   "        when:",
   "          provider_success: true",
@@ -130,6 +141,7 @@ const REFACTOR_SWARM = [
   '      provider: "{{ refactorer }}"',
   '      prompt: "{{ refactor_prompt }}"',
   "    transitions:",
+  ...BLOCKED_TRANSITION,
   "      - to: verifying",
   "        when:",
   "          provider_success: true",
@@ -142,6 +154,7 @@ const REFACTOR_SWARM = [
   '      provider: "{{ verifier }}"',
   '      prompt: "{{ verify_prompt }}"',
   "    transitions:",
+  ...BLOCKED_TRANSITION,
   "      - to: done",
   "        when:",
   "          provider_success: true",

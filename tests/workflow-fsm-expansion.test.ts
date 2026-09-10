@@ -3078,6 +3078,28 @@ describe("built-in workflow templates", () => {
       to: "shipped"
     });
 
+    // A rejected pass writes BLOCKED.md and exits 0 instead of relying on a
+    // non-zero exit code -- exiting non-zero from a Bash tool call only ends
+    // that subshell, not the provider session, so provider_success reads
+    // true regardless (issue #730). The artifact_exists: BLOCKED.md
+    // transition must still route to blocked even when every other success
+    // signal is also true.
+    const successSignals = {
+      branch_advanced_since_attempt_start: true,
+      branch_ahead_of_base: true,
+      provider_success: true
+    };
+    const blockedArtifact = (candidate: string) => candidate === "BLOCKED.md";
+    expect(
+      decide("refactor.red_team", successSignals, blockedArtifact)
+    ).toMatchObject({ kind: "advance", to: "needs_human" });
+    expect(
+      decide("refactor.refactoring", successSignals, blockedArtifact)
+    ).toMatchObject({ kind: "advance", to: "needs_human" });
+    expect(
+      decide("refactor.verifying", successSignals, blockedArtifact)
+    ).toMatchObject({ kind: "advance", to: "needs_human" });
+
     expect(decide("review.autofix", failureSignals)).toMatchObject({
       kind: "advance",
       to: "needs_human"

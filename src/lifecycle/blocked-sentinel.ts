@@ -79,10 +79,12 @@ async function isGitTracked(
   signal?: AbortSignal
 ): Promise<boolean> {
   const timeoutSignal = AbortSignal.timeout(GIT_COMMAND_TIMEOUT_MS);
-  const combinedSignal =
+  // AbortSignal.any() needs Node 20.3+, but package.json's engines field
+  // permits 20.0.0-20.2.x, so the two signals are linked by hand instead.
+  const combined =
     signal === undefined
-      ? timeoutSignal
-      : AbortSignal.any([timeoutSignal, signal]);
+      ? undefined
+      : combineAbortSignals([timeoutSignal, signal]);
   try {
     await git(
       [
@@ -93,7 +95,7 @@ async function isGitTracked(
         "--",
         BLOCKED_SENTINEL_FILENAME
       ],
-      combinedSignal
+      combined?.signal ?? timeoutSignal
     );
     return true;
   } catch (error) {
@@ -101,7 +103,37 @@ async function isGitTracked(
       throw error;
     }
     return false;
+  } finally {
+    combined?.dispose();
   }
+}
+
+// Manual stand-in for AbortSignal.any(): links `signal` listeners must be
+// removed once the caller is done, or a long-lived signal (e.g. a run
+// deadline reused across many attempts) accumulates one listener per call.
+function combineAbortSignals(signals: readonly AbortSignal[]): {
+  signal: AbortSignal;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  const onAbort = (event: Event): void => {
+    controller.abort((event.target as AbortSignal).reason);
+  };
+  for (const source of signals) {
+    if (source.aborted) {
+      controller.abort(source.reason);
+      break;
+    }
+    source.addEventListener("abort", onAbort, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      for (const source of signals) {
+        source.removeEventListener("abort", onAbort);
+      }
+    }
+  };
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

@@ -1125,19 +1125,20 @@ const PULL_REQUEST_DISCOVERY_LIMIT = 25;
 // ceiling to recognize "gave up looking for a PR" and release a deferred
 // claim (see ADR reasoning in ClaimLabelWriter's deferReleaseToScheduler).
 export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
-// Branch names are deterministic from the issue title (planWorkspacePaths),
-// so a redispatch of the same issue with an unchanged title reuses the same
-// branch name as an earlier, unrelated (and possibly already-terminal)
-// dispatch chain. A `not exists (... branch_name = ...)` discovery-
-// suppression check therefore treats that earlier chain's tracked PR as
-// "this branch already has a PR" and never discovers the fresh chain's own.
-// This CTE instead computes, for every run, the full set of its own
-// continuation-chain ancestors (including itself), so discovery suppression
-// can be scoped to "has *this chain* already tracked a PR" rather than "has
-// this branch name ever had one". See issue #738.
+// Scopes PR-discovery suppression to "has *this chain* already tracked a
+// PR" rather than "has this branch name ever had one" (see CONTEXT.md's
+// "Run Chain" entry and ADR-2026-09-10-2031, issue #738). The anchor
+// mirrors both call sites' own `runs` filter (state/branch/attempts) rather
+// than selecting every run: `runs` is never pruned, so an unfiltered anchor
+// would walk the whole table's history on every poll tick instead of just
+// the currently-eligible candidates.
 const RUN_CHAIN_ANCESTRY_CTE = [
   "with recursive run_chain_ancestry(member_id, ancestor_id) as (",
   "  select id, id from runs",
+  "  where state = 'succeeded'",
+  "  and branch_name is not null",
+  "  and branch_name <> ''",
+  "  and pr_discovery_attempts < @maxAttempts",
   "  union all",
   "  select run_chain_ancestry.member_id, r.continuation_parent_run_id",
   "  from run_chain_ancestry",
@@ -5813,16 +5814,13 @@ export class RunStore {
     return row === undefined ? undefined : mapTrackedPullRequestRow(row);
   }
 
-  // Branch names are not a unique run-chain identity: a redispatched issue
-  // whose title hasn't changed reuses the same deterministic branch name
-  // (planWorkspacePaths), so an earlier, unrelated dispatch chain's tracked
-  // PR row can share this run's own branch even though it belongs to a
-  // different, possibly already-terminal, chain. Scope the lookup to this
-  // run's own continuation chain instead: walk continuation_parent_run_id
-  // back through every ancestor (including the run itself) and match
-  // tracked_pull_requests rows whose run_id is one of those ancestors --
-  // trackPullRequest always records the discovering run's own id, so this
-  // is exact regardless of branch reuse. See issue #738.
+  // Scopes to this run's own continuation chain rather than branch name
+  // (see CONTEXT.md's "Run Chain" entry and ADR-2026-09-10-2031, issue
+  // #738). Seeds its own single-run recursive walk from @runId instead of
+  // joining against RUN_CHAIN_ANCESTRY_CTE: that CTE's anchor spans every
+  // discovery-eligible run, so filtering it down to one run's ancestry
+  // afterward would still materialize the whole set first -- more work than
+  // this bounded, chain-length-only walk needs.
   findTrackedPullRequestForRunChain(input: {
     projectName: string;
     runId: string;

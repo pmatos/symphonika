@@ -93,4 +93,38 @@ describe("clearBlockedSentinel provenance check (issue #739)", () => {
       readFile(path.join(root, "BLOCKED.md"), "utf8")
     ).rejects.toThrow();
   });
+
+  // PR #741 review: a caller that abandons its wait on this function (e.g. a
+  // run deadline) must be able to stop it from reaching the deletion, or an
+  // orphaned invocation can delete a fresh sentinel a later attempt writes.
+  it("still deletes an untracked sentinel when passed a signal that never fires", async () => {
+    const workspacePath = await makeGitWorkspace();
+    await writeFile(
+      path.join(workspacePath, "BLOCKED.md"),
+      "# Blocked\nStale sentinel from a previous attempt.\n"
+    );
+
+    await clearBlockedSentinel(workspacePath, new AbortController().signal);
+
+    await expect(
+      readFile(path.join(workspacePath, "BLOCKED.md"), "utf8")
+    ).rejects.toThrow();
+  });
+
+  it("does not delete an untracked sentinel once the caller's signal has fired", async () => {
+    const workspacePath = await makeGitWorkspace();
+    const staleContents =
+      "# Blocked\nStale sentinel from a previous attempt.\n";
+    await writeFile(path.join(workspacePath, "BLOCKED.md"), staleContents);
+    const controller = new AbortController();
+    controller.abort(new Error("run deadline abandoned this attempt"));
+
+    await expect(
+      clearBlockedSentinel(workspacePath, controller.signal)
+    ).rejects.toThrow();
+
+    await expect(
+      readFile(path.join(workspacePath, "BLOCKED.md"), "utf8")
+    ).resolves.toBe(staleContents);
+  });
 });

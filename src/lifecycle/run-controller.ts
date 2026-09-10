@@ -4767,12 +4767,20 @@ export class RunController {
         // clear (an unresponsive network/FUSE-backed workspace) would
         // otherwise suspend this await forever, and the slot's own finally
         // block -- reachable only once this line settles -- would never run
-        // (issue #736 review, round 2). Racing abandons the wait on deadline
-        // expiry rather than cancelling the underlying rm(); bestEffort's own
-        // try/catch still swallows an ordinary rm failure.
+        // (issue #736 review, round 2). Racing abandons the *wait* on
+        // deadline expiry, but the deadline signal is also threaded into
+        // clearBlockedSentinel itself so an abandoned invocation still stops:
+        // without it, the underlying `git` check (and the `rm` after it)
+        // would keep running orphaned past this race, and could delete a
+        // fresh sentinel a later attempt has since written (PR #741 review).
+        // bestEffort's own try/catch still swallows an ordinary rm failure.
         await input.deadline.race(
           this.bestEffort(
-            () => clearBlockedSentinel(workspacePathForBlockedSentinel),
+            () =>
+              clearBlockedSentinel(
+                workspacePathForBlockedSentinel,
+                input.deadline.signal
+              ),
             {
               issue: input.issue.number,
               operation: "clearBlockedSentinel",

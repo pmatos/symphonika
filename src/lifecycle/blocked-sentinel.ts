@@ -31,8 +31,17 @@ export const BLOCKED_SENTINEL_FILENAME = "BLOCKED.md";
 // managed repository's own git-tracked source file of the same name. A
 // git-tracked BLOCKED.md is left alone -- deleting it would let the provider
 // commit the removal of a real source file the orchestration never wrote.
+//
+// `signal`, if given, is the caller's own abandonment signal (e.g. a run
+// deadline), separate from the per-command GIT_COMMAND_TIMEOUT_MS bound
+// below. The caller only *awaits* this function under its own race and moves
+// on once that signal fires; without threading it through, the `git`
+// spawn -- and the `rm` that follows it -- would keep running orphaned after
+// the caller stopped waiting, and could delete a fresh sentinel a later
+// attempt has since written (PR #741 review).
 export async function clearBlockedSentinel(
-  workspacePath: string
+  workspacePath: string,
+  signal?: AbortSignal
 ): Promise<void> {
   const resolved = resolveArtifactPath(
     workspacePath,
@@ -41,9 +50,10 @@ export async function clearBlockedSentinel(
   if (resolved === undefined || !(await fileExists(resolved))) {
     return;
   }
-  if (await isGitTracked(workspacePath)) {
+  if (await isGitTracked(workspacePath, signal)) {
     return;
   }
+  signal?.throwIfAborted();
   await rm(resolved, { force: true });
 }
 
@@ -64,7 +74,15 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-async function isGitTracked(workspacePath: string): Promise<boolean> {
+async function isGitTracked(
+  workspacePath: string,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const timeoutSignal = AbortSignal.timeout(GIT_COMMAND_TIMEOUT_MS);
+  const combinedSignal =
+    signal === undefined
+      ? timeoutSignal
+      : AbortSignal.any([timeoutSignal, signal]);
   try {
     await git(
       [
@@ -75,10 +93,13 @@ async function isGitTracked(workspacePath: string): Promise<boolean> {
         "--",
         BLOCKED_SENTINEL_FILENAME
       ],
-      AbortSignal.timeout(GIT_COMMAND_TIMEOUT_MS)
+      combinedSignal
     );
     return true;
-  } catch {
+  } catch (error) {
+    if (signal?.aborted === true) {
+      throw error;
+    }
     return false;
   }
 }

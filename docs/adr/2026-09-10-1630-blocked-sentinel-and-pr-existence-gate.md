@@ -69,6 +69,10 @@ attempt that never touches the file. `clearBlockedSentinel` (`src/lifecycle/bloc
 removes `BLOCKED.md` from the Workspace immediately before each attempt's provider execution, next
 to the existing `headShaAtAttemptStart` snapshot in `run-controller.ts` — best-effort, logged and
 swallowed on failure, the same as other pre-attempt Workspace inspection steps at that call site.
+`run-controller.ts` only runs this clear when the attempt's current state actually declares a
+`BLOCKED.md` artifact-exists transition (`collectArtifactPaths(currentState).has("BLOCKED.md")`):
+most workflow states never reference the sentinel at all, and an unconditional clear would delete a
+managed repository's own unrelated root `BLOCKED.md` (issue #736 review).
 
 ### Gating a post-implement state on an actual pull request
 

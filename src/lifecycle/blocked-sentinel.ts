@@ -10,7 +10,7 @@ import { resolveArtifactPath } from "../workflow/predicates.js";
 // lets persist across attempts in a reused Workspace (ADR 0040), BLOCKED.md
 // is attempt-scoped: a sentinel left by an earlier blocked attempt must not
 // block a later, genuinely successful one.
-const BLOCKED_SENTINEL_FILENAME = "BLOCKED.md";
+export const BLOCKED_SENTINEL_FILENAME = "BLOCKED.md";
 
 // Resolves once the sentinel is gone or was never there (`force: true`
 // swallows ENOENT); a permission or I/O error still rejects. Unlike the

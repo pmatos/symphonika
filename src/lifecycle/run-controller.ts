@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { appendFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { clearBlockedSentinel } from "./blocked-sentinel.js";
+import {
+  BLOCKED_SENTINEL_FILENAME,
+  clearBlockedSentinel
+} from "./blocked-sentinel.js";
 
 import type { Logger } from "pino";
 
@@ -100,7 +103,11 @@ import {
   type LifecyclePolicy
 } from "./active-runs.js";
 import { raceAbortSignal } from "../abort-race.js";
-import { probeStateArtifacts, statePredicateKeys } from "./artifact-probe.js";
+import {
+  collectArtifactPaths,
+  probeStateArtifacts,
+  statePredicateKeys
+} from "./artifact-probe.js";
 import {
   buildEdgeBudgetExhaustedReason,
   buildNoProgressReason,
@@ -4638,15 +4645,24 @@ export class RunController {
         headInspectionFailed = true;
       }
 
-      const workspacePathForBlockedSentinel = started.evidence.workspacePath;
-      await this.bestEffort(
-        () => clearBlockedSentinel(workspacePathForBlockedSentinel),
-        {
-          issue: input.issue.number,
-          operation: "clearBlockedSentinel",
-          runId: input.runId
-        }
-      );
+      // Only clear the sentinel for a state that actually declares the
+      // BLOCKED.md gate (issue #736 review): most workflows never reference
+      // it, and an unconditional rm on a repo-root file would silently
+      // delete a managed repository's own unrelated BLOCKED.md.
+      const currentStateDeclaresBlockedGate =
+        currentState !== undefined &&
+        collectArtifactPaths(currentState).has(BLOCKED_SENTINEL_FILENAME);
+      if (currentStateDeclaresBlockedGate) {
+        const workspacePathForBlockedSentinel = started.evidence.workspacePath;
+        await this.bestEffort(
+          () => clearBlockedSentinel(workspacePathForBlockedSentinel),
+          {
+            issue: input.issue.number,
+            operation: "clearBlockedSentinel",
+            runId: input.runId
+          }
+        );
+      }
 
       await this.iterateAttempt({
         attemptId,

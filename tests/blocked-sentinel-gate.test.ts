@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -155,6 +155,80 @@ async function writeProject(root: string): Promise<void> {
   );
 }
 
+// Same fixture, but "working" has no `artifact_exists: BLOCKED.md`
+// transition anywhere in the workflow -- clearBlockedSentinel must not run
+// for a state that never declares the gate (issue #736 review), so a
+// managed repository's own unrelated root BLOCKED.md survives the attempt.
+async function writeNonGatingProject(root: string): Promise<void> {
+  await writeFile(
+    path.join(root, "symphonika.yml"),
+    [
+      "state:",
+      "  root: ./.symphonika",
+      "polling:",
+      "  interval_ms: 30000",
+      "providers:",
+      "  codex:",
+      `    command: "${DEFAULT_CODEX_COMMAND}"`,
+      "  claude:",
+      '    command: "claude -p --dangerously-skip-permissions --input-format stream-json --output-format stream-json"',
+      "projects:",
+      "  - name: symphonika",
+      "    disabled: false",
+      "    weight: 1",
+      "    tracker:",
+      "      kind: github",
+      "      owner: pmatos",
+      "      repo: symphonika",
+      '      token: "$GITHUB_TOKEN"',
+      "    issue_filters:",
+      '      states: ["open"]',
+      '      labels_all: ["agent-ready"]',
+      '      labels_none: ["blocked", "needs-human"]',
+      "    priority:",
+      "      labels: {}",
+      "      default: 99",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/symphonika",
+      "      git:",
+      "        remote: git@github.com:pmatos/symphonika.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      "    workflow: ./workflow.yml",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "workflow.yml"),
+    [
+      "workflow:",
+      "  name: non_gating_fixture",
+      "  initial: working",
+      "  states:",
+      "    working:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: work-prompt.md",
+      "      transitions:",
+      "        - to: done",
+      "          when:",
+      "            provider_success: true",
+      "        - to: failed",
+      "    done:",
+      "      terminal: success",
+      "    failed:",
+      "      terminal: blocked",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    path.join(root, "work-prompt.md"),
+    "Do the work for #{{issue.number}}.\n"
+  );
+}
+
 function providerWriting(
   artifacts: Array<{ contents: string; relativePath: string }>,
   workspacePath: string
@@ -297,5 +371,30 @@ describe("BLOCKED.md sentinel gates an agent state's transition (issue #730)", (
 
     expect(run.state).toBe("succeeded");
     expect(run.terminal_state_id).toBe("done");
+  });
+
+  it("leaves a managed repository's own root BLOCKED.md untouched when the state has no gate", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
+    await writeNonGatingProject(root);
+    const ownedContents =
+      "# Blocked\nThis file belongs to the managed repository, unrelated to symphonika.\n";
+    await writeFile(
+      path.join(prepared.workspacePath, "BLOCKED.md"),
+      ownedContents
+    );
+
+    const run = await runUntilTerminal(
+      root,
+      providerWriting([], prepared.workspacePath),
+      prepared
+    );
+
+    expect(run.state).toBe("succeeded");
+    expect(run.terminal_state_id).toBe("done");
+    await expect(
+      readFile(path.join(prepared.workspacePath, "BLOCKED.md"), "utf8")
+    ).resolves.toBe(ownedContents);
   });
 });

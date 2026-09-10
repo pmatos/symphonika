@@ -12,10 +12,12 @@ import path from "node:path";
 const BLOCKED_SENTINEL_FILENAME = "BLOCKED.md";
 
 // Resolves once the sentinel is gone or was never there (`force: true`
-// swallows ENOENT); a permission or I/O error still rejects, and the caller
-// treats that as best-effort the same way it treats other pre-attempt
-// workspace inspection failures. Runs once per attempt, before the provider
-// executes, alongside the headShaAtAttemptStart snapshot.
+// swallows ENOENT); a permission or I/O error still rejects. Unlike the
+// headShaAtAttemptStart snapshot's inspection failure, which is deferred into
+// a distinct workspace_inspection_failed classification, the caller only
+// warn-logs a rejection here and proceeds, so a stale sentinel can survive
+// and misroute a later successful attempt. Runs once per attempt, after the
+// headShaAtAttemptStart snapshot, before the provider executes.
 export async function clearBlockedSentinel(
   workspacePath: string
 ): Promise<void> {

@@ -4638,14 +4638,15 @@ export class RunController {
         headInspectionFailed = true;
       }
 
-      try {
-        await clearBlockedSentinel(started.evidence.workspacePath);
-      } catch (error) {
-        this.logger?.warn(
-          { err: error, issue: input.issue.number, runId: input.runId },
-          "symphonika could not clear a stale BLOCKED.md sentinel before this attempt"
-        );
-      }
+      const workspacePathForBlockedSentinel = started.evidence.workspacePath;
+      await this.bestEffort(
+        () => clearBlockedSentinel(workspacePathForBlockedSentinel),
+        {
+          issue: input.issue.number,
+          operation: "clearBlockedSentinel",
+          runId: input.runId
+        }
+      );
 
       await this.iterateAttempt({
         attemptId,

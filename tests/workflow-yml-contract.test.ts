@@ -60,5 +60,39 @@ describe("this repo's own workflow.yml (symphonika_self_driving)", () => {
       (transition) => transition.when.pr_open === true
     );
     expect(openTransition?.to).toBe("code_review_fix");
+
+    const mergedTransition = gate?.transitions.find(
+      (transition) => transition.when.pr_merged === true
+    );
+    expect(mergedTransition?.to).toBe("merged");
+
+    const closedTransition = gate?.transitions.find(
+      (transition) => transition.when.pr_open === false
+    );
+    expect(closedTransition?.to).toBe("failed");
   });
+
+  it.each(["code_review_fix", "simplify", "autofix", "resolve_conflicts"])(
+    "gates %s's success transition on an artifact_exists: BLOCKED.md check ordered first (issue #730)",
+    async (stateId) => {
+      const { workflow } = await loadExpandedWorkflow(workflowPath);
+      const state = findWorkflowState(workflow, stateId);
+      expect(state).toBeDefined();
+
+      const blockedIndex = state!.transitions.findIndex(
+        (transition) => transition.when.artifact_exists === "BLOCKED.md"
+      );
+      const successIndex = state!.transitions.findIndex(
+        (transition) => transition.when.provider_success === true
+      );
+
+      expect(blockedIndex).toBeGreaterThanOrEqual(0);
+      expect(successIndex).toBeGreaterThanOrEqual(0);
+      // First-match-wins transition dispatch (state-machine-dispatch.ts): the
+      // BLOCKED.md check must be checked before provider_success, or a
+      // rejected pass that still exits 0 would be read as success.
+      expect(blockedIndex).toBeLessThan(successIndex);
+      expect(state!.transitions[blockedIndex]?.to).toBe("failed");
+    }
+  );
 });

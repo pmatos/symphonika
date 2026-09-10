@@ -1668,25 +1668,13 @@ export class RunController {
     issueNumber: number;
     project: RunControllerProjectConfig;
   }): Promise<boolean> {
-    const { project } = input;
-    if (project.disabled === true || !isDispatchProject(project)) {
-      return false;
-    }
-    let loaded;
-    try {
-      loaded = await this.loadWorkflow(project.workflow);
-    } catch {
-      return false;
-    }
-    if (
-      loaded.errors.length > 0 ||
-      loaded.expandedWorkflow.source.kind !== "raw_fsm"
-    ) {
+    const loaded = await this.loadRawFsmWorkflow(input.project);
+    if (loaded === undefined || loaded === "load_failed") {
       return false;
     }
     return this.isIssueParkedAtRawFsmState(loaded, {
       issueNumber: input.issueNumber,
-      projectName: project.name
+      projectName: input.project.name
     });
   }
 
@@ -1714,22 +1702,22 @@ export class RunController {
     );
   }
 
-  // Loads the project's workflow once per pickProjectCandidate call instead
-  // of once per candidate -- isIssueOwnedByWorkflow's own per-issue load is
-  // fine for its one-issue-at-a-time PR-follow-up callers, but the fresh
-  // dispatch loop can evaluate many candidates from the same project bucket
-  // in one pick.
+  // Loads and classifies a project's workflow as a raw_fsm workflow (or not),
+  // shared by isIssueOwnedByWorkflow's one-issue-at-a-time callers and
+  // pickProjectCandidate's wait-park guard, which loads once per project
+  // bucket instead of once per candidate.
   //
-  // Fails CLOSED on a load error (`"load_failed"`), unlike
-  // isIssueOwnedByWorkflow's fail-open: a transient read failure here would
-  // otherwise silently reopen the exact race this guards (issue #731), same
-  // as the reasoning dispatchReviewFollowup already applies to its own
-  // load failure (see the comment there, run-controller.ts:3484-3489).
-  // Fails OPEN (`undefined`, meaning "no wait park to guard against") only
-  // for a disabled project, a non-dispatch project, or a workflow that is
-  // not raw_fsm -- none of those can ever have a waiting row worth refusing
-  // a fresh claim over.
-  private async loadRawFsmWorkflowForWaitParkGuard(
+  // Callers disagree on how to treat a load error: isIssueOwnedByWorkflow
+  // fails OPEN (`"load_failed"` collapses to false, same as a non-raw_fsm
+  // workflow), while pickProjectCandidate's guard fails CLOSED on
+  // `"load_failed"` -- a transient read failure there would otherwise
+  // silently reopen the exact race this guards (issue #731), same as the
+  // reasoning dispatchReviewFollowup already applies to its own load failure
+  // (see the comment there, run-controller.ts:3484-3489). Returns `undefined`
+  // (meaning "no wait park to guard against") for a disabled project, a
+  // non-dispatch project, or a workflow that is not raw_fsm -- none of those
+  // can ever have a waiting row worth refusing a fresh claim over.
+  private async loadRawFsmWorkflow(
     project: RunControllerProjectConfig
   ): Promise<LoadedWorkflow | "load_failed" | undefined> {
     if (project.disabled === true || !isDispatchProject(project)) {
@@ -3752,8 +3740,13 @@ export class RunController {
     // wait_park re-evaluations, so without this check a fresh claim can
     // restart the workflow from `initial` while the parked run still owns
     // the Issue. See issue #731.
-    const rawFsmWorkflow =
-      await this.loadRawFsmWorkflowForWaitParkGuard(project);
+    const rawFsmWorkflow = await this.loadRawFsmWorkflow(project);
+    // Fails closed: cannot confirm no wait park owns any candidate in this
+    // project's bucket, so the whole bucket is skipped for this pick rather
+    // than risking the double-claim the load would otherwise have caught.
+    if (rawFsmWorkflow === "load_failed") {
+      return undefined;
+    }
     for (const entry of bucket.slice().sort(compareCandidateIssues)) {
       if (this.activeRuns.isIssueReserved(entry.project, entry.issue.number)) {
         continue;
@@ -3766,13 +3759,6 @@ export class RunController {
           repository: project.tracker
         })
       ) {
-        continue;
-      }
-      // "load_failed" fails closed: cannot confirm no wait park owns this
-      // candidate, so every candidate in this project's bucket is skipped
-      // for this pick rather than risking the double-claim the load would
-      // otherwise have caught.
-      if (rawFsmWorkflow === "load_failed") {
         continue;
       }
       if (

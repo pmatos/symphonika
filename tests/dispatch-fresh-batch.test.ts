@@ -538,7 +538,7 @@ describe("RunController.dispatchFresh", () => {
   });
 
   it("issue #731: fails closed (skips the whole project) when the wait-park guard's own workflow load errors", async () => {
-    // loadRawFsmWorkflowForWaitParkGuard cannot confirm no waiting row owns
+    // loadRawFsmWorkflow cannot confirm no waiting row owns
     // any candidate in this project's bucket when its own load fails, so it
     // must refuse every candidate rather than fall through to a claim that
     // could race a parked run it failed to see. Mirrors dispatchReviewFollowup's

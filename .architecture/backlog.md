@@ -4,6 +4,36 @@ Persisted candidate memory for `pm-deepen` refactor-audit runs. Each firing
 reconciles this file against merged/open PRs, reuses existing slugs so the dedup
 filter holds, and never deletes entries. Statuses change; rows stay.
 
+## tracked-pull-request-lookup
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
+- **Files**: ~3 estimated (`src/run-store.ts`, `src/lifecycle/run-controller.ts`, one store test)
+- **Modules**: `src/run-store.ts` (`findTrackedPullRequestByIssue` 5770-5790 + its twin `findTrackedPullRequestByIssueAndBranch` 5800-5821, added by #736), sole branch-scoped caller `src/lifecycle/run-controller.ts` `observeWaitPullRequestSignals` 2024-2034; unaffected unscoped callers `src/http/pages.ts:3785,6754`, `src/lifecycle/file-overlap-guard.ts:303`
+- **Summary**: Merge the issue-wide and branch-scoped Tracked-PR lookups into one `findTrackedPullRequestByIssue({issueNumber, projectName, branchName?})` where the Run Store owns branch-scoping and the "absent branch" notion (undefined and "" both unscoped); the wait re-eval caller drops its ternary, the twin is removed, and the #736 branch-scoping fix gains a unit test.
+- **First seen**: 2026-09-11
+- **Reason**: Picked by the 2026-09-11 run (top surviving candidate at 20/25; runner-up candidate `create-waiting-run-normalization` at 18/25, 2 points back — not within 1). Only candidate with this-week-hot lines (#736, 2026-09-10). Out of scope: the 16-column `tracked_pull_requests` select list is duplicated ~6× across run-store query methods (5782/5813/5832/5859 and below) — a shared column constant is a pure DRY cleanup, deliberately left for a follow-up so blast stays at 1.
+
+## create-waiting-run-normalization
+
+- **Status**: proposed
+- **Score**: 18/25 (leverage 3, locality 4, blast radius 1, heat 3)
+- **Files**: ~2-3 estimated
+- **Modules**: `src/lifecycle/run-controller.ts` (2660-2672, 5331-5343), `src/run-store.ts` (`createWaitingRun`)
+- **Summary**: Two sites hand-normalize `branchName`/`workspacePath` before `createWaitingRun` and already diverge on what "absent" means (`row.branchName.length === 0` vs `input.branchName === undefined`); let `createWaitingRun` take `branchName?`/`workspacePath?` and normalize once, making the divergence unrepresentable. Same "store owns absent" shape as `tracked-pull-request-lookup`.
+- **First seen**: 2026-09-11
+- **Reason**: Runner-up candidate to `tracked-pull-request-lookup` this run (18/25, 2 points back). Natural next firing.
+
+## schedule-wait-park-epilogue
+
+- **Status**: proposed
+- **Score**: 17/25 (leverage 3, locality 4, blast radius 1, heat 2)
+- **Files**: ~1-2 estimated
+- **Modules**: `src/lifecycle/run-controller.ts` (2673-2683, 4670-4684, 5840-5850; consumer `executeWaitPark` 1663-1675, refusal `logWaitReevaluationRefused` 4164)
+- **Summary**: Three sites repeat the identical `this.schedule({... kind: "wait_park" ...})` + `if (!scheduled) logWaitReevaluationRefused(...)` block, re-encoding the deliberately-asymmetric "wait-park logs-but-does-not-cancel on scheduler refusal" invariant; a private `scheduleWaitPark(...)` seam owns it once while each caller keeps its own row persistence.
+- **First seen**: 2026-09-11
+- **Reason**: Highest raw leverage of the 2026-09-11 scan, but held back by heat — the schedule blocks are cold (2026-05-13/18); only the `if(!scheduled)` refusal lines are recent (#674). In the hot file, on cold lines. Do NOT fold all 11 `this.schedule` sites — wait_park's log-only refusal is intentionally unlike the cancel-on-refusal of state_advance/retry.
+
 ## outcome-projection
 
 - **Status**: landed
@@ -168,7 +198,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 ## run-slot-lease
 
 - **Status**: proposed
-- **Score**: 19/25 (leverage 4, locality 3, blast radius 3, heat 5)
+- **Score**: 16/25 (leverage 4, locality 3, blast radius 3, heat 2) — re-scored 2026-09-11 from 19/25: heat 5→2. Every deadline site is still `42a9d8bb` (#631, 2026-09-01); this week's raw-FSM wait-state PRs touched the separate claim-guard mechanism, not the deadline plumbing, so the lines have gone cold. Friction unchanged.
 - **Files**: ~5 estimated
 - **Modules**: `src/lifecycle/run-controller.ts` (`RunSlotDeadline` factory 506-590, `createRunSlotDeadline`+ownership CAS 681-750, threaded through `dispatchOneFresh` 1146-1208, `claimAndPersistRun` 3126-3313, `runAttemptLifecycle` 3352-3653, `iterateAttempt` 4203-4290)
 - **Summary**: A `RunSlotLease` owning build-from-policy+origin, scoped arm→clear, and the ownership CAS, concentrating three construction sites and the arm/clear bookkeeping that keep producing sequencing bugs (#655/#631/#653/#654).
@@ -187,14 +217,14 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## provider-run-harness
 
-- **Status**: in-flight
+- **Status**: landed
 - **Score**: 20/25 (leverage 4, locality 4, blast radius 2, heat 4)
 - **PR**: #701
 - **Files**: ~5 estimated (three providers + new `provider-session.ts` + test)
 - **Modules**: `src/providers/codex.ts` (`runAttempt` prologue 118-186, `finally` 325-339, `cancel` 83-116), `src/providers/claude.ts` (73-143, 167-180, 54-71), `src/providers/omp.ts` (135-178, 319-328, 108-133); new `src/providers/provider-session.ts`
 - **Summary**: Each provider's `runAttempt` opens with a byte-identical ~55-line ADR-0052 prologue (placeholder `activeRun` before the `wrapForProviderScope` await, cancel-recheck synthetic `process_exit`, spawn+stderr+queue) and closes with an identical ADR-0064 `finally` (delete → `stopProviderScope` → `waitForFlush`); a `runProviderSession(deps, input)` harness owns those once and takes the provider-specific protocol body + cancel-interrupt as hooks.
 - **First seen**: 2026-09-03
-- **Reason**: **Picked by the 2026-09-04 run** (top surviving candidate at 20/25; runner-up `run-slot-lease` at 19/25, within 1 point). Was the exactly-tied runner-up to last firing's `watchdog-subject-port` (#695, merged 2026-09-03). Friction re-verified against the current tree this run: prologue/`finally`/cancel still near-identical across codex/claude/omp; stderr-attach, `confirmProviderScopeCleanup`, and `waitForFlush` still byte-identical. **Divergence surface is wide** (activeRun factory, command transform, spawn env, cancel-interrupt body, synthetic-event shape all differ), so the harness needs ~6-7 hooks — real but depth-tempering. **Benign-drift finding (do not re-derive):** omp calls `stopProviderScope` on early-cancel (omp.ts:157) and adds a second `shutdownProviderProcess` in `finally` (omp.ts:326) that codex/claude omit, but `wrapForProviderScope` (`process-scope.ts:131`) only *builds* a `systemd-run` command — no durable scope exists pre-spawn — so it is a harmless no-op, not a behaviour decision. The harness can preserve all three via a hook; **not** `live-run-ownership-registry`-style bail territory. Implemented via design-it-twice winner C (common-case-optimised: `createProviderSession` + `jsonlProviderSession`); runner-up design A (minimal interface) lost on common-case depth (forced codex+claude to name the shared JSONL queue, spent a general hook on omp's fixed shutdown). Added the `Agent Provider Session` term to CONTEXT.md. PR #701 opened 2026-09-04.
+- **Reason**: **Picked by the 2026-09-04 run** (top surviving candidate at 20/25; runner-up `run-slot-lease` at 19/25, within 1 point). Was the exactly-tied runner-up to last firing's `watchdog-subject-port` (#695, merged 2026-09-03). Friction re-verified against the current tree this run: prologue/`finally`/cancel still near-identical across codex/claude/omp; stderr-attach, `confirmProviderScopeCleanup`, and `waitForFlush` still byte-identical. **Divergence surface is wide** (activeRun factory, command transform, spawn env, cancel-interrupt body, synthetic-event shape all differ), so the harness needs ~6-7 hooks — real but depth-tempering. **Benign-drift finding (do not re-derive):** omp calls `stopProviderScope` on early-cancel (omp.ts:157) and adds a second `shutdownProviderProcess` in `finally` (omp.ts:326) that codex/claude omit, but `wrapForProviderScope` (`process-scope.ts:131`) only *builds* a `systemd-run` command — no durable scope exists pre-spawn — so it is a harmless no-op, not a behaviour decision. The harness can preserve all three via a hook; **not** `live-run-ownership-registry`-style bail territory. Implemented via design-it-twice winner C (common-case-optimised: `createProviderSession` + `jsonlProviderSession`); runner-up design A (minimal interface) lost on common-case depth (forced codex+claude to name the shared JSONL queue, spent a general hook on omp's fixed shutdown). Added the `Agent Provider Session` term to CONTEXT.md. PR #701 opened 2026-09-04; **merged 2026-09-04T06:40:48Z** (reconciled from `in-flight` by the 2026-09-11 run).
 
 ### Run 2026-09-04 — complete
 
@@ -234,6 +264,46 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Summary**: The dispatch-project and routine-host loaders are drifting twins repeating a byte-identical SPEC-5.1 watchdog-override whole-snapshot-rejection block (1121-1136 vs 1218-1233, second annotated `// Same …`) and a structurally identical reload-vs-first-load fatal-decision block; a shared `parseProjectSection` + `watchdogOverrideGate` seam would own both invariants once, leaving each loader its distinct tail.
 - **First seen**: 2026-09-04
 - **Reason**: New find by the 2026-09-04 fresh scan. Partial deletion test — the two invariants concentrate but the surrounding zod-error-push idiom and the loaders' tails (dispatch: polling + workflow load + `disabled`; host: `agent` + `mode`, no workflow) genuinely differ and stay separate. Sub-20, so not this firing's pick; natural mid-tier future candidate in an otherwise cold-for-the-backlog file.
+
+## wait-terminal-contract
+
+- **Status**: dropped
+- **Score**: n/a (deletion test moves)
+- **Files**: ~3 estimated
+- **Modules**: `src/lifecycle/run-controller.ts` (`reEvaluateWaitingRun` advance-to-terminal 2553-2585, direct-terminate 2740-2765; `applyWorkflowOutcome` advance-to-terminal 5303-5316)
+- **Summary**: The ADR-0058 blocked/succeeded terminal contract is implemented three times — two wait paths call `terminalizeBlocked`, the provider path returns `terminalLabel` for outcome-projection + `ClaimLabelWriter.applyTerminal`.
+- **First seen**: 2026-09-11
+- **Reason**: Deletion test **moves** — the synchronous store+label wait mechanism and the projection-driven provider mechanism are genuinely different; unifying touches the just-landed #610 outcome-projection module. Adjacency risk, not a seam. Surfaced and dropped by the 2026-09-11 scan.
+
+## blocked-terminalization-phase
+
+- **Status**: dropped
+- **Score**: n/a (leverage low — dedup not deepening)
+- **Files**: ~1 estimated
+- **Modules**: `src/lifecycle/run-controller.ts` (`terminalizeBlocked` 1921-1938, `terminalizePullRequestDiscoveryExhausted` 1875-1897)
+- **Summary**: Two near-exact terminalize twins differing only in a `release({phase})` argument.
+- **First seen**: 2026-09-11
+- **Reason**: `phase` is a **log tag only** — verified in `claim-label-writer.ts:300-321` that it does not drive behaviour (`deferReleaseToScheduler` keys off `outcome.kind === "success"`, not phase). Collapsing is a ~5-line dedup; complexity mostly stays. Not a deepening candidate.
+
+## raw-fsm-park-ownership
+
+- **Status**: dropped
+- **Score**: n/a (already deep)
+- **Files**: ~1 estimated
+- **Modules**: `src/lifecycle/run-controller.ts` (`isIssueOwnedByWorkflow`/`isIssueParkedAtRawFsmState`/`throwIfIssueParkedAtRawFsmState`/`loadRawFsmWorkflow` 1701-1829)
+- **Summary**: The raw-FSM park-ownership predicates.
+- **First seen**: 2026-09-11
+- **Reason**: Already consolidated around the shared `isIssueParkedAtRawFsmState` predicate; the fail-open (ownership) vs fail-closed (guard) split is documented as intentional. No seam to add — deleting it would move real complexity back to callers, not concentrate it.
+
+## wait-state-predicate-split
+
+- **Status**: dropped
+- **Score**: n/a (leverage low)
+- **Files**: ~2 estimated
+- **Modules**: `src/workflow/types.ts:12` (`isIssueContentActionKind`), `src/lifecycle/run-controller.ts` (`isParkedAction` 6266, `isArtifactOnlyWaitState` 6315)
+- **Summary**: The three "what kind of wait/park state" predicates are split across two files.
+- **First seen**: 2026-09-11
+- **Reason**: Leverage low — concentrating them concentrates little behaviour; the two run-controller-private predicates are legitimately local to their callers. Noted for completeness so the next firing does not re-derive it.
 
 ## mutate-and-publish
 

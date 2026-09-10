@@ -2315,10 +2315,13 @@ Lifecycle:
    unresolved threads exist. If the destination is another wait state, Symphonika creates a new
    waiting Run row and schedules a `wait_park` re-evaluation. If the destination is terminal, the
    waiting Run records `terminal_state_id` and transitions to `succeeded`.
-4. Progress guard. Symphonika fingerprints what the re-evaluation observed — the projected signal
-   map, the artefact probe results for the paths the state's own predicates name, the tracked head
-   SHA, and the review-feedback fingerprint — and records it against `(project, issue, from state,
-   to state)` when an advance is taken. An advance that would repeat an edge under an identical
+4. Progress guard. Symphonika fingerprints what the re-evaluation observed — the matched
+   transition's own `when` predicate (not the full projected signal map: a signal the taken
+   transition does not reference, such as `mergeable` churning while an edge is gated only on
+   `has_unresolved_reviews`, is not evidence of progress on that edge, see issue #740), the
+   artefact probe results for the paths the state's own predicates name, the tracked head SHA, and
+   the review-feedback fingerprint — and records it against `(project, issue, from state, to
+   state)` when an advance is taken. An advance that would repeat an edge under an identical
    fingerprint has learned nothing since that edge last ran, so it cannot make progress. Alongside
    that test, an absolute accepted-claim count bounds an edge whose fingerprint keeps changing
    without the workflow converging. The default is `10` accepted advances per edge; a Dispatch

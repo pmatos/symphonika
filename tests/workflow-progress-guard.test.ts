@@ -718,6 +718,57 @@ describe("workflow progress guard", () => {
     }
   });
 
+  it("does not treat an unrelated signal change as progress on the has_unresolved_reviews edge", async () => {
+    // Mirrors a real recurrence (issue #740): main advances fast enough that
+    // checks/mergeable can flip between polls for reasons that have nothing
+    // to do with the one unresolved review thread the reviewer has already
+    // triaged. The edge both ticks actually take is justified by
+    // has_unresolved_reviews: true alone (it is checked before the
+    // checks: failure transition in workflow.yml), so a churning `checks`
+    // value must not reset the guard's memory of that edge.
+    const root = await makeTempRoot();
+    await writeCyclingProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      seedTrackedPr(store, issue);
+
+      const getPullRequestFollowupState = vi
+        .fn()
+        .mockResolvedValueOnce(prState())
+        .mockResolvedValue(prState({ statusCheckRollupState: "FAILURE" }));
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState,
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        root,
+        runStore: store
+      });
+
+      seedPark(store, issue, "waiting-1");
+      await controller.reEvaluateWaitingRun("waiting-1");
+      const first = store.getRun("waiting-1");
+      expect(first?.state).toBe("succeeded");
+      expect(first?.currentStateId).toBe("repair");
+
+      seedPark(store, issue, "waiting-2");
+      await controller.reEvaluateWaitingRun("waiting-2");
+
+      const second = store.getRun("waiting-2");
+      expect(second?.state).toBe("waiting");
+      expect(second?.currentStateId).toBe("holding");
+      expect(second?.stateTransitionReason).toBe("no_progress:holding:repair");
+    } finally {
+      store.close();
+    }
+  });
+
   it("does not guard an advance into a terminal state", async () => {
     const root = await makeTempRoot();
     await writeCyclingProject(root);

@@ -71,7 +71,8 @@ describe("state-machine-dispatch", () => {
       expect(decision).toEqual({
         kind: "advance",
         reason: "state run_agent advanced to done",
-        to: "done"
+        to: "done",
+        when: {}
       });
     });
 

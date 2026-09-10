@@ -72,7 +72,10 @@ swallowed on failure, the same as other pre-attempt Workspace inspection steps a
 `run-controller.ts` only runs this clear when the attempt's current state actually declares a
 `BLOCKED.md` artifact-exists transition (`collectArtifactPaths(currentState).has("BLOCKED.md")`):
 most workflow states never reference the sentinel at all, and an unconditional clear would delete a
-managed repository's own unrelated root `BLOCKED.md` (issue #736 review).
+managed repository's own unrelated root `BLOCKED.md` (issue #736 review). That state-gate condition
+still deletes an in-scope `BLOCKED.md` unconditionally, with no check on whether the file is this
+attempt's own sentinel or a repository's tracked file of the same name; ADR-2026-09-10-2018 adds a
+git-tracked-file provenance check to close that gap.
 
 ### Gating a post-implement state on an actual pull request
 

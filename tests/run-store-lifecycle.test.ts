@@ -1169,7 +1169,19 @@ describe("run-store lifecycle CRUD", () => {
       expect(
         store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
       ).toEqual([]);
-      expect(store.hasPullRequestFollowupWork()).toBe(true);
+
+      // Close the PR so hasPullRequestFollowupWork's own not-exists branch is
+      // what's under test, not its unconditional "any open tracked PR"
+      // union arm -- that arm would pass even against the pre-fix,
+      // ancestor-only join.
+      store.recordPullRequestObservation({
+        headSha: "new-sha",
+        id: 1,
+        prUrl: "https://github.com/pmatos/symphonika/pull/99",
+        reviewFollowupCapReached: false,
+        state: "merged"
+      });
+      expect(store.hasPullRequestFollowupWork()).toBe(false);
     } finally {
       store.close();
     }

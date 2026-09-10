@@ -1893,24 +1893,26 @@ export class RunController {
     // still see the tracked row after PR follow-up has marked it "merged"; an
     // open-only listing would strand the wait. The dispatcher's own open-only
     // loop is unaffected — only wait re-evaluation widens the lookup.
-    const trackedByIssue = this.runStore.findTrackedPullRequestByIssue({
-      issueNumber: input.issueNumber,
-      projectName: input.projectName
-    });
-    // findTrackedPullRequestByIssue picks the newest row for the issue
-    // regardless of branch: after a redispatch onto a new branch (e.g. an
-    // issue-title edit), that row can still be an earlier, unrelated PR --
-    // possibly already merged or closed -- for a branch this run never
-    // pushed. Reject a mismatch and fall through to the "no PR tracked yet"
-    // path below (issue #736 review) rather than reading its signals. An
-    // empty run branchName means the caller doesn't know it yet, so the
-    // check is skipped rather than rejecting every tracked row.
+    //
+    // Query by (project, issue, branch) when the run's own branch is known,
+    // rather than fetching the newest issue-wide row and discarding it on a
+    // mismatch (issue #736 review, round 2): an issue can carry more than
+    // one tracked row across redispatches, and the newest by id is not
+    // necessarily the one for this run's branch -- fetch-then-discard could
+    // miss a real, older, branch-matching row entirely. An empty run
+    // branchName means the caller doesn't know it yet, so the unscoped
+    // lookup is used as before.
     const tracked =
-      trackedByIssue !== undefined &&
-      input.branchName.length > 0 &&
-      trackedByIssue.branchName !== input.branchName
-        ? undefined
-        : trackedByIssue;
+      input.branchName.length > 0
+        ? this.runStore.findTrackedPullRequestByIssueAndBranch({
+            branchName: input.branchName,
+            issueNumber: input.issueNumber,
+            projectName: input.projectName
+          })
+        : this.runStore.findTrackedPullRequestByIssue({
+            issueNumber: input.issueNumber,
+            projectName: input.projectName
+          });
     if (tracked === undefined) {
       if (!isMergePr && isArtifactOnlyWaitState(waitState)) {
         this.logger?.debug(
@@ -4670,13 +4672,23 @@ export class RunController {
         collectArtifactPaths(currentState).has(BLOCKED_SENTINEL_FILENAME);
       if (currentStateDeclaresBlockedGate) {
         const workspacePathForBlockedSentinel = started.evidence.workspacePath;
-        await this.bestEffort(
-          () => clearBlockedSentinel(workspacePathForBlockedSentinel),
-          {
-            issue: input.issue.number,
-            operation: "clearBlockedSentinel",
-            runId: input.runId
-          }
+        // Raced like every other pre-provider op in this method (e.g.
+        // addLabelsBounded above): rm() takes no AbortSignal, so a stalled
+        // clear (an unresponsive network/FUSE-backed workspace) would
+        // otherwise suspend this await forever, and the slot's own finally
+        // block -- reachable only once this line settles -- would never run
+        // (issue #736 review, round 2). Racing abandons the wait on deadline
+        // expiry rather than cancelling the underlying rm(); bestEffort's own
+        // try/catch still swallows an ordinary rm failure.
+        await input.deadline.race(
+          this.bestEffort(
+            () => clearBlockedSentinel(workspacePathForBlockedSentinel),
+            {
+              issue: input.issue.number,
+              operation: "clearBlockedSentinel",
+              runId: input.runId
+            }
+          )
         );
       }
 

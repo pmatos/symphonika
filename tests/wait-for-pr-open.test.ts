@@ -505,4 +505,84 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
       store.close();
     }
   });
+
+  it("finds this run's own tracked PR even when a different branch's row is newer (issue #736 review, round 2)", async () => {
+    const root = await makeTempRoot();
+    await writeWaitForPrOpenProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      // This run's own PR is tracked first (lower id) ...
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+      store.createWaitingRun({
+        branchName: "sym/symphonika/10-wait-for-pr-open-fixture",
+        currentStateId: "wait_for_pr_open",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika"
+      });
+      store.trackPullRequest({
+        branchName: "sym/symphonika/10-wait-for-pr-open-fixture",
+        headSha: "deadbeef",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+      // ... but a later redispatch onto a different branch tracks a second,
+      // newer-by-id row for the same issue. The newest row is not this run's
+      // own PR, so an issue-wide "newest row" lookup must not shadow it.
+      store.createRun({
+        id: "later-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.trackPullRequest({
+        branchName: "sym/symphonika/10-later-redispatch",
+        headSha: "cafebabe",
+        issueNumber: issue.number,
+        prNumber: 100,
+        prUrl: "https://example.test/pr/100",
+        projectName: "symphonika",
+        runId: "later-run"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("succeeded");
+      expect(after?.terminalStateId).toBe("code_review_fix");
+      expect(githubIssuesApi.getPullRequestFollowupState).toHaveBeenCalledWith(
+        expect.objectContaining({ pullNumber: 99 })
+      );
+    } finally {
+      store.close();
+    }
+  });
 });

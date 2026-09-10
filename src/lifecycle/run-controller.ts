@@ -1879,6 +1879,7 @@ export class RunController {
   // unmet under strict equality, so evaluating early would drop such a state
   // onto a catch-all transition on its first poll.
   private async observeWaitPullRequestSignals(input: {
+    branchName: string;
     isMergePr: boolean;
     issueNumber: number;
     projectName: string;
@@ -1892,10 +1893,24 @@ export class RunController {
     // still see the tracked row after PR follow-up has marked it "merged"; an
     // open-only listing would strand the wait. The dispatcher's own open-only
     // loop is unaffected — only wait re-evaluation widens the lookup.
-    const tracked = this.runStore.findTrackedPullRequestByIssue({
+    const trackedByIssue = this.runStore.findTrackedPullRequestByIssue({
       issueNumber: input.issueNumber,
       projectName: input.projectName
     });
+    // findTrackedPullRequestByIssue picks the newest row for the issue
+    // regardless of branch: after a redispatch onto a new branch (e.g. an
+    // issue-title edit), that row can still be an earlier, unrelated PR --
+    // possibly already merged or closed -- for a branch this run never
+    // pushed. Reject a mismatch and fall through to the "no PR tracked yet"
+    // path below (issue #736 review) rather than reading its signals. An
+    // empty run branchName means the caller doesn't know it yet, so the
+    // check is skipped rather than rejecting every tracked row.
+    const tracked =
+      trackedByIssue !== undefined &&
+      input.branchName.length > 0 &&
+      trackedByIssue.branchName !== input.branchName
+        ? undefined
+        : trackedByIssue;
     if (tracked === undefined) {
       if (!isMergePr && isArtifactOnlyWaitState(waitState)) {
         this.logger?.debug(
@@ -2353,6 +2368,7 @@ export class RunController {
             runId
           })
         : await this.observeWaitPullRequestSignals({
+            branchName: row.branchName,
             isMergePr,
             issueNumber: row.issueNumber,
             projectName: row.project,

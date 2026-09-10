@@ -11,11 +11,34 @@ workflow:
         provider: claude
         prompt: WORKFLOW.md
       transitions:
-        - to: code_review_fix
+        - to: wait_for_pr_open
           when:
             provider_success: true
             branch_ahead_of_base: true
         - to: failed
+
+    # implement's own transition only proves local git state -- a commit
+    # ahead of base -- not that impl.md's other job (push + `gh pr create`)
+    # actually happened. Parking here before code_review_fix reuses the
+    # exact tracked-PR-by-issue + PR-discovery machinery wait_for_pr already
+    # relies on below, plus ADR-2026-09-05-1205's bounded untracked-wait
+    # escalation, so a turn that ended before opening a PR (issue #730,
+    # vow-lang/vow#1255) parks and eventually terminalizes blocked instead
+    # of silently walking into code_review_fix/simplify against a PR that
+    # was never opened.
+    wait_for_pr_open:
+      action:
+        kind: wait
+      transitions:
+        - to: merged
+          when:
+            pr_merged: true
+        - to: failed
+          when:
+            pr_open: false
+        - to: code_review_fix
+          when:
+            pr_open: true
 
     # Automated review pass on the freshly opened PR. Runs once per PR open
     # (repairs below loop back to wait_for_pr only, not through here), so a
@@ -27,6 +50,13 @@ workflow:
         provider: claude
         prompt: prompts/code-review-fix.md
       transitions:
+        # A blocked pass (no open PR to review, etc.) writes BLOCKED.md
+        # instead of relying on a non-zero exit code -- exiting non-zero
+        # from a Bash tool call only ends that subshell, not the provider
+        # session, so provider_success reads true regardless (issue #730).
+        - to: failed
+          when:
+            artifact_exists: BLOCKED.md
         - to: simplify
           when:
             provider_success: true
@@ -38,6 +68,9 @@ workflow:
         provider: claude
         prompt: prompts/simplify.md
       transitions:
+        - to: failed
+          when:
+            artifact_exists: BLOCKED.md
         - to: wait_for_pr
           when:
             provider_success: true
@@ -111,6 +144,9 @@ workflow:
         provider: claude
         prompt: prompts/autofix-pr.md
       transitions:
+        - to: failed
+          when:
+            artifact_exists: BLOCKED.md
         - to: wait_for_pr
           when:
             provider_success: true
@@ -124,6 +160,9 @@ workflow:
         provider: claude
         prompt: prompts/resolve-conflicts.md
       transitions:
+        - to: failed
+          when:
+            artifact_exists: BLOCKED.md
         - to: wait_for_pr
           when:
             provider_success: true

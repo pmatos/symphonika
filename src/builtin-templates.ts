@@ -118,6 +118,13 @@ const REFACTOR_SWARM = [
   '      provider: "{{ red_teamer }}"',
   '      prompt: "{{ red_team_prompt }}"',
   "    transitions:",
+  // A rejected pass writes BLOCKED.md instead of relying on a non-zero exit
+  // code -- exiting non-zero from a Bash tool call only ends that subshell,
+  // not the provider session, so provider_success reads true regardless
+  // (issue #730).
+  "      - to: failed",
+  "        when:",
+  "          artifact_exists: BLOCKED.md",
   "      - to: refactoring",
   "        when:",
   "          provider_success: true",
@@ -130,6 +137,9 @@ const REFACTOR_SWARM = [
   '      provider: "{{ refactorer }}"',
   '      prompt: "{{ refactor_prompt }}"',
   "    transitions:",
+  "      - to: failed",
+  "        when:",
+  "          artifact_exists: BLOCKED.md",
   "      - to: verifying",
   "        when:",
   "          provider_success: true",
@@ -142,6 +152,9 @@ const REFACTOR_SWARM = [
   '      provider: "{{ verifier }}"',
   '      prompt: "{{ verify_prompt }}"',
   "    transitions:",
+  "      - to: failed",
+  "        when:",
+  "          artifact_exists: BLOCKED.md",
   "      - to: done",
   "        when:",
   "          provider_success: true",

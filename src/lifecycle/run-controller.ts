@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { appendFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { clearBlockedSentinel } from "./blocked-sentinel.js";
+
 import type { Logger } from "pino";
 
 import type {
@@ -4634,6 +4636,15 @@ export class RunController {
         // exit. Cancellation, input-required, and provider failures must retain
         // their own higher-priority classification.
         headInspectionFailed = true;
+      }
+
+      try {
+        await clearBlockedSentinel(started.evidence.workspacePath);
+      } catch (error) {
+        this.logger?.warn(
+          { err: error, issue: input.issue.number, runId: input.runId },
+          "symphonika could not clear a stale BLOCKED.md sentinel before this attempt"
+        );
       }
 
       await this.iterateAttempt({

@@ -159,11 +159,13 @@ describe("shipped refactor-swarm prompts", () => {
     expect(refactor).toContain("Do not edit, delete, rename, skip, or weaken");
     expect(verify).toContain("distinct refactor commit");
     expect(verify).toContain("Do not modify files or create commits");
-    // Every state must spell out the concrete blocked-exit signal, matching
-    // the convention the other shipped prompts already use.
+    // Every state must spell out the concrete blocked-exit signal: writing
+    // BLOCKED.md is what actually routes the FSM to its blocked exit (issue
+    // #730) -- exiting non-zero from a Bash tool call cannot, since it only
+    // ends that subshell, not the provider session.
     for (const prompt of [redTeam, refactor, verify]) {
-      expect(prompt).toContain("`exit 1`");
-      expect(prompt).toContain("blocked exit");
+      expect(prompt).toContain("BLOCKED.md");
+      expect(prompt).toContain("`provider_success` false");
     }
   });
 });

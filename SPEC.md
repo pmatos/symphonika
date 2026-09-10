@@ -620,9 +620,11 @@ code — exiting non-zero from a Bash tool call only ends that subshell, not the
 `provider_success` reads true regardless of the agent's own verdict. A `when: artifact_exists:
 BLOCKED.md` transition, checked before the state's success transition, is what actually routes the
 run to its blocked exit. Unlike an ordinary artefact, `BLOCKED.md` does not benefit from Workspace
-reuse across attempts (ADR 0040): Symphonika removes it from the Workspace immediately before each
-attempt's provider execution, so a sentinel left by an earlier blocked attempt cannot gate a later,
-genuinely successful one. See ADR-2026-09-10-1630.
+reuse across attempts (ADR 0040): immediately before each attempt's provider execution, Symphonika
+removes an untracked `BLOCKED.md` from the Workspace, so a sentinel left by an earlier blocked attempt
+cannot gate a later, genuinely successful one. A git-tracked `BLOCKED.md` is left in place as the
+managed repository's own file rather than deleted — the `artifact_exists` gate above still fires on it
+regardless. See ADR-2026-09-10-1630 and ADR-2026-09-10-2018.
 
 Expanded-graph validation rejects a `wait` state whose PR-signal transitions leave a settled,
 actionable pull-request observation uncovered. The validator enumerates successful or failed

@@ -1,6 +1,14 @@
+import { execFile } from "node:child_process";
 import { rm } from "node:fs/promises";
+import { promisify } from "node:util";
 
 import { resolveArtifactPath } from "../workflow/predicates.js";
+
+const execFileAsync = promisify(execFile);
+
+// Mirrors src/http/git-status.ts and src/lifecycle/file-overlap-guard.ts: a
+// wedged `git` must not hang the pre-attempt hook this runs from.
+const GIT_COMMAND_TIMEOUT_MS = 30_000;
 
 // The workspace-relative artifact a raw-FSM agent prompt writes to signal
 // "blocked" (issue #730): exiting non-zero from a Bash tool call only ends
@@ -19,6 +27,13 @@ export const BLOCKED_SENTINEL_FILENAME = "BLOCKED.md";
 // warn-logs a rejection here and proceeds, so a stale sentinel can survive
 // and misroute a later successful attempt. Runs once per attempt, after the
 // headShaAtAttemptStart snapshot, before the provider executes.
+//
+// Issue #739 / ADR-2026-09-10-2018: the caller only runs this for a state
+// that declares the BLOCKED.md gate, but that alone doesn't prove the file at
+// that path is the orchestration's own uncommitted sentinel rather than a
+// managed repository's own git-tracked source file of the same name. A
+// git-tracked BLOCKED.md is left alone -- deleting it would let the provider
+// commit the removal of a real source file the orchestration never wrote.
 export async function clearBlockedSentinel(
   workspacePath: string
 ): Promise<void> {
@@ -29,5 +44,24 @@ export async function clearBlockedSentinel(
   if (resolved === undefined) {
     return;
   }
+  if (await isGitTracked(workspacePath, BLOCKED_SENTINEL_FILENAME)) {
+    return;
+  }
   await rm(resolved, { force: true });
+}
+
+async function isGitTracked(
+  workspacePath: string,
+  relativePath: string
+): Promise<boolean> {
+  try {
+    await execFileAsync(
+      "git",
+      ["-C", workspacePath, "ls-files", "--error-unmatch", "--", relativePath],
+      { timeout: GIT_COMMAND_TIMEOUT_MS }
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }

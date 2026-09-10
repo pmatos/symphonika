@@ -1,7 +1,9 @@
 import Database from "better-sqlite3";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +11,8 @@ import { startDaemon } from "../src/daemon.js";
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
+
+const execFileAsync = promisify(execFile);
 
 // Issue #730: a raw-FSM agent prompt that determines it is blocked cannot
 // actually fail the run by exiting non-zero from a Bash tool call -- that
@@ -393,6 +397,51 @@ describe("BLOCKED.md sentinel gates an agent state's transition (issue #730)", (
 
     expect(run.state).toBe("succeeded");
     expect(run.terminal_state_id).toBe("done");
+    await expect(
+      readFile(path.join(prepared.workspacePath, "BLOCKED.md"), "utf8")
+    ).resolves.toBe(ownedContents);
+  });
+
+  // Issue #739: a gated state's clearBlockedSentinel call had no check on
+  // whether BLOCKED.md was the orchestration's own uncommitted sentinel or a
+  // managed repository's own git-tracked file of that name. Unlike the
+  // no-gate case above, this state does declare the gate, so a tracked
+  // BLOCKED.md must both survive the clear and route the run to the blocked
+  // terminal, rather than being silently deleted and the run left to
+  // succeed.
+  it("leaves a git-tracked BLOCKED.md untouched and blocks when the state declares the gate", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
+    await writeProject(root);
+    const ownedContents =
+      "# Blocked\nThis file belongs to the managed repository, unrelated to symphonika.\n";
+    await writeFile(
+      path.join(prepared.workspacePath, "BLOCKED.md"),
+      ownedContents
+    );
+    await execFileAsync("git", [
+      "-C",
+      prepared.workspacePath,
+      "add",
+      "BLOCKED.md"
+    ]);
+    await execFileAsync("git", [
+      "-C",
+      prepared.workspacePath,
+      "commit",
+      "-m",
+      "Add tracked BLOCKED.md"
+    ]);
+
+    const run = await runUntilTerminal(
+      root,
+      providerWriting([], prepared.workspacePath),
+      prepared
+    );
+
+    expect(run.state).toBe("blocked");
+    expect(run.terminal_state_id).toBe("blocked_terminal");
     await expect(
       readFile(path.join(prepared.workspacePath, "BLOCKED.md"), "utf8")
     ).resolves.toBe(ownedContents);

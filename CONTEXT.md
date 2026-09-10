@@ -75,7 +75,10 @@ labels, excluded labels, blocking operational labels, the newest Run's durable n
 guard, the Dependency Gate, and the wait-park guard: a raw FSM run already parked at a wait-kind
 state for this Issue refuses a fresh claim even when the label-based candidate list still surfaces
 the Issue, the same deference `isIssueOwnedByWorkflow` already gives PR Follow-up (issue #616),
-generalized to the fresh-dispatch path (issue #731).
+generalized to the fresh-dispatch path (issue #731). The picker's own wait-park check runs
+lock-free, so the parked-row predicate is repeated a second time inside the mutex-serialized claim
+boundary, against the same already-loaded workflow, immediately before the claim's own write --
+closing the window where a competing run parks between the pick and the claim (issue #737).
 _Avoid_: continuation eligibility when referring to first claim selection
 
 **Dependency Gate**:

@@ -661,6 +661,204 @@ describe("RunController.dispatchFresh", () => {
       "missing a closing ---"
     );
   });
+
+  it("issue #737: rechecks wait-park ownership inside dispatchMutex when a competing run parks between pick and claim", async () => {
+    // pickProjectCandidate's own check runs before any waiting row exists, so
+    // it lets the candidate through. createRunId fires moments later, still
+    // before dispatchMutex is acquired -- exactly the window #737 describes,
+    // where a concurrent run can finish, park at a raw_fsm wait state, and
+    // unregister from activeRuns. Seeding the waiting row from that hook
+    // simulates the race without real concurrency: claimAndPersistRun must
+    // repeat the parked-row predicate against the workflow pickProjectCandidate
+    // already loaded, or it would restart the workflow from `initial` while
+    // the parked run still owns the Issue.
+    const harness = await createHarness(
+      [{ name: "alpha", workflowPath: "raw-fsm.yml" }],
+      {
+        createRunId: () => {
+          seedWaitingRun(harness.runStore, {
+            currentStateId: "wait_for_pr",
+            issueNumber: 1,
+            projectName: "alpha",
+            runId: "parked-run"
+          });
+          return "claim-run";
+        }
+      }
+    );
+    await mkdir(path.join(harness.root, "prompts"), { recursive: true });
+    await writeFile(
+      path.join(harness.root, "prompts", "implement.md"),
+      "# Issue {{issue.number}}\n"
+    );
+    await writeFile(
+      path.join(harness.root, "raw-fsm.yml"),
+      [
+        "workflow:",
+        "  name: wait_park_regression",
+        "  initial: implement",
+        "  states:",
+        "    implement:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/implement.md",
+        "      transitions:",
+        "        - to: wait_for_pr",
+        "          when:",
+        "            provider_success: true",
+        "    wait_for_pr:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: merged",
+        "          when:",
+        "            pr_merged: true",
+        "        - to: failed",
+        "          when:",
+        "            pr_open: false",
+        "        - to: failed",
+        "          when:",
+        "            mergeable: false",
+        "        - to: failed",
+        "          when:",
+        "            checks: failure",
+        "        - to: failed",
+        "          when:",
+        "            checks: success",
+        "            mergeable: true",
+        "            unresolved_review_threads: 0",
+        "        - to: failed",
+        "          when:",
+        "            has_unresolved_reviews: true",
+        "    merged:",
+        "      terminal: success",
+        "    failed:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const batch = await harness.controller.dispatchFresh(
+      pollStatus([{ issueNumber: 1, project: "alpha" }])
+    );
+
+    // No second Run row for the deferred claim: the recheck must refuse
+    // before addLabelsBounded/createRun, not after.
+    expect(batch.claims).toEqual([
+      {
+        dispatched: false,
+        reason:
+          "fresh issue claim deferred: issue alpha#1 is parked at a raw_fsm wait state"
+      }
+    ]);
+    expect(batch.lifecycles).toEqual([]);
+    expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
+    expect(harness.runStore.listRuns({})).toHaveLength(1);
+    expect(harness.runStore.getRun("parked-run")).toMatchObject({
+      currentStateId: "wait_for_pr",
+      state: "waiting"
+    });
+  });
+
+  it("issue #737: rechecks wait-park ownership inside dispatchMutex on the serialized provider-failure path too", async () => {
+    // Same race as above, but the candidate's provider is misconfigured, so
+    // resolveAndClaim routes through excludeProjectAfterProviderFailure ->
+    // failFreshDispatchBeforeProvider instead of claimAndPersistRun. That
+    // path is also mutex-serialized and also writes a claim (a deterministic
+    // "failed" terminal Run), so it needs the identical recheck -- the issue
+    // calls this path out by name.
+    const harness = await createHarness(
+      [{ name: "alpha", workflowPath: "raw-fsm.yml" }],
+      {
+        createRunId: () => {
+          seedWaitingRun(harness.runStore, {
+            currentStateId: "wait_for_pr",
+            issueNumber: 1,
+            projectName: "alpha",
+            runId: "parked-run"
+          });
+          return "claim-run";
+        },
+        providersConfig: {}
+      }
+    );
+    await mkdir(path.join(harness.root, "prompts"), { recursive: true });
+    await writeFile(
+      path.join(harness.root, "prompts", "implement.md"),
+      "# Issue {{issue.number}}\n"
+    );
+    await writeFile(
+      path.join(harness.root, "raw-fsm.yml"),
+      [
+        "workflow:",
+        "  name: wait_park_regression",
+        "  initial: implement",
+        "  states:",
+        "    implement:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/implement.md",
+        "      transitions:",
+        "        - to: wait_for_pr",
+        "          when:",
+        "            provider_success: true",
+        "    wait_for_pr:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: merged",
+        "          when:",
+        "            pr_merged: true",
+        "        - to: failed",
+        "          when:",
+        "            pr_open: false",
+        "        - to: failed",
+        "          when:",
+        "            mergeable: false",
+        "        - to: failed",
+        "          when:",
+        "            checks: failure",
+        "        - to: failed",
+        "          when:",
+        "            checks: success",
+        "            mergeable: true",
+        "            unresolved_review_threads: 0",
+        "        - to: failed",
+        "          when:",
+        "            has_unresolved_reviews: true",
+        "    merged:",
+        "      terminal: success",
+        "    failed:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    const batch = await harness.controller.dispatchFresh(
+      pollStatus([{ issueNumber: 1, project: "alpha" }])
+    );
+
+    // Refused by the wait-park recheck, not by the provider-misconfiguration
+    // path it would otherwise have hit next -- proves the recheck runs
+    // before failFreshDispatchBeforeProvider's own label write and Run
+    // creation.
+    expect(batch.claims).toEqual([
+      {
+        dispatched: false,
+        reason:
+          "fresh issue claim deferred: issue alpha#1 is parked at a raw_fsm wait state"
+      }
+    ]);
+    expect(batch.lifecycles).toEqual([]);
+    expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
+    expect(harness.runStore.listRuns({})).toHaveLength(1);
+    expect(harness.runStore.getRun("parked-run")).toMatchObject({
+      currentStateId: "wait_for_pr",
+      state: "waiting"
+    });
+  });
 });
 
 function seedWaitingRun(

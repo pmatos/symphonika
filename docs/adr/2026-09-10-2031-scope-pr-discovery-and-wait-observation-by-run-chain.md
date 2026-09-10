@@ -54,7 +54,7 @@ change):
   has been deleted.
 - `listRunsAwaitingPullRequestDiscovery` and `hasPullRequestFollowupWork` (the same suppression
   shape, gating whether the poller bothers looking at all) replace their branch-name `not exists`
-  check with one scoped the same way: a shared CTE (`RUN_CHAIN_ANCESTRY_CTE`) walks
+  check with one scoped the same way: a shared CTE (`RUN_CHAIN_ROOT_CTE`) walks
   `continuation_parent_run_id` to resolve, for every candidate run and every run that has ever
   tracked a PR, the single root run at the top of its chain, and the suppression check requires a
   tracked row whose owning run resolves to the *same root* as the candidate — not merely a row

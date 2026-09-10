@@ -13,7 +13,12 @@ import type {
 export type StateMachineDecision =
   | { action: WorkflowAction; kind: "execute_action"; stateId: string }
   | { kind: "terminate"; stateId: string; terminal: string }
-  | { kind: "advance"; reason: string; to: string }
+  | {
+      kind: "advance";
+      reason: string;
+      to: string;
+      when: WorkflowPredicateMap;
+    }
   | { kind: "blocked"; reason: string }
   | { kind: "stay_waiting"; reason: string };
 
@@ -66,7 +71,8 @@ export function decideNextStep(input: {
       return {
         kind: "advance",
         reason: describeTransition(state.id, transition.when, transition.to),
-        to: transition.to
+        to: transition.to,
+        when: transition.when
       };
     }
   }

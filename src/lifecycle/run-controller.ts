@@ -2615,7 +2615,15 @@ export class RunController {
             progressFingerprint({
               artifactExists: waitArtifactExists,
               pullRequestState,
-              signals,
+              // Scoped to the predicate that actually justified this edge,
+              // not the full projected signal map: `mergeable`/`checks`/
+              // `review_decision` can all churn between polls for reasons
+              // unrelated to review feedback (e.g. a fast-moving base branch
+              // recomputing mergeability) and would otherwise look like
+              // progress on an edge whose own condition never changed,
+              // letting a triaged DEFER thread re-dispatch `autofix`
+              // indefinitely (issue #740).
+              signals: decision.when,
               state: waitState
             }),
             maxEdgeClaims

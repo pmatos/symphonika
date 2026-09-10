@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -44,6 +44,7 @@ afterEach(async () => {
 type ProjectSpec = {
   name: string;
   weight?: number;
+  workflowPath?: string;
 };
 
 function projectConfig(
@@ -67,7 +68,7 @@ function projectConfig(
       token: "$GITHUB_TOKEN"
     },
     weight: spec.weight ?? 1,
-    workflow: { format: "auto", path: "WORKFLOW.md" },
+    workflow: { format: "auto", path: spec.workflowPath ?? "WORKFLOW.md" },
     workspace: {
       git: {
         base_branch: "main",
@@ -449,4 +450,235 @@ describe("RunController.dispatchFresh", () => {
       sequentialStates.get("beta")?.schedulerCurrentWeight
     );
   });
+
+  it("issue #731: refuses to claim an issue fresh while an earlier run is parked at a raw_fsm wait state", async () => {
+    // Same bug class as #616 (dispatchReviewFollowup racing a parked
+    // wait_for_pr row), but for the normal per-tick poll/claim path: nothing
+    // stopped a second, non-continuation dispatch from restarting the
+    // workflow from `initial` while the first run sat parked in `waiting`.
+    const harness = await createHarness([
+      { name: "alpha", workflowPath: "raw-fsm.yml" }
+    ]);
+    await mkdir(path.join(harness.root, "prompts"), { recursive: true });
+    await writeFile(
+      path.join(harness.root, "prompts", "implement.md"),
+      "# Issue {{issue.number}}\n"
+    );
+    await writeFile(
+      path.join(harness.root, "raw-fsm.yml"),
+      [
+        "workflow:",
+        "  name: wait_park_regression",
+        "  initial: implement",
+        "  states:",
+        "    implement:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/implement.md",
+        "      transitions:",
+        "        - to: wait_for_pr",
+        "          when:",
+        "            provider_success: true",
+        "    wait_for_pr:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: merged",
+        "          when:",
+        "            pr_merged: true",
+        "        - to: failed",
+        "          when:",
+        "            pr_open: false",
+        "        - to: failed",
+        "          when:",
+        "            mergeable: false",
+        "        - to: failed",
+        "          when:",
+        "            checks: failure",
+        "        - to: failed",
+        "          when:",
+        "            checks: success",
+        "            mergeable: true",
+        "            unresolved_review_threads: 0",
+        "        - to: failed",
+        "          when:",
+        "            has_unresolved_reviews: true",
+        "    merged:",
+        "      terminal: success",
+        "    failed:",
+        "      terminal: blocked",
+        ""
+      ].join("\n")
+    );
+
+    seedWaitingRun(harness.runStore, {
+      currentStateId: "wait_for_pr",
+      issueNumber: 1,
+      projectName: "alpha",
+      runId: "parked-run"
+    });
+
+    const batch = await harness.controller.dispatchFresh(
+      pollStatus([{ issueNumber: 1, project: "alpha" }])
+    );
+
+    expect(batch.claims).toEqual([
+      {
+        dispatched: false,
+        reason: "no eligible issue has a registered provider"
+      }
+    ]);
+    expect(batch.lifecycles).toEqual([]);
+    expect(harness.runStore.listRuns({})).toHaveLength(1);
+    expect(harness.runStore.getRun("parked-run")).toMatchObject({
+      currentStateId: "wait_for_pr",
+      state: "waiting"
+    });
+  });
+
+  it("issue #731: fails closed (skips the whole project) when the wait-park guard's own workflow load errors", async () => {
+    // loadRawFsmWorkflow cannot confirm no waiting row owns
+    // any candidate in this project's bucket when its own load fails, so it
+    // must refuse every candidate rather than fall through to a claim that
+    // could race a parked run it failed to see. Mirrors dispatchReviewFollowup's
+    // identical fail-closed reasoning for the same failure mode (issue #616).
+    const harness = await createHarness([
+      { name: "alpha", workflowPath: "missing-workflow.yml" }
+    ]);
+
+    const batch = await harness.controller.dispatchFresh(
+      pollStatus([{ issueNumber: 1, project: "alpha" }])
+    );
+
+    expect(batch.claims).toEqual([
+      {
+        dispatched: false,
+        reason: "no eligible issue has a registered provider"
+      }
+    ]);
+    expect(batch.lifecycles).toEqual([]);
+    expect(harness.runStore.listRuns({})).toHaveLength(0);
+  });
+
+  it("issue #731: fails closed (skips the whole project) when the wait-park guard's workflow fails validation", async () => {
+    // Distinct from the load-error case above: loadWorkflow doesn't throw
+    // here, it successfully reads and parses the file but expansion reports
+    // validation errors (an edited wait state with uncovered PR-signal
+    // transitions). Without treating errors the same as a load throw, the
+    // guard falls open on `undefined` and reopens exactly the race issue
+    // #731 closes: a parked run's issue could still be claimed fresh.
+    const harness = await createHarness([
+      { name: "alpha", workflowPath: "raw-fsm.yml" }
+    ]);
+    await mkdir(path.join(harness.root, "prompts"), { recursive: true });
+    await writeFile(
+      path.join(harness.root, "prompts", "implement.md"),
+      "# Issue {{issue.number}}\n"
+    );
+    await writeFile(
+      path.join(harness.root, "raw-fsm.yml"),
+      [
+        "workflow:",
+        "  name: wait_park_regression",
+        "  initial: implement",
+        "  states:",
+        "    implement:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/implement.md",
+        "      transitions:",
+        "        - to: wait_for_pr",
+        "          when:",
+        "            provider_success: true",
+        "    wait_for_pr:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: merged",
+        "          when:",
+        "            pr_merged: true",
+        "    merged:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    seedWaitingRun(harness.runStore, {
+      currentStateId: "wait_for_pr",
+      issueNumber: 1,
+      projectName: "alpha",
+      runId: "parked-run"
+    });
+
+    const batch = await harness.controller.dispatchFresh(
+      pollStatus([{ issueNumber: 1, project: "alpha" }])
+    );
+
+    expect(batch.claims).toEqual([
+      {
+        dispatched: false,
+        reason: "no eligible issue has a registered provider"
+      }
+    ]);
+    expect(batch.lifecycles).toEqual([]);
+    expect(harness.runStore.listRuns({})).toHaveLength(1);
+    expect(harness.runStore.getRun("parked-run")).toMatchObject({
+      currentStateId: "wait_for_pr",
+      state: "waiting"
+    });
+  });
+
+  it("issue #731: does not fail closed for a non-raw_fsm workflow that fails validation -- only raw_fsm has a wait park to guard", async () => {
+    // The wait-park guard exists to refuse a fresh claim only when a raw_fsm
+    // workflow might have a waiting row it can no longer confirm. A markdown
+    // compatibility-graph workflow has no FSM position to be "parked" at
+    // (see the comment on isIssueOwnedByWorkflow), so a validation error on
+    // one must not broaden the guard into refusing every fresh claim for the
+    // whole project -- that would be a different, out-of-scope behavior
+    // change (workflow contract validation belongs elsewhere, e.g. the
+    // daemon's config reload, not this guard).
+    const harness = await createHarness([{ name: "alpha" }]);
+    await writeFile(
+      path.join(harness.root, "WORKFLOW.md"),
+      ["---", "workflow contract front matter with no closing marker", ""].join(
+        "\n"
+      )
+    );
+
+    const batch = await harness.controller.dispatchFresh(
+      pollStatus([{ issueNumber: 1, project: "alpha" }])
+    );
+
+    // The picker claims the issue -- proving the fix under test: the guard
+    // does not fail closed here. The claimed attempt then fails downstream
+    // once startAttempt reloads the same broken workflow contract, which is
+    // the correct, unrelated failure mode for an actually-invalid workflow
+    // and out of scope for this guard.
+    expect(batch.claims).toEqual([{ dispatched: true, runId: "run-1" }]);
+    await expect(Promise.all(batch.lifecycles)).rejects.toThrow(
+      "missing a closing ---"
+    );
+  });
 });
+
+function seedWaitingRun(
+  runStore: RunStore,
+  input: {
+    currentStateId: string;
+    issueNumber: number;
+    projectName: string;
+    runId: string;
+  }
+): void {
+  runStore.createRun({
+    id: input.runId,
+    issue: issue(input.issueNumber),
+    projectName: input.projectName,
+    providerCommand: "codex",
+    providerName: "codex"
+  });
+  runStore.setRunCurrentState(input.runId, input.currentStateId);
+  runStore.updateRunState(input.runId, "waiting");
+}

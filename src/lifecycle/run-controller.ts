@@ -1677,25 +1677,27 @@ export class RunController {
     issueNumber: number;
     project: RunControllerProjectConfig;
   }): Promise<boolean> {
-    const { project } = input;
-    if (project.disabled === true || !isDispatchProject(project)) {
+    const loaded = await this.loadRawFsmWorkflow(input.project);
+    if (loaded === undefined || loaded === "load_failed") {
       return false;
     }
-    let loaded;
-    try {
-      loaded = await this.loadWorkflow(project.workflow);
-    } catch {
-      return false;
-    }
-    if (
-      loaded.errors.length > 0 ||
-      loaded.expandedWorkflow.source.kind !== "raw_fsm"
-    ) {
-      return false;
-    }
+    return this.isIssueParkedAtRawFsmState(loaded, {
+      issueNumber: input.issueNumber,
+      projectName: input.project.name
+    });
+  }
+
+  // Shared by isIssueOwnedByWorkflow and pickProjectCandidate's wait-park
+  // guard: once a raw_fsm workflow is loaded, both ask the same question for
+  // a given issue -- does a waiting row park it at a state that workflow
+  // still has?
+  private isIssueParkedAtRawFsmState(
+    loaded: LoadedWorkflow,
+    input: { issueNumber: number; projectName: string }
+  ): boolean {
     const waiting = this.runStore.findWaitingRunByIssue({
       issueNumber: input.issueNumber,
-      projectName: project.name
+      projectName: input.projectName
     });
     if (waiting === undefined || waiting.currentStateId === null) {
       return false;
@@ -1707,6 +1709,67 @@ export class RunController {
       findWorkflowState(loaded.expandedWorkflow, waiting.currentStateId) !==
       undefined
     );
+  }
+
+  // Loads and classifies a project's workflow as a raw_fsm workflow (or not),
+  // shared by isIssueOwnedByWorkflow's one-issue-at-a-time callers and
+  // pickProjectCandidate's wait-park guard, which loads once per project
+  // bucket instead of once per candidate.
+  //
+  // Callers disagree on how to treat a load error: isIssueOwnedByWorkflow
+  // fails OPEN (`"load_failed"` collapses to false, same as a non-raw_fsm
+  // workflow), while pickProjectCandidate's guard fails CLOSED on
+  // `"load_failed"` -- a read failure, or a validation error on a raw_fsm
+  // workflow, would otherwise silently reopen the exact race this guards
+  // (issue #731), same as the reasoning dispatchReviewFollowup already
+  // applies to its own load failure (see the comment there,
+  // run-controller.ts:3522-3531). Scoped to raw_fsm: only a raw_fsm workflow
+  // can have a wait-park position at all, so a validation error on any other
+  // kind still returns `undefined` -- broadening fail-closed to every
+  // workflow kind would refuse fresh dispatch for a reason this guard has no
+  // business enforcing (that belongs to whatever validates the workflow
+  // contract generally, e.g. SPEC.md:619-620, not to the wait-park guard).
+  // Returns `undefined` (meaning "no wait park to guard against") for a
+  // disabled project, a non-dispatch project, or a workflow that is not
+  // raw_fsm -- none of those can ever have a waiting row worth refusing a
+  // fresh claim over.
+  private async loadRawFsmWorkflow(
+    project: RunControllerProjectConfig
+  ): Promise<LoadedWorkflow | "load_failed" | undefined> {
+    if (project.disabled === true || !isDispatchProject(project)) {
+      return undefined;
+    }
+    let loaded: LoadedWorkflow;
+    try {
+      loaded = await this.loadWorkflow(project.workflow);
+    } catch (error) {
+      this.logger?.warn(
+        {
+          project: project.name,
+          reason: error instanceof Error ? error.message : String(error)
+        },
+        "wait-park guard: workflow load failed; refusing fresh claims for project"
+      );
+      return "load_failed";
+    }
+    if (loaded.expandedWorkflow.source.kind !== "raw_fsm") {
+      return undefined;
+    }
+    // A raw FSM workflow that fails validation is exactly the "cannot
+    // confirm no wait park owns any candidate" case this guard exists for --
+    // treat it the same as a load throw rather than falling through to the
+    // fail-open `undefined` branch above.
+    if (loaded.errors.length > 0) {
+      this.logger?.warn(
+        {
+          project: project.name,
+          reason: loaded.errors.join("; ")
+        },
+        "wait-park guard: workflow validation failed; refusing fresh claims for project"
+      );
+      return "load_failed";
+    }
+    return loaded;
   }
 
   // A sibling to isIssueOwnedByWorkflow, for a case that predicate cannot
@@ -3721,6 +3784,24 @@ export class RunController {
     project: RunControllerProjectConfig
   ): Promise<{ issue: IssueSnapshot; project: string } | undefined> {
     const guarded = project.dispatch?.overlap_guard === true;
+    // Loaded once per bucket, not once per candidate: isIssueReserved only
+    // sees in-flight and scheduled work, not a durable `waiting` row -- the
+    // same gap #616 found in dispatchReviewFollowup, generalized by
+    // isIssueOwnedByWorkflow. A raw FSM run parked at a wait-kind state
+    // (e.g. wait_for_pr) has no entry in either in-memory registry between
+    // wait_park re-evaluations, so without this check a fresh claim can
+    // restart the workflow from `initial` while the parked run still owns
+    // the Issue. See issue #731.
+    const rawFsmWorkflow = await this.loadRawFsmWorkflow(project);
+    // Fails closed: cannot confirm no wait park owns any candidate in this
+    // project's bucket, so the whole bucket is skipped for this pick rather
+    // than risking the double-claim the load would otherwise have caught.
+    // Covers both a read failure and a workflow that fails validation --
+    // SPEC.md:619-620 forbids dispatching against an invalid contract
+    // either way.
+    if (rawFsmWorkflow === "load_failed") {
+      return undefined;
+    }
     for (const entry of bucket.slice().sort(compareCandidateIssues)) {
       if (this.activeRuns.isIssueReserved(entry.project, entry.issue.number)) {
         continue;
@@ -3731,6 +3812,15 @@ export class RunController {
           issueNumber: entry.issue.number,
           projectName: project.name,
           repository: project.tracker
+        })
+      ) {
+        continue;
+      }
+      if (
+        rawFsmWorkflow !== undefined &&
+        this.isIssueParkedAtRawFsmState(rawFsmWorkflow, {
+          issueNumber: entry.issue.number,
+          projectName: project.name
         })
       ) {
         continue;

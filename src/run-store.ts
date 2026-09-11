@@ -1154,7 +1154,12 @@ const PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE = [
   "and pr_discovery_attempts < @maxAttempts"
 ].join(" ");
 // Suppresses a run whose chain root already owns a tracked PR; shared by the
-// same two call sites for the same drift reason as the predicate above.
+// same two call sites for the same drift reason as the predicate above. The
+// branch_name equality is defense-in-depth for legacy chains predating
+// ADR-2026-09-04-0837 (see ADR-2026-09-10-2031 addendum, issue #745); it can
+// only narrow this suppression, never widen it, since
+// PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE already requires
+// runs.branch_name to be non-null/non-empty everywhere this applies.
 const RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION = [
   "and not exists (",
   "  select 1 from tracked_pull_requests pr",
@@ -1162,6 +1167,7 @@ const RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION = [
   "  join run_chain_root runs_root on runs_root.id = runs.id",
   "  where pr.project_name = runs.project_name",
   "  and pr_root.root_id = runs_root.root_id",
+  "  and pr.branch_name = runs.branch_name",
   ")"
 ].join(" ");
 const RUN_CHAIN_ROOT_CTE = [
@@ -5981,6 +5987,16 @@ export class RunStore {
   // discovery-eligible run, so filtering it down to one run's ancestry
   // afterward would still materialize the whole set first -- more work than
   // this bounded, chain-length-only walk needs.
+  //
+  // Also requires the tracked row's branch_name to match this run's
+  // resolved branch: the nearest non-empty branch_name found by walking this
+  // run's own row, then its ancestors, up the chain -- falling back to
+  // chain-membership alone only when no run anywhere in the chain has a
+  // recorded branch. Defense-in-depth for legacy chains, and ancestor
+  // resolution rather than @runId's own row alone; see ADR-2026-09-10-2031
+  // addendum ("Ancestor resolution"), issue #745, for why both are needed.
+  // Derived from @runId's own row rather than a caller-supplied branchName
+  // parameter -- that ADR deliberately removed that parameter.
   findTrackedPullRequestForRunChain(input: {
     issueNumber: number;
     projectName: string;
@@ -5989,22 +6005,45 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "with recursive chain(id) as (",
-          "  select @runId",
+          "with recursive chain(id, depth) as (",
+          "  select @runId, 0",
           "  union all",
-          "  select r.continuation_parent_run_id from runs r",
+          "  select r.continuation_parent_run_id, chain.depth + 1",
+          "  from runs r",
           "  join chain on r.id = chain.id",
           "  where r.continuation_parent_run_id is not null",
+          "),",
+          "resolved_branch(branch_name) as (",
+          // `cross join` pins join order (drive from `chain`, seek into
+          // `runs` by primary key) without changing results -- a plain
+          // `join` here lets the planner flip it around and scan the
+          // whole never-pruned `runs` table instead, since a materialized
+          // CTE's true size isn't visible to the cost estimator the way a
+          // real table's stats are.
+          "  select r.branch_name",
+          "  from chain",
+          "  cross join runs r on r.id = chain.id",
+          "  where r.branch_name is not null and r.branch_name <> ''",
+          "  order by chain.depth asc",
+          "  limit 1",
           ")",
-          "select id, project_name, issue_number, run_id, pr_number, pr_url,",
-          "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
-          "last_review_dispatch_fingerprint, review_dispatch_count,",
-          "review_followup_cap_reached,",
-          "last_followup_run_id, state, last_observed_at, created_at, updated_at",
-          "from tracked_pull_requests",
-          "where project_name = @projectName and issue_number = @issueNumber",
-          "and run_id in (select id from chain)",
-          "order by id desc limit 1"
+          "select tracked.id, tracked.project_name, tracked.issue_number,",
+          "tracked.run_id, tracked.pr_number, tracked.pr_url,",
+          "tracked.branch_name, tracked.head_sha_at_dispatch,",
+          "tracked.last_seen_head_sha,",
+          "tracked.last_review_dispatch_fingerprint,",
+          "tracked.review_dispatch_count, tracked.review_followup_cap_reached,",
+          "tracked.last_followup_run_id, tracked.state,",
+          "tracked.last_observed_at, tracked.created_at, tracked.updated_at",
+          "from tracked_pull_requests tracked",
+          "where tracked.project_name = @projectName",
+          "and tracked.issue_number = @issueNumber",
+          "and tracked.run_id in (select id from chain)",
+          "and (",
+          "  not exists (select 1 from resolved_branch) or",
+          "  tracked.branch_name = (select branch_name from resolved_branch)",
+          ")",
+          "order by tracked.id desc limit 1"
         ].join(" ")
       )
       .get({

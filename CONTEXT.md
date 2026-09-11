@@ -174,8 +174,9 @@ A stored record of one pull request Symphonika has discovered for an Issue, keye
 number)` and never deleted. A Run Chain that never opens a discoverable PR owns no Tracked Pull
 Request row at all, and `adopt-pr`'s `reassignTrackedPullRequestRun` can move a row's ownership onto
 a different chain — so "one row per Run Chain" is the common case, not a strict invariant (see the
-known gap in ADR-2026-09-10-2031). Resolving "this chain's own" tracked pull request still scopes by
-Run Chain membership, not branch name (see Run Chain for why).
+known gap in ADR-2026-09-10-2031). Resolving "this chain's own" tracked pull request scopes primarily
+by Run Chain membership (see Run Chain for why), narrowed by branch-name equality as defense-in-depth
+for legacy chains (see Run Chain for that addition too).
 _Avoid_: Pull Request State (that is the normalized GitHub state, not the stored row)
 
 **Progress Guard**:
@@ -245,10 +246,16 @@ _Avoid_: issue when referring to execution status
 **Run Chain**:
 The full lineage of Runs linked by `continuation_parent_run_id`: one root Run (created fresh, with no
 parent) plus every Continuation, State Advance, and waiting Run that descends from it. Chain
-membership, not branch name, is what anything recognizing "this chain's own" tracked pull request must
-match on — PR Follow-up discovery suppression, `wait`/`merge_pr` re-evaluation — because branch name is
+membership is the primary key anything recognizing "this chain's own" tracked pull request must match
+on — PR Follow-up discovery suppression, `wait`/`merge_pr` re-evaluation — because branch name is
 deterministic from the issue title and can be reused across otherwise-unrelated chains (see why in
-ADR-2026-09-10-2031).
+ADR-2026-09-10-2031). Both call sites additionally narrow that match with branch-name equality as
+defense-in-depth for chains whose rows predate that ADR's fix: discovery suppression compares against
+the candidate run's own `branch_name`, while `wait`/`merge_pr` re-evaluation compares against the
+nearest recorded `branch_name` found by walking from the waiting run's own row up through its
+ancestors. Both guard the same failure — a mid-chain issue-title edit diverging a continuation's
+branch from an ancestor's tracked PR despite sharing a chain root (see the addendum, issue #745).
+Chain membership stays the identity; branch equality only narrows it, never replaces it.
 _Avoid_: branch, issue when identifying which chain owns a tracked pull request
 
 **Adopted Run**:

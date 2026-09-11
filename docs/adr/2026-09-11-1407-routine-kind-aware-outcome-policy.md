@@ -104,7 +104,15 @@ Add an optional per-routine declaration flag, `expects_pr: boolean`, alongside t
   verification runs there); the operator-cancel path passes `false`, inert for the same reason
   `expectsPr: false` is. When true (and `expectsPr: true`), it suppresses rule 4 entirely, so the
   claim-preservation branch that follows keeps the claim's own `status` and `verified` normally
-  (`verified: true` only when the same action was independently confirmed).
+  (`verified: true` only when the same action was independently confirmed). Issue #758 widened the
+  success-path expression with a third disjunct, `|| fallbackDiscoveredPr`: both the direct listing
+  (when the after-execution snapshot's own PR read succeeds) and its fallback discovery retry (when
+  that read fails) now also compute whether they found a PR on the firing's own branch that is new
+  to this firing — any state, not only open, and absent from the before-snapshot when one is
+  available — so a PR invisible to the before/after diff (a failed read on either side, or a PR
+  opened and closed/merged within the firing's window) still counts, while a PR already open on a
+  reused branch before this firing began does not. What gets recorded into the run store stays
+  open-only regardless, per the recording behavior described above.
 
 This repository's own `routines/refactor-audit.md` is `kind: report` (it only files GitHub issues,
 never opens a PR), so it cannot and does not carry `expects_pr: true` — setting it there would be

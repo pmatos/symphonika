@@ -88,14 +88,16 @@ export type ReconcileRoutineOutcomeInput = {
   githubObservationAvailable: boolean;
   observedAction: ObservedRoutineAction | null;
   provider: AgentProviderName;
-  // True when a `pr` action was observed this firing via either the
-  // branch-scoped diff or a direct claim-URL verification — independent of
-  // `observedAction`, which a same-firing claim naming a *different*
-  // confirmed action (e.g. `issue_opened`) can end up holding instead (the
-  // caller's claim-URL verification replaces the diff's own `pr` observation
-  // with whatever the claim itself asked to confirm). Required so every
-  // caller states it explicitly rather than a stale default silently hiding
-  // a real observed PR from rule 4 below.
+  // True when a `pr` action was observed this firing via the branch-scoped
+  // diff, a direct claim-URL verification, or a PR newly found on the
+  // firing's own branch by the direct listing or its fallback discovery
+  // retry (#758) — independent of `observedAction`, which a same-firing
+  // claim naming a *different* confirmed action (e.g.
+  // `issue_opened`) can end up holding instead (the caller's claim-URL
+  // verification replaces the diff's own `pr` observation with whatever the
+  // claim itself asked to confirm). Required so every caller states it
+  // explicitly rather than a stale default silently hiding a real observed
+  // PR from rule 4 below.
   pullRequestObserved: boolean;
   terminalReason: string | null;
   terminalState: "succeeded" | "failed" | "cancelled";

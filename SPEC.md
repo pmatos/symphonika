@@ -1246,8 +1246,10 @@ different action, or an `error`-status claim, is unaffected and still fails dete
 commits. This widening is scoped to the Routine Firing dispatch path; §12.1's issue-driven Run
 lifecycle has no `expects_pr` concept and keeps its unconditional `no_workspace_changes` failure on
 zero commits regardless of any claim. On the succeeded transition, Symphonika lists every open pull
-request whose head is the firing branch and records its PR number and head SHA. Routine PR discovery
-is informational only: it never enters PR Follow-up, review re-dispatch, or auto-merge.
+request whose head is the firing branch and records its PR number and head SHA; when the
+after-execution snapshot's own PR read fails, a fallback retry performs the same listing and
+recording. Routine PR discovery is informational only beyond feeding the `expects_pr` exemption
+below: it never enters PR Follow-up, review re-dispatch, or auto-merge.
 
 The dispatcher asks every provider for the same Routine Outcome Claim
 `{status, action, url, title, summary}` and parses it only from the final normalized
@@ -1306,7 +1308,13 @@ fallback outright even when the claim names a different action: the branch-scope
 observation can be replaced by a differently-confirmed claim action before reconciliation runs (the
 direct-URL verification described above, ADR-2026-09-11-1001), so this exemption is carried
 separately from the observed/claimed action reconciliation otherwise uses, rather than inferred from
-it after the fact. See ADR-2026-09-11-1407. A successful firing with
+it after the fact. The exemption also counts a `pr` found on the firing's own branch and absent from the before-snapshot
+(any state, not only open — mirroring the before/after diff's own bar) by either the direct listing
+above or its fallback discovery retry, so a claimless or commit-claiming firing whose PR is invisible
+to the before/after diff — because that diff's own read failed, or because the PR was opened and then
+closed or merged within the firing's window — is not misreported as an unpublished commit. A PR that
+already existed on a reused branch before this firing began does not count, matching the diff's own
+"new to this firing" bar. See ADR-2026-09-11-1407. A successful firing with
 neither claim nor observation records `no_action`; it is verified and sourced to `gh` only when the
 before/after GitHub reads completed,
 otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and

@@ -20,6 +20,7 @@ import {
 } from "../lifecycle/provider-scratch.js";
 import {
   resolveEnvBackedValue,
+  tryGetPullRequest,
   tryListIssues,
   tryListPullRequestsForBranch,
   type GitHubIssuesApi,
@@ -59,9 +60,11 @@ import {
 } from "./schedule.js";
 import {
   diffRoutineGithubSnapshots,
+  parseGithubClaimUrl,
   parseRoutineOutcomeClaim,
   reconcileRoutineOutcome,
   ROUTINE_OUTCOME_JSON_SCHEMA,
+  type ObservedRoutineAction,
   type RoutineGithubSnapshot,
   type RoutineOutcomeClaim
 } from "./outcome.js";
@@ -1554,11 +1557,21 @@ async function runRoutineFiring(input: {
     // enrichment, so it must not let the execution deadline rewrite a
     // completed outcome.
     deadline.clear();
+    const claim = parseRoutineOutcomeClaim(events);
+    // Pure over githubBefore/githubAfter, computed here (rather than after
+    // discovery below) so a claim-URL verification pass can consult it.
+    const githubObservation = routineGithubObservation(
+      githubBefore,
+      githubAfter,
+      input.routine.kind,
+      githubSnapshotSince
+    );
     // Pull-request discovery must finish before this firing is recorded as
     // terminal: listReadyRoutineFanouts() only looks at routine_firings.state,
     // and daemon ticks are explicitly re-entrant (ADR 0052), so a concurrent
     // tick could otherwise observe "succeeded" and send the grouped summary
     // with this leg's PRs missing, before discovery has recorded them.
+    let discoveryDone: Promise<void> = Promise.resolve();
     if (outcome.kind === "succeeded" && input.routine.kind === "git") {
       if (githubAfter?.pullRequestsAvailable === true) {
         recordRoutinePullRequests({
@@ -1570,7 +1583,7 @@ async function runRoutineFiring(input: {
           runStore: input.runStore
         });
       } else {
-        await cancellation.race(
+        discoveryDone = cancellation.race(
           discoverRoutinePullRequests({
             branchName: prepared.branchName,
             env: input.env,
@@ -1584,6 +1597,47 @@ async function runRoutineFiring(input: {
         );
       }
     }
+    // ADR 0068 rule 4 only discards a claim as an unconfirmed external action
+    // when the branch-scoped diff above didn't observe a matching PR/issue —
+    // which happens whenever a skill adopts a branch other than this firing's
+    // own deterministic one for its PR (#748). Before letting rule 4 win,
+    // verify the claim's own URL directly; this is a secondary, more
+    // expensive check, so it only runs when the cheaper diff didn't already
+    // confirm the claim, and only for a succeeded `kind: git` firing, matching
+    // rule 4's own precondition (SPEC.md's git-only fallback: a `kind: report`
+    // routine never observes pull requests, so a report claim naming any
+    // historical PR in the repo must not be verified by this fallback).
+    // Independent of PR discovery above, so both GitHub reads are issued
+    // together rather than stacked sequentially.
+    const claimUrlVerificationPending: Promise<ObservedRoutineAction | null> =
+      outcome.kind === "succeeded" &&
+      input.routine.kind === "git" &&
+      claim !== null &&
+      claim.status !== "error" &&
+      githubObservation.action?.action !== claim.action
+        ? cancellation.race(
+            verifyRoutineOutcomeClaimUrl({
+              beforeIssuesSnapshot:
+                githubBefore?.issuesAvailable === true
+                  ? githubBefore.snapshot.issues
+                  : undefined,
+              claim,
+              env: input.env,
+              githubIssuesApi: input.githubIssuesApi,
+              issuesSnapshot:
+                githubAfter?.issuesAvailable === true
+                  ? githubAfter.snapshot.issues
+                  : undefined,
+              logger: input.logger,
+              project: input.project,
+              windowStart: githubSnapshotSince
+            })
+          )
+        : Promise.resolve(null);
+    const [, claimUrlVerification] = await Promise.all([
+      discoveryDone,
+      claimUrlVerificationPending
+    ]);
     // Re-check for a cancel that landed during discovery: an operator cancel
     // still wins even though the provider itself already finished (ADR 0060).
     const cancelBeforeCommitInspection = input.activeRuns.get(input.firingId);
@@ -1612,12 +1666,6 @@ async function runRoutineFiring(input: {
     if (completionCancelEntry?.cancelRequested === true) {
       outcome = routineCancellationOutcome(completionCancelEntry.cancelReason);
     }
-    const githubObservation = routineGithubObservation(
-      githubBefore,
-      githubAfter,
-      input.routine.kind,
-      githubSnapshotSince
-    );
     const resolvedRedactSecrets = redactSecrets();
     const redactedTerminalReason =
       outcome.reason.length === 0
@@ -1627,13 +1675,10 @@ async function runRoutineFiring(input: {
       commitsAhead,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
-        claim: redactRoutineOutcomeClaim(
-          parseRoutineOutcomeClaim(events),
-          resolvedRedactSecrets
-        ),
+        claim: redactRoutineOutcomeClaim(claim, resolvedRedactSecrets),
         commitsAhead,
         githubObservationAvailable: githubObservation.available,
-        observedAction: githubObservation.action,
+        observedAction: claimUrlVerification ?? githubObservation.action,
         provider: input.providerName,
         terminalReason: redactedTerminalReason,
         terminalState: outcome.kind
@@ -2183,6 +2228,187 @@ function routineGithubObservation(
   };
 }
 
+// Independently confirms (or refutes) a claimed pr/issue_opened/issue_closed
+// action by looking its own URL up directly, rather than relying on the
+// branch-scoped before/after diff above. That diff only ever matches a
+// PR/issue whose head is this firing's own deterministic branch, so a real
+// action taken from a different branch (see #748) is otherwise invisible to
+// it. Scoped to the firing's own configured owner/repo by
+// parseGithubClaimUrl, so a claim can't trigger a lookup against an
+// unrelated repository. A `pr` claim is confirmed by the pull request's mere
+// existence via a fresh single-PR GET — there's no reliable "before" state
+// for a branch this firing never observed, so this matches the
+// branch-scoped diff's own bar for PRs. An `issue_opened`/`issue_closed`
+// claim, by contrast, is answered only from captureRoutineGithubSnapshot's
+// own before/after issue snapshots (never a fresh GET — see
+// confirmIssueClaimAction below for why), applying the same
+// absent-from-before (or not-already-closed-there) bar
+// diffRoutineGithubSnapshots itself uses, so a stale or hallucinated URL
+// naming an issue that predates this firing is refuted rather than
+// rubber-stamped. Errors and "not found" both return null — a claim this
+// can't confirm is left for the caller's existing branch-scoped evidence to
+// decide, not treated as refuted.
+async function verifyRoutineOutcomeClaimUrl(input: {
+  beforeIssuesSnapshot: RoutineGithubSnapshot["issues"] | undefined;
+  claim: RoutineOutcomeClaim | null;
+  env: NodeJS.ProcessEnv;
+  githubIssuesApi: GitHubIssuesApi | undefined;
+  issuesSnapshot: RoutineGithubSnapshot["issues"] | undefined;
+  logger: Logger | undefined;
+  project: RunControllerProjectConfig;
+  windowStart: string;
+}): Promise<ObservedRoutineAction | null> {
+  const claim = input.claim;
+  if (
+    claim === null ||
+    claim.url === null ||
+    claim.status === "error" ||
+    (claim.action !== "pr" &&
+      claim.action !== "issue_opened" &&
+      claim.action !== "issue_closed") ||
+    input.githubIssuesApi === undefined ||
+    input.project.tracker === undefined
+  ) {
+    return null;
+  }
+  const { owner, repo, token: tokenConfig } = input.project.tracker;
+  const reference = parseGithubClaimUrl(claim.url, owner, repo);
+  if (reference === null) {
+    return null;
+  }
+  const token = resolveEnvBackedValue(tokenConfig, input.env);
+  if (token === undefined) {
+    input.logger?.warn(
+      { project: input.project.name },
+      "symphonika routine claim URL verification token unavailable"
+    );
+    return null;
+  }
+  try {
+    if (claim.action === "pr") {
+      if (reference.kind !== "pull") {
+        return null;
+      }
+      const pullRequest = await tryGetPullRequest(input.githubIssuesApi, {
+        owner,
+        pullNumber: reference.number,
+        repo,
+        token
+      });
+      if (pullRequest?.number === undefined) {
+        return null;
+      }
+      return {
+        action: "pr",
+        title: pullRequestTitle(pullRequest),
+        url: pullRequest.html_url ?? claim.url
+      };
+    }
+    if (reference.kind !== "issue") {
+      return null;
+    }
+    // Answered from captureRoutineGithubSnapshot's own before/after issue
+    // snapshots only — never a fresh single-issue GET. Those snapshots are
+    // each bound to a specific, recorded capture time; a live GET has no
+    // such bound; performed here (after githubAfter and PR discovery), it
+    // could observe an issue opened/closed in the gap between the
+    // after-snapshot's capture and this very call, which is real but did not
+    // happen during this firing's recorded observation window. `windowStart`
+    // is also only the broad pagination cutoff diffRoutineGithubSnapshots
+    // uses (githubSnapshotSince), not this firing's own start, so a
+    // timestamp check alone would additionally confirm an issue opened or
+    // closed hours before this firing began but still inside that rolling
+    // window. diffRoutineGithubSnapshots' actual protection against both is
+    // requiring absence from the *before* snapshot (or, for a close, that it
+    // wasn't already closed there) — mirrored here via
+    // confirmIssueClaimAction. Either snapshot missing, or the issue simply
+    // absent from the after one (it predates the window, or wasn't observed
+    // by it), leaves the claim unconfirmed rather than risk a false
+    // positive.
+    if (
+      input.beforeIssuesSnapshot === undefined ||
+      input.issuesSnapshot === undefined
+    ) {
+      return null;
+    }
+    const cachedIssue = input.issuesSnapshot[String(reference.number)];
+    if (cachedIssue === undefined) {
+      return null;
+    }
+    const beforeIssue = input.beforeIssuesSnapshot[String(reference.number)];
+    const confirmed = confirmIssueClaimAction(
+      claim.action,
+      cachedIssue,
+      beforeIssue,
+      Date.parse(input.windowStart)
+    );
+    if (confirmed === null) {
+      return null;
+    }
+    return {
+      action: claim.action,
+      title: confirmed.title,
+      url: confirmed.url ?? claim.url
+    };
+  } catch (error) {
+    input.logger?.warn(
+      {
+        err: error,
+        number: reference.number,
+        project: input.project.name,
+        referenceKind: reference.kind
+      },
+      "symphonika routine claim URL verification failed"
+    );
+    return null;
+  }
+}
+
+function issueTitle(issue: RawGitHubIssue): string {
+  return issue.title ?? `Issue #${issue.number}`;
+}
+
+function pullRequestTitle(pullRequest: RawGitHubPullRequest): string {
+  return pullRequest.title ?? `Pull request #${pullRequest.number}`;
+}
+
+// Mirrors diffRoutineGithubSnapshots' newlyOpenedIssue/newlyClosedIssue
+// predicates so the direct-URL fallback confirms a claim only under the
+// same "actually happened during this firing" bar the branch-scoped diff
+// already enforces, rather than a looser existence-plus-timestamp check.
+function confirmIssueClaimAction(
+  action: "issue_opened" | "issue_closed",
+  issue: RoutineGithubSnapshot["issues"][string],
+  beforeIssue: RoutineGithubSnapshot["issues"][string] | undefined,
+  windowStartMs: number
+): RoutineGithubSnapshot["issues"][string] | null {
+  if (action === "issue_opened") {
+    if (
+      beforeIssue !== undefined ||
+      !(Date.parse(issue.createdAt) >= windowStartMs)
+    ) {
+      return null;
+    }
+    return issue;
+  }
+  if (issue.state.toLowerCase() !== "closed") {
+    return null;
+  }
+  if (beforeIssue === undefined) {
+    if (
+      issue.closedAt === null ||
+      !(Date.parse(issue.closedAt) >= windowStartMs)
+    ) {
+      return null;
+    }
+    return issue;
+  }
+  if (beforeIssue.state.toLowerCase() === "closed") {
+    return null;
+  }
+  return issue;
+}
+
 function routineIssueObservations(
   issues: RawGitHubIssue[]
 ): RoutineGithubSnapshot["issues"] {
@@ -2201,7 +2427,7 @@ function routineIssueObservations(
       // an issue never falsely counts as newly opened for lack of evidence.
       createdAt: issue.created_at ?? EPOCH_ISO,
       state: issue.state ?? "",
-      title: issue.title ?? `Issue #${issue.number}`,
+      title: issueTitle(issue),
       url: issue.html_url ?? null
     };
   }
@@ -2218,7 +2444,7 @@ function routinePullRequestObservations(
       continue;
     }
     observations[String(pullRequest.number)] = {
-      title: pullRequest.title ?? `Pull request #${pullRequest.number}`,
+      title: pullRequestTitle(pullRequest),
       url: pullRequest.html_url ?? null
     };
   }

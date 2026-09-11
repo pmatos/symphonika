@@ -2229,6 +2229,1271 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("keeps a verified PR claim when GitHub branch-scoped observation can't match the firing branch (#748)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMBRANCH0";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "pr",
+      status: "success",
+      summary:
+        "Opened PR #99 from pm-deepen/retry-policy rather than the firing branch.",
+      title: "Refactor the retry policy module",
+      url: "https://github.com/pmatos/alpha/pull/99"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getPullRequest = vi.fn().mockResolvedValue({
+      head: { ref: "pm-deepen/retry-policy", sha: "abc999" },
+      html_url: "https://github.com/pmatos/alpha/pull/99",
+      number: 99,
+      state: "open",
+      title: "Refactor the retry policy module"
+    });
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-verify",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getPullRequest,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(getPullRequest).toHaveBeenCalledWith({
+        owner: "pmatos",
+        pullNumber: 99,
+        repo: "alpha",
+        token: "secret-token"
+      });
+      expect(runStore.getRoutineFiring("fire-claim-verify")).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "pr",
+          source: "codex",
+          status: "success",
+          summary:
+            "Opened PR #99 from pm-deepen/retry-policy rather than the firing branch.",
+          title: "Refactor the retry policy module",
+          url: "https://github.com/pmatos/alpha/pull/99",
+          verified: true
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("falls back to the commit-retained outcome when a claimed PR can't be found on GitHub (#748)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMREFUTE0";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "pr",
+      status: "success",
+      summary: "Opened a pull request from an adopted branch.",
+      title: "Extract retry policy",
+      url: "https://github.com/pmatos/alpha/pull/404"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getPullRequest = vi.fn().mockResolvedValue(null);
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-refute",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getPullRequest,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(getPullRequest).toHaveBeenCalledWith({
+        owner: "pmatos",
+        pullNumber: 404,
+        repo: "alpha",
+        token: "secret-token"
+      });
+      expect(runStore.getRoutineFiring("fire-claim-refute")).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "commit",
+          source: "git",
+          status: "success",
+          summary: "Observed commits ahead of the configured base branch.",
+          title: "Commit retained in the Routine Firing workspace",
+          url: null,
+          verified: true
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("prefers a URL-verified PR claim over a mismatched branch-scoped observation (#748)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMMISMATCH";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "pr",
+      status: "success",
+      summary: "Opened PR #99 from pm-deepen/retry-policy.",
+      title: "Refactor the retry policy module",
+      url: "https://github.com/pmatos/alpha/pull/99"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getPullRequest = vi.fn().mockResolvedValue({
+      head: { ref: "pm-deepen/retry-policy", sha: "abc999" },
+      html_url: "https://github.com/pmatos/alpha/pull/99",
+      number: 99,
+      state: "open",
+      title: "Refactor the retry policy module"
+    });
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+    // The branch-scoped diff can still observe an unrelated newly opened
+    // issue (issues aren't branch-scoped) even while the claimed PR is
+    // invisible to it. Rule 4's mismatch guard must not stop at "some action
+    // was observed" -- it must compare that observed action's own kind
+    // against the claim before giving up on URL verification.
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          created_at: "2026-05-22T09:59:30.000Z",
+          html_url: "https://github.com/pmatos/alpha/issues/23",
+          number: 23,
+          state: "open",
+          title: "Track a follow-up refactor"
+        }
+      ]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-mismatch",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getPullRequest,
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(getPullRequest).toHaveBeenCalledWith({
+        owner: "pmatos",
+        pullNumber: 99,
+        repo: "alpha",
+        token: "secret-token"
+      });
+      expect(runStore.getRoutineFiring("fire-claim-mismatch")).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "pr",
+          source: "codex",
+          status: "success",
+          summary: "Opened PR #99 from pm-deepen/retry-policy.",
+          title: "Refactor the retry policy module",
+          url: "https://github.com/pmatos/alpha/pull/99",
+          verified: true
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("verifies a claimed issue_closed action directly by URL", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMISSUE0";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "issue_closed",
+      status: "success",
+      summary: "Closed the superseded issue from an adopted branch.",
+      title: "Superseded dependency issue",
+      url: "https://github.com/pmatos/alpha/issues/17"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getIssue = vi.fn();
+    // Empty on the before-capture call (this issue wasn't already closed
+    // when the firing started) and containing the closed issue on the
+    // after-capture call: the direct-URL fallback answers only from these
+    // two snapshots, never a fresh single-issue GET (see #751).
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          closed_at: "2026-05-22T09:59:30.000Z",
+          html_url: "https://github.com/pmatos/alpha/issues/17",
+          number: 17,
+          state: "closed",
+          title: "Superseded dependency issue"
+        }
+      ]);
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-issue-closed",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getIssue,
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(getIssue).not.toHaveBeenCalled();
+      expect(
+        runStore.getRoutineFiring("fire-claim-issue-closed")
+      ).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "issue_closed",
+          source: "codex",
+          status: "success",
+          summary: "Closed the superseded issue from an adopted branch.",
+          title: "Superseded dependency issue",
+          url: "https://github.com/pmatos/alpha/issues/17",
+          verified: true
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not confirm an issue_closed claim when the issue is still open", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMISSUE1";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "issue_closed",
+      status: "success",
+      summary: "Closed the superseded issue from an adopted branch.",
+      title: "Superseded dependency issue",
+      url: "https://github.com/pmatos/alpha/issues/17"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getIssue = vi.fn().mockResolvedValue({
+      html_url: "https://github.com/pmatos/alpha/issues/17",
+      number: 17,
+      state: "open",
+      title: "Superseded dependency issue"
+    });
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-issue-still-open",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(
+        runStore.getRoutineFiring("fire-claim-issue-still-open")
+      ).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "commit",
+          source: "git",
+          status: "success",
+          summary: "Observed commits ahead of the configured base branch.",
+          title: "Commit retained in the Routine Firing workspace",
+          url: null,
+          verified: true
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("verifies a claimed issue_opened action directly by URL when the issue was created in this firing's window", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMISSUE2";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "issue_opened",
+      status: "success",
+      summary: "Filed a follow-up issue from an adopted branch.",
+      title: "Track a follow-up refactor",
+      url: "https://github.com/pmatos/alpha/issues/23"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getIssue = vi.fn();
+    // Empty on the before-capture call (this issue didn't exist yet when the
+    // firing started) and containing the new issue on the after-capture
+    // call: the direct-URL fallback answers only from these two snapshots,
+    // never a fresh single-issue GET (see #751).
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          created_at: "2026-05-22T09:59:30.000Z",
+          html_url: "https://github.com/pmatos/alpha/issues/23",
+          number: 23,
+          state: "open",
+          title: "Track a follow-up refactor"
+        }
+      ]);
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-issue-opened",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getIssue,
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(getIssue).not.toHaveBeenCalled();
+      expect(
+        runStore.getRoutineFiring("fire-claim-issue-opened")
+      ).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "issue_opened",
+          source: "codex",
+          status: "success",
+          summary: "Filed a follow-up issue from an adopted branch.",
+          title: "Track a follow-up refactor",
+          url: "https://github.com/pmatos/alpha/issues/23",
+          verified: true
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not confirm an issue_opened claim naming an issue that predates this firing's window", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMISSUE3";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    // A stale or hallucinated claim can name a real, but long pre-existing,
+    // issue in the configured repository. Confirming it as "opened" by this
+    // firing just because it exists would misattribute someone else's issue.
+    const claim = JSON.stringify({
+      action: "issue_opened",
+      status: "success",
+      summary: "Filed a follow-up issue from an adopted branch.",
+      title: "An unrelated, long-standing issue",
+      url: "https://github.com/pmatos/alpha/issues/5"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getIssue = vi.fn().mockResolvedValue({
+      created_at: "2020-01-01T00:00:00.000Z",
+      html_url: "https://github.com/pmatos/alpha/issues/5",
+      number: 5,
+      state: "open",
+      title: "An unrelated, long-standing issue"
+    });
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-issue-stale",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFiring("fire-claim-issue-stale")).toMatchObject(
+        {
+          commitsAhead: true,
+          outcome: {
+            action: "commit",
+            source: "git",
+            status: "success",
+            summary: "Observed commits ahead of the configured base branch.",
+            title: "Commit retained in the Routine Firing workspace",
+            url: null,
+            verified: true
+          },
+          state: "succeeded"
+        }
+      );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not confirm an issue_opened claim naming an issue already present before this firing began, even though its timestamp falls inside the broader snapshot window (#751)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMISSUE6";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    // `now` is 2026-05-22T10:00:01Z, so the broad snapshot window
+    // (githubSnapshotSince = now - 24h) starts 2026-05-21T10:00:01Z. Issue
+    // #9 was opened inside that broad window but well before this firing's
+    // own dispatch at `schedule.at`, so a timestamp-only check would
+    // wrongly confirm it; it must be rejected because it's already present
+    // in the before-snapshot captured at this firing's own start.
+    const claim = JSON.stringify({
+      action: "issue_opened",
+      status: "success",
+      summary: "Filed a follow-up issue from an adopted branch.",
+      title: "An issue opened by an earlier, unrelated firing",
+      url: "https://github.com/pmatos/alpha/issues/9"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getIssue = vi.fn();
+    // Present on both the before- and after-capture calls: the issue
+    // already existed when this firing started, unrelated to it.
+    const listIssues = vi.fn().mockResolvedValue([
+      {
+        created_at: "2026-05-21T15:00:00.000Z",
+        html_url: "https://github.com/pmatos/alpha/issues/9",
+        number: 9,
+        state: "open",
+        title: "An issue opened by an earlier, unrelated firing"
+      }
+    ]);
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-issue-before-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getIssue,
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(getIssue).not.toHaveBeenCalled();
+      expect(
+        runStore.getRoutineFiring("fire-claim-issue-before-snapshot")
+      ).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "commit",
+          source: "git",
+          status: "success",
+          summary: "Observed commits ahead of the configured base branch.",
+          title: "Commit retained in the Routine Firing workspace",
+          url: null,
+          verified: true
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not confirm an issue_opened claim when created_at is unparseable", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMISSUE5";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    // `Date.parse` returns NaN for a malformed timestamp; the window check
+    // must fail closed (refuse to confirm) rather than let NaN's false
+    // comparison silently pass the claim through.
+    const claim = JSON.stringify({
+      action: "issue_opened",
+      status: "success",
+      summary: "Filed a follow-up issue from an adopted branch.",
+      title: "Track a follow-up refactor",
+      url: "https://github.com/pmatos/alpha/issues/23"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getIssue = vi.fn().mockResolvedValue({
+      created_at: "not-a-real-timestamp",
+      html_url: "https://github.com/pmatos/alpha/issues/23",
+      number: 23,
+      state: "open",
+      title: "Track a follow-up refactor"
+    });
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-issue-nan",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFiring("fire-claim-issue-nan")).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "commit",
+          source: "git",
+          status: "success",
+          summary: "Observed commits ahead of the configured base branch.",
+          title: "Commit retained in the Routine Firing workspace",
+          url: null,
+          verified: true
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not confirm an issue_closed claim naming an issue that was closed before this firing's window", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMISSUE4";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    // The issue really is closed, but long before this firing ran -- a
+    // stale or hallucinated claim naming it must not be confirmed as this
+    // firing's own issue_closed action.
+    const claim = JSON.stringify({
+      action: "issue_closed",
+      status: "success",
+      summary: "Closed the superseded issue from an adopted branch.",
+      title: "An unrelated, long-closed issue",
+      url: "https://github.com/pmatos/alpha/issues/6"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getIssue = vi.fn().mockResolvedValue({
+      closed_at: "2020-01-01T00:00:00.000Z",
+      html_url: "https://github.com/pmatos/alpha/issues/6",
+      number: 6,
+      state: "closed",
+      title: "An unrelated, long-closed issue"
+    });
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-issue-closed-stale",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getIssue,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(
+        runStore.getRoutineFiring("fire-claim-issue-closed-stale")
+      ).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "commit",
+          source: "git",
+          status: "success",
+          summary: "Observed commits ahead of the configured base branch.",
+          title: "Commit retained in the Routine Firing workspace",
+          url: null,
+          verified: true
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not verify a report routine's pr claim by URL (#751)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "pr",
+      status: "success",
+      summary: "Noticed an unrelated pull request while auditing the repo.",
+      title: "Some unrelated pull request",
+      url: "https://github.com/pmatos/alpha/pull/42"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    // A `kind: report` routine never observes pull requests. If the direct
+    // URL fallback ran here anyway, this mock would confirm the claim
+    // against a PR the report never actually touched (#751 review).
+    const getPullRequest = vi.fn().mockResolvedValue({
+      head: { ref: "some-other-branch", sha: "abc111" },
+      html_url: "https://github.com/pmatos/alpha/pull/42",
+      number: 42,
+      state: "open",
+      title: "Some unrelated pull request"
+    });
+    const listIssues = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-report-pr-claim",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getPullRequest,
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report on {{project.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(getPullRequest).not.toHaveBeenCalled();
+      expect(runStore.getRoutineFiring("fire-report-pr-claim")).toMatchObject({
+        commitsAhead: false,
+        outcome: {
+          action: "pr",
+          source: "codex",
+          status: "success",
+          verified: false
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("observes a pull request that was opened and closed within the same firing", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

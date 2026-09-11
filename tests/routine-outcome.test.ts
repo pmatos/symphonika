@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   diffRoutineGithubSnapshots,
   formatRoutineOutcomeLine,
+  parseGithubClaimUrl,
   parseRoutineOutcomeClaim,
   reconcileRoutineOutcome
 } from "../src/routines/outcome.js";
@@ -710,6 +711,120 @@ describe("Routine Outcome reconciliation", () => {
       title: "",
       url: null,
       verified: false
+    });
+  });
+
+  describe("parseGithubClaimUrl", () => {
+    it("parses a pull request URL matching the configured repository", () => {
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com/pmatos/forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toEqual({ kind: "pull", number: 267 });
+    });
+
+    it("parses an issue URL matching the configured repository", () => {
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com/pmatos/forseti/issues/17",
+          "pmatos",
+          "forseti"
+        )
+      ).toEqual({ kind: "issue", number: 17 });
+    });
+
+    it("matches owner and repo case-insensitively", () => {
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com/Pmatos/Forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toEqual({ kind: "pull", number: 267 });
+    });
+
+    it("rejects a URL for a different repository", () => {
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com/pmatos/other-repo/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+    });
+
+    it("rejects a non-github.com host", () => {
+      expect(
+        parseGithubClaimUrl(
+          "https://example.com/pmatos/forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+    });
+
+    it("rejects a non-https scheme even when the host matches (#751)", () => {
+      expect(
+        parseGithubClaimUrl(
+          "http://github.com/pmatos/forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+      expect(
+        parseGithubClaimUrl(
+          "ftp://github.com/pmatos/forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+    });
+
+    it("rejects a noncanonical github.com origin, credentials, or query/hash suffix (#751)", () => {
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com:444/pmatos/forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+      expect(
+        parseGithubClaimUrl(
+          "https://user:pass@github.com/pmatos/forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com/pmatos/forseti/pull/267?x=1",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com/pmatos/forseti/pull/267#frag",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+    });
+
+    it("rejects a malformed URL", () => {
+      expect(parseGithubClaimUrl("not a url", "pmatos", "forseti")).toBeNull();
+    });
+
+    it("rejects a github.com URL that isn't a pull or issue reference", () => {
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com/pmatos/forseti/commits/main",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
     });
   });
 });

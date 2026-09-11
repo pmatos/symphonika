@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { sameIssueRepository } from "../issue-polling.js";
 import type {
   AgentProviderName,
   NormalizedProviderEvent
@@ -114,6 +115,57 @@ export function parseRoutineOutcomeClaim(
   return parsed.success ? parsed.data : null;
 }
 
+// Parses a claim's `url` into a GitHub pull/issue reference, scoped to the
+// firing's own configured owner/repo. Direct-URL verification (dispatcher.ts)
+// only ever looks up a reference this returns, so a claim pointing at an
+// unrelated host, repository, port, or scheme can't trigger an API call for
+// it. Canonical `https://github.com/<owner>/<repo>/(pull|issues)/<n>` only,
+// per this ADR's own Decision section: a non-canonical claim url (a
+// different scheme, an explicit port, embedded credentials, or a query/hash
+// suffix) must never reach reconcileRoutineOutcome marked verified, since
+// that step persists the claim's own url verbatim rather than the verified
+// GitHub-canonical one.
+export function parseGithubClaimUrl(
+  url: string,
+  owner: string,
+  repo: string
+): { kind: "issue" | "pull"; number: number } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (
+    parsed.origin !== "https://github.com" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    return null;
+  }
+  const match = /^\/([^/]+)\/([^/]+)\/(pull|issues)\/(\d+)$/.exec(
+    parsed.pathname
+  );
+  if (match === null) {
+    return null;
+  }
+  const [, matchedOwner, matchedRepo, matchedKind, matchedNumber] = match;
+  if (
+    !sameIssueRepository(
+      { owner: matchedOwner!, repo: matchedRepo! },
+      { owner, repo }
+    )
+  ) {
+    return null;
+  }
+  return {
+    kind: matchedKind === "pull" ? "pull" : "issue",
+    number: Number(matchedNumber)
+  };
+}
+
 export function diffRoutineGithubSnapshots(
   before: RoutineGithubSnapshot,
   after: RoutineGithubSnapshot,
@@ -215,14 +267,14 @@ export function reconcileRoutineOutcome(
 
   // A `none`/absent claim under-reports a real commit-only outcome, and so
   // does an external-action claim (pr/issue_opened/issue_closed) that no
-  // GitHub observation corroborates — the retention query only protects rows
-  // whose canonical action is a verified `commit`, so leaving an unconfirmed
-  // external-action claim as the canonical outcome would let age-based
-  // pruning delete the only copy of real commits behind it. Git evidence
-  // overrides both cases here — unqualified by the claim's own status, per
-  // ADR 0068 rule 4 — so a future retention pass never treats a
-  // commit-bearing firing as claim-verified "nothing to do" or an
-  // unconfirmed external action.
+  // GitHub observation corroborates. Workspace retention itself keys
+  // protection on the independent `commitsAhead` signal rather than this
+  // canonical `action` (see ADR 0068's Consequences), so this override isn't
+  // needed to keep age-based pruning safe — it exists so the persisted
+  // outcome doesn't misrepresent a real commit-bearing firing as
+  // claim-verified "nothing to do" or an unconfirmed external action. Git
+  // evidence overrides both cases here — unqualified by the claim's own
+  // status, per ADR 0068 rule 4.
   const claimIsUnconfirmedExternalAction =
     input.claim !== null &&
     (input.claim.action === "pr" ||

@@ -169,6 +169,15 @@ merges PRs only when policy says they are clear. A workflow-owned Issue decides 
 parked position instead (see docs/adr/0090-fsm-position-is-the-only-start-state.md).
 _Avoid_: arbitrary PR detection
 
+**Tracked Pull Request**:
+A stored record of one pull request Symphonika has discovered for an Issue, keyed by `(Project, PR
+number)` and never deleted. A Run Chain that never opens a discoverable PR owns no Tracked Pull
+Request row at all, and `adopt-pr`'s `reassignTrackedPullRequestRun` can move a row's ownership onto
+a different chain — so "one row per Run Chain" is the common case, not a strict invariant (see the
+known gap in ADR-2026-09-10-2031). Resolving "this chain's own" tracked pull request still scopes by
+Run Chain membership, not branch name (see Run Chain for why).
+_Avoid_: Pull Request State (that is the normalized GitHub state, not the stored row)
+
 **Progress Guard**:
 The dual rule that a parked Run may not re-take a transition it already took under an identical
 observation — the projected signals, the artefact probe, the tracked head SHA, and the review

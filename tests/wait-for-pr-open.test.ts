@@ -15,7 +15,7 @@ import {
   type RunControllerProvidersConfig
 } from "../src/lifecycle/run-controller.js";
 import type { ProviderEvent } from "../src/provider.js";
-import { openRunStore } from "../src/run-store.js";
+import { openRunStore, type RunStore } from "../src/run-store.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
 
 // Issue #730 root cause #2: implement's completion gate only checks local
@@ -57,6 +57,39 @@ function issueFixture() {
     updated_at: "2026-09-10T11:00:00Z",
     url: "https://github.com/pmatos/symphonika/issues/10"
   };
+}
+
+// Seeds an "earlier-run" chain that already tracked and merged its own PR
+// (#77) on the given branch, shared by the two stale-PR regression tests
+// below (issue #736 review, issue #738) which differ only in branchName.
+function seedStaleMergedPrChain(
+  store: RunStore,
+  issue: ReturnType<typeof issueFixture>,
+  branchName: string
+): void {
+  store.createRun({
+    id: "earlier-run",
+    issue,
+    projectName: "symphonika",
+    providerCommand: DEFAULT_CODEX_COMMAND,
+    providerName: "codex"
+  });
+  store.trackPullRequest({
+    branchName,
+    headSha: "old-sha",
+    issueNumber: issue.number,
+    prNumber: 77,
+    prUrl: "https://example.test/pr/77",
+    projectName: "symphonika",
+    runId: "earlier-run"
+  });
+  store.recordPullRequestObservation({
+    headSha: "old-sha",
+    id: 1,
+    prUrl: "https://example.test/pr/77",
+    reviewFollowupCapReached: false,
+    state: "merged"
+  });
 }
 
 function preparedWorkspaceFixture(root: string): PreparedIssueWorkspace {
@@ -432,29 +465,11 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
       const issue = issueFixture();
       // An earlier run on this same issue (e.g. before an issue-title edit
       // changed the branch name) already tracked and merged its own PR.
-      store.createRun({
-        id: "earlier-run",
+      seedStaleMergedPrChain(
+        store,
         issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.trackPullRequest({
-        branchName: "sym/symphonika/10-old-title-before-edit",
-        headSha: "old-sha",
-        issueNumber: issue.number,
-        prNumber: 77,
-        prUrl: "https://example.test/pr/77",
-        projectName: "symphonika",
-        runId: "earlier-run"
-      });
-      store.recordPullRequestObservation({
-        headSha: "old-sha",
-        id: 1,
-        prUrl: "https://example.test/pr/77",
-        reviewFollowupCapReached: false,
-        state: "merged"
-      });
+        "sym/symphonika/10-old-title-before-edit"
+      );
 
       // A fresh run was redispatched onto a new branch and has not pushed or
       // opened a PR of its own yet.
@@ -597,29 +612,11 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
       // merged its own PR on this exact branch name -- redispatching an
       // issue whose title hasn't changed reuses the same deterministic
       // branch name (planWorkspacePaths).
-      store.createRun({
-        id: "earlier-run",
+      seedStaleMergedPrChain(
+        store,
         issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.trackPullRequest({
-        branchName: "sym/symphonika/10-wait-for-pr-open-fixture",
-        headSha: "old-sha",
-        issueNumber: issue.number,
-        prNumber: 77,
-        prUrl: "https://example.test/pr/77",
-        projectName: "symphonika",
-        runId: "earlier-run"
-      });
-      store.recordPullRequestObservation({
-        headSha: "old-sha",
-        id: 1,
-        prUrl: "https://example.test/pr/77",
-        reviewFollowupCapReached: false,
-        state: "merged"
-      });
+        "sym/symphonika/10-wait-for-pr-open-fixture"
+      );
 
       // A fresh, unrelated top-level dispatch chain reuses the same branch
       // and has not pushed or opened a PR of its own yet.

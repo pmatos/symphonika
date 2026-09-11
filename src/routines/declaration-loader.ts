@@ -126,6 +126,18 @@ export function parseRoutineDeclaration(
     errors.push(`routine at ${routinePath} allow_overlap must be a boolean`);
   }
 
+  const expectsPrValue = frontMatter.expects_pr;
+  if (
+    Object.hasOwn(frontMatter, "expects_pr") &&
+    typeof expectsPrValue !== "boolean"
+  ) {
+    errors.push(`routine at ${routinePath} expects_pr must be a boolean`);
+  } else if (expectsPrValue === true && kind !== "git") {
+    errors.push(
+      `routine at ${routinePath} expects_pr: true requires kind: git`
+    );
+  }
+
   const disabledValue = frontMatter.disabled;
   if (
     Object.hasOwn(frontMatter, "disabled") &&
@@ -192,6 +204,7 @@ export function parseRoutineDeclaration(
         catchUpValue === "fire_once_if_missed" ? "fire_once_if_missed" : "skip",
       disabled: typeof disabledValue === "boolean" ? disabledValue : false,
       ...(effort === undefined ? {} : { effort }),
+      expectsPr: typeof expectsPrValue === "boolean" ? expectsPrValue : false,
       kind: kind as RoutineKind,
       ...(model === undefined ? {} : { model }),
       name: name!,

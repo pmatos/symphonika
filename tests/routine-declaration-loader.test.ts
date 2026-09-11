@@ -200,7 +200,8 @@ describe("RoutineDeclarationLoader", () => {
       "catch_up: replay_all",
       "catch_up must be fire_once_if_missed"
     ],
-    ["allow_overlap", "allow_overlap: yes", "allow_overlap must be a boolean"]
+    ["allow_overlap", "allow_overlap: yes", "allow_overlap must be a boolean"],
+    ["expects_pr", "expects_pr: yes", "expects_pr must be a boolean"]
   ])("rejects an invalid %s policy", async (_policy, field, expectedError) => {
     const root = await makeTempRoot();
     const routinePath = path.join(root, "invalid-policy.md");
@@ -249,6 +250,7 @@ describe("RoutineDeclarationLoader", () => {
       allowOverlap: false,
       catchUp: "skip",
       disabled: false,
+      expectsPr: false,
       kind: "git",
       name: "dependency-update",
       prompt: "Update dependencies on {{branch.name}}.\n",
@@ -256,6 +258,56 @@ describe("RoutineDeclarationLoader", () => {
       schedule: { at: "2026-05-22T10:00:00.000Z" },
       sourcePath: routinePath
     });
+  });
+
+  it("parses expects_pr: true on a kind: git routine", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "pr-producing.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: pr-producing",
+        "schedule:",
+        "  at: 2026-05-22T10:00:00.000Z",
+        "kind: git",
+        "expects_pr: true",
+        "---",
+        "Open a pull request.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.errors).toEqual([]);
+    expect(result.routine).toMatchObject({ expectsPr: true });
+  });
+
+  it("rejects expects_pr: true on a kind: report routine", async () => {
+    const root = await makeTempRoot();
+    const routinePath = path.join(root, "report-with-expects-pr.md");
+    await writeFile(
+      routinePath,
+      [
+        "---",
+        "name: report-with-expects-pr",
+        "schedule:",
+        "  cron: daily",
+        "kind: report",
+        "expects_pr: true",
+        "---",
+        "Report.",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadRoutineDeclaration(routinePath);
+
+    expect(result.routine).toBeNull();
+    expect(result.errors.join("\n")).toContain(
+      "expects_pr: true requires kind: git"
+    );
   });
 
   it("parses a Markdown kind: report routine with one-shot at schedule", async () => {
@@ -283,6 +335,7 @@ describe("RoutineDeclarationLoader", () => {
       allowOverlap: false,
       catchUp: "skip",
       disabled: false,
+      expectsPr: false,
       kind: "report",
       name: "weekly-report",
       prompt: "Summarize {{project.name}} from {{workspace.path}}.\n",

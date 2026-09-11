@@ -1730,6 +1730,7 @@ describe("RunStore routines", () => {
           catchUp: "skip",
           deferral: null,
           disabledReason: null,
+          expectsPr: false,
           kind: "report",
           lastAttemptedAt: null,
           lastFiredAt: null,
@@ -1754,6 +1755,34 @@ describe("RunStore routines", () => {
           state: "active"
         }
       ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("persists a routine's expects_pr policy and exposes it on listRoutines/getRoutine", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          expectsPr: true,
+          kind: "git",
+          name: "audit-fix",
+          prompt: "Fix it.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/audit-fix.md",
+          projectName: "alpha"
+        }
+      ]);
+
+      expect(store.listRoutines()).toEqual([
+        expect.objectContaining({ expectsPr: true })
+      ]);
+      expect(
+        store.getRoutine({ name: "audit-fix", projectName: "alpha" })
+      ).toMatchObject({ expectsPr: true });
     } finally {
       store.close();
     }
@@ -1823,6 +1852,7 @@ describe("RunStore routines", () => {
           catchUp: "skip",
           deferral: null,
           disabledReason: null,
+          expectsPr: false,
           kind: "report",
           lastAttemptedAt: null,
           lastFiredAt: null,

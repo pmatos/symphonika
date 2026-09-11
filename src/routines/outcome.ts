@@ -83,6 +83,10 @@ export type RoutineGithubSnapshot = {
 export type ReconcileRoutineOutcomeInput = {
   claim: RoutineOutcomeClaim | null;
   commitsAhead: boolean;
+  // The routine's own declared outcome policy (ADR amending 0068): when true,
+  // rule 4's commit-only fallback below reports `error` rather than
+  // `success` — a bare commit is not this routine's contract.
+  expectsPr: boolean;
   githubObservationAvailable: boolean;
   observedAction: ObservedRoutineAction | null;
   provider: AgentProviderName;
@@ -288,6 +292,24 @@ export function reconcileRoutineOutcome(
       input.claim.action === "none" ||
       claimIsUnconfirmedExternalAction)
   ) {
+    // A routine that declares expects_pr has a contract to produce a PR (or
+    // explicitly say there was nothing to do) — a bare commit with no
+    // confirmed external action means that contract wasn't met, so it's
+    // reported as an operator-facing error rather than a quiet success. The
+    // commit itself is still a verified fact and retention is unaffected
+    // (keyed on commitsAhead, not this status).
+    if (input.expectsPr) {
+      return {
+        action: "commit",
+        source: "git",
+        status: "error",
+        summary:
+          "Commit exists in the Routine Firing workspace with no verified external action.",
+        title: "Commit retained in the Routine Firing workspace",
+        url: null,
+        verified: true
+      };
+    }
     return {
       action: "commit",
       source: "git",

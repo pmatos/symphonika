@@ -1677,6 +1677,7 @@ async function runRoutineFiring(input: {
       outcome: reconcileRoutineOutcome({
         claim: redactRoutineOutcomeClaim(claim, resolvedRedactSecrets),
         commitsAhead,
+        expectsPr: input.routine.expectsPr,
         githubObservationAvailable: githubObservation.available,
         observedAction: claimUrlVerification ?? githubObservation.action,
         provider: input.providerName,
@@ -1855,6 +1856,7 @@ async function runRoutineFiring(input: {
           resolvedRedactSecrets
         ),
         commitsAhead,
+        expectsPr: input.routine.expectsPr,
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
         provider: input.providerName,

@@ -1013,6 +1013,7 @@ Optional controls:
 catch_up: fire_once_if_missed
 allow_overlap: true
 disabled: true
+expects_pr: true
 ```
 
 - Omitted `catch_up` means missed events during daemon outage are skipped.
@@ -1020,6 +1021,11 @@ disabled: true
   active.
 - Overlap opt-in does not bypass global or per-Project concurrency caps.
 - `disabled: true` stops every target after reload without cancelling active firings.
+- `expects_pr: true` (only valid with `kind: git`) declares that this Routine's contract is to
+  produce a verified PR, or explicitly claim there was nothing to do. A successful firing with
+  commits ahead of base but no verified external action then records `status: error` instead of a
+  quiet `success`; the commit and its workspace-retention protection are unaffected. Omitted
+  defaults to `false` (current behavior).
 
 Skipped clock events create no firing row, but Routine status records the attempt, reason, time, and
 rolling 24-hour counts per Project. Fan-out admission is per Project: siblings that have capacity

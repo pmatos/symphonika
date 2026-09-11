@@ -5864,13 +5864,15 @@ export class RunStore {
   // fix, a mid-chain issue-title edit could recompute a continuation's own
   // branch, diverging it from an ancestor's tracked PR that still shares the
   // same chain (issue #745). Ancestor resolution (rather than @runId's own
-  // row alone) matters for chains where the waiting row itself predates
-  // ADR-2026-09-04-0837's *own* row started persisting a branch_name: its
-  // branch_name is NULL, but its parent run -- the one that actually parked
-  // it, which reached this state through workspace prep and so already has
-  // a branch of its own -- resolves the run's real branch instead of
-  // wrongly falling back to matching any ancestor's PR by chain membership
-  // alone. Derived from @runId's own row rather than a caller-supplied
+  // row alone) matters for chains where the waiting row itself predates the
+  // point where createWaitingRun started persisting a branch_name: its own
+  // branch_name is NULL, but a nearer ancestor that reached its state
+  // through workspace prep (not necessarily this row's immediate parent --
+  // a wait-to-wait re-park's immediate parent is itself another waiting
+  // row, so the walk can take more than one hop) already has a branch of
+  // its own, and resolves the run's real branch instead of wrongly falling
+  // back to matching any ancestor's PR by chain membership alone. Derived
+  // from @runId's own row rather than a caller-supplied
   // branchName parameter -- ADR-2026-09-10-2031 deliberately removed that
   // parameter, and this run's branch is already on its own row.
   findTrackedPullRequestForRunChain(input: {
@@ -5890,9 +5892,15 @@ export class RunStore {
           "  where r.continuation_parent_run_id is not null",
           "),",
           "resolved_branch(branch_name) as (",
+          // `cross join` pins join order (drive from `chain`, seek into
+          // `runs` by primary key) without changing results -- a plain
+          // `join` here lets the planner flip it around and scan the
+          // whole never-pruned `runs` table instead, since a materialized
+          // CTE's true size isn't visible to the cost estimator the way a
+          // real table's stats are.
           "  select r.branch_name",
           "  from chain",
-          "  join runs r on r.id = chain.id",
+          "  cross join runs r on r.id = chain.id",
           "  where r.branch_name is not null and r.branch_name <> ''",
           "  order by chain.depth asc",
           "  limit 1",

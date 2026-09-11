@@ -869,15 +869,6 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
         providerName: "codex"
       });
       store.updateRunState("root-run", "succeeded");
-      store.trackPullRequest({
-        branchName: rootBranch,
-        headSha: "old-sha",
-        issueNumber: issue.number,
-        prNumber: 77,
-        prUrl: "https://example.test/pr/77",
-        projectName: "symphonika",
-        runId: "root-run"
-      });
 
       // Same legacy shape as the sibling test above, except the tracked PR
       // this time belongs to the intermediate run -- the nearest ancestor
@@ -903,6 +894,23 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
         prUrl: "https://example.test/pr/88",
         projectName: "symphonika",
         runId: "intermediate-run"
+      });
+      // Tracked *after* intermediate's PR on purpose, so this row gets the
+      // larger tracked_pull_requests.id: a lookup that (wrongly) fell back
+      // to "most recently tracked PR in the chain" -- chain-membership
+      // matching alone, with no ancestor-branch resolution -- would pick
+      // this PR over 88 by insertion order and this assertion would still
+      // pass for the wrong reason. Ordering the inserts this way instead
+      // makes branch-equality the only thing that can produce a match on
+      // 88, so this test actually exercises the nearest-ancestor walk.
+      store.trackPullRequest({
+        branchName: rootBranch,
+        headSha: "old-sha",
+        issueNumber: issue.number,
+        prNumber: 77,
+        prUrl: "https://example.test/pr/77",
+        projectName: "symphonika",
+        runId: "root-run"
       });
       store.createWaitingRun({
         currentStateId: "wait_for_pr_open",

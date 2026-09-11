@@ -123,21 +123,23 @@ matching alone would treat that ancestor's PR as covering the diverged continuat
 
 Ancestor resolution (2026-09-11, PR #755 review): matching only the waiting run's own row is not
 enough — a chain can also predate the point where `createWaitingRun` itself started persisting a
-`branch_name` on the waiting row, leaving that one row's `branch_name` NULL even though the run it
-parked from (its immediate parent, which reached this state through workspace prep and so already
-has a branch of its own) has a perfectly good one. Treating a NULL own-row branch as "no information"
+`branch_name` on the waiting row, leaving that one row's `branch_name` NULL even though a nearer
+ancestor that reached its state through workspace prep (not necessarily this row's *immediate*
+parent — a wait-to-wait re-park's immediate parent is itself another waiting row, so the walk can
+take more than one hop) has a perfectly good one. Treating a NULL own-row branch as "no information"
 and falling back to chain-membership alone reopens exactly the false match this addendum exists to
 prevent. Walking to the nearest ancestor with a recorded branch closes that gap. The remaining
 fallback — chain-membership alone when *no* run anywhere in the chain has a recorded branch — is
-believed unreachable in practice for this call site (a waiting run's immediate parent cannot reach
-`wait_for_pr_open` without workspace prep setting its own branch first), but is kept rather than
-turned into "no match" because failing open here degrades no worse than before this ADR, while a
-backfill migration to eliminate it outright was judged not worth the schema churn for a case that
-already can't arise through any live code path.
+believed unreachable in practice for this call site (some ancestor in the chain must have reached
+workspace prep to ever produce a tracked PR at all, and workspace prep always sets its own branch),
+but is kept rather than turned into "no match" because failing open here degrades no worse than
+before this ADR, while a backfill migration to eliminate it outright was judged not worth the schema
+churn for a case that already can't arise through any live code path.
 
 Both additions can only narrow the existing chain-scoped matching, never widen it — they cannot
-reopen the branch-reuse bug this ADR fixes, since every current continuation-creation path already
-inherits `branch_name` from its parent and so already satisfies branch equality trivially.
+reopen the branch-reuse bug this ADR fixes, since every current continuation-creation path inherits
+`branch_name` from a parent that has one, and so satisfies branch equality trivially in the
+post-ADR-2026-09-04-0837 steady state.
 
 ## Consequences
 

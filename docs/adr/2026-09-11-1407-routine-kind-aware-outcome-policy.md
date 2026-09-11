@@ -104,7 +104,11 @@ Add an optional per-routine declaration flag, `expects_pr: boolean`, alongside t
   verification runs there); the operator-cancel path passes `false`, inert for the same reason
   `expectsPr: false` is. When true (and `expectsPr: true`), it suppresses rule 4 entirely, so the
   claim-preservation branch that follows keeps the claim's own `status` and `verified` normally
-  (`verified: true` only when the same action was independently confirmed).
+  (`verified: true` only when the same action was independently confirmed). Issue #758 widened the
+  success-path expression with a third disjunct, `|| fallbackDiscoveredPr`: when the after-execution
+  snapshot's own PR read fails, `discoverRoutinePullRequests`'s retry now returns whether it recorded
+  an open PR on the firing's branch, so that retry's result also counts, not just the before/after
+  diff and claim-URL verification above.
 
 This repository's own `routines/refactor-audit.md` is `kind: report` (it only files GitHub issues,
 never opens a PR), so it cannot and does not carry `expects_pr: true` — setting it there would be

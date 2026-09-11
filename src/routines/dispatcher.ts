@@ -1608,7 +1608,12 @@ async function runRoutineFiring(input: {
     // and daemon ticks are explicitly re-entrant (ADR 0052), so a concurrent
     // tick could otherwise observe "succeeded" and send the grouped summary
     // with this leg's PRs missing, before discovery has recorded them.
-    let discoveryDone: Promise<void> = Promise.resolve();
+    // Resolves true only when the fallback discovery path below (not the
+    // direct-record branch, which the branch-scoped diff above already feeds
+    // into `githubObservation`) finds a real open PR on this firing's own
+    // branch — propagated into `pullRequestObserved` below so it can close
+    // expects_pr's exemption gap for a claimless/commit-claiming firing (#758).
+    let discoveryDone: Promise<boolean> = Promise.resolve(false);
     if (outcome.kind === "succeeded" && input.routine.kind === "git") {
       if (githubAfter?.pullRequestsAvailable === true) {
         recordRoutinePullRequests({
@@ -1674,7 +1679,7 @@ async function runRoutineFiring(input: {
             })
           )
         : Promise.resolve(null);
-    const [, claimUrlVerification] = await Promise.all([
+    const [fallbackDiscoveredPr, claimUrlVerification] = await Promise.all([
       discoveryDone,
       claimUrlVerificationPending
     ]);
@@ -1721,13 +1726,15 @@ async function runRoutineFiring(input: {
         githubObservationAvailable: githubObservation.available,
         observedAction: claimUrlVerification ?? githubObservation.action,
         provider: input.providerName,
-        // Computed from the branch diff and claim-URL verification directly,
-        // not from `observedAction` above — that field can end up holding a
-        // different, also-confirmed claim action (see outcome.ts) once claim
-        // URL verification replaces the diff's own `pr` observation.
+        // Computed from the branch diff, claim-URL verification, and fallback
+        // discovery directly, not from `observedAction` above — that field
+        // can end up holding a different, also-confirmed claim action (see
+        // outcome.ts) once claim URL verification replaces the diff's own
+        // `pr` observation.
         pullRequestObserved:
           githubObservation.action?.action === "pr" ||
-          claimUrlVerification?.action === "pr",
+          claimUrlVerification?.action === "pr" ||
+          fallbackDiscoveredPr,
         terminalReason: redactedTerminalReason,
         terminalState: outcome.kind
       }),
@@ -2823,6 +2830,11 @@ async function classifyRoutineOutcome(
   };
 }
 
+// Returns whether an open PR for the firing's own branch was recorded, so
+// the caller can propagate a fallback discovery into `pullRequestObserved`'s
+// exemption for expects_pr (#758) — this path's own recording remains
+// informational only otherwise (SPEC.md): it never enters PR Follow-up,
+// review re-dispatch, or auto-merge.
 async function discoverRoutinePullRequests(input: {
   branchName: string;
   env: NodeJS.ProcessEnv;
@@ -2832,12 +2844,12 @@ async function discoverRoutinePullRequests(input: {
   project: RunControllerProjectConfig;
   routineName: string;
   runStore: RunStore;
-}): Promise<void> {
+}): Promise<boolean> {
   if (
     input.githubIssuesApi === undefined ||
     input.project.tracker === undefined
   ) {
-    return;
+    return false;
   }
   const token = resolveEnvBackedValue(input.project.tracker.token, input.env);
   if (token === undefined) {
@@ -2845,7 +2857,7 @@ async function discoverRoutinePullRequests(input: {
       { project: input.project.name, routine: input.routineName },
       "symphonika routine PR discovery token unavailable"
     );
-    return;
+    return false;
   }
 
   let pullRequests: RawGitHubPullRequest[] | undefined;
@@ -2861,7 +2873,7 @@ async function discoverRoutinePullRequests(input: {
       { branch: input.branchName, err: error },
       "symphonika routine PR discovery failed"
     );
-    return;
+    return false;
   }
 
   // The cancellation settlement window races this call rather than aborting
@@ -2874,10 +2886,10 @@ async function discoverRoutinePullRequests(input: {
       { firingId: input.firingId, routine: input.routineName },
       "symphonika routine PR discovery abandoned after firing already completed"
     );
-    return;
+    return false;
   }
 
-  recordRoutinePullRequests({
+  return recordRoutinePullRequests({
     branchName: input.branchName,
     firingId: input.firingId,
     projectName: input.project.name,
@@ -2887,6 +2899,7 @@ async function discoverRoutinePullRequests(input: {
   });
 }
 
+// Returns whether at least one open PR for `branchName` was recorded.
 function recordRoutinePullRequests(input: {
   branchName: string;
   firingId: string;
@@ -2894,7 +2907,8 @@ function recordRoutinePullRequests(input: {
   pullRequests: RawGitHubPullRequest[];
   routineName: string;
   runStore: RunStore;
-}): void {
+}): boolean {
+  let recordedOpenPr = false;
   for (const pullRequest of input.pullRequests) {
     if (!isOpenPullRequestForBranch(pullRequest, input.branchName)) {
       continue;
@@ -2907,7 +2921,9 @@ function recordRoutinePullRequests(input: {
       projectName: input.projectName,
       routineName: input.routineName
     });
+    recordedOpenPr = true;
   }
+  return recordedOpenPr;
 }
 
 // Unlike isOpenPullRequestForBranch, this admits a closed/merged PR: outcome

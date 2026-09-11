@@ -5647,7 +5647,7 @@ export class RunStore {
           // can still be depending on this row's current ownership, so
           // clobbering it unconditionally would strand that chain instead
           // of the fresh one.
-          `run_id = case when exists (select 1 from owner_chain oc join runs r on r.id = oc.id where r.state not in (${TERMINAL_RUN_STATES_SQL_LIST})) then tracked_pull_requests.run_id else excluded.run_id end,`,
+          `run_id = case when not exists (select 1 from owner_chain oc join runs r on r.id = oc.id where r.state not in (${TERMINAL_RUN_STATES_SQL_LIST})) then excluded.run_id else tracked_pull_requests.run_id end,`,
           "issue_number = excluded.issue_number,",
           "pr_url = excluded.pr_url,",
           "branch_name = excluded.branch_name,",
@@ -7175,6 +7175,16 @@ export class RunStore {
     this.database.exec(`
       create index if not exists tracked_pull_requests_run_id_idx
       on tracked_pull_requests(run_id);
+    `);
+
+    // trackPullRequest's owner_chain CTE (issue #746) walks runs forward from
+    // an owner run_id to its descendants via this column on every poll tick
+    // for an already-tracked open PR (the common case). Without an index,
+    // SQLite builds a transient one by scanning the whole runs table on each
+    // call; this makes that walk an indexed search instead.
+    this.database.exec(`
+      create index if not exists runs_continuation_parent_run_id_idx
+      on runs(continuation_parent_run_id);
     `);
 
     // Runs after the ensureColumn additions above so databases created before

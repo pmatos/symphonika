@@ -117,7 +117,10 @@ export function parseRoutineOutcomeClaim(
 // Parses a claim's `url` into a GitHub pull/issue reference, scoped to the
 // firing's own configured owner/repo. Direct-URL verification (dispatcher.ts)
 // only ever looks up a reference this returns, so a claim pointing at an
-// unrelated host or repository can't trigger an API call for it.
+// unrelated host, repository, or scheme can't trigger an API call for it.
+// https-only, per this ADR's own Decision section: a non-https claim url
+// (e.g. `http://` or `ftp://`) must never reach reconcileRoutineOutcome
+// marked verified, since that step persists the claim's own url verbatim.
 export function parseGithubClaimUrl(
   url: string,
   owner: string,
@@ -127,6 +130,9 @@ export function parseGithubClaimUrl(
   try {
     parsed = new URL(url);
   } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") {
     return null;
   }
   if (parsed.hostname.toLowerCase() !== "github.com") {

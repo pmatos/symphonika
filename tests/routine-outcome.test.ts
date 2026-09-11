@@ -765,6 +765,23 @@ describe("Routine Outcome reconciliation", () => {
       ).toBeNull();
     });
 
+    it("rejects a non-https scheme even when the host matches (#751)", () => {
+      expect(
+        parseGithubClaimUrl(
+          "http://github.com/pmatos/forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+      expect(
+        parseGithubClaimUrl(
+          "ftp://github.com/pmatos/forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+    });
+
     it("rejects a malformed URL", () => {
       expect(parseGithubClaimUrl("not a url", "pmatos", "forseti")).toBeNull();
     });

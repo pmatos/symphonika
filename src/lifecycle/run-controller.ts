@@ -2012,8 +2012,10 @@ export class RunController {
     // open-only listing would strand the wait. The dispatcher's own open-only
     // loop is unaffected — only wait re-evaluation widens the lookup.
     //
-    // Scoped by this run's own continuation chain, not branch name (see
-    // CONTEXT.md's "Run Chain" entry and ADR-2026-09-10-2031, issue #738).
+    // Scoped by this run's own continuation chain, narrowed by branch-name
+    // equality against the nearest ancestor's recorded branch_name as
+    // defense-in-depth (see CONTEXT.md's "Run Chain" entry and
+    // ADR-2026-09-10-2031, issues #738 and #745).
     const tracked = this.runStore.findTrackedPullRequestForRunChain({
       issueNumber: input.issueNumber,
       projectName: input.projectName,

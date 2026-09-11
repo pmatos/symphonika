@@ -286,13 +286,26 @@ export function reconcileRoutineOutcome(
   // A self-reported commit claim doesn't exempt an expects_pr routine from rule 4 either.
   const claimIsExplicitCommitUnderPrPolicy =
     input.expectsPr && input.claim !== null && input.claim.action === "commit";
+  // Under expects_pr, only an observed/claimed `pr` discharges the contract —
+  // a confirmed issue action is still short of "produce a PR", so it must not
+  // exempt a retained commit from rule 4 just because it was independently
+  // verified (claimIsUnconfirmedExternalAction only catches the unconfirmed
+  // case). A claim-less issue action observed via GitHub state diff is
+  // unaffected: that's ADR 0068's pre-existing "observed action wins" rule
+  // (the earlier branch above), which this ADR does not amend.
+  const claimIsNonPrActionUnderPrPolicy =
+    input.expectsPr &&
+    input.claim !== null &&
+    (input.claim.action === "issue_opened" ||
+      input.claim.action === "issue_closed");
   if (
     input.terminalState === "succeeded" &&
     input.commitsAhead &&
     (input.claim === null ||
       input.claim.action === "none" ||
       claimIsUnconfirmedExternalAction ||
-      claimIsExplicitCommitUnderPrPolicy)
+      claimIsExplicitCommitUnderPrPolicy ||
+      claimIsNonPrActionUnderPrPolicy)
   ) {
     return {
       action: "commit",

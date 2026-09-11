@@ -1277,13 +1277,18 @@ unverified. A successful `kind: git` firing with commits ahead of base can verif
 suppresses the retention signal below. The routine's own `expects_pr` declaration decides this fallback's scope and `status`: `false`
 (default) records `success` and leaves an explicit `commit` claim's own reported status, source, and
 title untouched, matching prior behavior; `true` records `error` instead and, unlike `false`, also
-folds an explicit `commit` claim into the same fallback — an agent that self-reports having committed
-without publishing is still short of the routine's contract to produce a verified PR or explicitly
-claim there was nothing to do, so it is not exempt just because it was self-reported rather than
-inferred. The `commit` action, `verified: true`, and the retention signal are unaffected either
-way — `expects_pr` changes only the persisted `status` (and, for an explicit commit claim under
-`true`, whether the fallback's generic `source`/`title` replace the claim's own). See
-ADR-2026-09-11-1407, amending ADR 0068 rule 4. A successful firing with
+folds an explicit `commit` claim, and a confirmed `issue_opened`/`issue_closed` claim, into the same
+fallback — an agent that self-reports having committed without publishing is still short of the
+routine's contract to produce a verified PR or explicitly claim there was nothing to do, so it is not
+exempt just because it was self-reported rather than inferred; likewise, only an observed/claimed
+`pr` discharges that contract, so an independently-confirmed issue action does not exempt a retained
+commit either. A claim-less issue action confirmed only via the before/after GitHub diff is
+unaffected — that is ADR 0068's pre-existing "an observed GitHub action wins over an absent ...
+claim" rule (the reconciliation step's first branch), which this widening does not touch. The
+`commit` action, `verified: true`, and the retention signal are unaffected either
+way — `expects_pr` changes only the persisted `status` (and, for an explicit commit or confirmed
+issue-action claim under `true`, whether the fallback's generic `source`/`title` replace the claim's
+own). See ADR-2026-09-11-1407, amending ADR 0068 rule 4. A successful firing with
 neither claim nor observation records `no_action`; it is verified and sourced to `gh` only when the
 before/after GitHub reads completed,
 otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and

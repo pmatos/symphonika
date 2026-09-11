@@ -673,6 +673,40 @@ describe("Routine Outcome reconciliation", () => {
     });
   });
 
+  it("reports an error for a PR-expecting routine's confirmed issue action with a retained commit", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "issue_opened",
+          status: "success",
+          summary: "Filed a follow-up issue.",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/issues/9"
+        },
+        commitsAhead: true,
+        expectsPr: true,
+        githubObservationAvailable: true,
+        observedAction: {
+          action: "issue_opened",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/issues/9"
+        },
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "git",
+      status: "error",
+      summary:
+        "Commit exists in the Routine Firing workspace with no verified external action.",
+      title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
   it("does not report an error for a PR-expecting routine when the claimed pull request is confirmed", () => {
     expect(
       reconcileRoutineOutcome({

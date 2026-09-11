@@ -89,19 +89,37 @@ chain membership from `continuation_parent_run_id`, a link every row has always 
 already correct for every existing row the moment the code ships. Chains are short (order 10 hops
 at most), so the extra query cost of the walk is not a real concern at Symphonika's scale.
 
-### Known gap: `reassignTrackedPullRequestRun` breaks the root-equality invariant
+### `trackPullRequest`'s conflict path now reassigns a dead owner's row (issue #746)
 
-The "`trackPullRequest`'s upsert never touches `run_id` on conflict, by design" invariant above has
-exactly one exception: `RunStore.reassignTrackedPullRequestRun`, called from `daemon.ts`'s adopt-pr
-flow to move a `tracked_pull_requests` row's `run_id` onto a freshly adopted run when an operator
-adopts a PR whose original implementing chain has gone stale. That reassignment is intentional and
-correct for the adopted run — but the donor chain's own `succeeded`/`waiting` rows still resolve to
-their own original chain root, which no longer matches the tracked row's (now reassigned) root.
-Root-equality suppression stops recognizing the donor chain's rows as already-tracked, so
-`listRunsAwaitingPullRequestDiscovery` re-lists them on every poll tick indefinitely. Tracked as
-issue #746 alongside the related "transfer a rediscovered PR to a fresh chain" gap, since both are
-instances of the same open design question: what run chain should own a tracked PR row after
-`run_id` moves out from under the chain that originally created it.
+The "`trackPullRequest`'s upsert never touches `run_id` on conflict" invariant above was too
+strong: a fresh, unrelated chain that reuses an earlier chain's branch name can rediscover that
+earlier chain's still-open PR (its own pushed commits land on the same PR), and the unconditional
+preserve-on-conflict behavior left the row pointing at the earlier chain forever — the fresh chain
+could never find its own PR (`findTrackedPullRequestForRunChain`), and discovery kept
+"rediscovering" it every poll tick without ever incrementing `pr_discovery_attempts`.
+`trackPullRequest`'s upsert now reassigns `run_id` to the rediscovering candidate only when every
+run in the existing owner's chain — the owner row's `run_id` and every continuation descended from
+it, walked forward via `continuation_parent_run_id` — has gone terminal (`TERMINAL_RUN_STATES`).
+Checking the whole chain rather than just the owner run matters because the owner run is always
+`succeeded` (itself terminal) by construction — `listRunsAwaitingPullRequestDiscovery` only
+considers `succeeded` runs — so a check of the owner run alone would reassign unconditionally,
+reintroducing the exact hazard this hedge exists to avoid: a still-live descendant (e.g. parked at
+`wait_for_pr_open`) depending on that ownership.
+
+### Known gap: `reassignTrackedPullRequestRun` still breaks the root-equality invariant
+
+`RunStore.reassignTrackedPullRequestRun`, called from `daemon.ts`'s adopt-pr flow to move a
+`tracked_pull_requests` row's `run_id` onto a freshly adopted run when an operator adopts a PR
+whose original implementing chain has gone stale, remains a second, deliberately unconditional
+exception to the invariant above — an operator's adopt-pr decision overrides whatever the
+donor chain's own `RunState` says, so it cannot wait for the same liveness check `trackPullRequest`
+now applies. That reassignment is intentional and correct for the adopted run — but the donor
+chain's own `succeeded`/`waiting` rows still resolve to their own original chain root, which no
+longer matches the tracked row's (now reassigned) root. Root-equality suppression stops
+recognizing the donor chain's rows as already-tracked, so `listRunsAwaitingPullRequestDiscovery`
+re-lists them on every poll tick indefinitely. This half of issue #746 is intentionally left open:
+it needs the donor chain's own rows to be superseded or re-linked at adopt-pr time, in
+`daemon.ts`/`createAdoptedRun`, not a change to `trackPullRequest`'s conflict path.
 
 ## Consequences
 

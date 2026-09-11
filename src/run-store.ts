@@ -66,6 +66,13 @@ export const TERMINAL_RUN_STATES: ReadonlySet<RunState> = new Set([
   "succeeded"
 ]);
 
+// SQL literal form of TERMINAL_RUN_STATES for trackPullRequest's owner-chain
+// liveness check (issue #746) -- derived so the SQL list can't drift from the
+// TypeScript set above.
+const TERMINAL_RUN_STATES_SQL_LIST = [...TERMINAL_RUN_STATES]
+  .map((state) => `'${state}'`)
+  .join(", ");
+
 export type FailureClassification =
   "transient" | "deterministic" | "input_required";
 
@@ -5611,6 +5618,18 @@ export class RunStore {
     this.database
       .prepare(
         [
+          // Walks forward from the existing tracked row's own run_id (if
+          // any) through every continuation descended from it, so the
+          // update below can tell whether that owner chain is still live
+          // anywhere -- not just at the owner run itself, which is always
+          // terminal ('succeeded') by construction (issue #746).
+          "with recursive owner_chain(id) as (",
+          "  select run_id from tracked_pull_requests",
+          "  where project_name = @project_name and pr_number = @pr_number",
+          "  union all",
+          "  select r.id from runs r",
+          "  join owner_chain oc on r.continuation_parent_run_id = oc.id",
+          ")",
           "insert into tracked_pull_requests (",
           "project_name, issue_number, run_id, pr_number, pr_url, branch_name,",
           "head_sha_at_dispatch, last_seen_head_sha, state, last_observed_at,",
@@ -5621,6 +5640,14 @@ export class RunStore {
           "@created_at, @updated_at",
           ")",
           "on conflict(project_name, pr_number) do update set",
+          // Reassign run_id to the rediscovering candidate only once every
+          // run in the existing owner's chain has gone terminal -- see the
+          // comment below this method and ADR-2026-09-10-2031's "Known gap"
+          // section. A live descendant (e.g. parked at wait_for_pr_open)
+          // can still be depending on this row's current ownership, so
+          // clobbering it unconditionally would strand that chain instead
+          // of the fresh one.
+          `run_id = case when exists (select 1 from owner_chain oc join runs r on r.id = oc.id where r.state not in (${TERMINAL_RUN_STATES_SQL_LIST})) then tracked_pull_requests.run_id else excluded.run_id end,`,
           "issue_number = excluded.issue_number,",
           "pr_url = excluded.pr_url,",
           "branch_name = excluded.branch_name,",
@@ -5645,13 +5672,14 @@ export class RunStore {
       });
   }
 
-  // trackPullRequest's own upsert deliberately never updates run_id on
-  // conflict (docs/adr/0078-pr-surface-poll-snapshot-and-state-projection.md)
-  // -- that's load-bearing for its other caller (pull-request-followup.ts),
-  // which must not clobber an existing owner. adopt-pr needs the opposite:
-  // when it adopts a PR already tracked under a now-dead run_id, the
-  // dashboard must stop showing that dead Run as the owner. A dedicated
-  // method keeps trackPullRequest's own contract unchanged.
+  // trackPullRequest's own upsert reassigns run_id on conflict only once the
+  // existing owner's whole chain has gone terminal (issue #746) -- that's
+  // still load-bearing for its other caller (pull-request-followup.ts),
+  // which must not clobber a *live* existing owner. adopt-pr needs something
+  // stronger: an operator adopting a PR has already decided the original
+  // chain is stale regardless of what RunState says, so it must reassign
+  // unconditionally rather than wait for the liveness check above to agree.
+  // A dedicated method keeps trackPullRequest's own contract unchanged.
   reassignTrackedPullRequestRun(input: {
     prNumber: number;
     projectName: string;

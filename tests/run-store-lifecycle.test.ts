@@ -1187,6 +1187,133 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("reassigns a rediscovered PR's owner once the earlier chain that tracked it has gone fully terminal (issue #746)", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const branchName = "sym/symphonika/70-reused-branch";
+
+      // An earlier, unrelated top-level dispatch chain tracked PR #77 on
+      // this branch and has since gone fully terminal (no live descendant
+      // continuation anywhere in its chain) -- e.g. its own wait_for_pr_open
+      // park already resolved to some other terminal outcome, or it never
+      // parked at all.
+      seedRun(store, { id: "earlier-run", issueNumber: 70 });
+      store.updateRunState("earlier-run", "succeeded");
+      store.trackPullRequest({
+        branchName,
+        headSha: "old-sha",
+        issueNumber: 70,
+        projectName: "symphonika",
+        prNumber: 77,
+        prUrl: "https://github.com/pmatos/symphonika/pull/77",
+        runId: "earlier-run"
+      });
+
+      // A fresh, unrelated chain reuses the same branch, succeeds, and
+      // discovery finds the same still-open PR #77 (its own pushed commits
+      // landed on it) and re-tracks it under the fresh run's id.
+      const freshId = seedRun(store, { id: "fresh-run", issueNumber: 70 });
+      store.updateRunEvidence(freshId, evidence(branchName));
+      store.updateRunState(freshId, "succeeded");
+      store.trackPullRequest({
+        branchName,
+        headSha: "new-sha",
+        issueNumber: 70,
+        projectName: "symphonika",
+        prNumber: 77,
+        prUrl: "https://github.com/pmatos/symphonika/pull/77",
+        runId: "fresh-run"
+      });
+
+      // Ownership transfers to the fresh chain: it can now find its own PR
+      // through findTrackedPullRequestForRunChain, and discovery suppression
+      // recognizes the row as already tracked by its own chain root instead
+      // of rediscovering it forever.
+      const tracked = store.findTrackedPullRequestForRunChain({
+        issueNumber: 70,
+        projectName: "symphonika",
+        runId: "fresh-run"
+      });
+      expect(tracked).toMatchObject({ prNumber: 77, runId: "fresh-run" });
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("preserves a rediscovered PR's earlier owner while that chain still has a live descendant (issue #746)", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const branchName = "sym/symphonika/71-reused-branch-live";
+      const issue = {
+        body: "",
+        created_at: "2025-01-01T00:00:00Z",
+        id: 1001,
+        labels: ["agent-ready"],
+        number: 71,
+        priority: 1,
+        state: "open" as const,
+        title: "fixture",
+        updated_at: "2025-01-01T00:00:00Z",
+        url: "https://example/71"
+      };
+
+      // The earlier chain tracked PR #88 and is still actively depending on
+      // that ownership: it parked a later continuation at wait_for_pr_open,
+      // which is still live.
+      seedRun(store, { id: "earlier-run", issueNumber: 71 });
+      store.updateRunState("earlier-run", "succeeded");
+      store.trackPullRequest({
+        branchName,
+        headSha: "old-sha",
+        issueNumber: 71,
+        projectName: "symphonika",
+        prNumber: 88,
+        prUrl: "https://github.com/pmatos/symphonika/pull/88",
+        runId: "earlier-run"
+      });
+      store.createWaitingRun({
+        branchName,
+        currentStateId: "wait_for_pr_open",
+        id: "earlier-wait",
+        issue,
+        parentRunId: "earlier-run",
+        projectName: "symphonika"
+      });
+
+      // A fresh, unrelated chain reuses the branch, succeeds, and discovery
+      // re-tracks the same still-open PR under the fresh run's id.
+      const freshId = seedRun(store, { id: "fresh-run", issueNumber: 71 });
+      store.updateRunEvidence(freshId, evidence(branchName));
+      store.updateRunState(freshId, "succeeded");
+      store.trackPullRequest({
+        branchName,
+        headSha: "new-sha",
+        issueNumber: 71,
+        projectName: "symphonika",
+        prNumber: 88,
+        prUrl: "https://github.com/pmatos/symphonika/pull/88",
+        runId: "fresh-run"
+      });
+
+      // Reassigning would break the earlier chain's still-live wait -- its
+      // own contract (trackPullRequest's comment) forbids clobbering a
+      // legitimately live owner, so the row must stay with "earlier-run".
+      const tracked = store.findTrackedPullRequestForRunChain({
+        issueNumber: 71,
+        projectName: "symphonika",
+        runId: "earlier-wait"
+      });
+      expect(tracked).toMatchObject({ prNumber: 88, runId: "earlier-run" });
+    } finally {
+      store.close();
+    }
+  });
+
   it("PR discovery prefers least-attempted runs and excludes ones that hit the attempt cap", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

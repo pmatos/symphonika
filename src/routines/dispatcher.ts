@@ -20,6 +20,8 @@ import {
 } from "../lifecycle/provider-scratch.js";
 import {
   resolveEnvBackedValue,
+  tryGetIssue,
+  tryGetPullRequest,
   tryListIssues,
   tryListPullRequestsForBranch,
   type GitHubIssuesApi,
@@ -1570,6 +1572,7 @@ async function runRoutineFiring(input: {
     // and daemon ticks are explicitly re-entrant (ADR 0052), so a concurrent
     // tick could otherwise observe "succeeded" and send the grouped summary
     // with this leg's PRs missing, before discovery has recorded them.
+    let discoveryDone: Promise<void> = Promise.resolve();
     if (outcome.kind === "succeeded" && input.routine.kind === "git") {
       if (githubAfter?.pullRequestsAvailable === true) {
         recordRoutinePullRequests({
@@ -1581,7 +1584,7 @@ async function runRoutineFiring(input: {
           runStore: input.runStore
         });
       } else {
-        await cancellation.race(
+        discoveryDone = cancellation.race(
           discoverRoutinePullRequests({
             branchName: prepared.branchName,
             env: input.env,
@@ -1602,11 +1605,12 @@ async function runRoutineFiring(input: {
     // verify the claim's own URL directly; this is a secondary, more
     // expensive check, so it only runs when the cheaper diff didn't already
     // confirm the claim, and only for a succeeded firing, matching rule 4's
-    // own precondition.
-    const claimUrlVerification =
+    // own precondition. Independent of PR discovery above, so both GitHub
+    // reads are issued together rather than stacked sequentially.
+    const claimUrlVerificationPending: Promise<ObservedRoutineAction | null> =
       outcome.kind === "succeeded" &&
       githubObservation.action?.action !== claim?.action
-        ? await cancellation.race(
+        ? cancellation.race(
             verifyRoutineOutcomeClaimUrl({
               claim,
               env: input.env,
@@ -1615,7 +1619,11 @@ async function runRoutineFiring(input: {
               project: input.project
             })
           )
-        : null;
+        : Promise.resolve(null);
+    const [, claimUrlVerification] = await Promise.all([
+      discoveryDone,
+      claimUrlVerificationPending
+    ]);
     // Re-check for a cancel that landed during discovery: an operator cancel
     // still wins even though the provider itself already finished (ADR 0060).
     const cancelBeforeCommitInspection = input.activeRuns.get(input.firingId);
@@ -2236,30 +2244,24 @@ async function verifyRoutineOutcomeClaimUrl(input: {
   ) {
     return null;
   }
-  const reference = parseGithubClaimUrl(
-    claim.url,
-    input.project.tracker.owner,
-    input.project.tracker.repo
-  );
+  const { owner, repo, token: tokenConfig } = input.project.tracker;
+  const reference = parseGithubClaimUrl(claim.url, owner, repo);
   if (reference === null) {
     return null;
   }
-  const token = resolveEnvBackedValue(input.project.tracker.token, input.env);
+  const token = resolveEnvBackedValue(tokenConfig, input.env);
   if (token === undefined) {
     return null;
   }
   try {
-    if (reference.kind === "pull") {
-      if (
-        claim.action !== "pr" ||
-        input.githubIssuesApi.getPullRequest === undefined
-      ) {
+    if (claim.action === "pr") {
+      if (reference.kind !== "pull") {
         return null;
       }
-      const pullRequest = await input.githubIssuesApi.getPullRequest({
-        owner: input.project.tracker.owner,
+      const pullRequest = await tryGetPullRequest(input.githubIssuesApi, {
+        owner,
         pullNumber: reference.number,
-        repo: input.project.tracker.repo,
+        repo,
         token
       });
       if (pullRequest?.number === undefined) {
@@ -2271,16 +2273,13 @@ async function verifyRoutineOutcomeClaimUrl(input: {
         url: pullRequest.html_url ?? claim.url
       };
     }
-    if (
-      (claim.action !== "issue_opened" && claim.action !== "issue_closed") ||
-      input.githubIssuesApi.getIssue === undefined
-    ) {
+    if (reference.kind !== "issue") {
       return null;
     }
-    const issue = await input.githubIssuesApi.getIssue({
+    const issue = await tryGetIssue(input.githubIssuesApi, {
       issueNumber: reference.number,
-      owner: input.project.tracker.owner,
-      repo: input.project.tracker.repo,
+      owner,
+      repo,
       token
     });
     // GitHub's issues API also returns pull requests (marked by

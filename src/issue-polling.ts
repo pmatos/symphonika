@@ -1058,6 +1058,16 @@ export async function tryGetPullRequestFollowupState(
   return api.getPullRequestFollowupState(input);
 }
 
+export async function tryGetPullRequest(
+  api: GitHubIssuesApi,
+  input: GitHubPullRequestInput
+): Promise<RawGitHubPullRequest | null | undefined> {
+  if (api.getPullRequest === undefined) {
+    return undefined;
+  }
+  return api.getPullRequest(input);
+}
+
 export async function tryMergePullRequest(
   api: GitHubIssuesApi,
   input: GitHubPullRequestMergeInput

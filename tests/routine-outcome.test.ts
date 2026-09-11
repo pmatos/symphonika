@@ -613,6 +613,36 @@ describe("Routine Outcome reconciliation", () => {
     });
   });
 
+  it("reports an error for a PR-expecting routine's explicit commit claim with no verified external action", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "commit",
+          status: "success",
+          summary: "Committed the fix but could not push the branch.",
+          title: "Extract retry policy",
+          url: null
+        },
+        commitsAhead: true,
+        expectsPr: true,
+        githubObservationAvailable: true,
+        observedAction: null,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "git",
+      status: "error",
+      summary:
+        "Commit exists in the Routine Firing workspace with no verified external action.",
+      title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
   it("reports an error for a PR-expecting routine's under-reporting no-action claim with a retained commit", () => {
     expect(
       reconcileRoutineOutcome({

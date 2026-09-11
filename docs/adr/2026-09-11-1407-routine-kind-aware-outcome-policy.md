@@ -63,14 +63,22 @@ Add an optional per-routine declaration flag, `expects_pr: boolean`, alongside t
   flag has to round-trip through the same store as every other declaration field to reach the
   dispatcher's reconciliation call.
 - Reconciliation: `reconcileRoutineOutcome` (`src/routines/outcome.ts`) gains a required
-  `expectsPr: boolean` input. Inside rule 4's existing fallback condition
-  (`terminalState === "succeeded" && commitsAhead && (claim absent, "none", or an unconfirmed
-  external-action claim)`), `expectsPr: true` now persists `status: "error"` with a summary
-  explaining that a commit exists with no verified external action, instead of `status: "success"`.
-  `action: "commit"`, `source: "git"`, `verified: true`, and the title
-  (`"Commit retained in the Routine Firing workspace"`) are unchanged — the commit itself is still a
-  verified fact, and `status` is the only field this policy decision changes. Retention is
-  unaffected: it already keys off the independent `commitsAhead` column, not outcome `status`.
+  `expectsPr: boolean` input. When `expectsPr: true`, rule 4's fallback condition
+  (`terminalState === "succeeded" && commitsAhead && (...)`) is widened: alongside the pre-existing
+  disjuncts (claim absent, `"none"`, or an unconfirmed external-action claim), an explicit
+  `action: "commit"` claim now also satisfies it. An agent that self-reports "I committed but didn't
+  publish" is exactly the unpublished-work case this policy exists to surface, so it cannot be
+  exempted from rule 4 just because it was reported rather than inferred. In every case that
+  satisfies the widened condition, `expectsPr: true` persists `status: "error"` with a summary
+  explaining that a commit exists with no verified external action — replacing `status: "success"`
+  for the pre-existing disjuncts, and replacing whatever status the claim itself reported for an
+  explicit commit claim. `action: "commit"`, `source: "git"`, `verified: true`, and the title
+  (`"Commit retained in the Routine Firing workspace"`) are unchanged for every case this policy
+  reclassifies — the commit itself is still a verified fact. When `expectsPr: false`, rule 4's
+  condition and the claim-preservation branch that follows it are both unchanged from ADR 0068: an
+  explicit commit claim keeps its own reported `status`, `source`, and `title`. Retention is
+  unaffected either way: it already keys off the independent `commitsAhead` column, not outcome
+  `status`.
 - Wiring: both dispatcher call sites that reach rule 4 on the success/failure path
   (`runRoutineFiring`'s two `reconcileRoutineOutcome` calls) pass `input.routine.expectsPr`. The
   operator-cancel path (`cancelRunInStore`, `src/http/app.ts`) passes `expectsPr: false`
@@ -90,7 +98,10 @@ that declaration.
 - A `kind: git` routine that opts in with `expects_pr: true` now reports `error`, not `success`, for
   a firing that leaves a commit with no verified PR and no explicit "nothing to do" claim — visible
   to operators through the same one-line outcome formatter (`formatRoutineOutcomeLine`) and firing
-  detail views that already render `status`.
+  detail views that already render `status`. This applies whether the agent's own claim under-reports
+  the firing (absent, `"none"`, or an unconfirmed external-action claim) or explicitly reports the
+  commit itself (`action: "commit"`) — a self-reported "I committed but didn't publish" is not
+  exempt, since it is exactly the unpublished-work case this policy exists to catch.
 - Every routine kind's default behavior is unchanged: `expects_pr` defaults to `false`, and rule 4's
   fallback still records `success` exactly as before ADR 0068's own text describes, unless a routine
   explicitly opts in.

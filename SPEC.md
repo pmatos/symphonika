@@ -1274,12 +1274,16 @@ unverified. A successful `kind: git` firing with commits ahead of base can verif
 `commit` outcome regardless of the claim's own reported status, and this git evidence overrides a
 `none` claim or an unconfirmed pull-request/issue claim that under-reports it so a self-reported
 "nothing to do", an external action no GitHub observation corroborates, or an "error" never
-suppresses the retention signal below. The routine's own `expects_pr` declaration decides this
-fallback's `status`: `false` (default) records `success`, matching prior behavior; `true` records
-`error` instead, since that routine's contract is to produce a verified PR or explicitly claim there
-was nothing to do, and a bare unconfirmed commit means neither happened. The `commit` action,
-`verified: true`, and the retention signal are unaffected either way — `expects_pr` changes only the
-persisted `status`. See ADR-2026-09-11-1407, amending ADR 0068 rule 4. A successful firing with
+suppresses the retention signal below. The routine's own `expects_pr` declaration decides this fallback's scope and `status`: `false`
+(default) records `success` and leaves an explicit `commit` claim's own reported status, source, and
+title untouched, matching prior behavior; `true` records `error` instead and, unlike `false`, also
+folds an explicit `commit` claim into the same fallback — an agent that self-reports having committed
+without publishing is still short of the routine's contract to produce a verified PR or explicitly
+claim there was nothing to do, so it is not exempt just because it was self-reported rather than
+inferred. The `commit` action, `verified: true`, and the retention signal are unaffected either
+way — `expects_pr` changes only the persisted `status` (and, for an explicit commit claim under
+`true`, whether the fallback's generic `source`/`title` replace the claim's own). See
+ADR-2026-09-11-1407, amending ADR 0068 rule 4. A successful firing with
 neither claim nor observation records `no_action`; it is verified and sourced to `gh` only when the
 before/after GitHub reads completed,
 otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and

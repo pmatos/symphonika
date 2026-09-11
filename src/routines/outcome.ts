@@ -84,8 +84,10 @@ export type ReconcileRoutineOutcomeInput = {
   claim: RoutineOutcomeClaim | null;
   commitsAhead: boolean;
   // The routine's own declared outcome policy (ADR amending 0068): when true,
-  // rule 4's commit-only fallback below reports `error` rather than
-  // `success` — a bare commit is not this routine's contract.
+  // rule 4 below reports `error` instead of `success` for any commits-ahead
+  // outcome with no verified external action — whether the claim is
+  // absent/none, an unconfirmed pr/issue claim, or an explicit commit claim
+  // — since a bare commit is not this routine's contract either way.
   expectsPr: boolean;
   githubObservationAvailable: boolean;
   observedAction: ObservedRoutineAction | null;
@@ -285,12 +287,19 @@ export function reconcileRoutineOutcome(
       input.claim.action === "issue_opened" ||
       input.claim.action === "issue_closed") &&
     input.observedAction?.action !== input.claim.action;
+  // An agent that explicitly claims `action: "commit"` (committed but didn't
+  // publish) is still short of an expects_pr routine's contract, so it can't
+  // be exempted from rule 4 just because it was self-reported rather than
+  // inferred from an absent/under-reporting claim.
+  const claimIsExplicitCommitUnderPrPolicy =
+    input.expectsPr && input.claim !== null && input.claim.action === "commit";
   if (
     input.terminalState === "succeeded" &&
     input.commitsAhead &&
     (input.claim === null ||
       input.claim.action === "none" ||
-      claimIsUnconfirmedExternalAction)
+      claimIsUnconfirmedExternalAction ||
+      claimIsExplicitCommitUnderPrPolicy)
   ) {
     // A routine that declares expects_pr has a contract to produce a PR (or
     // explicitly say there was nothing to do) — a bare commit with no

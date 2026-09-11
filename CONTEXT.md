@@ -171,9 +171,11 @@ _Avoid_: arbitrary PR detection
 
 **Tracked Pull Request**:
 A stored record of one pull request Symphonika has discovered for an Issue, keyed by `(Project, PR
-number)` and never deleted. A redispatched Issue accumulates one Tracked Pull Request per Run
-Chain, so the newest stored row is not necessarily this run's; resolving "this chain's own" tracked
-pull request scopes by Run Chain membership, not branch name (see Run Chain for why).
+number)` and never deleted. A Run Chain that never opens a discoverable PR owns no Tracked Pull
+Request row at all, and `adopt-pr`'s `reassignTrackedPullRequestRun` can move a row's ownership onto
+a different chain — so "one row per Run Chain" is the common case, not a strict invariant (see the
+known gap in ADR-2026-09-10-2031). Resolving "this chain's own" tracked pull request still scopes by
+Run Chain membership, not branch name (see Run Chain for why).
 _Avoid_: Pull Request State (that is the normalized GitHub state, not the stored row)
 
 **Progress Guard**:

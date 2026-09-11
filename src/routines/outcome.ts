@@ -298,23 +298,13 @@ export function reconcileRoutineOutcome(
     // reported as an operator-facing error rather than a quiet success. The
     // commit itself is still a verified fact and retention is unaffected
     // (keyed on commitsAhead, not this status).
-    if (input.expectsPr) {
-      return {
-        action: "commit",
-        source: "git",
-        status: "error",
-        summary:
-          "Commit exists in the Routine Firing workspace with no verified external action.",
-        title: "Commit retained in the Routine Firing workspace",
-        url: null,
-        verified: true
-      };
-    }
     return {
       action: "commit",
       source: "git",
-      status: "success",
-      summary: "Observed commits ahead of the configured base branch.",
+      status: input.expectsPr ? "error" : "success",
+      summary: input.expectsPr
+        ? "Commit exists in the Routine Firing workspace with no verified external action."
+        : "Observed commits ahead of the configured base branch.",
       title: "Commit retained in the Routine Firing workspace",
       url: null,
       verified: true

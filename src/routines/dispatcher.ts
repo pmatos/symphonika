@@ -2908,22 +2908,22 @@ async function discoverRoutinePullRequests(input: {
     return false;
   }
 
+  const listedPullRequests = pullRequests ?? [];
   recordRoutinePullRequests({
     branchName: input.branchName,
     firingId: input.firingId,
     projectName: input.project.name,
-    pullRequests: pullRequests ?? [],
+    pullRequests: listedPullRequests,
     routineName: input.routineName,
     runStore: input.runStore
   });
   return observedNewPullRequestForBranch(
-    pullRequests ?? [],
+    listedPullRequests,
     input.branchName,
     input.beforePullRequests
   );
 }
 
-// Returns whether at least one open PR for `branchName` was recorded.
 function recordRoutinePullRequests(input: {
   branchName: string;
   firingId: string;
@@ -2931,8 +2931,7 @@ function recordRoutinePullRequests(input: {
   pullRequests: RawGitHubPullRequest[];
   routineName: string;
   runStore: RunStore;
-}): boolean {
-  let recordedOpenPr = false;
+}): void {
   for (const pullRequest of input.pullRequests) {
     if (!isOpenPullRequestForBranch(pullRequest, input.branchName)) {
       continue;
@@ -2945,9 +2944,7 @@ function recordRoutinePullRequests(input: {
       projectName: input.projectName,
       routineName: input.routineName
     });
-    recordedOpenPr = true;
   }
-  return recordedOpenPr;
 }
 
 // Unlike isOpenPullRequestForBranch, this admits a closed/merged PR: outcome
@@ -2987,7 +2984,8 @@ function isOpenPullRequestForBranch(
   );
 }
 
-// Mirrors diffRoutineGithubSnapshots' own newPullRequest bar: a PR counts as
+// Mirrors diffRoutineGithubSnapshots' own newPullRequest bar (reusing the same
+// raw->snapshot conversion, routinePullRequestObservations): a PR counts as
 // observed only when it's new to this firing, not merely present in a raw
 // listing. Without `beforePullRequests` (its own read failed or wasn't
 // captured), any state-matching PR counts — the same permissive fallback the
@@ -3003,11 +3001,14 @@ function observedNewPullRequestForBranch(
   branchName: string,
   beforePullRequests: RoutineGithubSnapshot["pullRequests"] | undefined
 ): boolean {
-  return pullRequests.some(
-    (pullRequest) =>
-      isPullRequestForBranch(pullRequest, branchName) &&
-      (beforePullRequests === undefined ||
-        beforePullRequests[String(pullRequest.number)] === undefined)
+  const afterPullRequests = routinePullRequestObservations(
+    pullRequests,
+    branchName
+  );
+  return Object.keys(afterPullRequests).some(
+    (number) =>
+      beforePullRequests === undefined ||
+      beforePullRequests[number] === undefined
   );
 }
 

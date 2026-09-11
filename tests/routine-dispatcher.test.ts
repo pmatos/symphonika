@@ -2323,6 +2323,7 @@ describe("RoutineFiringDispatcher", () => {
         owner: "pmatos",
         pullNumber: 99,
         repo: "alpha",
+        signal: expect.any(AbortSignal) as AbortSignal,
         token: "secret-token"
       });
       expect(runStore.getRoutineFiring("fire-claim-verify")).toMatchObject({
@@ -2431,6 +2432,7 @@ describe("RoutineFiringDispatcher", () => {
         owner: "pmatos",
         pullNumber: 404,
         repo: "alpha",
+        signal: expect.any(AbortSignal) as AbortSignal,
         token: "secret-token"
       });
       expect(runStore.getRoutineFiring("fire-claim-refute")).toMatchObject({
@@ -2562,6 +2564,7 @@ describe("RoutineFiringDispatcher", () => {
         owner: "pmatos",
         pullNumber: 99,
         repo: "alpha",
+        signal: expect.any(AbortSignal) as AbortSignal,
         token: "secret-token"
       });
       expect(runStore.getRoutineFiring("fire-claim-mismatch")).toMatchObject({
@@ -2573,6 +2576,130 @@ describe("RoutineFiringDispatcher", () => {
           summary: "Opened PR #99 from pm-deepen/retry-policy.",
           title: "Refactor the retry policy module",
           url: "https://github.com/pmatos/alpha/pull/99",
+          verified: true
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("completes the firing with a non-fatal fallback when the claim-URL GitHub read hangs past its own bounded timeout (#752)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMTIMEOUT0";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "pr",
+      status: "success",
+      summary: "Opened a pull request from an adopted branch.",
+      title: "Extract retry policy",
+      url: "https://github.com/pmatos/alpha/pull/404"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    // Never resolves on its own -- only rejects once the timeout-bounded
+    // signal fires, standing in for a GitHub read that stalls indefinitely.
+    const getPullRequest = vi.fn(
+      (input: { signal?: AbortSignal }) =>
+        new Promise<never>((_resolve, reject) => {
+          input.signal?.addEventListener("abort", () => {
+            reject(
+              new DOMException("The operation was aborted.", "AbortError")
+            );
+          });
+        })
+    );
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        claimUrlVerificationTimeoutMs: 20,
+        configDir: root,
+        createFiringId: () => "fire-claim-timeout",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getPullRequest,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(getPullRequest).toHaveBeenCalledWith({
+        owner: "pmatos",
+        pullNumber: 404,
+        repo: "alpha",
+        signal: expect.any(AbortSignal) as AbortSignal,
+        token: "secret-token"
+      });
+      // The stalled read must not block the firing from ever going
+      // terminal, and must not leave a claim it couldn't confirm recorded
+      // as verified -- it degrades exactly like a GitHub read that resolved
+      // to "not found" (see the #748 fallback test above).
+      expect(runStore.getRoutineFiring("fire-claim-timeout")).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "commit",
+          source: "git",
+          status: "success",
+          summary: "Observed commits ahead of the configured base branch.",
+          title: "Commit retained in the Routine Firing workspace",
+          url: null,
           verified: true
         },
         state: "succeeded"

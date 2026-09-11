@@ -1252,7 +1252,10 @@ whose head is the firing's own deterministic branch. For a succeeded `kind: git`
 names a `pr`, `issue_opened`, or `issue_closed` action the snapshot didn't already confirm,
 Symphonika additionally looks the claim's own `url` up directly against the Project's configured
 repository — one REST read by number, refusing any URL outside that repository — before treating the
-claim as unconfirmed. An `issue_opened`/`issue_closed` claim confirmed this way must also have its
+claim as unconfirmed. This read runs after the firing's own `timeout_minutes` deadline is already
+cleared for post-terminal enrichment, so it carries its own short, independent, non-fatal timeout
+instead: expiry leaves the claim unconfirmed rather than blocking the firing from going terminal. An
+`issue_opened`/`issue_closed` claim confirmed this way must also have its
 `created_at`/`closed_at` fall within the firing's own window, the same bound the branch-scoped
 snapshot already applies, so a stale or hallucinated URL naming a long pre-existing issue is refused
 rather than confirmed on existence alone; a `pr` claim has no such window since there is no "before"

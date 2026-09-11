@@ -62,6 +62,16 @@ configured repository before rule 4 gets to discard it.
   snapshot `state` to be `closed`, so a claim of "closed" for an issue that's actually still open is
   refuted too. Any lookup failure (network error, 404, disabled API method, missing tracker/token)
   returns `null` — the caller's existing branch-scoped evidence and rule 4 fallback are unchanged.
+  The `pr` claim's live GET is bounded by its own short, independent, non-fatal timeout
+  (`CLAIM_URL_VERIFICATION_TIMEOUT_MS`, 30s), passed as an `AbortSignal`. It cannot reuse the
+  firing's own `timeout_minutes` deadline: that deadline is deliberately cleared before this
+  verification runs (`deadline.clear()`, see the comment above its call site), specifically so an
+  execution-phase timeout can't rewrite an already-classified succeeded/failed/cancelled outcome
+  during this post-terminal enrichment — which PR discovery relies on too. Without its own bound,
+  this call was the one genuinely new unbounded network await this ADR introduced on the path where
+  branch-scoped PR discovery is skipped (`pullRequestsAvailable === true`): a stalled read would hold
+  the firing `running`, and its concurrency/non-overlap slots, past any configured deadline (issue
+  #752).
 - The dispatcher only performs this second check when it's needed: `githubObservation.action?.action
   !== claim?.action`, `outcome.kind === "succeeded"` (rule 4's own precondition — a failed or
   cancelled firing can never reach rule 4), `input.routine.kind === "git"` (a `kind: report` routine

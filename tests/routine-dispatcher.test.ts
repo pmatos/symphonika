@@ -2804,6 +2804,112 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("does not verify a report routine's pr claim by URL (#751)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "pr",
+      status: "success",
+      summary: "Noticed an unrelated pull request while auditing the repo.",
+      title: "Some unrelated pull request",
+      url: "https://github.com/pmatos/alpha/pull/42"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    // A `kind: report` routine never observes pull requests. If the direct
+    // URL fallback ran here anyway, this mock would confirm the claim
+    // against a PR the report never actually touched (#751 review).
+    const getPullRequest = vi.fn().mockResolvedValue({
+      head: { ref: "some-other-branch", sha: "abc111" },
+      html_url: "https://github.com/pmatos/alpha/pull/42",
+      number: 42,
+      state: "open",
+      title: "Some unrelated pull request"
+    });
+    const listIssues = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-report-pr-claim",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getPullRequest,
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report on {{project.name}}.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(getPullRequest).not.toHaveBeenCalled();
+      expect(runStore.getRoutineFiring("fire-report-pr-claim")).toMatchObject({
+        commitsAhead: false,
+        outcome: {
+          action: "pr",
+          source: "codex",
+          status: "success",
+          verified: false
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("observes a pull request that was opened and closed within the same firing", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

@@ -1604,11 +1604,15 @@ async function runRoutineFiring(input: {
     // own deterministic one for its PR (#748). Before letting rule 4 win,
     // verify the claim's own URL directly; this is a secondary, more
     // expensive check, so it only runs when the cheaper diff didn't already
-    // confirm the claim, and only for a succeeded firing, matching rule 4's
-    // own precondition. Independent of PR discovery above, so both GitHub
-    // reads are issued together rather than stacked sequentially.
+    // confirm the claim, and only for a succeeded `kind: git` firing, matching
+    // rule 4's own precondition (SPEC.md's git-only fallback: a `kind: report`
+    // routine never observes pull requests, so a report claim naming any
+    // historical PR in the repo must not be verified by this fallback).
+    // Independent of PR discovery above, so both GitHub reads are issued
+    // together rather than stacked sequentially.
     const claimUrlVerificationPending: Promise<ObservedRoutineAction | null> =
       outcome.kind === "succeeded" &&
+      input.routine.kind === "git" &&
       githubObservation.action?.action !== claim?.action
         ? cancellation.race(
             verifyRoutineOutcomeClaimUrl({

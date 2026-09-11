@@ -45,9 +45,11 @@ configured repository before rule 4 gets to discard it.
   branch-scoped evidence and rule 4 fallback are unchanged.
 - The dispatcher only performs this second check when it's needed: `githubObservation.action?.action
   !== claim?.action`, `outcome.kind === "succeeded"` (rule 4's own precondition — a failed or
-  cancelled firing can never reach rule 4), and `claim.status !== "error"` (an error-status claim
-  falls through to the existing git-evidence override regardless, so its own title/summary were never
-  going to be trusted here). The result is merged as
+  cancelled firing can never reach rule 4), `input.routine.kind === "git"` (a `kind: report` routine
+  never observes pull requests, so its claim must not be confirmed by looking up an unrelated PR by
+  number), and `claim.status !== "error"` (an error-status claim falls through to the existing
+  git-evidence override regardless, so its own title/summary were never going to be trusted here).
+  The result is merged as
   `observedAction: claimUrlVerification ?? githubObservation.action` before calling
   `reconcileRoutineOutcome`.
 - `reconcileRoutineOutcome` itself is unchanged. Feeding a confirmed action into the same

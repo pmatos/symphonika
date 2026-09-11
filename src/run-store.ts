@@ -1147,7 +1147,14 @@ const PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE = [
   "and pr_discovery_attempts < @maxAttempts"
 ].join(" ");
 // Suppresses a run whose chain root already owns a tracked PR; shared by the
-// same two call sites for the same drift reason as the predicate above.
+// same two call sites for the same drift reason as the predicate above. The
+// branch_name equality is defense-in-depth for chains predating
+// ADR-2026-09-04-0837 (branch_name inherited once per chain): before that
+// fix, a mid-chain issue-title edit could recompute a continuation's own
+// branch, diverging it from an ancestor's tracked PR that still shares the
+// same chain root (issue #745). It can only narrow this suppression, never
+// widen it -- PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE already requires
+// runs.branch_name to be non-null/non-empty everywhere this applies.
 const RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION = [
   "and not exists (",
   "  select 1 from tracked_pull_requests pr",
@@ -1155,6 +1162,7 @@ const RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION = [
   "  join run_chain_root runs_root on runs_root.id = runs.id",
   "  where pr.project_name = runs.project_name",
   "  and pr_root.root_id = runs_root.root_id",
+  "  and pr.branch_name = runs.branch_name",
   ")"
 ].join(" ");
 const RUN_CHAIN_ROOT_CTE = [
@@ -5846,6 +5854,16 @@ export class RunStore {
   // discovery-eligible run, so filtering it down to one run's ancestry
   // afterward would still materialize the whole set first -- more work than
   // this bounded, chain-length-only walk needs.
+  //
+  // Also requires the tracked row's branch_name to match this run's own
+  // (falling back to chain-membership alone when this run has no recorded
+  // branch) -- defense-in-depth for chains predating ADR-2026-09-04-0837
+  // (branch_name inherited once per chain): before that fix, a mid-chain
+  // issue-title edit could recompute a continuation's own branch, diverging
+  // it from an ancestor's tracked PR that still shares the same chain
+  // (issue #745). Derived from @runId's own row rather than a caller-
+  // supplied branchName parameter -- ADR-2026-09-10-2031 deliberately
+  // removed that parameter, and this run's branch is already on its own row.
   findTrackedPullRequestForRunChain(input: {
     issueNumber: number;
     projectName: string;
@@ -5861,15 +5879,24 @@ export class RunStore {
           "  join chain on r.id = chain.id",
           "  where r.continuation_parent_run_id is not null",
           ")",
-          "select id, project_name, issue_number, run_id, pr_number, pr_url,",
-          "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
-          "last_review_dispatch_fingerprint, review_dispatch_count,",
-          "review_followup_cap_reached,",
-          "last_followup_run_id, state, last_observed_at, created_at, updated_at",
-          "from tracked_pull_requests",
-          "where project_name = @projectName and issue_number = @issueNumber",
-          "and run_id in (select id from chain)",
-          "order by id desc limit 1"
+          "select tracked.id, tracked.project_name, tracked.issue_number,",
+          "tracked.run_id, tracked.pr_number, tracked.pr_url,",
+          "tracked.branch_name, tracked.head_sha_at_dispatch,",
+          "tracked.last_seen_head_sha,",
+          "tracked.last_review_dispatch_fingerprint,",
+          "tracked.review_dispatch_count, tracked.review_followup_cap_reached,",
+          "tracked.last_followup_run_id, tracked.state,",
+          "tracked.last_observed_at, tracked.created_at, tracked.updated_at",
+          "from tracked_pull_requests tracked",
+          "left join runs waiting_run on waiting_run.id = @runId",
+          "where tracked.project_name = @projectName",
+          "and tracked.issue_number = @issueNumber",
+          "and tracked.run_id in (select id from chain)",
+          "and (",
+          "  waiting_run.branch_name is null or waiting_run.branch_name = '' or",
+          "  tracked.branch_name = waiting_run.branch_name",
+          ")",
+          "order by tracked.id desc limit 1"
         ].join(" ")
       )
       .get({

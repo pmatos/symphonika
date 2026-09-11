@@ -1187,6 +1187,76 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("does not suppress discovery via a legacy chain whose continuation branch diverged from its tracked ancestor's branch (issue #745)", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const ancestorBranch = "sym/symphonika/70-legacy-title-before-edit";
+      const continuationBranch = "sym/symphonika/70-legacy-title-after-edit";
+
+      // The chain's root run opened and tracked its own PR, on its own
+      // branch, and that PR has since merged.
+      const ancestorId = seedRun(store, { id: "ancestor", issueNumber: 70 });
+      store.updateRunEvidence(ancestorId, evidence(ancestorBranch));
+      store.trackPullRequest({
+        branchName: ancestorBranch,
+        headSha: "old-sha",
+        issueNumber: 70,
+        projectName: "symphonika",
+        prNumber: 88,
+        prUrl: "https://github.com/pmatos/symphonika/pull/88",
+        runId: ancestorId
+      });
+      store.recordPullRequestObservation({
+        headSha: "old-sha",
+        id: 1,
+        prUrl: "https://github.com/pmatos/symphonika/pull/88",
+        reviewFollowupCapReached: false,
+        state: "merged"
+      });
+
+      // Back when branch names were recomputed per attempt instead of
+      // inherited once per chain (pre-ADR-2026-09-04-0837), a title edit
+      // mid-chain could give a continuation a different branch than its
+      // ancestor's. Simulate that legacy divergence directly, since
+      // createContinuationRun now always inherits the parent's branch.
+      store.createContinuationRun({
+        id: "continuation",
+        issue: {
+          body: "",
+          created_at: "2025-01-01T00:00:00Z",
+          id: 1009,
+          labels: ["agent-ready"],
+          number: 70,
+          priority: 1,
+          state: "open",
+          title: "fixture (retitled)",
+          updated_at: "2025-01-01T00:00:00Z",
+          url: "https://example/70"
+        },
+        parentRunId: ancestorId,
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.updateRunEvidence("continuation", evidence(continuationBranch));
+      store.updateRunState("continuation", "succeeded");
+
+      // Chain-root equality alone would suppress this: "continuation"
+      // resolves to the same chain root as "ancestor", whose tracked PR the
+      // not-exists check would find regardless of branch. Branch equality
+      // must additionally require the tracked row's branch to match the
+      // candidate's own branch, so this continuation -- whose own branch
+      // never had a PR tracked for it -- stays discovery-eligible.
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual(["continuation"]);
+      expect(store.hasPullRequestFollowupWork()).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
   it("PR discovery prefers least-attempted runs and excludes ones that hit the attempt cap", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

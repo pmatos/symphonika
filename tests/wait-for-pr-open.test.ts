@@ -670,4 +670,79 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
       store.close();
     }
   });
+
+  it("does not treat an ancestor's tracked PR as this run's own when this legacy chain's branch diverged from it (issue #745)", async () => {
+    const root = await makeTempRoot();
+    await writeWaitForPrOpenProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      const ancestorBranch = "sym/symphonika/10-legacy-title-before-edit";
+      const continuationBranch = "sym/symphonika/10-wait-for-pr-open-fixture";
+
+      // This chain's own root run opened and tracked its own PR, on its own
+      // branch, before a mid-chain issue-title edit recomputed a later
+      // continuation's branch (pre-ADR-2026-09-04-0837: branch_name is now
+      // inherited once per chain instead of recomputed per attempt).
+      store.createRun({
+        id: "ancestor-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("ancestor-run", "succeeded");
+      store.trackPullRequest({
+        branchName: ancestorBranch,
+        headSha: "old-sha",
+        issueNumber: issue.number,
+        prNumber: 77,
+        prUrl: "https://example.test/pr/77",
+        projectName: "symphonika",
+        runId: "ancestor-run"
+      });
+
+      // A later continuation of the SAME chain -- linked via parentRunId,
+      // not an unrelated redispatch -- ended up on a different branch.
+      store.createWaitingRun({
+        branchName: continuationBranch,
+        currentStateId: "wait_for_pr_open",
+        id: "waiting-run",
+        issue,
+        parentRunId: "ancestor-run",
+        projectName: "symphonika"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      // The ancestor's tracked PR is on a different branch than this run's
+      // own -- an ancestor-chain-only lookup would still find it (same
+      // chain), but branch equality must reject it as not this run's own,
+      // leaving the wait parked instead of reading the ancestor's PR state
+      // as this run's own.
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("waiting");
+      expect(after?.currentStateId).toBe("wait_for_pr_open");
+      expect(
+        githubIssuesApi.getPullRequestFollowupState
+      ).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
 });

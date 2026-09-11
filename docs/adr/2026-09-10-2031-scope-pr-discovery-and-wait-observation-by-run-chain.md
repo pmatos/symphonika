@@ -103,6 +103,25 @@ issue #746 alongside the related "transfer a rediscovered PR to a fresh chain" g
 instances of the same open design question: what run chain should own a tracked PR row after
 `run_id` moves out from under the chain that originally created it.
 
+### Addendum (2026-09-11, issue #745): branch equality retained as defense-in-depth
+
+Both call sites additionally require branch-name equality alongside chain membership:
+
+- `RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION` requires the tracked row's `branch_name` to equal
+  the candidate run's own `branch_name`, in addition to sharing a chain root.
+- `findTrackedPullRequestForRunChain` requires the tracked row's `branch_name` to equal the
+  waiting run's own `branch_name` (read from its own row via `runId`, not a re-plumbed caller
+  parameter — this ADR's removal of `observeWaitPullRequestSignals`'s `branchName` input stands),
+  falling back to chain-membership alone when the waiting run has no recorded branch.
+
+This guards chains whose rows predate this ADR's fix (branch_name inherited once per chain): before
+it, a mid-chain issue-title edit could recompute a continuation's own branch per attempt, diverging
+it from an ancestor's tracked PR that still shares the same chain. Chain-root/chain-membership
+matching alone would treat that ancestor's PR as covering the diverged continuation too. Both
+additions can only narrow the existing chain-scoped matching, never widen it — they cannot reopen
+the branch-reuse bug this ADR fixes, since every current continuation-creation path already
+inherits `branch_name` from its parent and so already satisfies branch equality trivially.
+
 ## Consequences
 
 - A redispatch of an issue whose title has not changed (reusing the same deterministic branch

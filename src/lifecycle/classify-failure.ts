@@ -22,6 +22,13 @@ export type ClassifyFailureInput = {
   // words are appended to them when it wrote any.
   stderrLogPath?: string;
   successWorkspace?: {
+    // When true, a `kind: git` workspace with zero commits ahead of base is
+    // reported as `success` (with `commitsAhead: false`) instead of the
+    // deterministic `no_workspace_changes` failure below, letting a caller
+    // reach its own claim-aware reconciliation instead of being pre-empted
+    // here. Only the Routine Firing path opts in; workspace success
+    // verification for the issue-driven Run lifecycle never sets this.
+    allowZeroCommits?: boolean;
     baseBranch: string;
     headInspectionFailed?: boolean;
     headShaAtStart?: string;
@@ -32,6 +39,10 @@ export type ClassifyFailureInput = {
 export type ClassifiedTerminal = {
   branchAdvancedSinceAttemptStart?: boolean;
   classification?: FailureClassification;
+  // Only ever set on a `kind: "success"` result for a `kind: git` workspace;
+  // the real commits-ahead bit, so a caller doesn't have to re-derive it (or
+  // infer it from `kind` alone) once it flows out of this module.
+  commitsAhead?: boolean;
   kind: "success" | "failed" | "cancelled" | "input_required";
   reason: string;
 };
@@ -149,10 +160,17 @@ async function verifyWorkspaceSuccess(
       return workspaceInspectionFailed();
     }
     if (!(await inspectWorkspaceCommitsAhead(workspace))) {
+      if (workspace.allowZeroCommits !== true) {
+        return {
+          classification: "deterministic",
+          kind: "failed",
+          reason: "no_workspace_changes"
+        };
+      }
       return {
-        classification: "deterministic",
-        kind: "failed",
-        reason: "no_workspace_changes"
+        commitsAhead: false,
+        kind: "success",
+        reason: ""
       };
     }
     const branchAdvancedSinceAttemptStart =
@@ -164,6 +182,7 @@ async function verifyWorkspaceSuccess(
           });
     return {
       branchAdvancedSinceAttemptStart,
+      commitsAhead: true,
       kind: "success",
       reason: ""
     };

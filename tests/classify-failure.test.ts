@@ -68,6 +68,29 @@ describe("classifyFailure", () => {
     expect(result.reason).toBe("no_workspace_changes");
   });
 
+  it("classifies exit code 0 with no commits ahead of base as success when allowZeroCommits is set", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await createGitWorkspaceAtBase({
+      branchName: "sym/symphonika/8-test",
+      workspacePath
+    });
+
+    const result = await classifyFailure({
+      cancelRequested: false,
+      events: [{ type: "process_exit", exitCode: 0 }],
+      redactSecrets: [],
+      successWorkspace: {
+        allowZeroCommits: true,
+        baseBranch: "main",
+        workspacePath
+      }
+    });
+
+    expect(result.kind).toBe("success");
+    expect(result.commitsAhead).toBe(false);
+  });
+
   it("classifies workspace inspection errors on exit code 0 as deterministic failure", async () => {
     const root = await makeTempRoot();
     const result = await classifyFailure({

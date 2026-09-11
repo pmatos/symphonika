@@ -5718,6 +5718,280 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("succeeds an expects_pr routine with an explicit no-action claim and no commits ahead of base (#757)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JNOACTIONEXPECTPR";
+    await createGitWorkspaceAtBase({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "none",
+      status: "no_action",
+      summary: "Found nothing to refactor this pass.",
+      title: "",
+      url: null
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-no-action-expects-pr",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  expectsPr: true,
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(
+        runStore.getRoutineFiring("fire-no-action-expects-pr")
+      ).toMatchObject({
+        commitsAhead: false,
+        outcome: {
+          action: "none",
+          source: "codex",
+          status: "no_action"
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("still fails a non-expects_pr kind: git firing with no commits ahead, even with an explicit no-action claim (#757)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/dependency-update/01JNOACTIONNOPR";
+    await createGitWorkspaceAtBase({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const claim = JSON.stringify({
+      action: "none",
+      status: "no_action",
+      summary: "No dependency updates were available.",
+      title: "",
+      url: null
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-no-action-no-pr-policy",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "dependency-update",
+                  prompt: "Update dependencies.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "dependency-update.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(
+        runStore.getRoutineFiring("fire-no-action-no-pr-policy")
+      ).toMatchObject({
+        commitsAhead: false,
+        state: "failed",
+        terminalReason: "no_workspace_changes"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("still fails an expects_pr kind: git firing with no commits ahead when the provider makes no claim (#757)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JNOCLAIMEXPECTPR";
+    await createGitWorkspaceAtBase({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-no-claim-expects-pr",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  expectsPr: true,
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(
+        runStore.getRoutineFiring("fire-no-claim-expects-pr")
+      ).toMatchObject({
+        commitsAhead: false,
+        state: "failed",
+        terminalReason: "no_workspace_changes"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("protects commits ahead when a kind: git provider fails", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

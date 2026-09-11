@@ -1236,9 +1236,18 @@ the terminal `firing_timeout` classification.
 For `kind: report`, provider exit code 0 succeeds without requiring commits. For `kind: git`, exit
 code 0 applies the same commits-ahead-of-base inspection as §12.1: zero commits fails with
 `no_workspace_changes`, inspection failure fails with `workspace_inspection_failed`, and one or
-more commits succeeds. On the succeeded transition, Symphonika lists every open pull request whose
-head is the firing branch and records its PR number and head SHA. Routine PR discovery is
-informational only: it never enters PR Follow-up, review re-dispatch, or auto-merge.
+more commits succeeds — except when the routine's own `expects_pr` is `true` and its parsed Routine
+Outcome Claim (see below) is a non-`error` `action: "none"`: an explicit claim that there was
+nothing to do is checked ahead of this inspection, and zero commits then succeeds instead of
+failing, so `reconcileRoutineOutcome`'s own claim handling — not this pre-claim classification step —
+decides the persisted outcome (ADR-2026-09-11-1630, amending ADR-2026-09-11-1407). A `kind: git`
+routine with `expects_pr` omitted or `false`, or any firing with no claim, a claim naming a
+different action, or an `error`-status claim, is unaffected and still fails deterministically on zero
+commits. This widening is scoped to the Routine Firing dispatch path; §12.1's issue-driven Run
+lifecycle has no `expects_pr` concept and keeps its unconditional `no_workspace_changes` failure on
+zero commits regardless of any claim. On the succeeded transition, Symphonika lists every open pull
+request whose head is the firing branch and records its PR number and head SHA. Routine PR discovery
+is informational only: it never enters PR Follow-up, review re-dispatch, or auto-merge.
 
 The dispatcher asks every provider for the same Routine Outcome Claim
 `{status, action, url, title, summary}` and parses it only from the final normalized

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const issuesUpdate = vi.fn();
 const issuesCreateComment = vi.fn();
+const pullsGet = vi.fn();
 
 vi.mock("@octokit/rest", () => ({
   Octokit: vi.fn().mockImplementation(function MockOctokit() {
@@ -10,6 +11,9 @@ vi.mock("@octokit/rest", () => ({
         issues: {
           createComment: issuesCreateComment,
           update: issuesUpdate
+        },
+        pulls: {
+          get: pullsGet
         }
       }
     };
@@ -102,6 +106,29 @@ describe("OctokitGitHubIssuesApi.addIssueComment", () => {
         issue_number: 213,
         owner: "pmatos",
         repo: "forseti"
+      })
+    );
+  });
+});
+
+describe("OctokitGitHubIssuesApi.getPullRequest", () => {
+  beforeEach(() => {
+    pullsGet.mockReset().mockResolvedValue({ data: { number: 404 } });
+  });
+
+  it("forwards an abort signal under request, matching the label-write methods", async () => {
+    const controller = new AbortController();
+    await DEFAULT_GITHUB_ISSUES_API.getPullRequest?.({
+      owner: "pmatos",
+      pullNumber: 404,
+      repo: "symphonika",
+      signal: controller.signal,
+      token: "secret"
+    });
+
+    expect(pullsGet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: { signal: controller.signal }
       })
     );
   });

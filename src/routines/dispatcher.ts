@@ -99,6 +99,13 @@ export type DispatchDueRoutinesInput = {
   // started before that work is abandoned. Defaults to
   // ROUTINE_CANCELLATION_SETTLE_MS.
   cancellationSettleMs?: number;
+  // Bounds the direct GitHub PR read verifyRoutineOutcomeClaimUrl issues
+  // after the firing's own timeout_minutes deadline is already cleared
+  // (see dispatcher.ts's deadline.clear() comment above). Non-fatal on
+  // expiry -- an unconfirmed claim just falls through to the caller's
+  // existing branch-scoped evidence. Defaults to
+  // CLAIM_URL_VERIFICATION_TIMEOUT_MS.
+  claimUrlVerificationTimeoutMs?: number;
   configDir: string;
   createFanoutId?: () => string;
   createFiringId?: () => string;
@@ -412,6 +419,9 @@ export function fireRoutineNow(
     ...(input.cancellationSettleMs === undefined
       ? {}
       : { cancellationSettleMs: input.cancellationSettleMs }),
+    ...(input.claimUrlVerificationTimeoutMs === undefined
+      ? {}
+      : { claimUrlVerificationTimeoutMs: input.claimUrlVerificationTimeoutMs }),
     logger: input.logger,
     now: new Date(),
     prepareRoutineWorkspace:
@@ -486,6 +496,15 @@ class RoutineFiringCancelledError extends Error {
 // abandoned, which bounds the time to a terminal row without truncating the
 // evidence an ordinary operator cancel still collects in a second or two.
 const ROUTINE_CANCELLATION_SETTLE_MS = 60_000;
+
+// The firing's own timeout_minutes deadline is deliberately cleared before
+// verifyRoutineOutcomeClaimUrl runs (see the deadline.clear() comment
+// above): rewriting an already-classified succeeded/failed/cancelled
+// outcome to firing_timeout during post-terminal enrichment is exactly what
+// that clear() prevents. A stalled direct GitHub read still has to be
+// bounded somehow, so it gets its own short, independent, non-fatal
+// timeout instead of reusing (or resurrecting) the cleared deadline.
+const CLAIM_URL_VERIFICATION_TIMEOUT_MS = 30_000;
 
 export function synchronizeRoutineTargets(
   input: SynchronizeRoutineTargetsInput
@@ -1074,6 +1093,11 @@ export async function dispatchDueRoutines(
         ...(input.cancellationSettleMs === undefined
           ? {}
           : { cancellationSettleMs: input.cancellationSettleMs }),
+        ...(input.claimUrlVerificationTimeoutMs === undefined
+          ? {}
+          : {
+              claimUrlVerificationTimeoutMs: input.claimUrlVerificationTimeoutMs
+            }),
         logger: input.logger,
         now,
         prepareRoutineWorkspace,
@@ -1291,6 +1315,7 @@ async function deliverReadyRoutineFanouts(
 async function runRoutineFiring(input: {
   activeRuns: ActiveRunRegistry;
   cancellationSettleMs?: number;
+  claimUrlVerificationTimeoutMs?: number;
   configDir: string;
   env: NodeJS.ProcessEnv;
   firingId: string;
@@ -1630,6 +1655,9 @@ async function runRoutineFiring(input: {
                   : undefined,
               logger: input.logger,
               project: input.project,
+              timeoutMs:
+                input.claimUrlVerificationTimeoutMs ??
+                CLAIM_URL_VERIFICATION_TIMEOUT_MS,
               windowStart: githubSnapshotSince
             })
           )
@@ -2256,6 +2284,10 @@ async function verifyRoutineOutcomeClaimUrl(input: {
   issuesSnapshot: RoutineGithubSnapshot["issues"] | undefined;
   logger: Logger | undefined;
   project: RunControllerProjectConfig;
+  // Bounds only the live single-PR GET below, not the issue_opened/
+  // issue_closed branches, which answer from already-captured snapshots and
+  // issue no network call of their own.
+  timeoutMs: number;
   windowStart: string;
 }): Promise<ObservedRoutineAction | null> {
   const claim = input.claim;
@@ -2293,6 +2325,7 @@ async function verifyRoutineOutcomeClaimUrl(input: {
         owner,
         pullNumber: reference.number,
         repo,
+        signal: AbortSignal.timeout(input.timeoutMs),
         token
       });
       if (pullRequest?.number === undefined) {

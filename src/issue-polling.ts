@@ -369,7 +369,8 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       const response = await octokit.rest.pulls.get({
         owner: input.owner,
         pull_number: input.pullNumber,
-        repo: input.repo
+        repo: input.repo,
+        ...requestOption(input)
       });
       return response.data;
     } catch (error) {

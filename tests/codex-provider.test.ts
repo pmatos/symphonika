@@ -183,6 +183,9 @@ describe("Codex JSON-RPC provider", () => {
         threadId: "thread-9"
       }
     });
+    expect(
+      objectField(objectField(requests[3], "params"), "outputSchema")
+    ).toBeUndefined();
 
     expect(events.map((event) => event.raw)).toEqual([
       {
@@ -362,6 +365,40 @@ describe("Codex JSON-RPC provider", () => {
     expect(events.every((event) => typeof event.receivedAt === "string")).toBe(
       true
     );
+  });
+
+  it("reinforces a routine claim schema through turn/start.outputSchema", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
+    const outputSchema = {
+      properties: {
+        status: { enum: ["success", "no_action", "error"], type: "string" }
+      },
+      required: ["status"],
+      type: "object"
+    };
+
+    await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        outputSchema,
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} app-server`,
+          name: "codex"
+        },
+        workspacePath
+      })
+    );
+
+    const requests = readJsonl(await readFile(transcriptPath, "utf8"));
+    expect(
+      objectField(objectField(requests[3], "params"), "outputSchema")
+    ).toEqual(outputSchema);
   });
 
   it("normalizes reasoning item boundaries as timestamped thinking events", async () => {

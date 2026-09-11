@@ -202,6 +202,13 @@ async function* runCodexTurn(
           type: "text"
         }
       ],
+      // Reinforcement, not the contract (ADR 0068): parseRoutineOutcomeClaim
+      // still only reads the turn_completed event. openai/codex#15451 reports
+      // the model can still degrade to malformed text under this field with
+      // tools active; that's no worse than today's unconstrained prose.
+      ...(input.outputSchema === undefined
+        ? {}
+        : { outputSchema: input.outputSchema }),
       threadId
     }
   });

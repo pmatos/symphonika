@@ -110,16 +110,33 @@ Both call sites additionally require branch-name equality alongside chain member
 - `RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION` requires the tracked row's `branch_name` to equal
   the candidate run's own `branch_name`, in addition to sharing a chain root.
 - `findTrackedPullRequestForRunChain` requires the tracked row's `branch_name` to equal the
-  waiting run's own `branch_name` (read from its own row via `runId`, not a re-plumbed caller
-  parameter — this ADR's removal of `observeWaitPullRequestSignals`'s `branchName` input stands),
-  falling back to chain-membership alone when the waiting run has no recorded branch.
+  waiting run's *resolved* branch (read from its own row via `runId`, not a re-plumbed caller
+  parameter — this ADR's removal of `observeWaitPullRequestSignals`'s `branchName` input stands):
+  the nearest non-empty `branch_name` found by walking the waiting run's own row, then its
+  ancestors, up the chain. Falls back to chain-membership alone only when no run anywhere in the
+  chain has a recorded branch.
 
 This guards chains whose rows predate this ADR's fix (branch_name inherited once per chain): before
 it, a mid-chain issue-title edit could recompute a continuation's own branch per attempt, diverging
 it from an ancestor's tracked PR that still shares the same chain. Chain-root/chain-membership
-matching alone would treat that ancestor's PR as covering the diverged continuation too. Both
-additions can only narrow the existing chain-scoped matching, never widen it — they cannot reopen
-the branch-reuse bug this ADR fixes, since every current continuation-creation path already
+matching alone would treat that ancestor's PR as covering the diverged continuation too.
+
+Ancestor resolution (2026-09-11, PR #755 review): matching only the waiting run's own row is not
+enough — a chain can also predate the point where `createWaitingRun` itself started persisting a
+`branch_name` on the waiting row, leaving that one row's `branch_name` NULL even though the run it
+parked from (its immediate parent, which reached this state through workspace prep and so already
+has a branch of its own) has a perfectly good one. Treating a NULL own-row branch as "no information"
+and falling back to chain-membership alone reopens exactly the false match this addendum exists to
+prevent. Walking to the nearest ancestor with a recorded branch closes that gap. The remaining
+fallback — chain-membership alone when *no* run anywhere in the chain has a recorded branch — is
+believed unreachable in practice for this call site (a waiting run's immediate parent cannot reach
+`wait_for_pr_open` without workspace prep setting its own branch first), but is kept rather than
+turned into "no match" because failing open here degrades no worse than before this ADR, while a
+backfill migration to eliminate it outright was judged not worth the schema churn for a case that
+already can't arise through any live code path.
+
+Both additions can only narrow the existing chain-scoped matching, never widen it — they cannot
+reopen the branch-reuse bug this ADR fixes, since every current continuation-creation path already
 inherits `branch_name` from its parent and so already satisfies branch equality trivially.
 
 ## Consequences

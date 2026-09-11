@@ -5855,15 +5855,24 @@ export class RunStore {
   // afterward would still materialize the whole set first -- more work than
   // this bounded, chain-length-only walk needs.
   //
-  // Also requires the tracked row's branch_name to match this run's own
-  // (falling back to chain-membership alone when this run has no recorded
-  // branch) -- defense-in-depth for chains predating ADR-2026-09-04-0837
-  // (branch_name inherited once per chain): before that fix, a mid-chain
-  // issue-title edit could recompute a continuation's own branch, diverging
-  // it from an ancestor's tracked PR that still shares the same chain
-  // (issue #745). Derived from @runId's own row rather than a caller-
-  // supplied branchName parameter -- ADR-2026-09-10-2031 deliberately
-  // removed that parameter, and this run's branch is already on its own row.
+  // Also requires the tracked row's branch_name to match this run's
+  // resolved branch: the nearest non-empty branch_name found by walking
+  // this run's own row, then its ancestors, up the chain (falling back to
+  // chain-membership alone only when no run anywhere in the chain has a
+  // recorded branch) -- defense-in-depth for chains predating
+  // ADR-2026-09-04-0837 (branch_name inherited once per chain): before that
+  // fix, a mid-chain issue-title edit could recompute a continuation's own
+  // branch, diverging it from an ancestor's tracked PR that still shares the
+  // same chain (issue #745). Ancestor resolution (rather than @runId's own
+  // row alone) matters for chains where the waiting row itself predates
+  // ADR-2026-09-04-0837's *own* row started persisting a branch_name: its
+  // branch_name is NULL, but its parent run -- the one that actually parked
+  // it, which reached this state through workspace prep and so already has
+  // a branch of its own -- resolves the run's real branch instead of
+  // wrongly falling back to matching any ancestor's PR by chain membership
+  // alone. Derived from @runId's own row rather than a caller-supplied
+  // branchName parameter -- ADR-2026-09-10-2031 deliberately removed that
+  // parameter, and this run's branch is already on its own row.
   findTrackedPullRequestForRunChain(input: {
     issueNumber: number;
     projectName: string;
@@ -5872,12 +5881,21 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "with recursive chain(id) as (",
-          "  select @runId",
+          "with recursive chain(id, depth) as (",
+          "  select @runId, 0",
           "  union all",
-          "  select r.continuation_parent_run_id from runs r",
+          "  select r.continuation_parent_run_id, chain.depth + 1",
+          "  from runs r",
           "  join chain on r.id = chain.id",
           "  where r.continuation_parent_run_id is not null",
+          "),",
+          "resolved_branch(branch_name) as (",
+          "  select r.branch_name",
+          "  from chain",
+          "  join runs r on r.id = chain.id",
+          "  where r.branch_name is not null and r.branch_name <> ''",
+          "  order by chain.depth asc",
+          "  limit 1",
           ")",
           "select tracked.id, tracked.project_name, tracked.issue_number,",
           "tracked.run_id, tracked.pr_number, tracked.pr_url,",
@@ -5888,13 +5906,12 @@ export class RunStore {
           "tracked.last_followup_run_id, tracked.state,",
           "tracked.last_observed_at, tracked.created_at, tracked.updated_at",
           "from tracked_pull_requests tracked",
-          "left join runs waiting_run on waiting_run.id = @runId",
           "where tracked.project_name = @projectName",
           "and tracked.issue_number = @issueNumber",
           "and tracked.run_id in (select id from chain)",
           "and (",
-          "  waiting_run.branch_name is null or waiting_run.branch_name = '' or",
-          "  tracked.branch_name = waiting_run.branch_name",
+          "  not exists (select 1 from resolved_branch) or",
+          "  tracked.branch_name = (select branch_name from resolved_branch)",
           ")",
           "order by tracked.id desc limit 1"
         ].join(" ")

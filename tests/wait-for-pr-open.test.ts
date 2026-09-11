@@ -15,7 +15,11 @@ import {
   type RunControllerProvidersConfig
 } from "../src/lifecycle/run-controller.js";
 import type { ProviderEvent } from "../src/provider.js";
-import { openRunStore, type RunStore } from "../src/run-store.js";
+import {
+  openRunStore,
+  type RunEvidenceInput,
+  type RunStore
+} from "../src/run-store.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
 
 // Issue #730 root cause #2: implement's completion gate only checks local
@@ -56,6 +60,20 @@ function issueFixture() {
     title: "wait_for_pr_open acceptance fixture",
     updated_at: "2026-09-10T11:00:00Z",
     url: "https://github.com/pmatos/symphonika/issues/10"
+  };
+}
+
+function runEvidenceFixture(branchName: string): RunEvidenceInput {
+  return {
+    branchName,
+    branchRef: `refs/heads/${branchName}`,
+    issueSnapshotPath: "/tmp/issue-snapshot.json",
+    metadataPath: "/tmp/prompt-metadata.json",
+    normalizedLogPath: "/tmp/provider.normalized.jsonl",
+    promptPath: "/tmp/prompt.md",
+    rawLogPath: "/tmp/provider.raw.jsonl",
+    workflowGraphPath: "/tmp/workflow-graph.json",
+    workspacePath: "/tmp/workspace"
   };
 }
 
@@ -741,6 +759,179 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
       expect(
         githubIssuesApi.getPullRequestFollowupState
       ).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("does not fall back to chain membership when the waiting row's own branch is unrecorded but a nearer ancestor's branch is known and differs (issue #745)", async () => {
+    const root = await makeTempRoot();
+    await writeWaitForPrOpenProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      const rootBranch = "sym/symphonika/10-legacy-title-before-edit";
+      const intermediateBranch = "sym/symphonika/10-legacy-title-mid-edit";
+
+      // This chain's root opened and tracked its own PR, on its own branch.
+      store.createRun({
+        id: "root-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("root-run", "succeeded");
+      store.trackPullRequest({
+        branchName: rootBranch,
+        headSha: "old-sha",
+        issueNumber: issue.number,
+        prNumber: 77,
+        prUrl: "https://example.test/pr/77",
+        projectName: "symphonika",
+        runId: "root-run"
+      });
+
+      // A mid-chain continuation diverged to its own branch (pre-ADR-2026-
+      // 09-04-0837 per-attempt recomputation) and reached wait_for_pr_open
+      // through a createWaitingRun call from before this store started
+      // persisting the waiting row's own branch_name -- the row's
+      // branch_name is NULL outright, not merely absent-but-equal.
+      store.createContinuationRun({
+        id: "intermediate-run",
+        issue,
+        parentRunId: "root-run",
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunEvidence(
+        "intermediate-run",
+        runEvidenceFixture(intermediateBranch)
+      );
+      store.updateRunState("intermediate-run", "succeeded");
+      store.createWaitingRun({
+        currentStateId: "wait_for_pr_open",
+        id: "waiting-run",
+        issue,
+        parentRunId: "intermediate-run",
+        projectName: "symphonika"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      // A chain-membership-only lookup (or one that only inspects the
+      // waiting row's own null branch_name) would still find the root's
+      // tracked PR here. Resolving the nearest ancestor's branch -- the
+      // intermediate run's, two attempts closer than the root's -- must
+      // reject it as not this run's own instead of falsely reading its
+      // state.
+      const after = store.getRun("waiting-run");
+      expect(after?.state).toBe("waiting");
+      expect(after?.currentStateId).toBe("wait_for_pr_open");
+      expect(
+        githubIssuesApi.getPullRequestFollowupState
+      ).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("resolves to the nearest ancestor's branch when the waiting row's own branch is unrecorded and the tracked PR matches it (issue #745)", async () => {
+    const root = await makeTempRoot();
+    await writeWaitForPrOpenProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      const rootBranch = "sym/symphonika/10-legacy-title-before-edit";
+      const intermediateBranch = "sym/symphonika/10-legacy-title-mid-edit";
+
+      store.createRun({
+        id: "root-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("root-run", "succeeded");
+      store.trackPullRequest({
+        branchName: rootBranch,
+        headSha: "old-sha",
+        issueNumber: issue.number,
+        prNumber: 77,
+        prUrl: "https://example.test/pr/77",
+        projectName: "symphonika",
+        runId: "root-run"
+      });
+
+      // Same legacy shape as the sibling test above, except the tracked PR
+      // this time belongs to the intermediate run -- the nearest ancestor
+      // that actually has a recorded branch.
+      store.createContinuationRun({
+        id: "intermediate-run",
+        issue,
+        parentRunId: "root-run",
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunEvidence(
+        "intermediate-run",
+        runEvidenceFixture(intermediateBranch)
+      );
+      store.updateRunState("intermediate-run", "succeeded");
+      store.trackPullRequest({
+        branchName: intermediateBranch,
+        headSha: "new-sha",
+        issueNumber: issue.number,
+        prNumber: 88,
+        prUrl: "https://example.test/pr/88",
+        projectName: "symphonika",
+        runId: "intermediate-run"
+      });
+      store.createWaitingRun({
+        currentStateId: "wait_for_pr_open",
+        id: "waiting-run",
+        issue,
+        parentRunId: "intermediate-run",
+        projectName: "symphonika"
+      });
+
+      const githubIssuesApi: GitHubIssuesApi = {
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([])
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      expect(githubIssuesApi.getPullRequestFollowupState).toHaveBeenCalledWith(
+        expect.objectContaining({ pullNumber: 88 })
+      );
     } finally {
       store.close();
     }

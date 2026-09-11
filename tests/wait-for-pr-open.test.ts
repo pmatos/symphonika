@@ -110,6 +110,42 @@ function seedStaleMergedPrChain(
   });
 }
 
+const LEGACY_ROOT_BRANCH = "sym/symphonika/10-legacy-title-before-edit";
+const LEGACY_INTERMEDIATE_BRANCH = "sym/symphonika/10-legacy-title-mid-edit";
+
+// Seeds a root-run -> intermediate-run chain on LEGACY_ROOT_BRANCH and
+// LEGACY_INTERMEDIATE_BRANCH respectively, simulating a pre-ADR-2026-09-04-
+// 0837 title-edit divergence -- shared by the two nearest-ancestor-
+// resolution tests below (issue #745), which differ only in which run's PR
+// gets tracked, in what order, and how the waiting row is parked.
+function seedLegacyDivergedChain(
+  store: RunStore,
+  issue: ReturnType<typeof issueFixture>
+): void {
+  store.createRun({
+    id: "root-run",
+    issue,
+    projectName: "symphonika",
+    providerCommand: DEFAULT_CODEX_COMMAND,
+    providerName: "codex"
+  });
+  store.updateRunState("root-run", "succeeded");
+
+  store.createContinuationRun({
+    id: "intermediate-run",
+    issue,
+    parentRunId: "root-run",
+    projectName: "symphonika",
+    providerCommand: DEFAULT_CODEX_COMMAND,
+    providerName: "codex"
+  });
+  store.updateRunEvidence(
+    "intermediate-run",
+    runEvidenceFixture(LEGACY_INTERMEDIATE_BRANCH)
+  );
+  store.updateRunState("intermediate-run", "succeeded");
+}
+
 function preparedWorkspaceFixture(root: string): PreparedIssueWorkspace {
   const workspacePath = path.join(
     root,
@@ -770,20 +806,16 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       const issue = issueFixture();
-      const rootBranch = "sym/symphonika/10-legacy-title-before-edit";
-      const intermediateBranch = "sym/symphonika/10-legacy-title-mid-edit";
 
-      // This chain's root opened and tracked its own PR, on its own branch.
-      store.createRun({
-        id: "root-run",
-        issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunState("root-run", "succeeded");
+      // The root opened and tracked its own PR, on its own branch. The
+      // intermediate continuation diverged to its own branch (pre-ADR-2026-
+      // 09-04-0837 per-attempt recomputation) and reached wait_for_pr_open
+      // through a createWaitingRun call from before this store started
+      // persisting the waiting row's own branch_name -- the row's
+      // branch_name is NULL outright, not merely absent-but-equal.
+      seedLegacyDivergedChain(store, issue);
       store.trackPullRequest({
-        branchName: rootBranch,
+        branchName: LEGACY_ROOT_BRANCH,
         headSha: "old-sha",
         issueNumber: issue.number,
         prNumber: 77,
@@ -791,25 +823,6 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
         projectName: "symphonika",
         runId: "root-run"
       });
-
-      // A mid-chain continuation diverged to its own branch (pre-ADR-2026-
-      // 09-04-0837 per-attempt recomputation) and reached wait_for_pr_open
-      // through a createWaitingRun call from before this store started
-      // persisting the waiting row's own branch_name -- the row's
-      // branch_name is NULL outright, not merely absent-but-equal.
-      store.createContinuationRun({
-        id: "intermediate-run",
-        issue,
-        parentRunId: "root-run",
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunEvidence(
-        "intermediate-run",
-        runEvidenceFixture(intermediateBranch)
-      );
-      store.updateRunState("intermediate-run", "succeeded");
       store.createWaitingRun({
         currentStateId: "wait_for_pr_open",
         id: "waiting-run",
@@ -858,36 +871,13 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
     try {
       const issue = issueFixture();
-      const rootBranch = "sym/symphonika/10-legacy-title-before-edit";
-      const intermediateBranch = "sym/symphonika/10-legacy-title-mid-edit";
-
-      store.createRun({
-        id: "root-run",
-        issue,
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunState("root-run", "succeeded");
 
       // Same legacy shape as the sibling test above, except the tracked PR
       // this time belongs to the intermediate run -- the nearest ancestor
       // that actually has a recorded branch.
-      store.createContinuationRun({
-        id: "intermediate-run",
-        issue,
-        parentRunId: "root-run",
-        projectName: "symphonika",
-        providerCommand: DEFAULT_CODEX_COMMAND,
-        providerName: "codex"
-      });
-      store.updateRunEvidence(
-        "intermediate-run",
-        runEvidenceFixture(intermediateBranch)
-      );
-      store.updateRunState("intermediate-run", "succeeded");
+      seedLegacyDivergedChain(store, issue);
       store.trackPullRequest({
-        branchName: intermediateBranch,
+        branchName: LEGACY_INTERMEDIATE_BRANCH,
         headSha: "new-sha",
         issueNumber: issue.number,
         prNumber: 88,
@@ -904,7 +894,7 @@ describe("wait_for_pr_open gates implement's handoff on an actual PR (issue #730
       // makes branch-equality the only thing that can produce a match on
       // 88, so this test actually exercises the nearest-ancestor walk.
       store.trackPullRequest({
-        branchName: rootBranch,
+        branchName: LEGACY_ROOT_BRANCH,
         headSha: "old-sha",
         issueNumber: issue.number,
         prNumber: 77,

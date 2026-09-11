@@ -1148,12 +1148,10 @@ const PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE = [
 ].join(" ");
 // Suppresses a run whose chain root already owns a tracked PR; shared by the
 // same two call sites for the same drift reason as the predicate above. The
-// branch_name equality is defense-in-depth for chains predating
-// ADR-2026-09-04-0837 (branch_name inherited once per chain): before that
-// fix, a mid-chain issue-title edit could recompute a continuation's own
-// branch, diverging it from an ancestor's tracked PR that still shares the
-// same chain root (issue #745). It can only narrow this suppression, never
-// widen it -- PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE already requires
+// branch_name equality is defense-in-depth for legacy chains predating
+// ADR-2026-09-04-0837 (see ADR-2026-09-10-2031 addendum, issue #745); it can
+// only narrow this suppression, never widen it, since
+// PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE already requires
 // runs.branch_name to be non-null/non-empty everywhere this applies.
 const RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION = [
   "and not exists (",
@@ -5856,25 +5854,14 @@ export class RunStore {
   // this bounded, chain-length-only walk needs.
   //
   // Also requires the tracked row's branch_name to match this run's
-  // resolved branch: the nearest non-empty branch_name found by walking
-  // this run's own row, then its ancestors, up the chain (falling back to
+  // resolved branch: the nearest non-empty branch_name found by walking this
+  // run's own row, then its ancestors, up the chain -- falling back to
   // chain-membership alone only when no run anywhere in the chain has a
-  // recorded branch) -- defense-in-depth for chains predating
-  // ADR-2026-09-04-0837 (branch_name inherited once per chain): before that
-  // fix, a mid-chain issue-title edit could recompute a continuation's own
-  // branch, diverging it from an ancestor's tracked PR that still shares the
-  // same chain (issue #745). Ancestor resolution (rather than @runId's own
-  // row alone) matters for chains where the waiting row itself predates the
-  // point where createWaitingRun started persisting a branch_name: its own
-  // branch_name is NULL, but a nearer ancestor that reached its state
-  // through workspace prep (not necessarily this row's immediate parent --
-  // a wait-to-wait re-park's immediate parent is itself another waiting
-  // row, so the walk can take more than one hop) already has a branch of
-  // its own, and resolves the run's real branch instead of wrongly falling
-  // back to matching any ancestor's PR by chain membership alone. Derived
-  // from @runId's own row rather than a caller-supplied
-  // branchName parameter -- ADR-2026-09-10-2031 deliberately removed that
-  // parameter, and this run's branch is already on its own row.
+  // recorded branch. Defense-in-depth for legacy chains, and ancestor
+  // resolution rather than @runId's own row alone; see ADR-2026-09-10-2031
+  // addendum ("Ancestor resolution"), issue #745, for why both are needed.
+  // Derived from @runId's own row rather than a caller-supplied branchName
+  // parameter -- that ADR deliberately removed that parameter.
   findTrackedPullRequestForRunChain(input: {
     issueNumber: number;
     projectName: string;

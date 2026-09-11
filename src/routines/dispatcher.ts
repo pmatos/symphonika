@@ -1621,6 +1621,10 @@ async function runRoutineFiring(input: {
               claim,
               env: input.env,
               githubIssuesApi: input.githubIssuesApi,
+              issuesSnapshot:
+                githubAfter?.issuesAvailable === true
+                  ? githubAfter.snapshot.issues
+                  : undefined,
               logger: input.logger,
               project: input.project,
               windowStart: githubSnapshotSince
@@ -2242,6 +2246,7 @@ async function verifyRoutineOutcomeClaimUrl(input: {
   claim: RoutineOutcomeClaim | null;
   env: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi | undefined;
+  issuesSnapshot: RoutineGithubSnapshot["issues"] | undefined;
   logger: Logger | undefined;
   project: RunControllerProjectConfig;
   windowStart: string;
@@ -2288,12 +2293,41 @@ async function verifyRoutineOutcomeClaimUrl(input: {
       }
       return {
         action: "pr",
-        title: pullRequest.title ?? `Pull request #${pullRequest.number}`,
+        title: pullRequestTitle(pullRequest),
         url: pullRequest.html_url ?? claim.url
       };
     }
     if (reference.kind !== "issue") {
       return null;
+    }
+    const windowStartMs = Date.parse(input.windowStart);
+    // Issue observation (unlike PR observation) is already repo-wide and
+    // since-windowed (captureRoutineGithubSnapshot), so any issue actually
+    // opened/closed within this firing's window is necessarily already in
+    // this snapshot — an issue's updated_at can never precede its own
+    // created_at/closed_at, so the `since` filter that built this snapshot
+    // could not have excluded it. A snapshot miss therefore means the issue
+    // predates the window (or doesn't exist), not that the snapshot is
+    // incomplete, so it's safe to answer from the cache without a second
+    // GitHub round-trip.
+    const cachedIssue = input.issuesSnapshot?.[String(reference.number)];
+    if (cachedIssue !== undefined) {
+      if (claim.action === "issue_opened") {
+        if (!(Date.parse(cachedIssue.createdAt) >= windowStartMs)) {
+          return null;
+        }
+      } else if (
+        cachedIssue.state.toLowerCase() !== "closed" ||
+        cachedIssue.closedAt === null ||
+        !(Date.parse(cachedIssue.closedAt) >= windowStartMs)
+      ) {
+        return null;
+      }
+      return {
+        action: claim.action,
+        title: cachedIssue.title,
+        url: cachedIssue.url ?? claim.url
+      };
     }
     const issue = await tryGetIssue(input.githubIssuesApi, {
       issueNumber: reference.number,
@@ -2308,7 +2342,6 @@ async function verifyRoutineOutcomeClaimUrl(input: {
     if (issue?.number === undefined || issue.pull_request !== undefined) {
       return null;
     }
-    const windowStartMs = Date.parse(input.windowStart);
     if (claim.action === "issue_opened") {
       // `Date.parse` returns NaN for a missing/malformed timestamp, and NaN
       // compares false either way round — written as `< windowStartMs` that
@@ -2334,7 +2367,7 @@ async function verifyRoutineOutcomeClaimUrl(input: {
     }
     return {
       action: claim.action,
-      title: issue.title ?? `Issue #${issue.number}`,
+      title: issueTitle(issue),
       url: issue.html_url ?? claim.url
     };
   } catch (error) {
@@ -2349,6 +2382,14 @@ async function verifyRoutineOutcomeClaimUrl(input: {
     );
     return null;
   }
+}
+
+function issueTitle(issue: RawGitHubIssue): string {
+  return issue.title ?? `Issue #${issue.number}`;
+}
+
+function pullRequestTitle(pullRequest: RawGitHubPullRequest): string {
+  return pullRequest.title ?? `Pull request #${pullRequest.number}`;
 }
 
 function routineIssueObservations(
@@ -2369,7 +2410,7 @@ function routineIssueObservations(
       // an issue never falsely counts as newly opened for lack of evidence.
       createdAt: issue.created_at ?? EPOCH_ISO,
       state: issue.state ?? "",
-      title: issue.title ?? `Issue #${issue.number}`,
+      title: issueTitle(issue),
       url: issue.html_url ?? null
     };
   }
@@ -2386,7 +2427,7 @@ function routinePullRequestObservations(
       continue;
     }
     observations[String(pullRequest.number)] = {
-      title: pullRequest.title ?? `Pull request #${pullRequest.number}`,
+      title: pullRequestTitle(pullRequest),
       url: pullRequest.html_url ?? null
     };
   }

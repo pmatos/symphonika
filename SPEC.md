@@ -675,9 +675,10 @@ object fails rendering with terminal reason `prompt_render_error`.
 
 Every rendered Routine prompt also requires a final JSON Routine Outcome Claim with
 `status`, `action`, `url`, `title`, and `summary`. This prompt-level contract applies to every
-provider. Claude additionally receives the same JSON Schema through `--json-schema`, but the
-provider-specific flag is reinforcement rather than the parsing mechanism. A missing, non-JSON, or
-schema-invalid final claim does not fail the firing.
+provider. Claude and Codex additionally receive the same JSON Schema through `--json-schema` and
+`turn/start.outputSchema` respectively, but the provider-specific mechanism is reinforcement rather
+than the parsing mechanism. A missing, non-JSON, or schema-invalid final claim does not fail the
+firing.
 
 The preamble tells the agent:
 

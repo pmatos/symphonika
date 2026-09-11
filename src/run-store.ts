@@ -5605,6 +5605,76 @@ export class RunStore {
     return row !== undefined;
   }
 
+  // Walks forward from runId through every continuation descended from it
+  // and reports whether every run reached is terminal (TERMINAL_RUN_STATES).
+  // Forward-only is deliberate: this answers "is anything still live below
+  // the current owner row" (issue #746), not "who else shares its chain" --
+  // see retirePullRequestDiscoveryChain below for that broader question.
+  private isRunChainFullyTerminal(runId: string): boolean {
+    const alive = this.database
+      .prepare(
+        [
+          "with recursive owner_chain(id) as (",
+          "  select @runId as id",
+          "  union all",
+          "  select r.id from runs r",
+          "  join owner_chain oc on r.continuation_parent_run_id = oc.id",
+          ")",
+          "select 1 as alive from owner_chain",
+          "join runs r on r.id = owner_chain.id",
+          `where r.state not in (${TERMINAL_RUN_STATES_SQL_LIST})`,
+          "limit 1"
+        ].join(" ")
+      )
+      .get({ runId }) as { alive: number } | undefined;
+    return alive === undefined;
+  }
+
+  // Permanently excludes every run sharing runId's chain from future PR
+  // discovery once trackPullRequest reassigns a tracked PR row away from it
+  // (issue #746). RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION suppresses a
+  // candidate only by comparing its chain root against the row's *current*
+  // owner root, so the instant ownership moves, the displaced chain's root
+  // no longer matches and it falls straight back into
+  // listRunsAwaitingPullRequestDiscovery -- rediscovers the same still-open
+  // PR, and (being terminal too) reclaims the row right back, oscillating
+  // with the new owner forever. Walking up to the chain's root and back down
+  // (unlike the forward-only liveness walk above) matters because the row
+  // being displaced can be owned by a *descendant* continuation rather than
+  // its chain's root -- retiring only that continuation's own descendants
+  // would leave the root itself, and any sibling continuations off it,
+  // still eligible to rediscover and reclaim the row. Reuses
+  // pr_discovery_attempts (pinned at the cap) rather than a dedicated column
+  // -- both current callers (listRunsAwaitingPullRequestDiscovery,
+  // hasPullRequestFollowupWork) always use the MAX_PULL_REQUEST_DISCOVERY_
+  // ATTEMPTS default, so this reliably excludes the whole chain; it is not a
+  // real attempt count once pinned this way.
+  private retirePullRequestDiscoveryChain(runId: string, now: string): void {
+    this.database
+      .prepare(
+        [
+          "with recursive up(id) as (",
+          "  select @runId as id",
+          "  union all",
+          "  select r.continuation_parent_run_id from runs r",
+          "  join up on r.id = up.id",
+          "  where r.continuation_parent_run_id is not null",
+          "),",
+          "down(id) as (",
+          "  select up.id from up",
+          "  join runs r on r.id = up.id",
+          "  where r.continuation_parent_run_id is null",
+          "  union all",
+          "  select r.id from runs r",
+          "  join down on r.continuation_parent_run_id = down.id",
+          ")",
+          "update runs set pr_discovery_attempts = @maxAttempts, updated_at = @now",
+          "where id in (select id from down) and pr_discovery_attempts < @maxAttempts"
+        ].join(" ")
+      )
+      .run({ maxAttempts: MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS, now, runId });
+  }
+
   trackPullRequest(input: {
     branchName: string;
     headSha: string;
@@ -5615,61 +5685,83 @@ export class RunStore {
     runId: string;
   }): void {
     const now = timestamp();
-    this.database
-      .prepare(
-        [
-          // Walks forward from the existing tracked row's own run_id (if
-          // any) through every continuation descended from it, so the
-          // update below can tell whether that owner chain is still live
-          // anywhere -- not just at the owner run itself, which is always
-          // terminal ('succeeded') by construction (issue #746).
-          "with recursive owner_chain(id) as (",
-          "  select run_id from tracked_pull_requests",
-          "  where project_name = @project_name and pr_number = @pr_number",
-          "  union all",
-          "  select r.id from runs r",
-          "  join owner_chain oc on r.continuation_parent_run_id = oc.id",
-          ")",
-          "insert into tracked_pull_requests (",
-          "project_name, issue_number, run_id, pr_number, pr_url, branch_name,",
-          "head_sha_at_dispatch, last_seen_head_sha, state, last_observed_at,",
-          "created_at, updated_at",
-          ") values (",
-          "@project_name, @issue_number, @run_id, @pr_number, @pr_url, @branch_name,",
-          "@head_sha_at_dispatch, @last_seen_head_sha, 'open', @last_observed_at,",
-          "@created_at, @updated_at",
-          ")",
-          "on conflict(project_name, pr_number) do update set",
-          // Reassign run_id to the rediscovering candidate only once every
-          // run in the existing owner's chain has gone terminal -- see the
-          // comment below this method and ADR-2026-09-10-2031's "Known gap"
-          // section. A live descendant (e.g. parked at wait_for_pr_open)
-          // can still be depending on this row's current ownership, so
-          // clobbering it unconditionally would strand that chain instead
-          // of the fresh one.
-          `run_id = case when not exists (select 1 from owner_chain oc join runs r on r.id = oc.id where r.state not in (${TERMINAL_RUN_STATES_SQL_LIST})) then excluded.run_id else tracked_pull_requests.run_id end,`,
-          "issue_number = excluded.issue_number,",
-          "pr_url = excluded.pr_url,",
-          "branch_name = excluded.branch_name,",
-          "last_seen_head_sha = excluded.last_seen_head_sha,",
-          "state = 'open',",
-          "last_observed_at = excluded.last_observed_at,",
-          "updated_at = excluded.updated_at"
-        ].join(" ")
-      )
-      .run({
-        branch_name: input.branchName,
-        created_at: now,
-        head_sha_at_dispatch: input.headSha,
-        issue_number: input.issueNumber,
-        last_observed_at: now,
-        last_seen_head_sha: input.headSha,
-        pr_number: input.prNumber,
-        pr_url: input.prUrl,
-        project_name: input.projectName,
-        run_id: input.runId,
-        updated_at: now
-      });
+    const upsert = this.database.transaction((): void => {
+      const existing = this.database
+        .prepare(
+          "select run_id from tracked_pull_requests where project_name = @project_name and pr_number = @pr_number"
+        )
+        .get({
+          pr_number: input.prNumber,
+          project_name: input.projectName
+        }) as { run_id: string } | undefined;
+
+      // Reassign run_id to the rediscovering candidate only once every run
+      // in the existing owner's chain has gone terminal -- see
+      // isRunChainFullyTerminal and ADR-2026-09-10-2031's "Known gap"
+      // section. A live descendant (e.g. parked at wait_for_pr_open) can
+      // still be depending on this row's current ownership, so clobbering
+      // it unconditionally would strand that chain instead of the fresh
+      // one. Both production callers (pull-request-followup.ts's discovery
+      // loop, gated by listRunsAwaitingPullRequestDiscovery's root-equality
+      // suppression, and daemon.ts's adopt-pr flow, which always passes a
+      // brand-new run_id with no prior chain) only ever pass a runId whose
+      // chain root already differs from the existing owner's, so comparing
+      // run_id here is enough -- no separate root comparison is needed.
+      const reassigning =
+        existing !== undefined &&
+        existing.run_id !== input.runId &&
+        this.isRunChainFullyTerminal(existing.run_id);
+      const ownerRunId = reassigning ? input.runId : undefined;
+
+      this.database
+        .prepare(
+          [
+            "insert into tracked_pull_requests (",
+            "project_name, issue_number, run_id, pr_number, pr_url, branch_name,",
+            "head_sha_at_dispatch, last_seen_head_sha, state, last_observed_at,",
+            "created_at, updated_at",
+            ") values (",
+            "@project_name, @issue_number, @run_id, @pr_number, @pr_url, @branch_name,",
+            "@head_sha_at_dispatch, @last_seen_head_sha, 'open', @last_observed_at,",
+            "@created_at, @updated_at",
+            ")",
+            "on conflict(project_name, pr_number) do update set",
+            "run_id = coalesce(@owner_run_id, tracked_pull_requests.run_id),",
+            // Ownership transfer must also clear last_followup_run_id --
+            // otherwise dispatchReviewFollowupIfNeeded's `lastFollowupRunId
+            // ?? runId` fallback keeps preferring the retired donor chain as
+            // parentRunId, re-parenting the next dispatch onto it instead of
+            // the new owner (issue #746).
+            "last_followup_run_id = case when @owner_run_id is not null then null else tracked_pull_requests.last_followup_run_id end,",
+            "issue_number = excluded.issue_number,",
+            "pr_url = excluded.pr_url,",
+            "branch_name = excluded.branch_name,",
+            "last_seen_head_sha = excluded.last_seen_head_sha,",
+            "state = 'open',",
+            "last_observed_at = excluded.last_observed_at,",
+            "updated_at = excluded.updated_at"
+          ].join(" ")
+        )
+        .run({
+          branch_name: input.branchName,
+          created_at: now,
+          head_sha_at_dispatch: input.headSha,
+          issue_number: input.issueNumber,
+          last_observed_at: now,
+          last_seen_head_sha: input.headSha,
+          owner_run_id: ownerRunId ?? null,
+          pr_number: input.prNumber,
+          pr_url: input.prUrl,
+          project_name: input.projectName,
+          run_id: input.runId,
+          updated_at: now
+        });
+
+      if (existing !== undefined && reassigning) {
+        this.retirePullRequestDiscoveryChain(existing.run_id, now);
+      }
+    });
+    upsert();
   }
 
   // trackPullRequest's own upsert reassigns run_id on conflict only once the
@@ -5687,7 +5779,7 @@ export class RunStore {
   }): void {
     this.database
       .prepare(
-        "update tracked_pull_requests set run_id = ?, updated_at = ? where project_name = ? and pr_number = ?"
+        "update tracked_pull_requests set run_id = ?, last_followup_run_id = null, updated_at = ? where project_name = ? and pr_number = ?"
       )
       .run(input.runId, timestamp(), input.projectName, input.prNumber);
   }

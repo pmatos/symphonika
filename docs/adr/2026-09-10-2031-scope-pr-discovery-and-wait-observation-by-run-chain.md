@@ -106,6 +106,30 @@ considers `succeeded` runs — so a check of the owner run alone would reassign 
 reintroducing the exact hazard this hedge exists to avoid: a still-live descendant (e.g. parked at
 `wait_for_pr_open`) depending on that ownership.
 
+Reassigning away from a fully terminal donor reintroduces the same root-equality gap described
+below for `reassignTrackedPullRequestRun`, but automatically and repeatably: root-equality
+suppression only protects the row's *current* owner, so the instant ownership moves, the donor's
+root no longer matches and it falls back into `listRunsAwaitingPullRequestDiscovery` — rediscovers
+the same still-open PR, and (being terminal too) reclaims the row right back, oscillating with the
+new owner every poll tick, forever, with neither chain's `pr_discovery_attempts` ever advancing (it
+is only incremented on the "PR not found" path). `trackPullRequest` now closes this for its own
+conflict path by retiring the displaced donor at transfer time: every run sharing the donor's chain
+root — walked up to the root and back down, not just forward from the owner row, since the owner
+row can be a descendant continuation rather than the root itself — has `pr_discovery_attempts`
+pinned at `MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS`, permanently excluding it from
+`PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE`. Both current callers of that predicate
+(`listRunsAwaitingPullRequestDiscovery`, `hasPullRequestFollowupWork`) always use the default cap,
+so this reliably retires the chain; it is a pinned sentinel, not a real attempt count, once used
+this way.
+
+Reassignment must also clear `last_followup_run_id`, not just `run_id`. That column caches the most
+recent review-dispatch run so `dispatchReviewFollowupIfNeeded` can parent the next dispatch onto it
+(falling back to `run_id` only when unset); left pointing at the retired donor chain after transfer,
+it would re-parent the next dispatch onto that dead chain instead of the new owner, and
+`findTrackedPullRequestForRunChain` — scoped to the new owner's chain — would never see the
+resulting run. Both `trackPullRequest`'s conflict path and `reassignTrackedPullRequestRun` clear it
+whenever `run_id` moves.
+
 ### Known gap: `reassignTrackedPullRequestRun` still breaks the root-equality invariant
 
 `RunStore.reassignTrackedPullRequestRun`, called from `daemon.ts`'s adopt-pr flow to move a

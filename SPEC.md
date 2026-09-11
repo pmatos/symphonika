@@ -1252,9 +1252,13 @@ whose head is the firing's own deterministic branch. For a succeeded `kind: git`
 names a `pr`, `issue_opened`, or `issue_closed` action the snapshot didn't already confirm,
 Symphonika additionally looks the claim's own `url` up directly against the Project's configured
 repository — one REST read by number, refusing any URL outside that repository — before treating the
-claim as unconfirmed. This lets a real action taken from a branch other than the firing's own (for
-example a delegated skill that adopts a different branch) still be confirmed. See
-ADR-2026-09-11-1001, amending ADR 0068 rules 2 and 4.
+claim as unconfirmed. An `issue_opened`/`issue_closed` claim confirmed this way must also have its
+`created_at`/`closed_at` fall within the firing's own window, the same bound the branch-scoped
+snapshot already applies, so a stale or hallucinated URL naming a long pre-existing issue is refused
+rather than confirmed on existence alone; a `pr` claim has no such window since there is no "before"
+state for a branch this firing never observed. This lets a real action taken from a branch other than
+the firing's own (for example a delegated skill that adopts a different branch) still be confirmed.
+See ADR-2026-09-11-1001, amending ADR 0068 rules 2 and 4.
 
 One pure reconciliation step persists a canonical result with `verified` and `source`. An observed
 GitHub action wins over an absent, error, no-action, or commit claim and is sourced to `gh`. A

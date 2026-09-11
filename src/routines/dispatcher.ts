@@ -1613,14 +1613,17 @@ async function runRoutineFiring(input: {
     const claimUrlVerificationPending: Promise<ObservedRoutineAction | null> =
       outcome.kind === "succeeded" &&
       input.routine.kind === "git" &&
-      githubObservation.action?.action !== claim?.action
+      claim !== null &&
+      claim.status !== "error" &&
+      githubObservation.action?.action !== claim.action
         ? cancellation.race(
             verifyRoutineOutcomeClaimUrl({
               claim,
               env: input.env,
               githubIssuesApi: input.githubIssuesApi,
               logger: input.logger,
-              project: input.project
+              project: input.project,
+              windowStart: githubSnapshotSince
             })
           )
         : Promise.resolve(null);
@@ -2225,8 +2228,15 @@ function routineGithubObservation(
 // action taken from a different branch (see #748) is otherwise invisible to
 // it. Scoped to the firing's own configured owner/repo by
 // parseGithubClaimUrl, so a claim can't trigger a lookup against an
-// unrelated repository. Errors and "not found" both return null — a claim
-// this can't confirm is left for the caller's existing branch-scoped
+// unrelated repository. A `pr` claim is confirmed by the pull request's mere
+// existence — there's no reliable "before" state for a branch this firing
+// never observed, so this matches the branch-scoped diff's own bar for PRs.
+// An `issue_opened`/`issue_closed` claim additionally requires the issue's
+// own created_at/closed_at to fall within this firing's window (mirroring
+// diffRoutineGithubSnapshots' equivalent windowStart check), so a stale or
+// hallucinated URL naming an issue that predates this firing is refuted
+// rather than rubber-stamped. Errors and "not found" both return null — a
+// claim this can't confirm is left for the caller's existing branch-scoped
 // evidence to decide, not treated as refuted.
 async function verifyRoutineOutcomeClaimUrl(input: {
   claim: RoutineOutcomeClaim | null;
@@ -2234,6 +2244,7 @@ async function verifyRoutineOutcomeClaimUrl(input: {
   githubIssuesApi: GitHubIssuesApi | undefined;
   logger: Logger | undefined;
   project: RunControllerProjectConfig;
+  windowStart: string;
 }): Promise<ObservedRoutineAction | null> {
   const claim = input.claim;
   if (
@@ -2255,6 +2266,10 @@ async function verifyRoutineOutcomeClaimUrl(input: {
   }
   const token = resolveEnvBackedValue(tokenConfig, input.env);
   if (token === undefined) {
+    input.logger?.warn(
+      { project: input.project.name },
+      "symphonika routine claim URL verification token unavailable"
+    );
     return null;
   }
   try {
@@ -2293,11 +2308,29 @@ async function verifyRoutineOutcomeClaimUrl(input: {
     if (issue?.number === undefined || issue.pull_request !== undefined) {
       return null;
     }
-    if (
-      claim.action === "issue_closed" &&
-      issue.state?.toLowerCase() !== "closed"
-    ) {
-      return null;
+    const windowStartMs = Date.parse(input.windowStart);
+    if (claim.action === "issue_opened") {
+      // `Date.parse` returns NaN for a missing/malformed timestamp, and NaN
+      // compares false either way round — written as `< windowStartMs` that
+      // would silently confirm the claim instead of refusing it, so this
+      // mirrors diffRoutineGithubSnapshots' own `>= windowStart` polarity and
+      // negates the whole comparison instead.
+      if (
+        issue.created_at === undefined ||
+        issue.created_at === null ||
+        !(Date.parse(issue.created_at) >= windowStartMs)
+      ) {
+        return null;
+      }
+    } else if (claim.action === "issue_closed") {
+      if (
+        issue.state?.toLowerCase() !== "closed" ||
+        issue.closed_at === undefined ||
+        issue.closed_at === null ||
+        !(Date.parse(issue.closed_at) >= windowStartMs)
+      ) {
+        return null;
+      }
     }
     return {
       action: claim.action,

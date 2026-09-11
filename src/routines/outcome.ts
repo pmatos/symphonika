@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { sameIssueRepository } from "../issue-polling.js";
 import type {
   AgentProviderName,
   NormalizedProviderEvent
@@ -152,8 +153,10 @@ export function parseGithubClaimUrl(
   }
   const [, matchedOwner, matchedRepo, matchedKind, matchedNumber] = match;
   if (
-    matchedOwner!.toLowerCase() !== owner.toLowerCase() ||
-    matchedRepo!.toLowerCase() !== repo.toLowerCase()
+    !sameIssueRepository(
+      { owner: matchedOwner!, repo: matchedRepo! },
+      { owner, repo }
+    )
   ) {
     return null;
   }

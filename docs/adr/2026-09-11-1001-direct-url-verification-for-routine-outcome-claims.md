@@ -38,10 +38,17 @@ configured repository before rule 4 gets to discard it.
 - `verifyRoutineOutcomeClaimUrl` (`src/routines/dispatcher.ts`) resolves that reference with one
   direct GitHub read: `GitHubIssuesApi.getPullRequest` (new; REST `pulls.get`) for a `pr` claim, or
   the existing `getIssue` for `issue_opened` / `issue_closed`. A `pr` claim is confirmed by the pull
-  request's mere existence, matching the existing branch-scoped diff's own bar. An `issue_closed`
-  claim additionally requires the issue's current `state` to be `closed`, so a claim of "closed" for
-  an issue that's actually still open is refuted, not rubber-stamped. Any lookup failure (network
-  error, 404, disabled API method, missing tracker/token) returns `null` — the caller's existing
+  request's mere existence: there is no "before" state for a branch this firing never observed, so a
+  time-window check isn't feasible here the way it is for issues below, and a legitimate claim can
+  also cover a skill pushing to an *existing* PR from an earlier firing (`created_at` predating this
+  window), which a window check would wrongly refute. An `issue_opened` claim additionally requires
+  the issue's `created_at`, and an `issue_closed` claim its `closed_at`, to fall within this firing's
+  window (`githubSnapshotSince`) — mirroring `diffRoutineGithubSnapshots`' own `windowStart` check —
+  so a stale or hallucinated claim naming a real but long pre-existing (or long-closed) issue in the
+  Project's own repository is refuted rather than rubber-stamped just because the issue exists.
+  `issue_closed` also still requires the issue's current `state` to be `closed`, so a claim of
+  "closed" for an issue that's actually still open is refuted too. Any lookup failure (network error,
+  404, disabled API method, missing tracker/token) returns `null` — the caller's existing
   branch-scoped evidence and rule 4 fallback are unchanged.
 - The dispatcher only performs this second check when it's needed: `githubObservation.action?.action
   !== claim?.action`, `outcome.kind === "succeeded"` (rule 4's own precondition — a failed or
@@ -81,3 +88,10 @@ configured repository before rule 4 gets to discard it.
 - A malicious or buggy claim naming a URL outside the Project's own configured repository can never
   trigger a lookup: `parseGithubClaimUrl` refuses to match it, so the existing branch-scoped/git
   fallback decides the outcome exactly as before this change.
+- A `pr` claim naming a real, but otherwise unrelated, PR already open in the Project's own
+  repository (a hallucinated number, or a stale value carried over from a previous firing's prompt
+  context) can still be confirmed, since existence is the only bar available for an off-branch PR.
+  The root-cause fix — making PR observation repo-wide and time-boxed the way issue observation
+  already is (`captureRoutineGithubSnapshot` currently calls `listPullRequestsForBranch`, not a
+  repo-wide `since`-bounded list) — is out of scope here; this ADR only adds a second evidence path
+  alongside the existing branch-scoped one, it does not generalize it.

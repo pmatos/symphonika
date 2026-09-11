@@ -782,6 +782,37 @@ describe("Routine Outcome reconciliation", () => {
       ).toBeNull();
     });
 
+    it("rejects a noncanonical github.com origin, credentials, or query/hash suffix (#751)", () => {
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com:444/pmatos/forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+      expect(
+        parseGithubClaimUrl(
+          "https://user:pass@github.com/pmatos/forseti/pull/267",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com/pmatos/forseti/pull/267?x=1",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+      expect(
+        parseGithubClaimUrl(
+          "https://github.com/pmatos/forseti/pull/267#frag",
+          "pmatos",
+          "forseti"
+        )
+      ).toBeNull();
+    });
+
     it("rejects a malformed URL", () => {
       expect(parseGithubClaimUrl("not a url", "pmatos", "forseti")).toBeNull();
     });

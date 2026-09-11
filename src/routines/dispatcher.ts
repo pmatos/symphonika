@@ -20,7 +20,6 @@ import {
 } from "../lifecycle/provider-scratch.js";
 import {
   resolveEnvBackedValue,
-  tryGetIssue,
   tryGetPullRequest,
   tryListIssues,
   tryListPullRequestsForBranch,
@@ -2237,15 +2236,18 @@ function routineGithubObservation(
 // it. Scoped to the firing's own configured owner/repo by
 // parseGithubClaimUrl, so a claim can't trigger a lookup against an
 // unrelated repository. A `pr` claim is confirmed by the pull request's mere
-// existence — there's no reliable "before" state for a branch this firing
-// never observed, so this matches the branch-scoped diff's own bar for PRs.
-// An `issue_opened`/`issue_closed` claim additionally requires the issue's
-// own created_at/closed_at to fall within this firing's window (mirroring
-// diffRoutineGithubSnapshots' equivalent windowStart check), so a stale or
-// hallucinated URL naming an issue that predates this firing is refuted
-// rather than rubber-stamped. Errors and "not found" both return null — a
-// claim this can't confirm is left for the caller's existing branch-scoped
-// evidence to decide, not treated as refuted.
+// existence via a fresh single-PR GET — there's no reliable "before" state
+// for a branch this firing never observed, so this matches the
+// branch-scoped diff's own bar for PRs. An `issue_opened`/`issue_closed`
+// claim, by contrast, is answered only from captureRoutineGithubSnapshot's
+// own before/after issue snapshots (never a fresh GET — see
+// confirmIssueClaimAction below for why), applying the same
+// absent-from-before (or not-already-closed-there) bar
+// diffRoutineGithubSnapshots itself uses, so a stale or hallucinated URL
+// naming an issue that predates this firing is refuted rather than
+// rubber-stamped. Errors and "not found" both return null — a claim this
+// can't confirm is left for the caller's existing branch-scoped evidence to
+// decide, not treated as refuted.
 async function verifyRoutineOutcomeClaimUrl(input: {
   beforeIssuesSnapshot: RoutineGithubSnapshot["issues"] | undefined;
   claim: RoutineOutcomeClaim | null;
@@ -2305,73 +2307,40 @@ async function verifyRoutineOutcomeClaimUrl(input: {
     if (reference.kind !== "issue") {
       return null;
     }
-    // `windowStart` is the same broad pagination cutoff
-    // diffRoutineGithubSnapshots uses (githubSnapshotSince), not this
-    // firing's own start, so a timestamp check alone would also confirm an
-    // issue opened/closed hours before this firing began but still inside
-    // that rolling window. diffRoutineGithubSnapshots' actual protection
-    // against that is requiring absence from the *before* snapshot (or, for
-    // a close, that it wasn't already closed there) — mirrored here via
-    // confirmIssueClaimAction. Without a before-snapshot there is no way to
-    // tell this firing's own action from a stale one, so the claim is left
-    // unconfirmed rather than risk a false positive.
-    if (input.beforeIssuesSnapshot === undefined) {
+    // Answered from captureRoutineGithubSnapshot's own before/after issue
+    // snapshots only — never a fresh single-issue GET. Those snapshots are
+    // each bound to a specific, recorded capture time; a live GET has no
+    // such bound; performed here (after githubAfter and PR discovery), it
+    // could observe an issue opened/closed in the gap between the
+    // after-snapshot's capture and this very call, which is real but did not
+    // happen during this firing's recorded observation window. `windowStart`
+    // is also only the broad pagination cutoff diffRoutineGithubSnapshots
+    // uses (githubSnapshotSince), not this firing's own start, so a
+    // timestamp check alone would additionally confirm an issue opened or
+    // closed hours before this firing began but still inside that rolling
+    // window. diffRoutineGithubSnapshots' actual protection against both is
+    // requiring absence from the *before* snapshot (or, for a close, that it
+    // wasn't already closed there) — mirrored here via
+    // confirmIssueClaimAction. Either snapshot missing, or the issue simply
+    // absent from the after one (it predates the window, or wasn't observed
+    // by it), leaves the claim unconfirmed rather than risk a false
+    // positive.
+    if (
+      input.beforeIssuesSnapshot === undefined ||
+      input.issuesSnapshot === undefined
+    ) {
+      return null;
+    }
+    const cachedIssue = input.issuesSnapshot[String(reference.number)];
+    if (cachedIssue === undefined) {
       return null;
     }
     const beforeIssue = input.beforeIssuesSnapshot[String(reference.number)];
-    const windowStartMs = Date.parse(input.windowStart);
-    // Issue observation (unlike PR observation) is already repo-wide and
-    // since-windowed (captureRoutineGithubSnapshot), so any issue actually
-    // opened/closed within this firing's window is necessarily already in
-    // this snapshot — an issue's updated_at can never precede its own
-    // created_at/closed_at, so the `since` filter that built this snapshot
-    // could not have excluded it. A snapshot miss therefore means the issue
-    // predates the window (or doesn't exist), not that the snapshot is
-    // incomplete, so it's safe to answer from the cache without a second
-    // GitHub round-trip.
-    const cachedIssue = input.issuesSnapshot?.[String(reference.number)];
-    if (cachedIssue !== undefined) {
-      const confirmed = confirmIssueClaimAction(
-        claim.action,
-        cachedIssue,
-        beforeIssue,
-        windowStartMs
-      );
-      if (confirmed === null) {
-        return null;
-      }
-      return {
-        action: claim.action,
-        title: confirmed.title,
-        url: confirmed.url ?? claim.url
-      };
-    }
-    const issue = await tryGetIssue(input.githubIssuesApi, {
-      issueNumber: reference.number,
-      owner,
-      repo,
-      token
-    });
-    // GitHub's issues API also returns pull requests (marked by
-    // `pull_request`); routineIssueObservations already excludes those from
-    // the branch-scoped diff, so a claim's `/issues/N` URL that actually
-    // resolves to a PR must not be treated as an issue reference here either.
-    if (issue?.number === undefined || issue.pull_request !== undefined) {
-      return null;
-    }
     const confirmed = confirmIssueClaimAction(
       claim.action,
-      {
-        closedAt: issue.closed_at ?? null,
-        // A missing created_at is treated as "always predates the window",
-        // matching routineIssueObservations' own convention.
-        createdAt: issue.created_at ?? EPOCH_ISO,
-        state: issue.state ?? "",
-        title: issueTitle(issue),
-        url: issue.html_url ?? null
-      },
+      cachedIssue,
       beforeIssue,
-      windowStartMs
+      Date.parse(input.windowStart)
     );
     if (confirmed === null) {
       return null;

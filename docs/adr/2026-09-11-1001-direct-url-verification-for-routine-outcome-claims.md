@@ -35,30 +35,33 @@ configured repository before rule 4 gets to discard it.
   only a `https://github.com/<owner>/<repo>/(pull|issues)/<number>` URL matching the firing
   Project's own configured `owner`/`repo` (case-insensitively). Any other host, repository, or path
   shape returns `null` — a claim can never trigger a lookup against an unrelated repository.
-- `verifyRoutineOutcomeClaimUrl` (`src/routines/dispatcher.ts`) resolves that reference with one
-  direct GitHub read: `GitHubIssuesApi.getPullRequest` (new; REST `pulls.get`) for a `pr` claim, or
-  the existing `getIssue` for `issue_opened` / `issue_closed`. A `pr` claim is confirmed by the pull
-  request's mere existence: there is no "before" state for a branch this firing never observed, so a
-  time-window check isn't feasible here the way it is for issues below, and a legitimate claim can
-  also cover a skill pushing to an *existing* PR from an earlier firing (`created_at` predating this
-  window), which a window check would wrongly refute. An `issue_opened`/`issue_closed` claim is
-  checked with `confirmIssueClaimAction`, which mirrors `diffRoutineGithubSnapshots`' own
-  `newlyOpenedIssue`/`newlyClosedIssue` predicates rather than a timestamp alone:
-  `githubSnapshotSince` is a broad rolling pagination cutoff (`now - 24h`), not this firing's own
-  start, so an issue actually opened or closed hours before this firing began — but still inside that
-  24h window — would otherwise pass a `createdAt`/`closedAt >= githubSnapshotSince` check alone. The
-  same before-snapshot `captureRoutineGithubSnapshot` already captures for the branch-scoped diff is
-  reused here: an `issue_opened` claim additionally requires the issue be absent from that
-  before-snapshot, and an `issue_closed` claim additionally requires it not already be `closed` there
-  (or, if absent from before entirely, that its `closed_at` still falls within the window) — refuting
-  a stale or hallucinated claim naming a real but long pre-existing (or long-closed, or
-  already-closed-before-this-firing) issue in the Project's own repository, rather than rubber-stamping
-  it just because the issue exists and its timestamp happens to fall in the rolling window. When the
-  before-snapshot isn't available at all, the claim is left unconfirmed rather than guessed at.
-  `issue_closed` also still requires the issue's current `state` to be `closed`, so a claim of
-  "closed" for an issue that's actually still open is refuted too. Any lookup failure (network error,
-  404, disabled API method, missing tracker/token) returns `null` — the caller's existing
-  branch-scoped evidence and rule 4 fallback are unchanged.
+- `verifyRoutineOutcomeClaimUrl` (`src/routines/dispatcher.ts`) resolves that reference against a
+  `pr` claim with one direct GitHub read (`GitHubIssuesApi.getPullRequest`, new; REST `pulls.get`),
+  confirmed by the pull request's mere existence: there is no "before" state for a branch this firing
+  never observed, so a time-window check isn't feasible here the way it is for issues below, and a
+  legitimate claim can also cover a skill pushing to an *existing* PR from an earlier firing
+  (`created_at` predating this window), which a window check would wrongly refute.
+  An `issue_opened`/`issue_closed` claim, by contrast, is answered only from
+  `captureRoutineGithubSnapshot`'s own before/after issue snapshots — never a fresh single-issue GET.
+  A live GET has no fixed capture boundary; performed after the after-snapshot and PR discovery, it
+  could observe an issue opened/closed in that gap, which is real but did not happen during this
+  firing's *recorded* observation window (see issue #751 review discussion). Issue confirmation uses
+  `confirmIssueClaimAction`, mirroring `diffRoutineGithubSnapshots`' own
+  `newlyOpenedIssue`/`newlyClosedIssue` predicates rather than a timestamp alone: `githubSnapshotSince`
+  is a broad rolling pagination cutoff (`now - 24h`), not this firing's own start, so an issue actually
+  opened or closed hours before this firing began — but still inside that 24h window — would otherwise
+  pass a `createdAt`/`closedAt >= githubSnapshotSince` check alone. An `issue_opened` claim additionally
+  requires the issue be absent from the before-snapshot, and an `issue_closed` claim additionally
+  requires it not already be `closed` there (or, if absent from before entirely, that its `closed_at`
+  still falls within the window) — refuting a stale or hallucinated claim naming a real but long
+  pre-existing (or long-closed, or already-closed-before-this-firing) issue in the Project's own
+  repository, rather than rubber-stamping it just because the issue exists and its timestamp happens
+  to fall in the rolling window. When either snapshot isn't available, or the claimed issue is simply
+  absent from the after-snapshot (it predates the window, or wasn't captured by it), the claim is left
+  unconfirmed rather than guessed at from live state. `issue_closed` also still requires the issue's
+  snapshot `state` to be `closed`, so a claim of "closed" for an issue that's actually still open is
+  refuted too. Any lookup failure (network error, 404, disabled API method, missing tracker/token)
+  returns `null` — the caller's existing branch-scoped evidence and rule 4 fallback are unchanged.
 - The dispatcher only performs this second check when it's needed: `githubObservation.action?.action
   !== claim?.action`, `outcome.kind === "succeeded"` (rule 4's own precondition — a failed or
   cancelled firing can never reach rule 4), `input.routine.kind === "git"` (a `kind: report` routine

@@ -2612,13 +2612,23 @@ describe("RoutineFiringDispatcher", () => {
       }),
       validate: vi.fn().mockResolvedValue(undefined)
     } satisfies AgentProvider;
-    const getIssue = vi.fn().mockResolvedValue({
-      closed_at: "2026-05-22T09:59:30.000Z",
-      html_url: "https://github.com/pmatos/alpha/issues/17",
-      number: 17,
-      state: "closed",
-      title: "Superseded dependency issue"
-    });
+    const getIssue = vi.fn();
+    // Empty on the before-capture call (this issue wasn't already closed
+    // when the firing started) and containing the closed issue on the
+    // after-capture call: the direct-URL fallback answers only from these
+    // two snapshots, never a fresh single-issue GET (see #751).
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          closed_at: "2026-05-22T09:59:30.000Z",
+          html_url: "https://github.com/pmatos/alpha/issues/17",
+          number: 17,
+          state: "closed",
+          title: "Superseded dependency issue"
+        }
+      ]);
     const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
 
     try {
@@ -2630,12 +2640,7 @@ describe("RoutineFiringDispatcher", () => {
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi: {
           getIssue,
-          // Empty on both the before- and after-capture calls: this issue
-          // didn't exist yet when this firing started, so the direct-URL
-          // fallback's before-snapshot check (absence required) is satisfied
-          // and it falls through to the single-issue GET being asserted on
-          // below.
-          listIssues: vi.fn().mockResolvedValue([]),
+          listIssues,
           listOpenIssues: vi.fn().mockResolvedValue([]),
           listPullRequestsForBranch
         },
@@ -2677,12 +2682,7 @@ describe("RoutineFiringDispatcher", () => {
         stateRoot
       });
 
-      expect(getIssue).toHaveBeenCalledWith({
-        issueNumber: 17,
-        owner: "pmatos",
-        repo: "alpha",
-        token: "secret-token"
-      });
+      expect(getIssue).not.toHaveBeenCalled();
       expect(
         runStore.getRoutineFiring("fire-claim-issue-closed")
       ).toMatchObject({
@@ -2841,13 +2841,23 @@ describe("RoutineFiringDispatcher", () => {
       }),
       validate: vi.fn().mockResolvedValue(undefined)
     } satisfies AgentProvider;
-    const getIssue = vi.fn().mockResolvedValue({
-      created_at: "2026-05-22T09:59:30.000Z",
-      html_url: "https://github.com/pmatos/alpha/issues/23",
-      number: 23,
-      state: "open",
-      title: "Track a follow-up refactor"
-    });
+    const getIssue = vi.fn();
+    // Empty on the before-capture call (this issue didn't exist yet when the
+    // firing started) and containing the new issue on the after-capture
+    // call: the direct-URL fallback answers only from these two snapshots,
+    // never a fresh single-issue GET (see #751).
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          created_at: "2026-05-22T09:59:30.000Z",
+          html_url: "https://github.com/pmatos/alpha/issues/23",
+          number: 23,
+          state: "open",
+          title: "Track a follow-up refactor"
+        }
+      ]);
     const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
 
     try {
@@ -2859,12 +2869,7 @@ describe("RoutineFiringDispatcher", () => {
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi: {
           getIssue,
-          // Empty on both the before- and after-capture calls: this issue
-          // didn't exist yet when this firing started, so the direct-URL
-          // fallback's before-snapshot check (absence required) is satisfied
-          // and it falls through to the single-issue GET being asserted on
-          // below.
-          listIssues: vi.fn().mockResolvedValue([]),
+          listIssues,
           listOpenIssues: vi.fn().mockResolvedValue([]),
           listPullRequestsForBranch
         },
@@ -2906,12 +2911,7 @@ describe("RoutineFiringDispatcher", () => {
         stateRoot
       });
 
-      expect(getIssue).toHaveBeenCalledWith({
-        issueNumber: 23,
-        owner: "pmatos",
-        repo: "alpha",
-        token: "secret-token"
-      });
+      expect(getIssue).not.toHaveBeenCalled();
       expect(
         runStore.getRoutineFiring("fire-claim-issue-opened")
       ).toMatchObject({

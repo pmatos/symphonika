@@ -2556,6 +2556,132 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("exempts an expects_pr routine's claimless firing from the commit-retained error when the direct-record branch finds a PR but the before-snapshot's own PR read failed (#758)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JDIRECTBEFOREFAIL";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    // `listIssues` (not `listOpenIssues`) is what captureRoutineGithubSnapshot
+    // calls, and it's mocked here specifically so the before-snapshot stays
+    // non-null despite its own PR read failing below: with no `listIssues`
+    // mock, issuesAvailable would be false too, `captureRoutineGithubSnapshot`
+    // would return null outright, and the after-snapshot capture is skipped
+    // whenever the before one is null -- which would accidentally route this
+    // firing through the fallback path instead of the direct-record branch
+    // this test targets.
+    const listIssues = vi.fn().mockResolvedValue([]);
+    // Call 1 (before-run snapshot) rejects, so `pullRequestsAvailable` is
+    // false there even though the snapshot itself is non-null (issues still
+    // available above). `routineGithubObservation` therefore never reports
+    // `pr` for this firing (it requires both snapshots' PR reads to
+    // succeed). Call 2 (after-run snapshot) succeeds and finds the open PR
+    // directly -- the direct-record branch, not the fallback -- so
+    // `pullRequestObserved` must come from `observedNewPullRequestForBranch`
+    // rather than the diff.
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("before-run PR snapshot unavailable"))
+      .mockResolvedValueOnce([
+        {
+          head: { ref: branchName, sha: "direct123" },
+          html_url: "https://github.com/pmatos/alpha/pull/99",
+          number: 99,
+          state: "open"
+        }
+      ]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-direct-before-fail",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  expectsPr: true,
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(listPullRequestsForBranch).toHaveBeenCalledTimes(2);
+      expect(
+        runStore.getRoutineFiring("fire-direct-before-fail")
+      ).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "none",
+          source: "symphonika",
+          status: "no_action",
+          summary: "No externally observable action was reported.",
+          title: "",
+          url: null,
+          verified: false
+        },
+        pullRequests: [
+          expect.objectContaining({
+            prNumber: 99,
+            prUrl: "https://github.com/pmatos/alpha/pull/99"
+          })
+        ],
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("exempts an expects_pr routine's claimless firing from the commit-retained error when fallback discovery finds an open PR (#758)", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");
@@ -2786,6 +2912,230 @@ describe("RoutineFiringDispatcher", () => {
         ],
         state: "succeeded"
       });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("exempts an expects_pr routine's claimless firing from the commit-retained error when fallback discovery finds an already-merged PR (#758)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JFALLBACKPRMERGED";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    // Same three-call shape as the open-PR fallback variant above, except the
+    // PR the fallback discovers was already merged by the time it's listed
+    // (e.g. fast auto-merge). It must still exempt: what gets recorded into
+    // the run store stays open-only (SPEC.md), but "was a PR observed this
+    // firing" must not, or a merged PR reproduces the exact false positive
+    // #758 fixes, just via a closed state instead of a failed read.
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error("after-run PR snapshot unavailable"))
+      .mockResolvedValueOnce([
+        {
+          head: { ref: branchName, sha: "fallback789" },
+          html_url: "https://github.com/pmatos/alpha/pull/79",
+          number: 79,
+          state: "closed"
+        }
+      ]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-fallback-exempt-merged",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  expectsPr: true,
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(listPullRequestsForBranch).toHaveBeenCalledTimes(3);
+      expect(
+        runStore.getRoutineFiring("fire-fallback-exempt-merged")
+      ).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "none",
+          source: "symphonika",
+          status: "no_action",
+          summary: "No externally observable action was reported.",
+          title: "",
+          url: null,
+          verified: false
+        },
+        // Merged/closed PRs are informational-only per SPEC.md and stay out
+        // of the run store even though they exempted this firing.
+        pullRequests: [],
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not exempt an expects_pr routine's claimless firing when fallback discovery only re-finds a PR that already existed before the firing (reused branch)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JFALLBACKPRSTALE";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    // Call 1 (before-run snapshot) already finds PR #80 on this branch (a
+    // reused branch carrying over a prior firing's PR). Call 2 (after-run
+    // snapshot) fails, so the dispatcher falls through to fallback
+    // discovery; call 3 re-finds the same pre-existing PR. It must NOT
+    // exempt this firing: the PR isn't new to this firing, so a real commit
+    // retained without any fresh externally observable action must still be
+    // reported as the commit-retained error. This guards against widening
+    // the fallback's "observed" bar past isPullRequestForBranch's own
+    // before-snapshot exclusion.
+    const existingPullRequest = {
+      head: { ref: branchName, sha: "stale000" },
+      html_url: "https://github.com/pmatos/alpha/pull/80",
+      number: 80,
+      state: "open"
+    };
+    const listPullRequestsForBranch = vi
+      .fn()
+      .mockResolvedValueOnce([existingPullRequest])
+      .mockRejectedValueOnce(new Error("after-run PR snapshot unavailable"))
+      .mockResolvedValueOnce([existingPullRequest]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-fallback-stale-pr",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: true,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  expectsPr: true,
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(listPullRequestsForBranch).toHaveBeenCalledTimes(3);
+      expect(runStore.getRoutineFiring("fire-fallback-stale-pr")).toMatchObject(
+        {
+          commitsAhead: true,
+          outcome: {
+            action: "commit",
+            source: "git",
+            status: "error",
+            summary:
+              "Commit exists in the Routine Firing workspace with no verified external action.",
+            title: "Commit retained in the Routine Firing workspace",
+            url: null,
+            verified: true
+          },
+          state: "succeeded"
+        }
+      );
     } finally {
       runStore.close();
     }

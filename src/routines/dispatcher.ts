@@ -1608,14 +1608,29 @@ async function runRoutineFiring(input: {
     // and daemon ticks are explicitly re-entrant (ADR 0052), so a concurrent
     // tick could otherwise observe "succeeded" and send the grouped summary
     // with this leg's PRs missing, before discovery has recorded them.
-    // Resolves true only when the fallback discovery path below (not the
-    // direct-record branch, which the branch-scoped diff above already feeds
-    // into `githubObservation`) finds a real open PR on this firing's own
-    // branch — propagated into `pullRequestObserved` below so it can close
-    // expects_pr's exemption gap for a claimless/commit-claiming firing (#758).
+    // Resolves true when either PR-listing path above finds a PR on this
+    // firing's own branch that wasn't already there before the firing
+    // started — propagated into `pullRequestObserved` below so it can close
+    // expects_pr's exemption gap for a claimless/commit-claiming firing
+    // (#758). The direct-record branch's own diff-based `githubObservation`
+    // only reports `pr` when *both* the before- and after-snapshot PR reads
+    // succeeded and the PR is absent from the before one, so a before-read
+    // failure or a reused branch's already-open PR would otherwise still
+    // leave a real, freshly-recorded PR unobserved.
+    const beforePullRequests =
+      githubBefore?.pullRequestsAvailable === true
+        ? githubBefore.snapshot.pullRequests
+        : undefined;
     let discoveryDone: Promise<boolean> = Promise.resolve(false);
     if (outcome.kind === "succeeded" && input.routine.kind === "git") {
       if (githubAfter?.pullRequestsAvailable === true) {
+        discoveryDone = Promise.resolve(
+          observedNewPullRequestForBranch(
+            githubAfter.pullRequests,
+            prepared.branchName,
+            beforePullRequests
+          )
+        );
         recordRoutinePullRequests({
           branchName: prepared.branchName,
           firingId: input.firingId,
@@ -1627,6 +1642,7 @@ async function runRoutineFiring(input: {
       } else {
         discoveryDone = cancellation.race(
           discoverRoutinePullRequests({
+            beforePullRequests,
             branchName: prepared.branchName,
             env: input.env,
             firingId: input.firingId,
@@ -2830,12 +2846,15 @@ async function classifyRoutineOutcome(
   };
 }
 
-// Returns whether an open PR for the firing's own branch was recorded, so
-// the caller can propagate a fallback discovery into `pullRequestObserved`'s
-// exemption for expects_pr (#758) — this path's own recording remains
-// informational only otherwise (SPEC.md): it never enters PR Follow-up,
-// review re-dispatch, or auto-merge.
+// Returns whether a PR new to this firing (absent from `beforePullRequests`
+// when available, any state — see observedNewPullRequestForBranch) was found
+// for the firing's own branch, so the caller can propagate a fallback
+// discovery into `pullRequestObserved`'s exemption for expects_pr (#758).
+// What gets recorded into the run store stays open-only regardless (SPEC.md)
+// — this path's own recording remains informational only otherwise: it never
+// enters PR Follow-up, review re-dispatch, or auto-merge.
 async function discoverRoutinePullRequests(input: {
+  beforePullRequests: RoutineGithubSnapshot["pullRequests"] | undefined;
   branchName: string;
   env: NodeJS.ProcessEnv;
   firingId: string;
@@ -2889,7 +2908,7 @@ async function discoverRoutinePullRequests(input: {
     return false;
   }
 
-  return recordRoutinePullRequests({
+  recordRoutinePullRequests({
     branchName: input.branchName,
     firingId: input.firingId,
     projectName: input.project.name,
@@ -2897,6 +2916,11 @@ async function discoverRoutinePullRequests(input: {
     routineName: input.routineName,
     runStore: input.runStore
   });
+  return observedNewPullRequestForBranch(
+    pullRequests ?? [],
+    input.branchName,
+    input.beforePullRequests
+  );
 }
 
 // Returns whether at least one open PR for `branchName` was recorded.
@@ -2960,6 +2984,30 @@ function isOpenPullRequestForBranch(
     pullRequest.head?.ref === branchName &&
     pullRequest.head.sha !== undefined &&
     pullRequest.head.sha.length > 0
+  );
+}
+
+// Mirrors diffRoutineGithubSnapshots' own newPullRequest bar: a PR counts as
+// observed only when it's new to this firing, not merely present in a raw
+// listing. Without `beforePullRequests` (its own read failed or wasn't
+// captured), any state-matching PR counts — the same permissive fallback the
+// diff itself has no equivalent for, since it simply can't compute without
+// both snapshots. Deliberately independent of isOpenPullRequestForBranch,
+// which gates only what gets recorded (open-only, per SPEC): a PR opened and
+// then merged/closed within the same firing window must still exempt
+// expects_pr's rule 4 (#758), and a PR that already existed before this
+// firing began (e.g. a reused branch carrying over a prior firing's PR) must
+// not.
+function observedNewPullRequestForBranch(
+  pullRequests: RawGitHubPullRequest[],
+  branchName: string,
+  beforePullRequests: RoutineGithubSnapshot["pullRequests"] | undefined
+): boolean {
+  return pullRequests.some(
+    (pullRequest) =>
+      isPullRequestForBranch(pullRequest, branchName) &&
+      (beforePullRequests === undefined ||
+        beforePullRequests[String(pullRequest.number)] === undefined)
   );
 }
 

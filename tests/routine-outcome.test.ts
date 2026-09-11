@@ -263,12 +263,14 @@ describe("Routine Outcome reconciliation", () => {
           url: "https://github.com/pmatos/rightkey/pull/42"
         },
         commitsAhead: true,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: {
           action: "pr",
           title: "Extract the retry policy into a pure module",
           url: "https://github.com/pmatos/rightkey/pull/42"
         },
+        pullRequestObserved: true,
         provider: "claude",
         terminalReason: null,
         terminalState: "succeeded"
@@ -295,8 +297,10 @@ describe("Routine Outcome reconciliation", () => {
           url: "https://github.com/pmatos/rightkey/pull/42"
         },
         commitsAhead: false,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -317,12 +321,14 @@ describe("Routine Outcome reconciliation", () => {
       reconcileRoutineOutcome({
         claim: null,
         commitsAhead: true,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: {
           action: "pr",
           title: "Extract the retry policy into a pure module",
           url: "https://github.com/pmatos/rightkey/pull/42"
         },
+        pullRequestObserved: true,
         provider: "claude",
         terminalReason: null,
         terminalState: "succeeded"
@@ -343,8 +349,10 @@ describe("Routine Outcome reconciliation", () => {
       reconcileRoutineOutcome({
         claim: null,
         commitsAhead: false,
+        expectsPr: false,
         githubObservationAvailable: false,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "omp",
         terminalReason: null,
         terminalState: "succeeded"
@@ -365,8 +373,10 @@ describe("Routine Outcome reconciliation", () => {
       reconcileRoutineOutcome({
         claim: null,
         commitsAhead: false,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -387,8 +397,10 @@ describe("Routine Outcome reconciliation", () => {
       reconcileRoutineOutcome({
         claim: null,
         commitsAhead: true,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -415,12 +427,14 @@ describe("Routine Outcome reconciliation", () => {
           url: null
         },
         commitsAhead: false,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: {
           action: "issue_closed",
           title: "Superseded dependency issue",
           url: "https://github.com/pmatos/rightkey/issues/17"
         },
+        pullRequestObserved: false,
         provider: "claude",
         terminalReason: null,
         terminalState: "succeeded"
@@ -447,8 +461,10 @@ describe("Routine Outcome reconciliation", () => {
           url: null
         },
         commitsAhead: true,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -475,8 +491,10 @@ describe("Routine Outcome reconciliation", () => {
           url: null
         },
         commitsAhead: true,
+        expectsPr: false,
         githubObservationAvailable: false,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -503,8 +521,10 @@ describe("Routine Outcome reconciliation", () => {
           url: null
         },
         commitsAhead: true,
+        expectsPr: false,
         githubObservationAvailable: false,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -531,8 +551,10 @@ describe("Routine Outcome reconciliation", () => {
           url: "https://github.com/pmatos/alpha/pull/17"
         },
         commitsAhead: true,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -548,6 +570,270 @@ describe("Routine Outcome reconciliation", () => {
     });
   });
 
+  it("reports an error for a PR-expecting routine's unconfirmed pull-request claim with a retained commit", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "pr",
+          status: "success",
+          summary: "Opened a pull request.",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/pull/17"
+        },
+        commitsAhead: true,
+        expectsPr: true,
+        githubObservationAvailable: true,
+        observedAction: null,
+        pullRequestObserved: false,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "git",
+      status: "error",
+      summary:
+        "Commit exists in the Routine Firing workspace with no verified external action.",
+      title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
+  it("reports an error for a PR-expecting routine's absent claim with a retained commit", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: null,
+        commitsAhead: true,
+        expectsPr: true,
+        githubObservationAvailable: true,
+        observedAction: null,
+        pullRequestObserved: false,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "git",
+      status: "error",
+      summary:
+        "Commit exists in the Routine Firing workspace with no verified external action.",
+      title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
+  it("reports an error for a PR-expecting routine's explicit commit claim with no verified external action", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "commit",
+          status: "success",
+          summary: "Committed the fix but could not push the branch.",
+          title: "Extract retry policy",
+          url: null
+        },
+        commitsAhead: true,
+        expectsPr: true,
+        githubObservationAvailable: true,
+        observedAction: null,
+        pullRequestObserved: false,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "git",
+      status: "error",
+      summary:
+        "Commit exists in the Routine Firing workspace with no verified external action.",
+      title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
+  it("reports an error for a PR-expecting routine's under-reporting no-action claim with a retained commit", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "none",
+          status: "no_action",
+          summary: "Nothing to do.",
+          title: "",
+          url: null
+        },
+        commitsAhead: true,
+        expectsPr: true,
+        githubObservationAvailable: false,
+        observedAction: null,
+        pullRequestObserved: false,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "git",
+      status: "error",
+      summary:
+        "Commit exists in the Routine Firing workspace with no verified external action.",
+      title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
+  it("reports an error for a PR-expecting routine's confirmed issue action with a retained commit", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "issue_opened",
+          status: "success",
+          summary: "Filed a follow-up issue.",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/issues/9"
+        },
+        commitsAhead: true,
+        expectsPr: true,
+        githubObservationAvailable: true,
+        observedAction: {
+          action: "issue_opened",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/issues/9"
+        },
+        pullRequestObserved: false,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "commit",
+      source: "git",
+      status: "error",
+      summary:
+        "Commit exists in the Routine Firing workspace with no verified external action.",
+      title: "Commit retained in the Routine Firing workspace",
+      url: null,
+      verified: true
+    });
+  });
+
+  it("does not report an error for a PR-expecting routine when a PR was observed but the claim names a different action", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "issue_opened",
+          status: "success",
+          summary: "Filed a follow-up issue.",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/issues/9"
+        },
+        commitsAhead: true,
+        expectsPr: true,
+        githubObservationAvailable: true,
+        // The branch-scoped diff observed a `pr`, distinct from the claim's
+        // own `issue_opened` — claimIsUnconfirmedExternalAction would fire on
+        // this mismatch alone, but `pullRequestObserved` exempts it.
+        observedAction: {
+          action: "pr",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/pull/17"
+        },
+        pullRequestObserved: true,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "issue_opened",
+      source: "codex",
+      status: "success",
+      summary: "Filed a follow-up issue.",
+      title: "Extract retry policy",
+      url: "https://github.com/pmatos/alpha/issues/9",
+      verified: false
+    });
+  });
+
+  it("reports a confirmed issue action as verified for a PR-expecting routine when a PR was also observed this firing", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "issue_opened",
+          status: "success",
+          summary: "Filed a follow-up issue.",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/issues/9"
+        },
+        commitsAhead: true,
+        expectsPr: true,
+        githubObservationAvailable: true,
+        // Claim-URL verification confirmed the issue claim, so the caller's
+        // `observedAction` matches the claim even though a PR was also
+        // observed via the branch-scoped diff this same firing
+        // (`pullRequestObserved`) — without it, the new
+        // claimIsNonPrActionUnderPrPolicy disjunct would report this as an
+        // unpublished commit despite the confirmed match.
+        observedAction: {
+          action: "issue_opened",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/issues/9"
+        },
+        pullRequestObserved: true,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "issue_opened",
+      source: "codex",
+      status: "success",
+      summary: "Filed a follow-up issue.",
+      title: "Extract retry policy",
+      url: "https://github.com/pmatos/alpha/issues/9",
+      verified: true
+    });
+  });
+
+  it("does not report an error for a PR-expecting routine when the claimed pull request is confirmed", () => {
+    expect(
+      reconcileRoutineOutcome({
+        claim: {
+          action: "pr",
+          status: "success",
+          summary: "Opened a pull request.",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/pull/17"
+        },
+        commitsAhead: true,
+        expectsPr: true,
+        githubObservationAvailable: true,
+        observedAction: {
+          action: "pr",
+          title: "Extract retry policy",
+          url: "https://github.com/pmatos/alpha/pull/17"
+        },
+        pullRequestObserved: true,
+        provider: "codex",
+        terminalReason: null,
+        terminalState: "succeeded"
+      })
+    ).toEqual({
+      action: "pr",
+      source: "codex",
+      status: "success",
+      summary: "Opened a pull request.",
+      title: "Extract retry policy",
+      url: "https://github.com/pmatos/alpha/pull/17",
+      verified: true
+    });
+  });
+
   it("does not override a pull-request claim git evidence when GitHub observation confirms it", () => {
     expect(
       reconcileRoutineOutcome({
@@ -559,12 +845,14 @@ describe("Routine Outcome reconciliation", () => {
           url: "https://github.com/pmatos/alpha/pull/17"
         },
         commitsAhead: true,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: {
           action: "pr",
           title: "Extract retry policy",
           url: "https://github.com/pmatos/alpha/pull/17"
         },
+        pullRequestObserved: true,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -591,8 +879,10 @@ describe("Routine Outcome reconciliation", () => {
           url: null
         },
         commitsAhead: true,
+        expectsPr: false,
         githubObservationAvailable: false,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -619,8 +909,10 @@ describe("Routine Outcome reconciliation", () => {
           url: null
         },
         commitsAhead: false,
+        expectsPr: false,
         githubObservationAvailable: false,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -647,8 +939,10 @@ describe("Routine Outcome reconciliation", () => {
           url: null
         },
         commitsAhead: false,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: "no_workspace_changes",
         terminalState: "failed"
@@ -675,8 +969,10 @@ describe("Routine Outcome reconciliation", () => {
           url: null
         },
         commitsAhead: false,
+        expectsPr: false,
         githubObservationAvailable: false,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "codex",
         terminalReason: null,
         terminalState: "succeeded"
@@ -697,8 +993,10 @@ describe("Routine Outcome reconciliation", () => {
       reconcileRoutineOutcome({
         claim: null,
         commitsAhead: false,
+        expectsPr: false,
         githubObservationAvailable: true,
         observedAction: null,
+        pullRequestObserved: false,
         provider: "claude",
         terminalReason: "process_exit_1",
         terminalState: "failed"

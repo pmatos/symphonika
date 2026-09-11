@@ -83,9 +83,20 @@ export type RoutineGithubSnapshot = {
 export type ReconcileRoutineOutcomeInput = {
   claim: RoutineOutcomeClaim | null;
   commitsAhead: boolean;
+  // See RoutineDeclaration.expectsPr; widens rule 4 below (ADR-2026-09-11-1407).
+  expectsPr: boolean;
   githubObservationAvailable: boolean;
   observedAction: ObservedRoutineAction | null;
   provider: AgentProviderName;
+  // True when a `pr` action was observed this firing via either the
+  // branch-scoped diff or a direct claim-URL verification — independent of
+  // `observedAction`, which a same-firing claim naming a *different*
+  // confirmed action (e.g. `issue_opened`) can end up holding instead (the
+  // caller's claim-URL verification replaces the diff's own `pr` observation
+  // with whatever the claim itself asked to confirm). Required so every
+  // caller states it explicitly rather than a stale default silently hiding
+  // a real observed PR from rule 4 below.
+  pullRequestObserved: boolean;
   terminalReason: string | null;
   terminalState: "succeeded" | "failed" | "cancelled";
 };
@@ -281,18 +292,47 @@ export function reconcileRoutineOutcome(
       input.claim.action === "issue_opened" ||
       input.claim.action === "issue_closed") &&
     input.observedAction?.action !== input.claim.action;
+  // A self-reported commit claim doesn't exempt an expects_pr routine from rule 4 either.
+  const claimIsExplicitCommitUnderPrPolicy =
+    input.expectsPr && input.claim !== null && input.claim.action === "commit";
+  // Under expects_pr, only an observed/claimed `pr` discharges the contract —
+  // a confirmed issue action is still short of "produce a PR", so it must not
+  // exempt a retained commit from rule 4 just because it was independently
+  // verified (claimIsUnconfirmedExternalAction only catches the unconfirmed
+  // case). A claim-less issue action observed via GitHub state diff is
+  // unaffected: that's ADR 0068's pre-existing "observed action wins" rule
+  // (the earlier branch above), which this ADR does not amend.
+  const claimIsNonPrActionUnderPrPolicy =
+    input.expectsPr &&
+    input.claim !== null &&
+    (input.claim.action === "issue_opened" ||
+      input.claim.action === "issue_closed");
+  // A PR observed this firing discharges expects_pr's contract outright, even
+  // when `observedAction` itself no longer says `pr` — a same-firing claim
+  // naming a different, also-real action (e.g. the firing both opened a PR
+  // and filed an issue, but the claim describes the issue) can lead the
+  // caller's claim-URL verification to confirm that other action and use it
+  // in place of the branch diff's own `pr` observation. `pullRequestObserved`
+  // carries the fact independently of that replacement.
+  const observedPrExemptsFromPrPolicy =
+    input.expectsPr && input.pullRequestObserved;
   if (
     input.terminalState === "succeeded" &&
     input.commitsAhead &&
+    !observedPrExemptsFromPrPolicy &&
     (input.claim === null ||
       input.claim.action === "none" ||
-      claimIsUnconfirmedExternalAction)
+      claimIsUnconfirmedExternalAction ||
+      claimIsExplicitCommitUnderPrPolicy ||
+      claimIsNonPrActionUnderPrPolicy)
   ) {
     return {
       action: "commit",
       source: "git",
-      status: "success",
-      summary: "Observed commits ahead of the configured base branch.",
+      status: input.expectsPr ? "error" : "success",
+      summary: input.expectsPr
+        ? "Commit exists in the Routine Firing workspace with no verified external action."
+        : "Observed commits ahead of the configured base branch.",
       title: "Commit retained in the Routine Firing workspace",
       url: null,
       verified: true

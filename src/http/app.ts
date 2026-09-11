@@ -1195,9 +1195,15 @@ function cancelRunInStore(
       outcome: reconcileRoutineOutcome({
         claim: null,
         commitsAhead: firing.commitsAhead,
+        // Rule 4 requires terminalState "succeeded" to fire; a cancel never
+        // reaches it, so this policy flag is inert here.
+        expectsPr: false,
         githubObservationAvailable: false,
         observedAction: null,
         provider: firing.provider,
+        // Same reasoning as `expectsPr: false` above: rule 4 never fires on
+        // this path.
+        pullRequestObserved: false,
         terminalReason: "cancelled",
         terminalState: "cancelled"
       }),

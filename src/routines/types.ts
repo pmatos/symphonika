@@ -56,6 +56,11 @@ export type RoutineDeclaration = {
   allowOverlap?: boolean;
   catchUp?: RoutineCatchUpPolicy;
   disabled?: boolean;
+  // Declares this routine's outcome contract: it must produce a verified PR,
+  // or explicitly claim there was nothing to do. Defaults to false (current
+  // behavior: a bare commit with no verified external action is `success`).
+  // See the ADR amending 0068 rule 4.
+  expectsPr?: boolean;
   kind: RoutineKind;
   name: string;
   notify?: boolean;
@@ -95,6 +100,7 @@ export type RoutineStatus = {
   // (ADR 0093).
   deferral: RoutineDeferralStatus | null;
   disabledReason: RoutineDisabledReason | null;
+  expectsPr: boolean;
   kind: RoutineKind;
   latestOutcome: RoutineOutcome | null;
   lastAttemptedAt: string | null;

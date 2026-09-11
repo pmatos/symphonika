@@ -252,6 +252,8 @@ Symphonika supports hand-authored Markdown routine files with YAML front matter:
 - optional positive `timeout_minutes`
 - optional `catch_up: fire_once_if_missed` (omitted means missed clock events are skipped)
 - optional `allow_overlap: true` (omitted means overlapping firings are skipped)
+- optional `expects_pr: true`, only valid with `kind: git` (omitted/false is current
+  behavior; see §8.5's Routine Outcome rule 4 amendment)
 
 Recurring schedules use five-field POSIX cron. They accept the `hourly`, `daily`, `weekly`,
 `monthly`, and `yearly` aliases with or without an `@` prefix. `schedule.tz` defaults to `Etc/UTC`.
@@ -722,7 +724,10 @@ deterministic declaration-load error. `tz` is valid only with `cron` and default
 `catch_up`, when present, must be `fire_once_if_missed`; `allow_overlap`, when present, must be a
 boolean. Their omitted defaults are missed-event skip and `false`, respectively. `disabled`, when
 present, must be a boolean; omitted defaults to `false`. `disabled: true` stops future scheduling
-for that routine on the next reload without affecting an in-flight firing; see §8.4.
+for that routine on the next reload without affecting an in-flight firing; see §8.4. `expects_pr`,
+when present, must be a boolean and defaults to `false`; `expects_pr: true` is a deterministic
+declaration-load error on a `kind: report` routine, since that kind never observes pull requests and
+the policy could never take effect there. See §8.5.
 
 `model`, `effort`, and `permission_mode`, when present, must be non-empty strings — Symphonika does
 not constrain `permission_mode` to a specific value; it is operator-authored, exactly like `model`
@@ -1272,8 +1277,28 @@ unverified. A successful `kind: git` firing with commits ahead of base can verif
 `commit` outcome regardless of the claim's own reported status, and this git evidence overrides a
 `none` claim or an unconfirmed pull-request/issue claim that under-reports it so a self-reported
 "nothing to do", an external action no GitHub observation corroborates, or an "error" never
-suppresses the retention signal below. A successful firing with neither claim nor observation records
-`no_action`; it is verified and sourced to `gh` only when the before/after GitHub reads completed,
+suppresses the retention signal below. The routine's own `expects_pr` declaration decides this fallback's scope and `status`: `false`
+(default) records `success` and leaves an explicit `commit` claim's own reported status, source, and
+title untouched, matching prior behavior; `true` records `error` instead and, unlike `false`, also
+folds an explicit `commit` claim, and a confirmed `issue_opened`/`issue_closed` claim, into the same
+fallback — an agent that self-reports having committed without publishing is still short of the
+routine's contract to produce a verified PR or explicitly claim there was nothing to do, so it is not
+exempt just because it was self-reported rather than inferred; likewise, only an observed/claimed
+`pr` discharges that contract, so an independently-confirmed issue action does not exempt a retained
+commit either. A claim-less issue action confirmed only via the before/after GitHub diff is
+unaffected — that is ADR 0068's pre-existing "an observed GitHub action wins over an absent ...
+claim" rule (the reconciliation step's first branch), which this widening does not touch. The
+`commit` action, `verified: true`, and the retention signal are unaffected either
+way — `expects_pr` changes only the persisted `status` (and, for an explicit commit or confirmed
+issue-action claim under `true`, whether the fallback's generic `source`/`title` replace the claim's
+own). See ADR-2026-09-11-1407, amending ADR 0068 rule 4. An observed `pr` this firing exempts the
+fallback outright even when the claim names a different action: the branch-scoped diff's own `pr`
+observation can be replaced by a differently-confirmed claim action before reconciliation runs (the
+direct-URL verification described above, ADR-2026-09-11-1001), so this exemption is carried
+separately from the observed/claimed action reconciliation otherwise uses, rather than inferred from
+it after the fact. See ADR-2026-09-11-1407. A successful firing with
+neither claim nor observation records `no_action`; it is verified and sourced to `gh` only when the
+before/after GitHub reads completed,
 otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and
 cancelled firings retain their terminal reason independently of the reconciled outcome.
 

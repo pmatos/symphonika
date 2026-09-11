@@ -1014,6 +1014,7 @@ type RoutineRow = {
   created_at: string;
   disabled_reason: RoutineDisabledReason | null;
   effort: string | null;
+  expects_pr: number;
   kind: RoutineKind;
   last_attempted_at: string | null;
   last_fired_at: string | null;
@@ -2813,11 +2814,11 @@ export class RunStore {
     const upsert = this.database.prepare(
       [
         "insert into routines (",
-        "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, notify_enabled, created_at, updated_at",
+        "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, expects_pr, catch_up, notify_enabled, created_at, updated_at",
         ") values (",
         "@project_name, @name, @source_path, @kind, @provider_name, @model, @effort, @permission_mode, @timeout_minutes, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body,",
         "case when @disabled = 1 then 'disabled' else 'active' end,",
-        "@disabled_reason, @allow_overlap, @catch_up, @notify_enabled, @created_at, @updated_at",
+        "@disabled_reason, @allow_overlap, @expects_pr, @catch_up, @notify_enabled, @created_at, @updated_at",
         ")",
         "on conflict(project_name, name) do update set",
         "source_path = excluded.source_path,",
@@ -2828,6 +2829,7 @@ export class RunStore {
         "permission_mode = excluded.permission_mode,",
         "timeout_minutes = excluded.timeout_minutes,",
         "allow_overlap = excluded.allow_overlap,",
+        "expects_pr = excluded.expects_pr,",
         "catch_up = excluded.catch_up,",
         "notify_enabled = excluded.notify_enabled,",
         "schedule_at = excluded.schedule_at,",
@@ -2949,9 +2951,9 @@ export class RunStore {
           .prepare(
             [
               "insert into routines (",
-              "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, catch_up, created_at, updated_at",
+              "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, disabled_reason, allow_overlap, expects_pr, catch_up, created_at, updated_at",
               ") values (",
-              `@project_name, @name, @source_path, @kind, @provider_name, @model, @effort, @permission_mode, @timeout_minutes, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'disabled', '${disabledReason}', @allow_overlap, @catch_up, @created_at, @updated_at`,
+              `@project_name, @name, @source_path, @kind, @provider_name, @model, @effort, @permission_mode, @timeout_minutes, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'disabled', '${disabledReason}', @allow_overlap, @expects_pr, @catch_up, @created_at, @updated_at`,
               ") on conflict(project_name, name) do update set",
               "source_path = excluded.source_path,",
               "kind = excluded.kind,",
@@ -2968,6 +2970,7 @@ export class RunStore {
               "state = excluded.state,",
               "disabled_reason = excluded.disabled_reason,",
               "allow_overlap = excluded.allow_overlap,",
+              "expects_pr = excluded.expects_pr,",
               "catch_up = excluded.catch_up,",
               "updated_at = excluded.updated_at",
               "where routines.prompt_body = ''"
@@ -2978,6 +2981,7 @@ export class RunStore {
             catch_up: routine.catchUp ?? "skip",
             created_at: now,
             effort: routine.effort ?? null,
+            expects_pr: routine.expectsPr === true ? 1 : 0,
             kind: routine.kind,
             model: routine.model ?? null,
             name: routine.name,
@@ -3063,6 +3067,7 @@ export class RunStore {
             disabled: routine.disabled === true ? 1 : 0,
             disabled_reason: routine.disabled === true ? "operator" : null,
             effort: routine.effort ?? null,
+            expects_pr: routine.expectsPr === true ? 1 : 0,
             kind: routine.kind,
             model: routine.model ?? null,
             name: routine.name,
@@ -3533,9 +3538,9 @@ export class RunStore {
     const insertInactive = this.database.prepare(
       [
         "insert into routines (",
-        "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, allow_overlap, catch_up, created_at, updated_at",
+        "project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, prompt_body, state, allow_overlap, expects_pr, catch_up, created_at, updated_at",
         ") values (",
-        "@project_name, @name, @source_path, @kind, @provider_name, @model, @effort, @permission_mode, @timeout_minutes, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'inactive', @allow_overlap, @catch_up, @created_at, @updated_at",
+        "@project_name, @name, @source_path, @kind, @provider_name, @model, @effort, @permission_mode, @timeout_minutes, @schedule_at, @schedule_cron, @schedule_tz, @next_fire_at, @prompt_body, 'inactive', @allow_overlap, @expects_pr, @catch_up, @created_at, @updated_at",
         ") on conflict(project_name, name) do update set",
         "source_path = excluded.source_path,",
         "kind = excluded.kind,",
@@ -3552,6 +3557,7 @@ export class RunStore {
         "state = excluded.state,",
         "disabled_reason = excluded.disabled_reason,",
         "allow_overlap = excluded.allow_overlap,",
+        "expects_pr = excluded.expects_pr,",
         "catch_up = excluded.catch_up,",
         "updated_at = excluded.updated_at",
         "where routines.prompt_body = ''"
@@ -3588,6 +3594,7 @@ export class RunStore {
           catch_up: routine.catchUp ?? "skip",
           created_at: now,
           effort: routine.effort ?? null,
+          expects_pr: routine.expectsPr === true ? 1 : 0,
           kind: routine.kind,
           model: routine.model ?? null,
           name: routine.name,
@@ -3707,7 +3714,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, notify_enabled, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
+          "select project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, expects_pr, catch_up, notify_enabled, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at",
           "from routines",
           where,
           "order by project_name asc, name asc"
@@ -3783,7 +3790,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, catch_up, notify_enabled, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
+          "select project_name, name, source_path, kind, provider_name, model, effort, permission_mode, timeout_minutes, schedule_at, schedule_cron, schedule_tz, next_fire_at, state, disabled_reason, allow_overlap, expects_pr, catch_up, notify_enabled, last_fired_at, last_attempted_at, last_skip_reason, last_skip_at, created_at, updated_at, prompt_body",
           "from routines where project_name = ? and name = ? and state != 'inactive'"
         ].join(" ")
       )
@@ -6840,6 +6847,7 @@ export class RunStore {
         prompt_body text not null,
         state text not null,
         allow_overlap integer not null default 0,
+        expects_pr integer not null default 0,
         catch_up text not null default 'skip',
         notify_enabled integer not null default 1,
         last_fired_at text,
@@ -7048,6 +7056,7 @@ export class RunStore {
       ["routines", "schedule_tz", "text"],
       ["routines", "next_fire_at", "text"],
       ["routines", "allow_overlap", "integer not null default 0"],
+      ["routines", "expects_pr", "integer not null default 0"],
       ["routines", "catch_up", "text not null default 'skip'"],
       ["routines", "notify_enabled", "integer not null default 1"],
       ["routines", "last_attempted_at", "text"],
@@ -8035,6 +8044,7 @@ function mapRoutineRow(row: RoutineRow): RoutineStatus {
     deferral: null,
     disabledReason: row.disabled_reason ?? null,
     ...(row.effort === null ? {} : { effort: row.effort }),
+    expectsPr: row.expects_pr === 1,
     kind: row.kind,
     latestOutcome: null,
     lastAttemptedAt: row.last_attempted_at ?? null,

@@ -41,11 +41,20 @@ configured repository before rule 4 gets to discard it.
   request's mere existence: there is no "before" state for a branch this firing never observed, so a
   time-window check isn't feasible here the way it is for issues below, and a legitimate claim can
   also cover a skill pushing to an *existing* PR from an earlier firing (`created_at` predating this
-  window), which a window check would wrongly refute. An `issue_opened` claim additionally requires
-  the issue's `created_at`, and an `issue_closed` claim its `closed_at`, to fall within this firing's
-  window (`githubSnapshotSince`) — mirroring `diffRoutineGithubSnapshots`' own `windowStart` check —
-  so a stale or hallucinated claim naming a real but long pre-existing (or long-closed) issue in the
-  Project's own repository is refuted rather than rubber-stamped just because the issue exists.
+  window), which a window check would wrongly refute. An `issue_opened`/`issue_closed` claim is
+  checked with `confirmIssueClaimAction`, which mirrors `diffRoutineGithubSnapshots`' own
+  `newlyOpenedIssue`/`newlyClosedIssue` predicates rather than a timestamp alone:
+  `githubSnapshotSince` is a broad rolling pagination cutoff (`now - 24h`), not this firing's own
+  start, so an issue actually opened or closed hours before this firing began — but still inside that
+  24h window — would otherwise pass a `createdAt`/`closedAt >= githubSnapshotSince` check alone. The
+  same before-snapshot `captureRoutineGithubSnapshot` already captures for the branch-scoped diff is
+  reused here: an `issue_opened` claim additionally requires the issue be absent from that
+  before-snapshot, and an `issue_closed` claim additionally requires it not already be `closed` there
+  (or, if absent from before entirely, that its `closed_at` still falls within the window) — refuting
+  a stale or hallucinated claim naming a real but long pre-existing (or long-closed, or
+  already-closed-before-this-firing) issue in the Project's own repository, rather than rubber-stamping
+  it just because the issue exists and its timestamp happens to fall in the rolling window. When the
+  before-snapshot isn't available at all, the claim is left unconfirmed rather than guessed at.
   `issue_closed` also still requires the issue's current `state` to be `closed`, so a claim of
   "closed" for an issue that's actually still open is refuted too. Any lookup failure (network error,
   404, disabled API method, missing tracker/token) returns `null` — the caller's existing

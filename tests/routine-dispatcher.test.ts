@@ -2630,6 +2630,12 @@ describe("RoutineFiringDispatcher", () => {
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi: {
           getIssue,
+          // Empty on both the before- and after-capture calls: this issue
+          // didn't exist yet when this firing started, so the direct-URL
+          // fallback's before-snapshot check (absence required) is satisfied
+          // and it falls through to the single-issue GET being asserted on
+          // below.
+          listIssues: vi.fn().mockResolvedValue([]),
           listOpenIssues: vi.fn().mockResolvedValue([]),
           listPullRequestsForBranch
         },
@@ -2853,6 +2859,12 @@ describe("RoutineFiringDispatcher", () => {
         env: { GITHUB_TOKEN: "secret-token" },
         githubIssuesApi: {
           getIssue,
+          // Empty on both the before- and after-capture calls: this issue
+          // didn't exist yet when this firing started, so the direct-URL
+          // fallback's before-snapshot check (absence required) is satisfied
+          // and it falls through to the single-issue GET being asserted on
+          // below.
+          listIssues: vi.fn().mockResolvedValue([]),
           listOpenIssues: vi.fn().mockResolvedValue([]),
           listPullRequestsForBranch
         },
@@ -3027,6 +3039,128 @@ describe("RoutineFiringDispatcher", () => {
           state: "succeeded"
         }
       );
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("does not confirm an issue_opened claim naming an issue already present before this firing began, even though its timestamp falls inside the broader snapshot window (#751)", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const branchName = "sym/alpha/routine/refactor-audit/01JCLAIMISSUE6";
+    await createGitWorkspaceAhead({ branchName, workspacePath });
+    const runStore = openRunStore({ stateRoot });
+    // `now` is 2026-05-22T10:00:01Z, so the broad snapshot window
+    // (githubSnapshotSince = now - 24h) starts 2026-05-21T10:00:01Z. Issue
+    // #9 was opened inside that broad window but well before this firing's
+    // own dispatch at `schedule.at`, so a timestamp-only check would
+    // wrongly confirm it; it must be rejected because it's already present
+    // in the before-snapshot captured at this firing's own start.
+    const claim = JSON.stringify({
+      action: "issue_opened",
+      status: "success",
+      summary: "Filed a follow-up issue from an adopted branch.",
+      title: "An issue opened by an earlier, unrelated firing",
+      url: "https://github.com/pmatos/alpha/issues/9"
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { result: claim, type: "turn_completed" },
+          raw: { result: claim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const getIssue = vi.fn();
+    // Present on both the before- and after-capture calls: the issue
+    // already existed when this firing started, unrelated to it.
+    const listIssues = vi.fn().mockResolvedValue([
+      {
+        created_at: "2026-05-21T15:00:00.000Z",
+        html_url: "https://github.com/pmatos/alpha/issues/9",
+        number: 9,
+        state: "open",
+        title: "An issue opened by an earlier, unrelated firing"
+      }
+    ]);
+    const listPullRequestsForBranch = vi.fn().mockResolvedValue([]);
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-claim-issue-before-snapshot",
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          getIssue,
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName,
+            branchRef: `refs/heads/${branchName}`,
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "git",
+                  name: "refactor-audit",
+                  prompt: "Deepen a module.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "refactor-audit.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(getIssue).not.toHaveBeenCalled();
+      expect(
+        runStore.getRoutineFiring("fire-claim-issue-before-snapshot")
+      ).toMatchObject({
+        commitsAhead: true,
+        outcome: {
+          action: "commit",
+          source: "git",
+          status: "success",
+          summary: "Observed commits ahead of the configured base branch.",
+          title: "Commit retained in the Routine Firing workspace",
+          url: null,
+          verified: true
+        },
+        state: "succeeded"
+      });
     } finally {
       runStore.close();
     }

@@ -1618,6 +1618,10 @@ async function runRoutineFiring(input: {
       githubObservation.action?.action !== claim.action
         ? cancellation.race(
             verifyRoutineOutcomeClaimUrl({
+              beforeIssuesSnapshot:
+                githubBefore?.issuesAvailable === true
+                  ? githubBefore.snapshot.issues
+                  : undefined,
               claim,
               env: input.env,
               githubIssuesApi: input.githubIssuesApi,
@@ -2243,6 +2247,7 @@ function routineGithubObservation(
 // claim this can't confirm is left for the caller's existing branch-scoped
 // evidence to decide, not treated as refuted.
 async function verifyRoutineOutcomeClaimUrl(input: {
+  beforeIssuesSnapshot: RoutineGithubSnapshot["issues"] | undefined;
   claim: RoutineOutcomeClaim | null;
   env: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi | undefined;
@@ -2300,6 +2305,20 @@ async function verifyRoutineOutcomeClaimUrl(input: {
     if (reference.kind !== "issue") {
       return null;
     }
+    // `windowStart` is the same broad pagination cutoff
+    // diffRoutineGithubSnapshots uses (githubSnapshotSince), not this
+    // firing's own start, so a timestamp check alone would also confirm an
+    // issue opened/closed hours before this firing began but still inside
+    // that rolling window. diffRoutineGithubSnapshots' actual protection
+    // against that is requiring absence from the *before* snapshot (or, for
+    // a close, that it wasn't already closed there) — mirrored here via
+    // confirmIssueClaimAction. Without a before-snapshot there is no way to
+    // tell this firing's own action from a stale one, so the claim is left
+    // unconfirmed rather than risk a false positive.
+    if (input.beforeIssuesSnapshot === undefined) {
+      return null;
+    }
+    const beforeIssue = input.beforeIssuesSnapshot[String(reference.number)];
     const windowStartMs = Date.parse(input.windowStart);
     // Issue observation (unlike PR observation) is already repo-wide and
     // since-windowed (captureRoutineGithubSnapshot), so any issue actually
@@ -2312,21 +2331,19 @@ async function verifyRoutineOutcomeClaimUrl(input: {
     // GitHub round-trip.
     const cachedIssue = input.issuesSnapshot?.[String(reference.number)];
     if (cachedIssue !== undefined) {
-      if (claim.action === "issue_opened") {
-        if (!(Date.parse(cachedIssue.createdAt) >= windowStartMs)) {
-          return null;
-        }
-      } else if (
-        cachedIssue.state.toLowerCase() !== "closed" ||
-        cachedIssue.closedAt === null ||
-        !(Date.parse(cachedIssue.closedAt) >= windowStartMs)
-      ) {
+      const confirmed = confirmIssueClaimAction(
+        claim.action,
+        cachedIssue,
+        beforeIssue,
+        windowStartMs
+      );
+      if (confirmed === null) {
         return null;
       }
       return {
         action: claim.action,
-        title: cachedIssue.title,
-        url: cachedIssue.url ?? claim.url
+        title: confirmed.title,
+        url: confirmed.url ?? claim.url
       };
     }
     const issue = await tryGetIssue(input.githubIssuesApi, {
@@ -2342,33 +2359,27 @@ async function verifyRoutineOutcomeClaimUrl(input: {
     if (issue?.number === undefined || issue.pull_request !== undefined) {
       return null;
     }
-    if (claim.action === "issue_opened") {
-      // `Date.parse` returns NaN for a missing/malformed timestamp, and NaN
-      // compares false either way round — written as `< windowStartMs` that
-      // would silently confirm the claim instead of refusing it, so this
-      // mirrors diffRoutineGithubSnapshots' own `>= windowStart` polarity and
-      // negates the whole comparison instead.
-      if (
-        issue.created_at === undefined ||
-        issue.created_at === null ||
-        !(Date.parse(issue.created_at) >= windowStartMs)
-      ) {
-        return null;
-      }
-    } else if (claim.action === "issue_closed") {
-      if (
-        issue.state?.toLowerCase() !== "closed" ||
-        issue.closed_at === undefined ||
-        issue.closed_at === null ||
-        !(Date.parse(issue.closed_at) >= windowStartMs)
-      ) {
-        return null;
-      }
+    const confirmed = confirmIssueClaimAction(
+      claim.action,
+      {
+        closedAt: issue.closed_at ?? null,
+        // A missing created_at is treated as "always predates the window",
+        // matching routineIssueObservations' own convention.
+        createdAt: issue.created_at ?? EPOCH_ISO,
+        state: issue.state ?? "",
+        title: issueTitle(issue),
+        url: issue.html_url ?? null
+      },
+      beforeIssue,
+      windowStartMs
+    );
+    if (confirmed === null) {
+      return null;
     }
     return {
       action: claim.action,
-      title: issueTitle(issue),
-      url: issue.html_url ?? claim.url
+      title: confirmed.title,
+      url: confirmed.url ?? claim.url
     };
   } catch (error) {
     input.logger?.warn(
@@ -2390,6 +2401,43 @@ function issueTitle(issue: RawGitHubIssue): string {
 
 function pullRequestTitle(pullRequest: RawGitHubPullRequest): string {
   return pullRequest.title ?? `Pull request #${pullRequest.number}`;
+}
+
+// Mirrors diffRoutineGithubSnapshots' newlyOpenedIssue/newlyClosedIssue
+// predicates so the direct-URL fallback confirms a claim only under the
+// same "actually happened during this firing" bar the branch-scoped diff
+// already enforces, rather than a looser existence-plus-timestamp check.
+function confirmIssueClaimAction(
+  action: "issue_opened" | "issue_closed",
+  issue: RoutineGithubSnapshot["issues"][string],
+  beforeIssue: RoutineGithubSnapshot["issues"][string] | undefined,
+  windowStartMs: number
+): RoutineGithubSnapshot["issues"][string] | null {
+  if (action === "issue_opened") {
+    if (
+      beforeIssue !== undefined ||
+      !(Date.parse(issue.createdAt) >= windowStartMs)
+    ) {
+      return null;
+    }
+    return issue;
+  }
+  if (issue.state.toLowerCase() !== "closed") {
+    return null;
+  }
+  if (beforeIssue === undefined) {
+    if (
+      issue.closedAt === null ||
+      !(Date.parse(issue.closedAt) >= windowStartMs)
+    ) {
+      return null;
+    }
+    return issue;
+  }
+  if (beforeIssue.state.toLowerCase() === "closed") {
+    return null;
+  }
+  return issue;
 }
 
 function routineIssueObservations(

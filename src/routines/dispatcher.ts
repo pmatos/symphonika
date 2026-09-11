@@ -101,8 +101,8 @@ export type DispatchDueRoutinesInput = {
   cancellationSettleMs?: number;
   // Bounds the direct GitHub PR read verifyRoutineOutcomeClaimUrl issues
   // after the firing's own timeout_minutes deadline is already cleared
-  // (see dispatcher.ts's deadline.clear() comment above). Non-fatal on
-  // expiry -- an unconfirmed claim just falls through to the caller's
+  // (see dispatcher.ts's deadline.clear() comment further below). Non-fatal
+  // on expiry -- an unconfirmed claim just falls through to the caller's
   // existing branch-scoped evidence. Defaults to
   // CLAIM_URL_VERIFICATION_TIMEOUT_MS.
   claimUrlVerificationTimeoutMs?: number;
@@ -499,7 +499,7 @@ const ROUTINE_CANCELLATION_SETTLE_MS = 60_000;
 
 // The firing's own timeout_minutes deadline is deliberately cleared before
 // verifyRoutineOutcomeClaimUrl runs (see the deadline.clear() comment
-// above): rewriting an already-classified succeeded/failed/cancelled
+// further below): rewriting an already-classified succeeded/failed/cancelled
 // outcome to firing_timeout during post-terminal enrichment is exactly what
 // that clear() prevents. A stalled direct GitHub read still has to be
 // bounded somehow, so it gets its own short, independent, non-fatal

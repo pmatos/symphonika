@@ -1288,7 +1288,12 @@ claim" rule (the reconciliation step's first branch), which this widening does n
 `commit` action, `verified: true`, and the retention signal are unaffected either
 way — `expects_pr` changes only the persisted `status` (and, for an explicit commit or confirmed
 issue-action claim under `true`, whether the fallback's generic `source`/`title` replace the claim's
-own). See ADR-2026-09-11-1407, amending ADR 0068 rule 4. A successful firing with
+own). See ADR-2026-09-11-1407, amending ADR 0068 rule 4. An observed `pr` this firing exempts the
+fallback outright even when the claim names a different action: the branch-scoped diff's own `pr`
+observation can be replaced by a differently-confirmed claim action before reconciliation runs (the
+direct-URL verification described above, ADR-2026-09-11-1001), so this exemption is carried
+separately from the observed/claimed action reconciliation otherwise uses, rather than inferred from
+it after the fact. See ADR-2026-09-11-1407. A successful firing with
 neither claim nor observation records `no_action`; it is verified and sourced to `gh` only when the
 before/after GitHub reads completed,
 otherwise it is unverified and sourced to `symphonika`. Omission alone is not a failure. Failed and

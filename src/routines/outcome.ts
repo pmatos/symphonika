@@ -88,6 +88,15 @@ export type ReconcileRoutineOutcomeInput = {
   githubObservationAvailable: boolean;
   observedAction: ObservedRoutineAction | null;
   provider: AgentProviderName;
+  // True when a `pr` action was observed this firing via either the
+  // branch-scoped diff or a direct claim-URL verification — independent of
+  // `observedAction`, which a same-firing claim naming a *different*
+  // confirmed action (e.g. `issue_opened`) can end up holding instead (the
+  // caller's claim-URL verification replaces the diff's own `pr` observation
+  // with whatever the claim itself asked to confirm). Required so every
+  // caller states it explicitly rather than a stale default silently hiding
+  // a real observed PR from rule 4 below.
+  pullRequestObserved: boolean;
   terminalReason: string | null;
   terminalState: "succeeded" | "failed" | "cancelled";
 };
@@ -298,9 +307,19 @@ export function reconcileRoutineOutcome(
     input.claim !== null &&
     (input.claim.action === "issue_opened" ||
       input.claim.action === "issue_closed");
+  // A PR observed this firing discharges expects_pr's contract outright, even
+  // when `observedAction` itself no longer says `pr` — a same-firing claim
+  // naming a different, also-real action (e.g. the firing both opened a PR
+  // and filed an issue, but the claim describes the issue) can lead the
+  // caller's claim-URL verification to confirm that other action and use it
+  // in place of the branch diff's own `pr` observation. `pullRequestObserved`
+  // carries the fact independently of that replacement.
+  const observedPrExemptsFromPrPolicy =
+    input.expectsPr && input.pullRequestObserved;
   if (
     input.terminalState === "succeeded" &&
     input.commitsAhead &&
+    !observedPrExemptsFromPrPolicy &&
     (input.claim === null ||
       input.claim.action === "none" ||
       claimIsUnconfirmedExternalAction ||

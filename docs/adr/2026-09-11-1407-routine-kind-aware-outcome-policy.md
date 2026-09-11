@@ -91,6 +91,20 @@ Add an optional per-routine declaration flag, `expects_pr: boolean`, alongside t
   unconditionally: its `terminalState` is always `"cancelled"`, which can never satisfy rule 4's own
   `terminalState === "succeeded"` precondition, so the flag is inert there regardless of the
   routine's declared policy.
+- Observed-PR exemption: `reconcileRoutineOutcome` also gains a required `pullRequestObserved:
+  boolean` input. An observed `pr` this firing discharges the `expects_pr: true` contract outright,
+  even when the claim itself describes a different action — the caller's `observedAction` alone
+  cannot express this, since dispatcher.ts's claim-URL verification (ADR-2026-09-11-1001) can confirm
+  a same-firing claim naming a *different* real action (for example the firing both opened a PR and
+  filed an issue, but the claim describes the issue) and replace the branch-scoped diff's own `pr`
+  observation with that confirmed one before `reconcileRoutineOutcome` ever sees it. Both dispatcher
+  call sites derive it independently of `observedAction`:
+  `githubObservation.action?.action === "pr" || claimUrlVerification?.action === "pr"` on the
+  success path, `githubObservation.action?.action === "pr"` on the failure path (no claim-URL
+  verification runs there); the operator-cancel path passes `false`, inert for the same reason
+  `expectsPr: false` is. When true (and `expectsPr: true`), it suppresses rule 4 entirely, so the
+  claim-preservation branch that follows keeps the claim's own `status` and `verified` normally
+  (`verified: true` only when the same action was independently confirmed).
 
 This repository's own `routines/refactor-audit.md` is `kind: report` (it only files GitHub issues,
 never opens a PR), so it cannot and does not carry `expects_pr: true` — setting it there would be

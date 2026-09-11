@@ -1681,6 +1681,13 @@ async function runRoutineFiring(input: {
         githubObservationAvailable: githubObservation.available,
         observedAction: claimUrlVerification ?? githubObservation.action,
         provider: input.providerName,
+        // Computed from the branch diff and claim-URL verification directly,
+        // not from `observedAction` above — that field can end up holding a
+        // different, also-confirmed claim action (see outcome.ts) once claim
+        // URL verification replaces the diff's own `pr` observation.
+        pullRequestObserved:
+          githubObservation.action?.action === "pr" ||
+          claimUrlVerification?.action === "pr",
         terminalReason: redactedTerminalReason,
         terminalState: outcome.kind
       }),
@@ -1860,6 +1867,10 @@ async function runRoutineFiring(input: {
         githubObservationAvailable: githubObservation.available,
         observedAction: githubObservation.action,
         provider: input.providerName,
+        // Rule 4 requires terminalState "succeeded" to fire; this path is
+        // always "cancelled"/"failed", so this is inert here (same reasoning
+        // as `expectsPr: false` on the operator-cancel path in app.ts).
+        pullRequestObserved: githubObservation.action?.action === "pr",
         terminalReason: redactedFinalReason,
         terminalState: finalCancelled ? "cancelled" : "failed"
       }),

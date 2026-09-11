@@ -1201,6 +1201,9 @@ function cancelRunInStore(
         githubObservationAvailable: false,
         observedAction: null,
         provider: firing.provider,
+        // Same reasoning as `expectsPr: false` above: rule 4 never fires on
+        // this path.
+        pullRequestObserved: false,
         terminalReason: "cancelled",
         terminalState: "cancelled"
       }),

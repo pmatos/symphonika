@@ -204,7 +204,7 @@ export type FireRoutineNowResult =
 type RoutineTerminalOutcome =
   | { kind: "cancelled"; reason: string }
   | { kind: "failed"; reason: string }
-  | { kind: "succeeded"; reason: string };
+  | { commitsAhead: boolean; kind: "succeeded"; reason: string };
 
 function routineCancellationOutcome(
   cancelReason: CancelReason | undefined
@@ -1539,12 +1539,25 @@ async function runRoutineFiring(input: {
     // observed, the firing reports cancelled even if the process happened
     // to exit cleanly in the same race.
     const cancelEntry = input.activeRuns.get(input.firingId);
+    // Parsed here, ahead of classification, so a `kind: git` firing with zero
+    // commits ahead can still reach `succeeded` when the routine opted into
+    // expects_pr and the provider's own claim explicitly says there was
+    // nothing to do — otherwise classifyRoutineOutcome would pre-empt that
+    // claim with a hard no_workspace_changes failure before it is ever read
+    // (issue #757). A non-error `action: "none"` claim is the only shape this
+    // widens; everything else (no claim, a different action, or an explicit
+    // error) keeps the prior unconditional failure.
+    const claim = parseRoutineOutcomeClaim(events);
+    const explicitNoActionClaim =
+      claim !== null && claim.action === "none" && claim.status !== "error";
     let outcome: RoutineTerminalOutcome =
       cancelEntry?.cancelRequested === true
         ? routineCancellationOutcome(cancelEntry.cancelReason)
         : await cancellation.race(
             deadline.race(
               classifyRoutineOutcome(events, {
+                allowZeroCommits:
+                  input.routine.expectsPr && explicitNoActionClaim,
                 baseBranch: input.project.workspace.git.base_branch,
                 kind: input.routine.kind,
                 redactSecrets: redactSecrets(),
@@ -1582,7 +1595,6 @@ async function runRoutineFiring(input: {
     // enrichment, so it must not let the execution deadline rewrite a
     // completed outcome.
     deadline.clear();
-    const claim = parseRoutineOutcomeClaim(events);
     // Pure over githubBefore/githubAfter, computed here (rather than after
     // discovery below) so a claim-URL verification pass can consult it.
     const githubObservation = routineGithubObservation(
@@ -1676,7 +1688,7 @@ async function runRoutineFiring(input: {
     }
     const commitsAhead =
       outcome.kind === "succeeded"
-        ? input.routine.kind === "git"
+        ? outcome.commitsAhead
         : await cancellation.race(
             inspectRoutineCommitsAhead({
               baseBranch: input.project.workspace.git.base_branch,
@@ -2716,6 +2728,13 @@ async function appendRoutineEvent(input: {
 async function classifyRoutineOutcome(
   events: NormalizedProviderEvent[],
   workspace: {
+    // Routine Firing / expects_pr path only (issue #757): lets a `kind: git`
+    // workspace with zero commits ahead reach `succeeded` instead of the
+    // unconditional `no_workspace_changes` failure below, so an explicit
+    // no-action claim can reach reconcileRoutineOutcome. The caller only ever
+    // sets this true for an expects_pr routine whose own claim explicitly
+    // says there was nothing to do.
+    allowZeroCommits: boolean;
     baseBranch: string;
     kind: RoutineStatus["kind"];
     redactSecrets: readonly string[];
@@ -2736,13 +2755,21 @@ async function classifyRoutineOutcome(
         ? {}
         : { stderrLogPath: workspace.stderrLogPath }),
       successWorkspace: {
+        allowZeroCommits: workspace.allowZeroCommits,
         baseBranch: workspace.baseBranch,
         workspacePath: workspace.workspacePath
       }
     });
     switch (classified.kind) {
       case "success":
-        return { kind: "succeeded", reason: classified.reason };
+        return {
+          // Always set by verifyWorkspaceSuccess's two success returns; the
+          // fallback only guards classifyFailure's own optional typing, it
+          // never masks a real answer here.
+          commitsAhead: classified.commitsAhead ?? true,
+          kind: "succeeded",
+          reason: classified.reason
+        };
       case "cancelled":
         return { kind: "cancelled", reason: classified.reason };
       case "failed":
@@ -2783,7 +2810,7 @@ async function classifyRoutineOutcome(
   }
   const exitCode = numberField(exit, "exitCode");
   if (exitCode === 0) {
-    return { kind: "succeeded", reason: "" };
+    return { commitsAhead: false, kind: "succeeded", reason: "" };
   }
   return {
     kind: "failed",

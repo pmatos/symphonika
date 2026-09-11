@@ -171,10 +171,9 @@ _Avoid_: arbitrary PR detection
 
 **Tracked Pull Request**:
 A stored record of one pull request Symphonika has discovered for an Issue, keyed by `(Project, PR
-number)` and never deleted. A redispatched Issue accumulates one Tracked Pull Request per chain's
-Issue Branch, so resolving an Issue's current PR scopes to the run's own Issue Branch when it is
-known — the newest stored row is not necessarily this run's. When the branch is not yet known the
-lookup falls back to the newest row Issue-wide.
+number)` and never deleted. A redispatched Issue accumulates one Tracked Pull Request per Run
+Chain, so the newest stored row is not necessarily this run's; resolving "this chain's own" tracked
+pull request scopes by Run Chain membership, not branch name (see Run Chain for why).
 _Avoid_: Pull Request State (that is the normalized GitHub state, not the stored row)
 
 **Progress Guard**:
@@ -240,6 +239,15 @@ _Avoid_: event log when referring to scheduler state
 **Run**:
 One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
+
+**Run Chain**:
+The full lineage of Runs linked by `continuation_parent_run_id`: one root Run (created fresh, with no
+parent) plus every Continuation, State Advance, and waiting Run that descends from it. Chain
+membership, not branch name, is what anything recognizing "this chain's own" tracked pull request must
+match on — PR Follow-up discovery suppression, `wait`/`merge_pr` re-evaluation — because branch name is
+deterministic from the issue title and can be reused across otherwise-unrelated chains (see why in
+ADR-2026-09-10-2031).
+_Avoid_: branch, issue when identifying which chain owns a tracked pull request
 
 **Adopted Run**:
 A Run created by `adopt-pr` rather than the normal issue-dispatch path, attaching an already-open

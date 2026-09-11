@@ -1072,6 +1072,121 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
+  it("does not suppress discovery for a fresh unrelated chain reusing an earlier chain's branch (issue #738)", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const branchName = "sym/symphonika/54-pr-followup";
+
+      // An earlier, unrelated top-level dispatch chain (no continuation
+      // link) for the same issue already tracked and merged its own PR on
+      // this exact branch name.
+      seedRun(store, { id: "earlier-run", issueNumber: 54 });
+      store.trackPullRequest({
+        branchName,
+        headSha: "old-sha",
+        issueNumber: 54,
+        projectName: "symphonika",
+        prNumber: 77,
+        prUrl: "https://github.com/pmatos/symphonika/pull/77",
+        runId: "earlier-run"
+      });
+      store.recordPullRequestObservation({
+        headSha: "old-sha",
+        id: 1,
+        prUrl: "https://github.com/pmatos/symphonika/pull/77",
+        reviewFollowupCapReached: false,
+        state: "merged"
+      });
+
+      // A fresh, unrelated top-level dispatch chain reuses the same branch
+      // name (redispatch of the same issue with an unchanged title) and has
+      // succeeded its own implementation without a PR of its own yet.
+      const freshId = seedRun(store, { id: "fresh-run", issueNumber: 54 });
+      store.updateRunEvidence(freshId, evidence(branchName));
+      store.updateRunState(freshId, "succeeded");
+
+      // The stale tracked row from the unrelated earlier chain must not
+      // suppress discovery for this fresh chain's own run.
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual(["fresh-run"]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("suppresses discovery once a descendant continuation tracks the chain's own PR (issue #738 follow-up)", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const branchName = "sym/symphonika/60-descendant-owns-pr";
+
+      // The chain's original run succeeded and accrued discovery attempts
+      // without finding a PR of its own yet.
+      const ancestorId = seedRun(store, { id: "ancestor", issueNumber: 60 });
+      store.updateRunEvidence(ancestorId, evidence(branchName));
+      store.updateRunState(ancestorId, "succeeded");
+      store.recordPullRequestDiscoveryAttempt(ancestorId);
+      store.recordPullRequestDiscoveryAttempt(ancestorId);
+
+      // A later continuation of that same chain (e.g. a review-followup run)
+      // is the one that actually opens/tracks the PR -- a descendant of the
+      // still-discovery-eligible ancestor, not one of its ancestors.
+      store.createContinuationRun({
+        id: "descendant",
+        issue: {
+          body: "",
+          created_at: "2025-01-01T00:00:00Z",
+          id: 1000,
+          labels: ["agent-ready"],
+          number: 60,
+          priority: 1,
+          state: "open",
+          title: "fixture",
+          updated_at: "2025-01-01T00:00:00Z",
+          url: "https://example/1"
+        },
+        parentRunId: ancestorId,
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.trackPullRequest({
+        branchName,
+        headSha: "new-sha",
+        issueNumber: 60,
+        projectName: "symphonika",
+        prNumber: 99,
+        prUrl: "https://github.com/pmatos/symphonika/pull/99",
+        runId: "descendant"
+      });
+
+      // An ancestor-only join would miss this descendant-owned row and keep
+      // "ancestor" discovery-eligible until it exhausted its attempt cap,
+      // even though the chain's PR already succeeded. Chain-root matching
+      // must suppress it immediately.
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual([]);
+
+      // Close the PR so hasPullRequestFollowupWork's own not-exists branch is
+      // what's under test, not its unconditional "any open tracked PR"
+      // union arm -- that arm would pass even against the pre-fix,
+      // ancestor-only join.
+      store.recordPullRequestObservation({
+        headSha: "new-sha",
+        id: 1,
+        prUrl: "https://github.com/pmatos/symphonika/pull/99",
+        reviewFollowupCapReached: false,
+        state: "merged"
+      });
+      expect(store.hasPullRequestFollowupWork()).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
   it("PR discovery prefers least-attempted runs and excludes ones that hit the attempt cap", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

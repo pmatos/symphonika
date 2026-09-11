@@ -1998,7 +1998,6 @@ export class RunController {
   // unmet under strict equality, so evaluating early would drop such a state
   // onto a catch-all transition on its first poll.
   private async observeWaitPullRequestSignals(input: {
-    branchName: string;
     isMergePr: boolean;
     issueNumber: number;
     projectName: string;
@@ -2013,16 +2012,12 @@ export class RunController {
     // open-only listing would strand the wait. The dispatcher's own open-only
     // loop is unaffected — only wait re-evaluation widens the lookup.
     //
-    // Pass the run's own branch so the Run Store scopes the lookup to it when
-    // known (issue #736): an issue can carry more than one tracked row across
-    // redispatches, and the newest by id is not necessarily this run's branch,
-    // so fetching the newest issue-wide row could miss a real, older,
-    // branch-matching row. An empty branchName means the branch is not known
-    // yet -- the store treats it as unscoped, the issue-wide lookup as before.
-    const tracked = this.runStore.findTrackedPullRequestByIssue({
-      branchName: input.branchName,
+    // Scoped by this run's own continuation chain, not branch name (see
+    // CONTEXT.md's "Run Chain" entry and ADR-2026-09-10-2031, issue #738).
+    const tracked = this.runStore.findTrackedPullRequestForRunChain({
       issueNumber: input.issueNumber,
-      projectName: input.projectName
+      projectName: input.projectName,
+      runId
     });
     if (tracked === undefined) {
       if (!isMergePr && isArtifactOnlyWaitState(waitState)) {
@@ -2481,7 +2476,6 @@ export class RunController {
             runId
           })
         : await this.observeWaitPullRequestSignals({
-            branchName: row.branchName,
             isMergePr,
             issueNumber: row.issueNumber,
             projectName: row.project,

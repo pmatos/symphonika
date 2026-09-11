@@ -6,7 +6,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## tracked-pull-request-lookup
 
-- **Status**: in-flight
+- **Status**: superseded
 - **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
 - **PR**: #747
 - **Files**: ~3 estimated (`src/run-store.ts`, `src/lifecycle/run-controller.ts`, one store test)
@@ -14,6 +14,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Summary**: Merge the issue-wide and branch-scoped Tracked-PR lookups into one `findTrackedPullRequestByIssue({issueNumber, projectName, branchName?})` where the Run Store owns branch-scoping and the "absent branch" notion (undefined and "" both unscoped); the wait re-eval caller drops its ternary, the twin is removed, and the #736 branch-scoping fix gains a unit test.
 - **First seen**: 2026-09-11
 - **Reason**: Picked by the 2026-09-11 run (top surviving candidate at 20/25; runner-up candidate `create-waiting-run-normalization` at 18/25, 2 points back — not within 1). Only candidate with this-week-hot lines (#736, 2026-09-10). Out of scope: the 16-column `tracked_pull_requests` select list is duplicated ~6× across run-store query methods (5782/5813/5832/5859 and below) — a shared column constant is a pure DRY cleanup, deliberately left for a follow-up so blast stays at 1. Implemented via design-it-twice winner A (optional `branchName?`, store owns "absent"); runner-up design C (typed `TrackedPrScope` union) lost on depth + blast. PR #747 opened 2026-09-11.
+- **Superseded by**: #742 (merged 2026-09-11, later the same day), which fixed the *same* call site (`observeWaitPullRequestSignals`) for a different bug (issue #738: branch names are deterministic from the issue title and get reused across unrelated Run Chains, so branch-scoping itself was unsound) by replacing branch-scoped lookup with `findTrackedPullRequestForRunChain`. `findTrackedPullRequestByIssueAndBranch` — this candidate's entire "twin" — has no callers left on `main`, so the merge-the-twins design is moot. Autofix (`/pm-autofix-pr`) resolved PR #747's resulting merge conflict by adopting `main`'s run-chain-scoped resolution as-is and dropping this PR's branch-scoping unification and its pinning test (`tests/run-store-tracked-pull-request.test.ts`), whose #736 scenario is already covered by `tests/wait-for-pr-open.test.ts` ("issue #736 review, round 2") via the run-chain mechanism.
 
 ### Run 2026-09-11 — complete
 

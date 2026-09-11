@@ -98,13 +98,17 @@ preserve-on-conflict behavior left the row pointing at the earlier chain forever
 could never find its own PR (`findTrackedPullRequestForRunChain`), and discovery kept
 "rediscovering" it every poll tick without ever incrementing `pr_discovery_attempts`.
 `trackPullRequest`'s upsert now reassigns `run_id` to the rediscovering candidate only when every
-run in the existing owner's chain — the owner row's `run_id` and every continuation descended from
-it, walked forward via `continuation_parent_run_id` — has gone terminal (`TERMINAL_RUN_STATES`).
-Checking the whole chain rather than just the owner run matters because the owner run is always
-`succeeded` (itself terminal) by construction — `listRunsAwaitingPullRequestDiscovery` only
-considers `succeeded` runs — so a check of the owner run alone would reassign unconditionally,
-reintroducing the exact hazard this hedge exists to avoid: a still-live descendant (e.g. parked at
-`wait_for_pr_open`) depending on that ownership.
+run in the existing owner's chain — the whole tree reachable via `continuation_parent_run_id`,
+walked up to the chain root and back down, not just forward from the owner row — has gone terminal
+(`TERMINAL_RUN_STATES`). Checking the whole chain rather than just the owner run matters because the
+owner run is always `succeeded` (itself terminal) by construction —
+`listRunsAwaitingPullRequestDiscovery` only considers `succeeded` runs — so a check of the owner run
+alone would reassign unconditionally, reintroducing the exact hazard this hedge exists to avoid: a
+still-live descendant (e.g. parked at `wait_for_pr_open`) depending on that ownership. Walking up to
+the root and back down, rather than only forward from the owner row, matters separately because the
+owner row can itself be a descendant continuation: a forward-only walk would miss a live run on a
+*different* branch of the same tree (e.g. a sibling continuation off a shared ancestor), wrongly
+reporting the chain as fully terminal.
 
 Reassigning away from a fully terminal donor reintroduces the same root-equality gap described
 below for `reassignTrackedPullRequestRun`, but automatically and repeatably: root-equality

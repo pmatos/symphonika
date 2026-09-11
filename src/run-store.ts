@@ -5605,23 +5605,38 @@ export class RunStore {
     return row !== undefined;
   }
 
-  // Walks forward from runId through every continuation descended from it
-  // and reports whether every run reached is terminal (TERMINAL_RUN_STATES).
-  // Forward-only is deliberate: this answers "is anything still live below
-  // the current owner row" (issue #746), not "who else shares its chain" --
-  // see retirePullRequestDiscoveryChain below for that broader question.
+  // Walks the whole Run Chain containing runId -- up to the root, then back
+  // down through every descendant (CONTEXT.md's "Run Chain": root plus
+  // every descendant, not just those reachable forward from runId) -- and
+  // reports whether every run in it is terminal (TERMINAL_RUN_STATES). A
+  // forward-only walk from runId would miss a live run on a *different*
+  // branch of the same tree (e.g. a sibling continuation off a shared
+  // ancestor) whenever runId is itself a descendant rather than the root,
+  // wrongly reporting the chain as fully terminal and permitting
+  // trackPullRequest to reassign ownership out from under that still-live
+  // sibling. Same up/down shape as retirePullRequestDiscoveryChain below,
+  // which retires this same tree once reassignment is permitted.
   private isRunChainFullyTerminal(runId: string): boolean {
     const alive = this.database
       .prepare(
         [
-          "with recursive owner_chain(id) as (",
+          "with recursive up(id) as (",
           "  select @runId as id",
           "  union all",
+          "  select r.continuation_parent_run_id from runs r",
+          "  join up on r.id = up.id",
+          "  where r.continuation_parent_run_id is not null",
+          "),",
+          "down(id) as (",
+          "  select up.id from up",
+          "  join runs r on r.id = up.id",
+          "  where r.continuation_parent_run_id is null",
+          "  union all",
           "  select r.id from runs r",
-          "  join owner_chain oc on r.continuation_parent_run_id = oc.id",
+          "  join down on r.continuation_parent_run_id = down.id",
           ")",
-          "select 1 as alive from owner_chain",
-          "join runs r on r.id = owner_chain.id",
+          "select 1 as alive from down",
+          "join runs r on r.id = down.id",
           `where r.state not in (${TERMINAL_RUN_STATES_SQL_LIST})`,
           "limit 1"
         ].join(" ")
@@ -5638,17 +5653,17 @@ export class RunStore {
   // no longer matches and it falls straight back into
   // listRunsAwaitingPullRequestDiscovery -- rediscovers the same still-open
   // PR, and (being terminal too) reclaims the row right back, oscillating
-  // with the new owner forever. Walking up to the chain's root and back down
-  // (unlike the forward-only liveness walk above) matters because the row
-  // being displaced can be owned by a *descendant* continuation rather than
-  // its chain's root -- retiring only that continuation's own descendants
-  // would leave the root itself, and any sibling continuations off it,
-  // still eligible to rediscover and reclaim the row. Reuses
-  // pr_discovery_attempts (pinned at the cap) rather than a dedicated column
-  // -- both current callers (listRunsAwaitingPullRequestDiscovery,
-  // hasPullRequestFollowupWork) always use the MAX_PULL_REQUEST_DISCOVERY_
-  // ATTEMPTS default, so this reliably excludes the whole chain; it is not a
-  // real attempt count once pinned this way.
+  // with the new owner forever. Same up/down walk as isRunChainFullyTerminal
+  // above, for the same reason: the row being displaced can be owned by a
+  // *descendant* continuation rather than its chain's root, so retiring only
+  // that continuation's own descendants would leave the root itself, and any
+  // sibling continuations off it, still eligible to rediscover and reclaim
+  // the row. Reuses pr_discovery_attempts (pinned at the cap) rather than a
+  // dedicated column -- both current callers
+  // (listRunsAwaitingPullRequestDiscovery, hasPullRequestFollowupWork)
+  // always use the MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS default, so this
+  // reliably excludes the whole chain; it is not a real attempt count once
+  // pinned this way.
   private retirePullRequestDiscoveryChain(runId: string, now: string): void {
     this.database
       .prepare(

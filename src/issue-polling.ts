@@ -139,6 +139,9 @@ export type GitHubIssuesApi = {
   getIssueDependencies?: (
     input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
   ) => Promise<Map<number, RawGitHubIssueDependencies>>;
+  getPullRequest?: (
+    input: GitHubPullRequestInput
+  ) => Promise<RawGitHubPullRequest | null>;
   listBranchCommits?: (
     input: GitHubBranchCommitsInput
   ) => Promise<RawGitHubCommit[] | null>;
@@ -347,6 +350,25 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       const response = await octokit.rest.issues.get({
         issue_number: input.issueNumber,
         owner: input.owner,
+        repo: input.repo
+      });
+      return response.data;
+    } catch (error) {
+      if (isOctokitNotFound(error)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async getPullRequest(
+    input: GitHubPullRequestInput
+  ): Promise<RawGitHubPullRequest | null> {
+    const octokit = this.octokit(input.token);
+    try {
+      const response = await octokit.rest.pulls.get({
+        owner: input.owner,
+        pull_number: input.pullNumber,
         repo: input.repo
       });
       return response.data;

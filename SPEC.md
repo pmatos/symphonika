@@ -1247,7 +1247,14 @@ diffing. A comparison is complete only when every channel relevant to the routin
 on both reads (issues alone for a report routine; issues and pull requests for a `kind: git`
 routine), so a silently failed channel is never mistaken for "checked and found nothing changed". A
 tracker-less Project skips GitHub observation with an informational log line; unavailable or failed
-optional observation is also non-fatal.
+optional observation is also non-fatal. This branch-scoped snapshot only ever matches a pull request
+whose head is the firing's own deterministic branch. For a succeeded `kind: git` firing whose claim
+names a `pr`, `issue_opened`, or `issue_closed` action the snapshot didn't already confirm,
+Symphonika additionally looks the claim's own `url` up directly against the Project's configured
+repository — one REST read by number, refusing any URL outside that repository — before treating the
+claim as unconfirmed. This lets a real action taken from a branch other than the firing's own (for
+example a delegated skill that adopts a different branch) still be confirmed. See
+ADR-2026-09-11-1001, amending ADR 0068 rules 2 and 4.
 
 One pure reconciliation step persists a canonical result with `verified` and `source`. An observed
 GitHub action wins over an absent, error, no-action, or commit claim and is sourced to `gh`. A

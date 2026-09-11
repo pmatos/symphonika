@@ -249,12 +249,13 @@ parent) plus every Continuation, State Advance, and waiting Run that descends fr
 membership is the primary key anything recognizing "this chain's own" tracked pull request must match
 on — PR Follow-up discovery suppression, `wait`/`merge_pr` re-evaluation — because branch name is
 deterministic from the issue title and can be reused across otherwise-unrelated chains (see why in
-ADR-2026-09-10-2031). Both call sites additionally narrow that match with branch-name equality —
-resolved by walking from a run's own row up through its ancestors to the nearest recorded
-`branch_name` — as defense-in-depth for chains predating that ADR's addendum, where a mid-chain
-issue-title edit could diverge a continuation's branch from an ancestor's tracked PR despite sharing
-a chain root (see the addendum, issue #745). Chain membership stays the identity; branch equality only
-narrows it, never replaces it.
+ADR-2026-09-10-2031). Both call sites additionally narrow that match with branch-name equality as
+defense-in-depth for chains whose rows predate that ADR's fix: discovery suppression compares against
+the candidate run's own `branch_name`, while `wait`/`merge_pr` re-evaluation compares against the
+nearest recorded `branch_name` found by walking from the waiting run's own row up through its
+ancestors. Both guard the same failure — a mid-chain issue-title edit diverging a continuation's
+branch from an ancestor's tracked PR despite sharing a chain root (see the addendum, issue #745).
+Chain membership stays the identity; branch equality only narrows it, never replaces it.
 _Avoid_: branch, issue when identifying which chain owns a tracked pull request
 
 **Adopted Run**:

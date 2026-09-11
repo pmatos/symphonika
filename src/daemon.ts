@@ -1302,8 +1302,8 @@ export async function startDaemon(
         const now = Date.now();
         let prResult: Awaited<ReturnType<typeof runPullRequestFollowup>>;
         if (
-          runStore.hasPullRequestFollowupWork() &&
-          now - lastPullRequestFollowupAt >= PR_FOLLOWUP_MIN_INTERVAL_MS
+          now - lastPullRequestFollowupAt >= PR_FOLLOWUP_MIN_INTERVAL_MS &&
+          runStore.hasPullRequestFollowupWork()
         ) {
           lastPullRequestFollowupAt = now;
           const snapshot = runtimeConfig.getSnapshot();

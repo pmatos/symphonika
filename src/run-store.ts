@@ -1139,7 +1139,7 @@ export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
 // tick instead of just the currently-relevant candidates and PR owners.
 // Shared by RUN_CHAIN_ROOT_CTE's anchor and both call sites below (listRuns-
 // AwaitingPullRequestDiscovery, hasPullRequestFollowupWork) so the three
-// copies of this filter can't drift out of sync (see heO0M / PR #742).
+// copies of this filter can't drift out of sync (see PR #742).
 const PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE = [
   "state = 'succeeded'",
   "and branch_name is not null",
@@ -1177,6 +1177,22 @@ const RUN_CHAIN_ROOT_CTE = [
   "  where root_run.continuation_parent_run_id is null",
   ")"
 ].join(" ");
+// Assembles the CTE, eligibility predicate and suppression clause in the one
+// fixed order both call sites need, so that order can't be recomposed
+// differently (and drift) at each call site.
+function buildPullRequestDiscoveryQuery(
+  fromRunsClause: string,
+  tailSql: string
+): string {
+  return [
+    RUN_CHAIN_ROOT_CTE,
+    fromRunsClause,
+    "where",
+    PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE,
+    RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION,
+    tailSql
+  ].join(" ");
+}
 export const INPUT_REQUIRED_LEGACY_BACKFILL_GRACE_MS = 60_000;
 const INPUT_REQUIRED_LEGACY_TERMINAL_REASON =
   "provider requested input (legacy)";
@@ -5538,16 +5554,10 @@ export class RunStore {
     );
     const rows = this.database
       .prepare(
-        [
-          RUN_CHAIN_ROOT_CTE,
-          "select id, project_name, issue_number, branch_name",
-          "from runs",
-          "where",
-          PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE,
-          RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION,
-          "order by pr_discovery_attempts asc, updated_at asc, id asc",
-          "limit @limit"
-        ].join(" ")
+        buildPullRequestDiscoveryQuery(
+          "select id, project_name, issue_number, branch_name from runs",
+          "order by pr_discovery_attempts asc, updated_at asc, id asc limit @limit"
+        )
       )
       .all({ limit, maxAttempts }) as PullRequestDiscoveryRunRow[];
 
@@ -5575,16 +5585,14 @@ export class RunStore {
     );
     const row = this.database
       .prepare(
-        [
-          RUN_CHAIN_ROOT_CTE,
-          "select 1 as found from tracked_pull_requests where state = 'open'",
-          "union all",
-          "select 1 as found from runs",
-          "where",
-          PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE,
-          RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION,
+        buildPullRequestDiscoveryQuery(
+          [
+            "select 1 as found from tracked_pull_requests where state = 'open'",
+            "union all",
+            "select 1 as found from runs"
+          ].join(" "),
           "limit 1"
-        ].join(" ")
+        )
       )
       .get({ maxAttempts }) as { found: number } | undefined;
     return row !== undefined;

@@ -1959,6 +1959,7 @@ export class RunController {
     // Scoped by this run's own continuation chain, not branch name (see
     // CONTEXT.md's "Run Chain" entry and ADR-2026-09-10-2031, issue #738).
     const tracked = this.runStore.findTrackedPullRequestForRunChain({
+      issueNumber: input.issueNumber,
       projectName: input.projectName,
       runId
     });

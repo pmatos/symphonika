@@ -1137,14 +1137,31 @@ export const MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS = 10;
 // PR, rather than selecting every run: `runs` is never pruned, so an
 // unfiltered anchor would walk the whole table's history on every poll
 // tick instead of just the currently-relevant candidates and PR owners.
+// Shared by RUN_CHAIN_ROOT_CTE's anchor and both call sites below (listRuns-
+// AwaitingPullRequestDiscovery, hasPullRequestFollowupWork) so the three
+// copies of this filter can't drift out of sync (see heO0M / PR #742).
+const PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE = [
+  "state = 'succeeded'",
+  "and branch_name is not null",
+  "and branch_name <> ''",
+  "and pr_discovery_attempts < @maxAttempts"
+].join(" ");
+// Suppresses a run whose chain root already owns a tracked PR; shared by the
+// same two call sites for the same drift reason as the predicate above.
+const RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION = [
+  "and not exists (",
+  "  select 1 from tracked_pull_requests pr",
+  "  join run_chain_root pr_root on pr_root.id = pr.run_id",
+  "  join run_chain_root runs_root on runs_root.id = runs.id",
+  "  where pr.project_name = runs.project_name",
+  "  and pr_root.root_id = runs_root.root_id",
+  ")"
+].join(" ");
 const RUN_CHAIN_ROOT_CTE = [
   "with recursive run_chain_walk(id, ancestor_id) as (",
   "  select id, id from runs",
   "  where (",
-  "    state = 'succeeded'",
-  "    and branch_name is not null",
-  "    and branch_name <> ''",
-  "    and pr_discovery_attempts < @maxAttempts",
+  PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE,
   "  )",
   "  or id in (select run_id from tracked_pull_requests)",
   "  union all",
@@ -5525,17 +5542,9 @@ export class RunStore {
           RUN_CHAIN_ROOT_CTE,
           "select id, project_name, issue_number, branch_name",
           "from runs",
-          "where state = 'succeeded'",
-          "and branch_name is not null",
-          "and branch_name <> ''",
-          "and pr_discovery_attempts < @maxAttempts",
-          "and not exists (",
-          "  select 1 from tracked_pull_requests pr",
-          "  join run_chain_root pr_root on pr_root.id = pr.run_id",
-          "  join run_chain_root runs_root on runs_root.id = runs.id",
-          "  where pr.project_name = runs.project_name",
-          "  and pr_root.root_id = runs_root.root_id",
-          ")",
+          "where",
+          PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE,
+          RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION,
           "order by pr_discovery_attempts asc, updated_at asc, id asc",
           "limit @limit"
         ].join(" ")
@@ -5571,17 +5580,9 @@ export class RunStore {
           "select 1 as found from tracked_pull_requests where state = 'open'",
           "union all",
           "select 1 as found from runs",
-          "where state = 'succeeded'",
-          "and branch_name is not null",
-          "and branch_name <> ''",
-          "and pr_discovery_attempts < @maxAttempts",
-          "and not exists (",
-          "  select 1 from tracked_pull_requests pr",
-          "  join run_chain_root pr_root on pr_root.id = pr.run_id",
-          "  join run_chain_root runs_root on runs_root.id = runs.id",
-          "  where pr.project_name = runs.project_name",
-          "  and pr_root.root_id = runs_root.root_id",
-          ")",
+          "where",
+          PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE,
+          RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION,
           "limit 1"
         ].join(" ")
       )
@@ -5838,6 +5839,7 @@ export class RunStore {
   // afterward would still materialize the whole set first -- more work than
   // this bounded, chain-length-only walk needs.
   findTrackedPullRequestForRunChain(input: {
+    issueNumber: number;
     projectName: string;
     runId: string;
   }): TrackedPullRequest | undefined {
@@ -5857,12 +5859,16 @@ export class RunStore {
           "review_followup_cap_reached,",
           "last_followup_run_id, state, last_observed_at, created_at, updated_at",
           "from tracked_pull_requests",
-          "where project_name = @projectName and run_id in (select id from chain)",
+          "where project_name = @projectName and issue_number = @issueNumber",
+          "and run_id in (select id from chain)",
           "order by id desc limit 1"
         ].join(" ")
       )
-      .get({ projectName: input.projectName, runId: input.runId }) as
-      TrackedPullRequestRow | undefined;
+      .get({
+        issueNumber: input.issueNumber,
+        projectName: input.projectName,
+        runId: input.runId
+      }) as TrackedPullRequestRow | undefined;
     return row === undefined ? undefined : mapTrackedPullRequestRow(row);
   }
 
@@ -7125,6 +7131,14 @@ export class RunStore {
     this.database.exec(`
       create index if not exists runs_project_issue_idx
       on runs(project_name, issue_number);
+    `);
+
+    // tracked_pull_requests rows are never deleted (per ADR-2026-09-10-2031),
+    // so this table only grows. RUN_CHAIN_ROOT_CTE's anchor and both of its
+    // callers join on pr.run_id every poll tick with no supporting index.
+    this.database.exec(`
+      create index if not exists tracked_pull_requests_run_id_idx
+      on tracked_pull_requests(run_id);
     `);
 
     // Runs after the ensureColumn additions above so databases created before

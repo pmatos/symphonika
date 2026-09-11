@@ -232,12 +232,11 @@ _Avoid_: issue when referring to execution status
 
 **Run Chain**:
 The full lineage of Runs linked by `continuation_parent_run_id`: one root Run (created fresh, with no
-parent) plus every Continuation, State Advance, and waiting Run that descends from it. A branch name
-is not a Run Chain identity — it is deterministic from the issue title (`planWorkspacePaths`,
-ADR-2026-09-04-0837), so a redispatched issue whose title has not changed reuses the same branch name
-across otherwise-unrelated chains. Anything that must recognize "this chain's own" tracked pull
-request — PR Follow-up discovery suppression, `wait`/`merge_pr` re-evaluation — walks this lineage
-instead of matching on branch name (see ADR-2026-09-10-2031).
+parent) plus every Continuation, State Advance, and waiting Run that descends from it. Chain
+membership, not branch name, is what anything recognizing "this chain's own" tracked pull request must
+match on — PR Follow-up discovery suppression, `wait`/`merge_pr` re-evaluation — because branch name is
+deterministic from the issue title and can be reused across otherwise-unrelated chains (see why in
+ADR-2026-09-10-2031).
 _Avoid_: branch, issue when identifying which chain owns a tracked pull request
 
 **Adopted Run**:

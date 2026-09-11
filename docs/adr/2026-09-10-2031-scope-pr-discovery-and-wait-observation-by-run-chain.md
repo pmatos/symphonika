@@ -89,6 +89,20 @@ chain membership from `continuation_parent_run_id`, a link every row has always 
 already correct for every existing row the moment the code ships. Chains are short (order 10 hops
 at most), so the extra query cost of the walk is not a real concern at Symphonika's scale.
 
+### Known gap: `reassignTrackedPullRequestRun` breaks the root-equality invariant
+
+The "`trackPullRequest`'s upsert never touches `run_id` on conflict, by design" invariant above has
+exactly one exception: `RunStore.reassignTrackedPullRequestRun`, called from `daemon.ts`'s adopt-pr
+flow to move a `tracked_pull_requests` row's `run_id` onto a freshly adopted run when an operator
+adopts a PR whose original implementing chain has gone stale. That reassignment is intentional and
+correct for the adopted run — but the donor chain's own `succeeded`/`waiting` rows still resolve to
+their own original chain root, which no longer matches the tracked row's (now reassigned) root.
+Root-equality suppression stops recognizing the donor chain's rows as already-tracked, so
+`listRunsAwaitingPullRequestDiscovery` re-lists them on every poll tick indefinitely. Tracked as
+issue #746 alongside the related "transfer a rediscovered PR to a fresh chain" gap, since both are
+instances of the same open design question: what run chain should own a tracked PR row after
+`run_id` moves out from under the chain that originally created it.
+
 ## Consequences
 
 - A redispatch of an issue whose title has not changed (reusing the same deterministic branch

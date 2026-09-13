@@ -225,5 +225,81 @@ within-1-point rule applies for reviewer awareness only.
 
 ## Design
 
-_Written in step 4, after this report and the backlog were committed. Design-it-twice proposals, the
-adjudicated winner, and why it beat the runner-up **design** are appended below._
+Three interfaces were produced by parallel sub-agents (design-it-twice), then adjudicated against, in
+order: depth, locality, seam placement, test surface, blast radius. The advisor picked the winner
+against those criteria.
+
+**Empirical finding all three shared** (and it refined the pick): the prologue is **not one
+contiguous block**. `executeRetry` interleaves a provider-missing check, and `dispatchReviewFollowup`
+interleaves `isIssueReserved` + raw-FSM ownership + provider checks, *between* project-resolve and the
+token/refresh work. The only span contiguous in all five callers is `[api guard?] → token →
+repository → refresh`. So the clean seam is a **project-resolve head** plus a **token→repository→refresh
+tail**, with each caller's own middle and its divergent drop reaction left in place. This refines the
+committed *Solution* above: the extracted tail takes an **already-resolved `project`**, not a
+`projectName` — the head (a 6-line `projectsLoader` + guard) stays a private method, which also keeps
+the new module's imports type-only and avoids a runtime import cycle back into `run-controller.ts`.
+
+### Design A — ports-and-adapters free function (WINNER)
+
+Exported `resolveScheduledDispatchContext(ports, request)` in a new
+`src/lifecycle/scheduled-dispatch-context.ts`, taking an explicit ports object (no `this`), returning
+a discriminated result. `resolveDispatchProject` stays a **private** method on `RunController`.
+
+```ts
+type ScheduledDispatchPorts = {
+  isLabelWritingApi: () => boolean;                          // closes over this.githubIssuesApi
+  resolveToken: (tokenReference: string) => string | undefined; // closes over this.env
+  refreshIssue: (input: { project: DispatchProjectConfig; issueNumber: number;
+                          repository: GitHubIssueRepositoryInput }) =>
+                Promise<IssueSnapshot | null | undefined>;
+};
+type ScheduledDispatchRequest = {
+  project: DispatchProjectConfig; issueNumber: number; requireLabelWritingApi: boolean;
+};
+type ScheduledDispatchContext =
+  | { kind: "resolved"; repository: GitHubIssueRepositoryInput; issue: IssueSnapshot | null }
+  | { kind: "dropped"; reason: "label_writes_unavailable" | "token_unavailable" | "refresh_unavailable" };
+```
+
+- **Hides**: the api-writability guard (skipped when `requireLabelWritingApi` is false), token
+  resolution, the `repository` literal, the `refreshIssue` call and its `undefined ⇒ dropped` fold.
+- **Leaves to callers**: `providersConfig` loading (3 of 5), the `issue === null` / `state !== "open"`
+  handling, eligibility scope (`fsm_owned` vs `label_controlled`), and the drop reaction (bare return
+  / warn / `claimLabels.release` / `cancelScheduledLifecycleWork` / `markCancelRequested` / typed
+  `DispatchOneFreshResult`) — the seam classifies via `reason`, the caller acts.
+- **reEval's deliberate api-guard omission** (issues #731/#737/#740/#745) is expressed as
+  `requireLabelWritingApi: false` — a required field so no future caller silently flips it.
+- **Test surface (why it won)**: the exported function is exercisable with three plain fake ports, no
+  `RunController` construction — so the test-first red phase pins the *adjudicated interface itself*
+  (autonomy-contract done-#5), which a private method cannot do without a reach-past cast. It also
+  preserves `providersLoader()`'s position byte-for-byte (it sits between head and tail, as today) and
+  needs no drop reorder in `executeRetry`.
+
+### Design B — single private method, minimal surface (runner-up design)
+
+`private async resolveScheduledDispatchContext({projectName, issueNumber, requireLabelWriting})`
+using `this.*`, hiding project-resolve **and** token/refresh behind one narrow interface. Smallest
+diff, no new file, no knip surface. **Why it lost**: being `private`, its red-green can only reach it
+through the public dispatch methods or a cast — it never pins the seam as an interface (done-#5,
+criterion 4). It adopts only 4 of 5 callers (leaves `dispatchReviewFollowup`'s prologue duplicated,
+undercutting the leverage-4 the pick was scored on) and needs an `executeRetry` drop-reorder hoist.
+It is the strongest loser: it is the same tail logic, one indirection cheaper, and it is what to fall
+back to if the exported seam proves awkward.
+
+### Design C — layered private methods sharing a leaf with `resolveAndClaim`
+
+A `resolveRepository` leaf shared by the fresh path too, `resolveDispatchProject`, a deep
+`resolveRepositoryAndRefresh`, and a composer. Broadest concentration (all 5 scheduled + the fresh
+leaf). **Why it lost**: same private-method test problem as B; its composer *relocates*
+`providersLoader()` after the seam; and the shared leaf touches `resolveAndClaim` — the poll path —
+to remove a single 5-line literal, and C's own analysis showed the fresh path's
+`excludeProject`/`stopLoop` semantics make any shared union a locality loss. Two prologue variants
+(fresh inline, scheduled seam) is the right stopping point; C's third layer is surface the criteria
+did not reward.
+
+### Verdict
+
+Design A wins on test surface (decisively, via done-#5) and behaviour preservation, ties C on
+depth/locality, and beats both on seam placement (it narrows an *existing* injected-dependency seam
+rather than adding a private one or a poll-path-coupled leaf). Runner-up **design**: B.
+

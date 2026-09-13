@@ -692,6 +692,8 @@ The preamble tells the agent:
 - it should operate on the assigned issue unless the workflow says otherwise
 - it should build inside the host's shared memory budget: cap build parallelism explicitly rather than defaulting to the host's core count, skip debug info when nothing will read a backtrace, and build only the targets the task needs
 - it should keep scratch under `$TMPDIR` rather than a hardcoded `/tmp/...` path
+- it is running a single headless turn with no asynchronous wakeup: nothing outside the turn can resume it, so it must run long steps in the foreground with an explicit time bound (or poll their real status itself) rather than backgrounding and waiting idle
+- it should commit and push real progress before starting anything that might outlast the turn, since whatever judges the run's outcome only sees what was committed, pushed, or explicitly reported
 
 ### 5.4 Routine Declarations
 

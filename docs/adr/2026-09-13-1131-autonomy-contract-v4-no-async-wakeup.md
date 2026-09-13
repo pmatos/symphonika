@@ -1,7 +1,7 @@
 # Autonomy contract v4: there is no asynchronous wakeup
 
-Symphonika bumps the autonomy preamble to `autonomy-preamble-v4` and adds a seventh contract
-point after project `vow`'s `implement` state repeatedly produced real, uncommitted work and then
+Symphonika bumps the autonomy preamble to `autonomy-preamble-v4` and adds two contract
+points after project `vow`'s `implement` state repeatedly produced real, uncommitted work and then
 died waiting for a background build it believed would notify it on completion. Two consecutive
 attempts at issue #1267 (`e6c2261a-166d-4796-a159-0f8446c1ac2f`, then
 `c51398b8-459d-470d-b43a-a149acedfb0e` after a manual retry) show the same shape: the agent starts
@@ -21,14 +21,16 @@ sitting uncommitted in the reused workspace both times. Grepping other `vow` iss
 `workflow_terminal_blocked` turned up the identical pattern on #1226 and #1222 (both waiting on a
 backgrounded `scripts/full_test.sh`), so this is not specific to one issue or one kind of build.
 
-The v4 contract adds a seventh item stating plainly that this is a single headless turn with no
+The v4 contract adds two items rather than one — matching the preamble's established one-rule-per-item
+shape (ADR 0093). Item 7 states plainly that this is a single headless turn with no
 asynchronous wakeup: nothing outside the turn can resume it, regardless of what a tool's own
 description promises (the `Bash` tool's `run_in_background` text is written for an interactive
 session where a later turn exists to receive the notification; a raw-FSM agent run has no later
 turn). It tells the agent to run long steps in the foreground with an explicit time bound, or poll
-their real status itself inside the turn's own budget, rather than backgrounding and waiting idle —
-and, since a step already running when the turn ends leaves no trace the workflow can see, to
-commit and push whatever real progress exists before starting anything that might outlast the turn.
+their real status itself inside the turn's own budget, rather than backgrounding and waiting idle.
+Item 8 is the checkpoint rule: since a step already running when the turn ends leaves no trace the
+workflow can see, the agent must commit and push whatever real progress exists before starting
+anything that might outlast the turn.
 That last clause is the one that would have saved both #1267 attempts: `implement`'s success edge
 reads only `branch_ahead_of_base`/`branch_advanced_since_attempt_start`, never partial or in-flight
 work, so an unfinished verification the agent never checkpointed is indistinguishable from no

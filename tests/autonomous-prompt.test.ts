@@ -66,7 +66,7 @@ describe("autonomous prompt rendering", () => {
 
     expect(rendered).toMatchInlineSnapshot(`
       {
-        "preambleVersion": "autonomy-preamble-v3",
+        "preambleVersion": "autonomy-preamble-v4",
         "prompt": "# Autonomous run instructions
 
       You are running as an autonomous full-permission coding worker. No operator will respond to prompts, approve tool calls, or read intermediate output during this run; behaviour that depends on a human answering mid-run is a failure mode.
@@ -80,6 +80,7 @@ describe("autonomous prompt rendering", () => {
       4. **Branch and PR hygiene.** Commit, push, and open the PR via \`gh pr create\` with explicit non-interactive flags (\`--base\`, \`--head\`, \`--title\`, \`--body\`). Do not use \`--web\` or any other flag that opens a browser or waits for input.
       5. **Build inside the memory budget.** Spawned providers usually share one memory cap across every concurrent attempt on the host, and exceeding it OOM-kills whole process trees — possibly another attempt's rather than yours — so a build that is merely slow is survivable where a greedy one is not. Cap build parallelism explicitly instead of letting a tool default to the host's core count, sizing it for the share you actually have rather than for the whole machine (\`ninja -jN\`, \`make -jN\`, \`cargo build -jN\`, \`CMAKE_BUILD_PARALLEL_LEVEL=N\`); skip debug info when nothing will read a backtrace, and build only the targets the task needs.
       6. **Keep scratch under \`$TMPDIR\`.** It is set aside and cleaned up for you per attempt. A hardcoded \`/tmp/...\` path escapes that, and on a host whose \`/tmp\` is a tmpfs it spends memory from the same budget as the build.
+      7. **This run has no asynchronous wakeup.** This is a single headless turn: the run ends the moment you stop calling tools, and nothing outside this turn can resume it — a backgrounded job, a scheduled check, or a promised notification will never reach you, no matter what a tool's own description claims. Never background a build/test/verification step and then wait idle for it to finish; instead run it in the foreground (with an explicit time bound) or poll its actual status yourself at intervals short enough to fit in this turn. If a step might still be running when your turn is likely to end, commit and push whatever real progress you have first — the workflow's own gates only see commits on the branch, never work in flight, so an unfinished verification you never checkpointed counts as no progress at all.
 
       ## Previous-attempt workspace
 
@@ -149,7 +150,7 @@ describe("autonomous prompt rendering", () => {
       `Provider command ${DEFAULT_CODEX_COMMAND} with labels ["agent-ready"].`
     );
     expect(rendered.prompt).toContain("gh CLI");
-    expect(rendered.preambleVersion).toBe("autonomy-preamble-v3");
+    expect(rendered.preambleVersion).toBe("autonomy-preamble-v4");
   });
 
   it("fails rendering when the workflow references an unknown variable", () => {
@@ -310,7 +311,7 @@ describe("autonomous prompt rendering", () => {
       await readFile(evidence.metadataPath, "utf8")
     );
     expect(metadata).toMatchObject({
-      autonomy_preamble_version: "autonomy-preamble-v3",
+      autonomy_preamble_version: "autonomy-preamble-v4",
       branch: input.branch,
       provider: input.provider,
       project: input.project,

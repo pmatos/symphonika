@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/pmatos/symphonika/compare/v0.6.0...v0.6.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* tell agents this run has no asynchronous wakeup ([#763](https://github.com/pmatos/symphonika/issues/763)) ([a1c64dc](https://github.com/pmatos/symphonika/commit/a1c64dc5df083b6365f95e486dde11616e053446))
+
 # [0.6.0](https://github.com/pmatos/symphonika/compare/v0.5.0...v0.6.0) (2026-09-13)
 
 

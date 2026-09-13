@@ -1,5 +1,29 @@
 # Changelog
 
+# [0.6.0](https://github.com/pmatos/symphonika/compare/v0.5.0...v0.6.0) (2026-09-13)
+
+
+### Bug Fixes
+
+* add provenance check before deleting the BLOCKED.md sentinel ([#741](https://github.com/pmatos/symphonika/issues/741)) ([7b3865b](https://github.com/pmatos/symphonika/commit/7b3865b3451d63fbcb89bbe1c85413b2186fb6e6))
+* bound routine claim-url verification's github read to a non-fatal timeout ([#756](https://github.com/pmatos/symphonika/issues/756)) ([cbdcd5f](https://github.com/pmatos/symphonika/commit/cbdcd5f54571dd300bd0a7cd7938539cd9000092))
+* give raw-fsm agent prompts a working blocked signal and gate code review on an open pr ([#736](https://github.com/pmatos/symphonika/issues/736)) ([e8d854f](https://github.com/pmatos/symphonika/commit/e8d854f465c484ecae0c7cb8ee4396546e2a4a34))
+* honor explicit no-action claim for zero-commit expects_pr firings ([#762](https://github.com/pmatos/symphonika/issues/762)) ([40a3e79](https://github.com/pmatos/symphonika/commit/40a3e799f6d3c00e9a17f04d9a8b9d314be51a42))
+* propagate fallback-discovered prs into pullRequestObserved ([#761](https://github.com/pmatos/symphonika/issues/761)) ([217a774](https://github.com/pmatos/symphonika/commit/217a77435a8dedb45710901cd6b2d03f76645288))
+* reassign trackPullRequest's conflict-preserving owner once it goes terminal ([#753](https://github.com/pmatos/symphonika/issues/753)) ([d934212](https://github.com/pmatos/symphonika/commit/d9342120a1d8228dc13fcbc513b5a464e9471270))
+* recheck raw fsm wait-park ownership at the serialized claim boundary ([#743](https://github.com/pmatos/symphonika/issues/743)) ([85cd725](https://github.com/pmatos/symphonika/commit/85cd725c98ef2437a3d2cd4b8db45556c67bcc5f))
+* refuse fresh issue claim while a raw fsm run is parked at a wait state ([#735](https://github.com/pmatos/symphonika/issues/735)) ([a7c7c4b](https://github.com/pmatos/symphonika/commit/a7c7c4bef150bddb1b712b7255cf637cac6647a1))
+* require branch equality for chain-scoped pr discovery and wait observation ([#755](https://github.com/pmatos/symphonika/issues/755)) ([8297ea4](https://github.com/pmatos/symphonika/commit/8297ea4a00859287f52945c7c0ecb1bbb8c3a099))
+* scope pr discovery and wait_for_pr_open by run chain, not branch ([#742](https://github.com/pmatos/symphonika/issues/742)) ([42ffe51](https://github.com/pmatos/symphonika/commit/42ffe51dd38b52f50bd142a7b0322d6229874e41))
+* scope wait-state progress guard fingerprint to the matched edge ([#744](https://github.com/pmatos/symphonika/issues/744)) ([00316ce](https://github.com/pmatos/symphonika/commit/00316ce767c776c578d7c54aabad80d9ec28028b))
+* verify routine outcome claim urls directly when branch-scoped observation misses them ([#751](https://github.com/pmatos/symphonika/issues/751)) ([b46fe59](https://github.com/pmatos/symphonika/commit/b46fe59c676e69059e943b73f375aab9a92106fc))
+
+
+### Features
+
+* reinforce codex routine outcome claims with turn/start.outputSchema ([#760](https://github.com/pmatos/symphonika/issues/760)) ([e0e9b6e](https://github.com/pmatos/symphonika/commit/e0e9b6e723b38d64a5edc164740c316ab90f1b0a))
+* report error for a PR-expecting routine's unconfirmed commit ([#754](https://github.com/pmatos/symphonika/issues/754)) ([259e879](https://github.com/pmatos/symphonika/commit/259e879f7f96ed20a075d9aa1ee557cc5cff8c9b))
+
 # [0.5.0](https://github.com/pmatos/symphonika/compare/v0.4.0...v0.5.0) (2026-09-06)
 
 

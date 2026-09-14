@@ -187,6 +187,54 @@ reopen the branch-reuse bug this ADR fixes, since every current continuation-cre
 `branch_name` from a parent that has one, and so satisfies branch equality trivially in the
 post-ADR-2026-09-04-0837 steady state.
 
+### Addendum (2026-09-14, PR #774): suppress a candidate superseded by any continuation
+
+`RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION` above only ever fires once some run in the chain has
+tracked a pull request. Root-caused live on vow-lang/vow#1276: an early stage (`plan`) succeeded
+and handed off to a continuation (`implement`) on the same branch, and nothing had tracked a pull
+request yet. `plan`'s own row still independently satisfied
+`PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE` (`state = 'succeeded'`, a branch, attempts under the
+ceiling), so its `pr_discovery_attempts` clock kept ticking on every poll purely because no PR had
+been tracked *yet* — and it exhausted and wrongly terminalized the issue as blocked while
+`implement` was still legitimately running.
+
+A second recursive CTE, `candidate_descendant`, walks *down* the continuation chain from the same
+eligibility anchor `RUN_CHAIN_ROOT_CTE` already uses (directional companion to its up-walk), and a
+new `RUN_CHAIN_ACTIVE_DESCENDANT_SUPPRESSION` clause excludes a candidate that has *any* same-chain
+descendant, independent of whether a pull request has been tracked. The exclusion is "most
+descendant states", not a whitelist of "active" ones: a whitelist has to be re-derived by hand for
+every `RunState` this code doesn't already know about, and a first version of this fix (an explicit
+`queued`/`preparing_workspace`/`running`/`succeeded` list) missed its own failure mode — a
+continuation that itself exhausts `pr_discovery_attempts` is marked `blocked`
+(`terminalizePullRequestDiscoveryExhausted`), which reads as "not active" by any whitelist, yet
+re-exposing the candidate at that exact point only reruns the same exhaustion on the same branch
+and duplicates the blocked-outcome labels on a stage that actually succeeded. A continuation left
+`failed` needs the same treatment for a less obvious reason: `mapOutcomeToRunState`
+(`outcome-projection.ts`) maps an `input_required` *outcome* — a continuation stalled waiting on a
+human — to `RunState` `"failed"`, not a separate value, so a naive whitelist would have kept
+missing exactly this case too. Both `blocked` and `failed` already deliver their own human-facing
+terminal signal the moment they're reached (claim-label-writer's `markBlocked`/`markFailed`), so a
+redundant one from the candidate serves no purpose.
+
+`waiting`, `cancelled`, and `stale` are the states left able to hand discovery back to the
+candidate. `waiting` because it hands discovery duty to the purpose-built `wait`/`merge_pr`
+re-evaluation mechanism instead of retiring it — see the `wait_for_pr_open` step in this fix's own
+test. `cancelled` (for reasons other than closed-issue/eligibility-loss) and `stale` because, unlike
+`blocked`/`failed`, claim-label-writer's cancelled handling only notifies a human for the
+closed-issue/eligibility-loss reasons, and the only other safety net for an abandoned claim —
+`detectStaleClaims` (`stale-claims.ts`) — operates on GitHub labels independently of this mechanism,
+not as part of it. Permanently suppressing the candidate for every other cancellation or a
+restart-recovery `stale` mark would make it depend solely on that separate sweep instead. This
+matches the original (pre-fix) whitelist's implicit treatment of those two states, so it isn't a new
+risk this addendum introduces — only `blocked`/`failed` move from "resumes discovery" to "stays
+suppressed".
+
+Branch-name equality between the candidate and a descendant also treats an unknown (NULL)
+descendant branch as a match rather than a mismatch, for the same reason the ancestor-resolution
+addendum above does: a descendant reached via a branchless `createWaitingRun` park, inherited as
+NULL by a later `createContinuationRun`, is still the same chain and simply hasn't recorded the
+branch it will finish on yet.
+
 ## Consequences
 
 - A redispatch of an issue whose title has not changed (reusing the same deterministic branch

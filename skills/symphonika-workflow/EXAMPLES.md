@@ -190,6 +190,32 @@ You are continuing work on {{branch.name}} after review feedback landed on the o
 - Do not modify operational labels (`sym:*` namespace).
 ```
 
+## 5. Using a built-in workflow template
+
+`workflow.use` splices a named, reusable sub-graph into the FSM instead of hand-authoring every state — see [REFERENCE.md](REFERENCE.md#reusable-workflow-templates-workflowuse) for the mechanics and the current built-in template list. This is Example 3's shape built from a template instead of by hand:
+
+```yaml
+workflow:
+  name: implement_only_from_template
+  initial: build   # bare instance id; resolves to the template's entry state
+  use:
+    build:
+      template: builtin:single-agent-pr
+      with:
+        provider: codex
+        prompt: WORKFLOW.md
+      exits:
+        success: done
+        blocked: failed
+  states:
+    done:
+      terminal: success
+    failed:
+      terminal: blocked
+```
+
+Read `docs/workflows.md` §9 in the Symphonika checkout before recommending a specific built-in — it documents each one's exact inputs, defaults, exits, and expanded behavior; confirm it still matches what's summarized in REFERENCE.md.
+
 ## Picking between shapes
 
 | You want | Use |
@@ -198,3 +224,4 @@ You are continuing work on {{branch.name}} after review feedback landed on the o
 | Implement + review loop + auto-merge | Example 2 |
 | Multi-state evidence, no PR loop | Example 3 |
 | Per-state agent prompts | Example 4 (with Examples 2/3) |
+| Common shape a built-in template already covers | Example 5 |

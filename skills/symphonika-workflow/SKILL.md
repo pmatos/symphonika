@@ -1,6 +1,6 @@
 ---
 name: symphonika-workflow
-description: Design and write a Symphonika Workflow Contract (WORKFLOW.md or workflow.yml) by grilling the user one question at a time. Use when the user wants to create, edit, or design a Symphonika workflow, mentions "symphonika workflow", asks how to wire up agent states, wait states, merge_pr states, predicates, or transitions, or describes an orchestration pipeline they want to run under Symphonika.
+description: Design and write a Symphonika Workflow Contract (WORKFLOW.md or workflow.yml) by grilling the user one question at a time. Use when the user wants to create, edit, or design a Symphonika workflow, mentions "symphonika workflow", asks how to wire up agent states, wait states, merge_pr states, predicates, or transitions, or describes an orchestration pipeline they want to run under Symphonika. Detects unsupported requirements and offers to file a feature request at pmatos/symphonika.
 ---
 
 # Symphonika Workflow Designer
@@ -37,7 +37,7 @@ If a question can be answered by reading `SPEC.md`, `CONTEXT.md`, `docs/adr/`, o
 
 ## Capability check (gate before writing)
 
-Before drafting the artifact, run through [REFERENCE.md](REFERENCE.md#supported-vs-unsupported) and flag anything the user asked for that is **not** supported in current Symphonika. Common asks that are out of scope today:
+Before drafting the artifact, run through [REFERENCE.md](REFERENCE.md#supported-vs-unsupported-12) and flag anything the user asked for that is **not** supported in current Symphonika. Common asks that are out of scope today:
 
 - Action kinds beyond `agent`, `wait`, `merge_pr`, `comment`, `label_issue`, `close_issue`
 - Predicates beyond the documented set (e.g. timer-based, body-text-based, label-based mid-walk)

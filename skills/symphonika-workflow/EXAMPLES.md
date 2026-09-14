@@ -192,7 +192,7 @@ You are continuing work on {{branch.name}} after review feedback landed on the o
 
 ## 5. Using a built-in workflow template
 
-`workflow.use` splices a named, reusable sub-graph into the FSM instead of hand-authoring every state — see [REFERENCE.md](REFERENCE.md#reusable-workflow-templates-workflowuse) for the mechanics and the current built-in template list. This is Example 3's shape built from a template instead of by hand:
+`workflow.use` splices a named, reusable sub-graph into the FSM instead of hand-authoring every state — see [REFERENCE.md](REFERENCE.md#reusable-workflow-templates--workflowuse-89) for the mechanics and the current built-in template list. This is Example 3's shape built from a template instead of by hand:
 
 ```yaml
 workflow:

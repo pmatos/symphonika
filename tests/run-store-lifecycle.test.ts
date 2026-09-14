@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { databasePath, openRunStore } from "../src/run-store.js";
+import {
+  databasePath,
+  MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS,
+  openRunStore
+} from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -1182,6 +1186,95 @@ describe("run-store lifecycle CRUD", () => {
         state: "merged"
       });
       expect(store.hasPullRequestFollowupWork()).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("suppresses discovery for a stage superseded by an actively dispatched continuation on the same branch (vow-lang/vow#1276)", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const branchName = "sym/vow/1276-fix";
+
+      // An early stage (e.g. "plan") succeeded and continued into a later
+      // stage (e.g. "implement") on the same branch. The later stage is
+      // still actively dispatched -- nothing has failed, it just hasn't
+      // finished yet.
+      const planId = seedRun(store, { id: "plan", issueNumber: 1276 });
+      store.updateRunEvidence(planId, evidence(branchName));
+      store.updateRunState(planId, "succeeded");
+
+      store.createContinuationRun({
+        id: "implement",
+        issue: {
+          body: "",
+          created_at: "2025-01-01T00:00:00Z",
+          id: 1276,
+          labels: ["agent-ready"],
+          number: 1276,
+          priority: 1,
+          state: "open",
+          title: "fixture",
+          updated_at: "2025-01-01T00:00:00Z",
+          url: "https://example/1276"
+        },
+        parentRunId: planId,
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.updateRunState("implement", "running");
+
+      // Simulate many discovery-poll ticks the way discoverPullRequests
+      // itself does: only record an attempt for a row this call actually
+      // returns. Before the fix, "plan" would be returned every tick (its
+      // own attempts count starts at 0, well under the ceiling) and would
+      // exhaust and wrongly terminalize it while "implement" was still
+      // legitimately working -- long before this loop's iteration count
+      // even matters.
+      for (let i = 0; i < MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS + 5; i += 1) {
+        const eligible = store.listRunsAwaitingPullRequestDiscovery();
+        expect(eligible.map((run) => run.runId)).toEqual([]);
+        for (const run of eligible) {
+          store.recordPullRequestDiscoveryAttempt(run.runId);
+        }
+      }
+      // Nothing is genuinely discoverable yet: "plan" is suppressed and
+      // "implement" (still running) doesn't match the eligibility
+      // predicate either, so there is truly no PR-discovery work to do
+      // until "implement" itself reaches a state worth polling.
+      expect(store.hasPullRequestFollowupWork()).toBe(false);
+
+      // Once "implement" is no longer actively dispatched (parked in a
+      // wait state, not running), it -- not "plan" -- is the row that must
+      // stay discovery-eligible.
+      store.updateRunState("implement", "succeeded");
+      store.updateRunEvidence("implement", evidence(branchName));
+      store.createWaitingRun({
+        branchName,
+        currentStateId: "wait_for_pr_open",
+        id: "wait",
+        issue: {
+          body: "",
+          created_at: "2025-01-01T00:00:00Z",
+          id: 1276,
+          labels: ["agent-ready"],
+          number: 1276,
+          priority: 1,
+          state: "open",
+          title: "fixture",
+          updated_at: "2025-01-01T00:00:00Z",
+          url: "https://example/1276"
+        },
+        parentRunId: "implement",
+        projectName: "symphonika",
+        workspacePath: "/tmp/workspace"
+      });
+
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual(["implement"]);
     } finally {
       store.close();
     }

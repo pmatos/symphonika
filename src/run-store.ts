@@ -1189,10 +1189,48 @@ const RUN_CHAIN_ROOT_CTE = [
   "  from run_chain_walk",
   "  join runs root_run on root_run.id = run_chain_walk.ancestor_id",
   "  where root_run.continuation_parent_run_id is null",
+  "),",
+  // Directional companion to run_chain_walk above, which only ever walks
+  // *up* from a fixed anchor set to find a shared root: it can't answer
+  // "does this candidate already have a descendant at work". Walking
+  // *down* the continuation chain from the same candidate set answers
+  // that, at the same bounded cost as the anchor set itself rather than a
+  // full-table scan.
+  "candidate_descendant(candidate_id, id) as (",
+  "  select id, id from runs",
+  "  where (",
+  PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE,
+  "  )",
+  "  union all",
+  "  select candidate_descendant.candidate_id, r.id",
+  "  from candidate_descendant",
+  "  join runs r on r.continuation_parent_run_id = candidate_descendant.id",
   ")"
 ].join(" ");
-// Assembles the CTE, eligibility predicate and suppression clause in the one
-// fixed order both call sites need, so that order can't be recomposed
+// A candidate stage (e.g. "plan") whose continuation (e.g. "implement") is
+// still actively dispatched, or has already itself succeeded, on the same
+// branch isn't the run that will discover a PR right now -- the
+// continuation is. Without this, the candidate's own pr_discovery_attempts
+// clock keeps ticking against a branch its continuation hasn't finished
+// pushing to yet, and can exhaust and wrongly terminalize the issue while
+// the continuation is still legitimately working (vow-lang/vow#1276). A
+// continuation is always created after its candidate (continuation_parent_
+// run_id points backward), so no separate recency check is needed here --
+// candidate_descendant membership alone establishes it.
+const RUN_CHAIN_ACTIVE_DESCENDANT_SUPPRESSION = [
+  "and not exists (",
+  "  select 1 from candidate_descendant cd",
+  "  join runs descendant on descendant.id = cd.id",
+  "  where cd.candidate_id = runs.id",
+  "  and descendant.id <> runs.id",
+  "  and descendant.branch_name = runs.branch_name",
+  "  and descendant.state in (",
+  "    'queued', 'preparing_workspace', 'running', 'succeeded'",
+  "  )",
+  ")"
+].join(" ");
+// Assembles the CTE, eligibility predicate and suppression clauses in the
+// one fixed order both call sites need, so that order can't be recomposed
 // differently (and drift) at each call site.
 function buildPullRequestDiscoveryQuery(
   fromRunsClause: string,
@@ -1204,6 +1242,7 @@ function buildPullRequestDiscoveryQuery(
     "where",
     PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE,
     RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION,
+    RUN_CHAIN_ACTIVE_DESCENDANT_SUPPRESSION,
     tailSql
   ].join(" ");
 }

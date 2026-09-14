@@ -17,9 +17,12 @@ import { isBlockedOutcome } from "./outcome-projection.js";
 // assigns to this alias, so RunController never names it. Only the two label
 // methods are required here — `GitHubIssuesApi`'s one required member,
 // `listOpenIssues`, has no business in a terminal-label test double.
+// `addIssueComment` stays optional, matching its declaration on
+// `GitHubIssuesApi` itself, so a test double need not implement it either.
 type LabelWritingApi = Required<
   Pick<GitHubIssuesApi, "addLabelsToIssue" | "removeLabelsFromIssue">
->;
+> &
+  Pick<GitHubIssuesApi, "addIssueComment">;
 
 // The terminal-outcome input the run controller builds once per termination.
 // Moved verbatim from run-controller so the module that owns the label decision
@@ -74,6 +77,12 @@ type IssueTarget = {
   issueNumber: number;
   repository: GitHubIssueRepositoryInput;
 };
+
+// markFailed/markBlocked/markNeedsHuman additionally require the human-
+// readable reason the run controller already computed for this outcome (its
+// `state_transition_reason`/`terminal_reason` write), so the sym:human-needed
+// comment below never drifts from the DB's own record of why.
+type IssueBlockTarget = IssueTarget & { reason: string };
 
 // Owns the orchestrator-owned terminal-outcome operational labels: the
 // sym:running removal, the sym:failed/sym:blocked add-then-sym:human-needed
@@ -191,6 +200,7 @@ export class ClaimLabelWriter {
     if (input.outcome.kind === "input_required") {
       await this.markFailed({
         issueNumber: input.issueNumber,
+        reason: input.outcome.reason,
         repository: input.repository
       });
     } else if (
@@ -201,11 +211,13 @@ export class ClaimLabelWriter {
       if (isBlockedOutcome(input.outcome)) {
         await this.markBlocked({
           issueNumber: input.issueNumber,
+          reason: input.outcome.reason,
           repository: input.repository
         });
       } else {
         await this.markFailed({
           issueNumber: input.issueNumber,
+          reason: input.outcome.reason,
           repository: input.repository
         });
       }
@@ -253,7 +265,7 @@ export class ClaimLabelWriter {
     }
   }
 
-  async markFailed(input: IssueTarget): Promise<void> {
+  async markFailed(input: IssueBlockTarget): Promise<void> {
     try {
       await this.api.addLabelsToIssue({
         ...input.repository,
@@ -275,7 +287,7 @@ export class ClaimLabelWriter {
     await this.markNeedsHuman(input);
   }
 
-  async markBlocked(input: IssueTarget): Promise<void> {
+  async markBlocked(input: IssueBlockTarget): Promise<void> {
     try {
       await this.api.addLabelsToIssue({
         ...input.repository,
@@ -325,7 +337,7 @@ export class ClaimLabelWriter {
   // path was taken. Its own try/catch keeps a sym:human-needed failure from
   // suppressing the caller, and vice versa. Never called directly by the
   // controller, so it stays private.
-  private async markNeedsHuman(input: IssueTarget): Promise<void> {
+  private async markNeedsHuman(input: IssueBlockTarget): Promise<void> {
     try {
       await this.api.addLabelsToIssue({
         ...input.repository,
@@ -343,6 +355,31 @@ export class ClaimLabelWriter {
       { issueNumber: input.issueNumber },
       "symphonika marked issue sym:human-needed"
     );
+    await this.postHumanNeededComment(input);
+  }
+
+  // The label alone leaves no trace on the issue of *why* a human is being
+  // asked to look -- see vow-lang/vow#1276, where a stale bookkeeping row
+  // marked an issue sym:human-needed with a real PR already open and being
+  // tracked, and the only way to find that out was journalctl + the run
+  // evidence directory. Independent try/catch, same as the label add above:
+  // a comment failure must never be mistaken for the label having failed.
+  private async postHumanNeededComment(input: IssueBlockTarget): Promise<void> {
+    if (this.api.addIssueComment === undefined) {
+      return;
+    }
+    try {
+      await this.api.addIssueComment({
+        ...input.repository,
+        body: `Symphonika marked this issue \`sym:human-needed\`.\n\n**Reason:** ${input.reason}`,
+        issueNumber: input.issueNumber
+      });
+    } catch (err) {
+      this.logger?.warn(
+        { err, issueNumber: input.issueNumber },
+        "symphonika failed to post sym:human-needed comment"
+      );
+    }
   }
 
   private async bestEffort(

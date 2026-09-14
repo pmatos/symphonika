@@ -1909,6 +1909,7 @@ export class RunController {
     this.runStore.updateRunState(input.runId, "blocked");
     await this.claimLabels.markBlocked({
       issueNumber: input.issueNumber,
+      reason,
       repository: input.repository
     });
     await this.claimLabels.release({
@@ -1954,6 +1955,7 @@ export class RunController {
     this.runStore.updateRunState(input.runId, "blocked");
     await this.claimLabels.markBlocked({
       issueNumber: input.issueNumber,
+      reason: input.reason,
       repository: input.repository
     });
     await this.releaseWaitTerminalClaim(input);
@@ -4414,6 +4416,7 @@ export class RunController {
           // Failure between claim and createRun (rare): still mark sym:failed best-effort.
           await this.claimLabels.markFailed({
             issueNumber: input.issue.number,
+            reason: error instanceof Error ? error.message : String(error),
             repository: input.repository
           });
         } else if (!runCreated) {
@@ -5762,11 +5765,13 @@ export class RunController {
         if (isBlockedOutcome(input.outcome)) {
           await this.claimLabels.markBlocked({
             issueNumber: input.issue.number,
+            reason: input.outcome.reason,
             repository: input.repository
           });
         } else {
           await this.claimLabels.markFailed({
             issueNumber: input.issue.number,
+            reason: input.outcome.reason,
             repository: input.repository
           });
         }
@@ -5963,15 +5968,17 @@ export class RunController {
         },
         "symphonika continuation cap reached; marking issue failed"
       );
+      const capReason = buildCapReachedReason(kind);
       this.runStore.createCapReachedFailureRun({
         id: capId,
         issue: refreshed,
         parentRunId: input.runId,
         projectName: input.project.name,
-        reason: buildCapReachedReason(kind)
+        reason: capReason
       });
       await this.claimLabels.markFailed({
         issueNumber: input.issue.number,
+        reason: capReason,
         repository: input.repository
       });
       // The continuation loop stops here -- no further continuation will be

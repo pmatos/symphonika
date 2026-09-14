@@ -5,20 +5,29 @@ import {
   ClaimLabelWriter,
   type ApplyLabelsInput
 } from "../src/lifecycle/claim-label-writer.js";
-import type { GitHubIssueLabelInput } from "../src/issue-polling.js";
+import type {
+  GitHubIssueCommentInput,
+  GitHubIssueLabelInput
+} from "../src/issue-polling.js";
 
 const repository = { owner: "octo", repo: "sym", token: "t0k" };
 
 type Recorded = { op: "add" | "remove"; issueNumber: number; labels: string[] };
 
-function makeApi(fail?: { add?: string[]; remove?: string[] }): {
+function makeApi(
+  fail?: { add?: string[]; comment?: boolean; remove?: string[] },
+  options?: { withComment?: boolean }
+): {
   api: {
+    addIssueComment?: (input: GitHubIssueCommentInput) => Promise<void>;
     addLabelsToIssue: (input: GitHubIssueLabelInput) => Promise<void>;
     removeLabelsFromIssue: (input: GitHubIssueLabelInput) => Promise<void>;
   };
   calls: Recorded[];
+  comments: GitHubIssueCommentInput[];
 } {
   const calls: Recorded[] = [];
+  const comments: GitHubIssueCommentInput[] = [];
   const record =
     (op: "add" | "remove", failing: string[] | undefined) =>
     (input: GitHubIssueLabelInput): Promise<void> => {
@@ -33,12 +42,23 @@ function makeApi(fail?: { add?: string[]; remove?: string[] }): {
       }
       return Promise.resolve();
     };
+  const addIssueComment = (input: GitHubIssueCommentInput): Promise<void> => {
+    comments.push(input);
+    if (fail?.comment === true) {
+      return Promise.reject(new Error("comment boom"));
+    }
+    return Promise.resolve();
+  };
   return {
     api: {
+      ...(options?.withComment === false
+        ? {}
+        : { addIssueComment: vi.fn(addIssueComment) }),
       addLabelsToIssue: vi.fn(record("add", fail?.add)),
       removeLabelsFromIssue: vi.fn(record("remove", fail?.remove))
     },
-    calls
+    calls,
+    comments
   };
 }
 
@@ -234,6 +254,7 @@ describe("ClaimLabelWriter direct entries", () => {
     const { api, calls } = makeApi();
     await new ClaimLabelWriter({ api }).markFailed({
       issueNumber: 7,
+      reason: "provider_error",
       repository
     });
     expect(seq(calls)).toEqual(["add:sym:failed", "add:sym:human-needed"]);
@@ -243,6 +264,7 @@ describe("ClaimLabelWriter direct entries", () => {
     const { api, calls } = makeApi();
     await new ClaimLabelWriter({ api }).markBlocked({
       issueNumber: 7,
+      reason: "no_workspace_changes",
       repository
     });
     expect(seq(calls)).toEqual(["add:sym:blocked", "add:sym:human-needed"]);
@@ -261,7 +283,11 @@ describe("ClaimLabelWriter direct entries", () => {
   it("still adds human-needed when the failed-label add throws, and never rejects", async () => {
     const { api, calls } = makeApi({ add: ["sym:failed"] });
     await expect(
-      new ClaimLabelWriter({ api }).markFailed({ issueNumber: 7, repository })
+      new ClaimLabelWriter({ api }).markFailed({
+        issueNumber: 7,
+        reason: "provider_error",
+        repository
+      })
     ).resolves.toBeUndefined();
     // The human-needed escalation still fires after the failed add throws.
     expect(seq(calls)).toEqual(["add:sym:failed", "add:sym:human-needed"]);
@@ -270,7 +296,65 @@ describe("ClaimLabelWriter direct entries", () => {
   it("resolves without rejecting even when the human-needed fallback itself throws", async () => {
     const { api } = makeApi({ add: ["sym:blocked", "sym:human-needed"] });
     await expect(
-      new ClaimLabelWriter({ api }).markBlocked({ issueNumber: 7, repository })
+      new ClaimLabelWriter({ api }).markBlocked({
+        issueNumber: 7,
+        reason: "no_workspace_changes",
+        repository
+      })
     ).resolves.toBeUndefined();
+  });
+
+  it("posts a comment naming the reason once sym:human-needed is added", async () => {
+    const { api, comments } = makeApi();
+    await new ClaimLabelWriter({ api }).markBlocked({
+      issueNumber: 7,
+      reason: "workflow_terminal_blocked",
+      repository
+    });
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toMatchObject({
+      issueNumber: 7,
+      owner: repository.owner,
+      repo: repository.repo,
+      token: repository.token
+    });
+    expect(comments[0]?.body).toContain("workflow_terminal_blocked");
+    expect(comments[0]?.body).toContain("sym:human-needed");
+  });
+
+  it("markFailed's comment carries the failed-path reason too", async () => {
+    const { api, comments } = makeApi();
+    await new ClaimLabelWriter({ api }).markFailed({
+      issueNumber: 7,
+      reason: "provider_error: exit code 1",
+      repository
+    });
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("provider_error: exit code 1");
+  });
+
+  it("a comment-post failure never rejects and never suppresses the labels", async () => {
+    const { api, calls, comments } = makeApi({ comment: true });
+    await expect(
+      new ClaimLabelWriter({ api }).markBlocked({
+        issueNumber: 7,
+        reason: "no_workspace_changes",
+        repository
+      })
+    ).resolves.toBeUndefined();
+    expect(seq(calls)).toEqual(["add:sym:blocked", "add:sym:human-needed"]);
+    expect(comments).toHaveLength(1);
+  });
+
+  it("skips commenting without throwing when the API has no addIssueComment", async () => {
+    const { api, calls } = makeApi(undefined, { withComment: false });
+    await expect(
+      new ClaimLabelWriter({ api }).markFailed({
+        issueNumber: 7,
+        reason: "provider_error",
+        repository
+      })
+    ).resolves.toBeUndefined();
+    expect(seq(calls)).toEqual(["add:sym:failed", "add:sym:human-needed"]);
   });
 });

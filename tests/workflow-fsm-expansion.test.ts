@@ -7,6 +7,7 @@ import { BUILTIN_WORKFLOW_TEMPLATES } from "../src/builtin-templates.js";
 import { decideNextStep } from "../src/lifecycle/state-machine-dispatch.js";
 import { projectPullRequestSignals } from "../src/workflow/pr-signal-projection.js";
 import {
+  collectWorkflowPromptConventionWarnings,
   explainWorkflow,
   loadExpandedWorkflow,
   validateExpandedWorkflowReferences
@@ -3613,5 +3614,129 @@ describe("validateExpandedWorkflowReferences", () => {
       workflowPath
     );
     expect(errors).toEqual([]);
+  });
+});
+
+describe("collectWorkflowPromptConventionWarnings", () => {
+  it("returns no warnings when every raw FSM agent prompt already resolves inside prompts/", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await mkdir(path.join(root, "prompts"), { recursive: true });
+
+    const workflow: ExpandedWorkflow = {
+      contentHash: "sha256:placeholder",
+      initial: "implement",
+      name: "consistent",
+      source: { kind: "raw_fsm", path: workflowPath },
+      states: [
+        {
+          action: {
+            kind: "agent",
+            provider: "codex",
+            prompt: "prompts/impl.md"
+          },
+          completeWhen: {},
+          id: "implement",
+          transitions: [{ to: "done", when: {} }]
+        },
+        { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+      ],
+      templateFiles: []
+    };
+
+    const warnings = await collectWorkflowPromptConventionWarnings(
+      workflow,
+      workflowPath
+    );
+    expect(warnings).toEqual([]);
+  });
+
+  it("warns when an agent prompt sits outside prompts/ even though prompts/ exists (vow-lang/vow#1277 postmortem)", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await mkdir(path.join(root, "prompts"), { recursive: true });
+
+    const workflow: ExpandedWorkflow = {
+      contentHash: "sha256:placeholder",
+      initial: "implement",
+      name: "inconsistent",
+      source: { kind: "raw_fsm", path: workflowPath },
+      states: [
+        {
+          action: { kind: "agent", provider: "codex", prompt: "WORKFLOW.md" },
+          completeWhen: {},
+          id: "implement",
+          transitions: [{ to: "done", when: {} }]
+        },
+        { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+      ],
+      templateFiles: []
+    };
+
+    const warnings = await collectWorkflowPromptConventionWarnings(
+      workflow,
+      workflowPath
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("implement");
+    expect(warnings[0]).toContain("WORKFLOW.md");
+    expect(warnings[0]).toContain("prompts/");
+  });
+
+  it("stays silent when the workflow directory has no prompts/ at all", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+
+    const workflow: ExpandedWorkflow = {
+      contentHash: "sha256:placeholder",
+      initial: "implement",
+      name: "no_prompts_dir",
+      source: { kind: "raw_fsm", path: workflowPath },
+      states: [
+        {
+          action: { kind: "agent", provider: "codex", prompt: "WORKFLOW.md" },
+          completeWhen: {},
+          id: "implement",
+          transitions: [{ to: "done", when: {} }]
+        },
+        { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+      ],
+      templateFiles: []
+    };
+
+    const warnings = await collectWorkflowPromptConventionWarnings(
+      workflow,
+      workflowPath
+    );
+    expect(warnings).toEqual([]);
+  });
+
+  it("skips markdown-sourced workflows even when a prompts/ directory happens to exist", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "WORKFLOW.md");
+    await mkdir(path.join(root, "prompts"), { recursive: true });
+
+    const workflow: ExpandedWorkflow = {
+      contentHash: "sha256:placeholder",
+      initial: "run_agent",
+      name: "markdown_workflow",
+      source: { kind: "markdown", path: workflowPath },
+      states: [
+        {
+          action: { kind: "agent", provider: "codex", prompt: "unused.md" },
+          completeWhen: {},
+          id: "run_agent",
+          transitions: [{ to: "done", when: {} }]
+        },
+        { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+      ],
+      templateFiles: []
+    };
+
+    const warnings = await collectWorkflowPromptConventionWarnings(
+      workflow,
+      workflowPath
+    );
+    expect(warnings).toEqual([]);
   });
 });

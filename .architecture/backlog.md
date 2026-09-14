@@ -6,13 +6,23 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## resolve-scheduled-dispatch-context
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 21/25 (leverage 4, locality 4, blast radius 2, heat 5)
-- **Files**: ~3 estimated (new `src/lifecycle/scheduled-dispatch-context.ts` + `run-controller.ts` + test; CONTEXT.md term optional → 4)
+- **PR**: #764
+- **Files**: ~3 estimated; 4 actual (new `src/lifecycle/scheduled-dispatch-context.ts`, `run-controller.ts`, new test, `CONTEXT.md` term — within tolerance)
 - **Modules**: `src/lifecycle/run-controller.ts` — five scheduled-dispatch prologues sharing project-resolve+token+repository+`refreshIssue`: `executeRetry` (1358-1417), `reEvaluateWaitingRun` (2417-2444, deliberately omits the `isLabelWritingGitHubIssuesApi` guard), `executeStateAdvance` (2833-2876), `executeContinuation` (3387-3431), `dispatchReviewFollowup` (3582-3688, interleaved); existing fresh-dispatch model `resolveAndClaim` (1008-1073)
-- **Summary**: A `resolveScheduledDispatchContext(deps, {projectName, issueNumber, requireLabelWriting})` returning `{kind:"ready", project, repository, refreshed}` | `{kind:"dropped", reason}`, concentrating the project/token/repository/issue-refresh resolution and leaving eligibility + drop reaction at each caller (the `resolveAndClaim` discriminated-result house pattern). `requireLabelWriting` defaults true; `reEvaluateWaitingRun` passes false to preserve its deliberate guard omission.
+- **Summary**: A `resolveScheduledDispatchContext(ports, {project, issueNumber, requireLabelWritingApi})` returning `{kind:"resolved", repository, issue}` | `{kind:"dropped", reason}`, concentrating the token/repository/issue-refresh tail (the contiguous span in all five callers) and leaving eligibility + drop reaction at each caller (the `resolveAndClaim` discriminated-result house pattern). The project-resolve head stays a private `resolveDispatchProject`. `requireLabelWritingApi` is required; `reEvaluateWaitingRun` passes false to preserve its deliberate guard omission.
 - **First seen**: 2026-09-14
-- **Reason**: **Picked by the 2026-09-14 run** (top surviving candidate at 21/25; runner-up candidate `run-chain-tree-walk-cte` at 20/25, within 1 point). Classic "seam collapsing N duplicated prologues" pattern on the hottest file. Blast held at 2 despite one production file because the review surface spans five critical dispatch methods. Divergences preserved, not fixed: api-writability guard optional (reEval omits it — wait-park re-eval path, issues #731/#737/#740/#745), `providersConfig` loaded by callers that need it (2 of 5), drop logging/reaction per-caller. Design + PR to follow this run.
+- **Reason**: **Picked by the 2026-09-14 run** (top surviving candidate at 21/25; runner-up candidate `run-chain-tree-walk-cte` at 20/25, within 1 point). Classic "seam collapsing N duplicated prologues" pattern on the hottest file. Blast held at 2 despite one production file because the review surface spans five critical dispatch methods. Divergences preserved, not fixed: api-writability guard optional (reEval omits it — wait-park re-eval path, issues #731/#737/#740/#745), `providersConfig` loaded by callers that need it (2 of 5), drop logging/reaction per-caller. Implemented via design-it-twice winner Design A (ports-and-adapters exported free function — the only design whose adjudicated interface a failing test can pin without a reach-past cast); runner-up design B (single private method) lost on that plus leaving `dispatchReviewFollowup` out and needing a retry drop reorder. Empirical refinement: the prologue is not contiguous (retry/reviewFollowup interleave caller-specific checks), so the seam is the token/refresh tail, not the whole prologue. Added the `Scheduled Dispatch Context` term to CONTEXT.md. PR #764 opened 2026-09-14.
+
+### Run 2026-09-14 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M2EG403B` (adopted; conditions 1-4 held — non-default, 0 unique commits ahead of `origin/main`, no upstream, unpublished on origin). Not renamed per the adopted-branch rule; slug recorded here and in the report instead.
+- **Committed**: report + backlog (`f9b993d`), design section (`4df7d90`), implementation + CONTEXT.md term (`6d8f685`), this in-flight update.
+- **Evidence**: PR #764; quality gate green (lint, typecheck, format:check, knip, build; test 2867 passed — no flakes this run). Diff 4 files (est. ~3; the 4th is the `CONTEXT.md` term add, within tolerance). No published/exported package/CLI/wire interface changed. `origin/main` unchanged at push (0 behind); no rebase needed. Reconciled `tracked-pull-request-lookup` #747 → merged (docs, superseded); no in-flight PR blocked this run.
+- **Next**: human review of #764; `run-chain-tree-walk-cte` (20/25, runner-up candidate) is the natural next firing, with `handle-scheduled-dispatch-error` (20/25) as its adjacent follow-up on the same methods.
 
 ## run-chain-tree-walk-cte
 

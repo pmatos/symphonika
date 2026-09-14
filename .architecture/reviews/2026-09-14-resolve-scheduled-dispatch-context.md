@@ -5,7 +5,7 @@
 `src/http/pages.ts`, `src/routines/dispatcher.ts`, `src/providers/*`), plus re-verification of the
 six `proposed` backlog candidates a sub-agent could re-locate on the current tree. Fresh scan by
 one sub-agent; the branch was adopted (see below).
-**Picked**: `resolve-scheduled-dispatch-context` — see PR and `.architecture/backlog.md`
+**Picked**: `resolve-scheduled-dispatch-context` — see [PR #764](https://github.com/pmatos/symphonika/pull/764) and `.architecture/backlog.md`
 **Degradations**: none. Branch **adopted** (`sym/symphonika/routine/refactor-audit/01M2EG403B`;
 step-0 conditions 1–4 all held — non-default, 0 unique commits ahead of `origin/main`, no upstream,
 unpublished on origin). Not renamed per the adopted-branch rule; slug recorded here and in the

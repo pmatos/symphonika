@@ -58,6 +58,7 @@ import { unitEnvironmentFilePath, userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
 import {
+  collectWorkflowPromptConventionWarnings,
   loadExpandedWorkflow,
   resolveWorkflowFormat,
   validateExpandedWorkflowReferences
@@ -578,14 +579,25 @@ export async function runDoctor(
       path.dirname(configPath),
       project.workflow.path
     );
-    const workflowErrors = await collectWorkflowErrors(
+    const workflowResult = await collectWorkflowErrors(
       workflowPath,
       project.workflow.format,
       project,
       parsedConfig,
       agentProviders
     );
-    errors.push(...workflowErrors);
+    errors.push(...workflowResult.errors);
+    if (
+      workflowResult.errors.length === 0 &&
+      workflowResult.workflow !== undefined
+    ) {
+      warnings.push(
+        ...(await collectWorkflowPromptConventionWarnings(
+          workflowResult.workflow,
+          workflowPath
+        ))
+      );
+    }
     const staleIssues = await fetchStaleIssues(project, env, githubIssuesApi);
     projects.push({
       ...validation,
@@ -1702,11 +1714,11 @@ async function collectWorkflowErrors(
   project: ProjectConfig,
   config: ServiceConfig,
   agentProviders: AgentProviderRegistry
-): Promise<string[]> {
+): Promise<{ errors: string[]; workflow?: ExpandedWorkflow }> {
   try {
     const expanded = await loadExpandedWorkflow(workflowPath, format);
     if (expanded.errors.length > 0) {
-      return expanded.errors;
+      return { errors: expanded.errors };
     }
     const errors = await validateExpandedWorkflowReferences(
       expanded.workflow,
@@ -1720,10 +1732,12 @@ async function collectWorkflowErrors(
         agentProviders
       ))
     );
-    return errors;
+    return { errors, workflow: expanded.workflow };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return [`workflow contract not found at ${workflowPath}: ${message}`];
+    return {
+      errors: [`workflow contract not found at ${workflowPath}: ${message}`]
+    };
   }
 }
 

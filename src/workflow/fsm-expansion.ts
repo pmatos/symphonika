@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import { BUILTIN_WORKFLOW_TEMPLATES } from "../builtin-templates.js";
@@ -173,6 +173,51 @@ export async function validateExpandedWorkflowReferences(
     }
   }
   return errors;
+}
+
+// Non-fatal: unlike validateExpandedWorkflowReferences, a prompt outside
+// prompts/ still works -- symphonika's own workflow.yml ran this way for a
+// while (implement read WORKFLOW.md at the repo root while every other state
+// already used prompts/*.md), and forseti/modgud/health-connectors/
+// pianosight/finnie all repeated it. The bare WORKFLOW.md name is what
+// `workflow:` itself resolves to markdown format when pointed at directly
+// (resolveWorkflowFormat), so reusing it for one FSM state's prompt reads as
+// a second, competing workflow definition sitting next to workflow.yml
+// rather than what it is: one prompt among several. Surfaced as a doctor
+// warning, not an error, so an existing project isn't broken by this check
+// alone -- see runDoctor's per-project loop (doctor.ts).
+export async function collectWorkflowPromptConventionWarnings(
+  workflow: ExpandedWorkflow,
+  workflowPath: string
+): Promise<string[]> {
+  if (workflow.source.kind !== "raw_fsm") {
+    return [];
+  }
+  const workflowDir = path.dirname(workflowPath);
+  const promptsDir = path.join(workflowDir, "prompts");
+  try {
+    const promptsDirStat = await stat(promptsDir);
+    if (!promptsDirStat.isDirectory()) {
+      return [];
+    }
+  } catch {
+    return [];
+  }
+
+  const warnings: string[] = [];
+  for (const state of workflow.states) {
+    const action = state.action;
+    if (action?.kind !== "agent" || typeof action.prompt !== "string") {
+      continue;
+    }
+    const promptPath = path.resolve(workflowDir, action.prompt);
+    if (!isPathInside(promptPath, promptsDir)) {
+      warnings.push(
+        `workflow state ${state.id} prompt ${action.prompt} sits outside prompts/, which already holds other states' prompts -- move it into prompts/ for consistency (a name like WORKFLOW.md also collides with symphonika's own single-file markdown workflow convention)`
+      );
+    }
+  }
+  return warnings;
 }
 
 export async function loadProjectWorkflow(input: {

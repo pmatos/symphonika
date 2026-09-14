@@ -1250,6 +1250,60 @@ describe("doctor", () => {
     expect(output.stderr).toContain("planning");
   });
 
+  it("warns (without erroring) when a raw FSM agent prompt sits outside prompts/ even though prompts/ exists", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, { workflowPath: "./workflow.yml" });
+    await mkdir(path.join(root, "prompts"), { recursive: true });
+    await writeFile(
+      path.join(root, "prompts", "code-review-fix.md"),
+      "Review.\n"
+    );
+    await writeFile(path.join(root, "WORKFLOW.md"), "Implement.\n");
+    await writeFile(
+      path.join(root, "workflow.yml"),
+      [
+        "workflow:",
+        "  name: outside_prompts_dir",
+        "  initial: implement",
+        "  states:",
+        "    implement:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: WORKFLOW.md",
+        "      transitions:",
+        "        - to: code_review_fix",
+        "    code_review_fix:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/code-review-fix.md",
+        "      transitions:",
+        "        - to: done",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(report.errors).toEqual([]);
+    const warning = report.warnings.find((entry) =>
+      entry.includes("implement")
+    );
+    expect(warning).toBeDefined();
+    expect(warning).toContain("WORKFLOW.md");
+    expect(warning).toContain("prompts/");
+  });
+
   it("rejects raw FSM workflows referencing an unconfigured provider", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");

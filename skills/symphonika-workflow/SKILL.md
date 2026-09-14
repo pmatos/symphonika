@@ -27,17 +27,17 @@ Cover at minimum:
 1. **Goal** — what should one Run of this workflow accomplish?
 2. **Shape** — single-state (Markdown `WORKFLOW.md`) or multi-state (raw FSM `workflow.yml`)? Default to single-state unless the user names at least one of: review-feedback loop, conflict resolution, wait-then-merge, conditional branches.
 3. **Providers** — Codex, Claude, or OMP per agent state? Per-state `action.provider` routing is fully supported at runtime; mix providers across states freely (see [REFERENCE.md](REFERENCE.md#providers)).
-4. **States** — for each FSM node: kind (`agent` | `wait` | `merge_pr` | `comment` | `label_issue` | `close_issue`), prompt path (for `agent`), `complete_when` (optional predicate gate evaluated before transitions — only needed when completion differs from the advance condition), transitions, terminal flag. Consider whether a `workflow.use` template (builtin or custom) already covers part of the shape instead of hand-authoring every state.
+4. **States** — for each FSM node: kind (`agent` | `wait` | `merge_pr` | `comment` | `label_issue` | `close_issue`), prompt path (for `agent`), `complete_when` (see REFERENCE.md's State action kinds section — only needed when completion differs from the advance condition), transitions, terminal flag. Consider whether a `workflow.use` template (builtin or custom) already covers part of the shape instead of hand-authoring every state.
 5. **Predicates** — which of the supported predicates (see REFERENCE, including `artifact_exists`) gate each transition? Reject predicates that do not exist. Walk through wait-state transition order explicitly — a plausible-looking order can leave a state parked forever (REFERENCE.md's Predicates section has the worked example).
 6. **Prompt body** — what does the agent need to be told? What templating variables (`issue`, `project`, `workspace`, `branch`, `run`, `provider`) does it use? Confirm every `{{var}}` resolves; strict Mustache fails on unknown vars.
 7. **Terminal states** — at least one `terminal: success` and (usually) one `terminal: blocked` or `terminal: failure`. Verify every non-terminal state has a transition that can fire.
-8. **Side effects outside the workflow** — PR opening and `agent-ready` removal are still agent-only (no dedicated action kind exists for them). Comments/labels/issue-closing *can* be done by the orchestrator directly via `comment` / `label_issue` / `close_issue` states — ask whether the user wants that instead of an agent doing it. Either way, a workflow's own `label_issue` action must not touch `agent-ready` or `sym:*` labels — those are orchestrator-owned out-of-band.
+8. **Side effects outside the workflow** — PR opening and `agent-ready` removal are still agent-only; comments/labels/issue-closing *can* be done by the orchestrator directly via `comment` / `label_issue` / `close_issue` states instead — ask whether the user wants that. See REFERENCE.md's State action kinds section for the boundary between them, including why a workflow's own `label_issue` shouldn't touch `agent-ready`/`sym:*`.
 
 If a question can be answered by reading `SPEC.md`, `CONTEXT.md`, `docs/adr/`, or the project's existing `symphonika.yml` / current `WORKFLOW.md`, read instead of asking.
 
 ## Capability check (gate before writing)
 
-Before drafting the artifact, run through [REFERENCE.md](REFERENCE.md#supported-vs-unsupported-12) and flag anything the user asked for that is **not** supported in current Symphonika. Common asks that are out of scope today:
+Before drafting the artifact, run through [REFERENCE.md](REFERENCE.md#supported-vs-unsupported) and flag anything the user asked for that is **not** supported in current Symphonika. Common asks that are out of scope today:
 
 - Action kinds beyond `agent`, `wait`, `merge_pr`, `comment`, `label_issue`, `close_issue`
 - Predicates beyond the documented set (e.g. timer-based, body-text-based, label-based mid-walk)
@@ -52,7 +52,7 @@ If anything is unsupported, **stop drafting** and run the feature-request flow b
 
 1. Summarize the missing capability in one sentence and confirm the user agrees with the framing.
 2. Build a minimal example workflow (paste-ready YAML or Markdown) that illustrates how the user would write it if the feature existed.
-3. Check for an existing report before proposing to file a new one: `gh issue list -R pmatos/symphonika --search "<capability keywords>"`. If a matching open (or recently closed) issue exists, point the user at it instead of filing a duplicate — `docs/workflows.md` itself has drifted stale relative to `src/` before, so confirm the gap is real against current `docs/workflows.md`/`src/` before assuming nobody's reported it.
+3. Check for an existing report before proposing to file a new one: `gh issue list -R pmatos/symphonika --search "<capability keywords>"`. If a matching open (or recently closed) issue exists, point the user at it instead of filing a duplicate. Before concluding nothing exists, double-check the gap is real against current `docs/workflows.md`/`src/` — the doc has drifted stale before.
 4. Ask the user explicitly: "Should I file this as a feature request at `pmatos/symphonika`?" — do not file without that confirmation.
 5. On yes, write the issue body to a scratch file first (avoids nested-fence escaping problems in a `gh issue create --body "$(cat <<'EOF' ... EOF)"` heredoc) and run:
    ```sh
@@ -86,12 +86,12 @@ After the design is fully resolved and supported:
 2. **Enumerate every file the workflow will need.** Start with the contract file itself. For an FSM workflow, also walk every `agent` state's `action.prompt:` and treat each distinct path as a file to write. For each referenced prompt path: check whether it already exists in the target project; if it does not, draft prompt content using [EXAMPLES.md](EXAMPLES.md) Example 4 as the template (specialized for that state's responsibility) and add it to the write list. Symphonika's raw-FSM validation fails with `workflow state ... prompt not found` when any referenced prompt file is missing, so the workflow file alone is not a usable artifact.
 3. Show the user the **full write list**. Tag each path `NEW` or `REPLACES (existing N lines)`; for a `NEW` path show the rendered content, for a `REPLACES` path show a diff against the existing file, not just the new content — the user can't judge an overwrite from the new content alone. Ask for explicit approval to write the whole set. Approval must cover every file — partial approval is not permitted.
 4. On approval, write every file in the list to its named path. Use `Write` (overwrite) only if the user has confirmed they want to replace any existing file there. If step 1 chose option (b), also `Edit` `symphonika.yml` to update `projects[].workflow:` — a narrow `Edit` only, never a full rewrite.
-5. Have the user (or run yourself, if you have a shell in the target project) `symphonika workflow validate --project <name>` to validate the new graph, and `symphonika workflow explain --project <name>` to review the expanded graph (this also expands `workflow.use` templates, so it's the way to confirm a template composed the way you expect). `symphonika doctor` also validates workflow contracts but checks the whole service, not just this one workflow — mention it as the broader pre-flight, not the primary check.
+5. Have the user (or run yourself, if you have a shell in the target project) validate the result using the commands in REFERENCE.md's Validation and inspection section (`workflow validate`, `workflow explain` — including for reviewing a `workflow.use` expansion — and `doctor` as the broader check).
 
 `symphonika.yml` edits from this skill are limited to the `projects[].workflow:` reconciliation in step 1 (option b). Do not touch any other field — service-level runtime settings, providers, tracker config, and workspace roots are out of scope for a workflow-design skill.
 
 ## See also
 
-- `docs/workflows.md` in the Symphonika checkout — the canonical, complete authoring reference. REFERENCE.md is a summary of it; read it directly for anything REFERENCE.md doesn't answer confidently.
+- `docs/workflows.md` in the Symphonika checkout — the canonical, complete authoring reference (see Quick start).
 - [REFERENCE.md](REFERENCE.md) — skill-specific capability-gate summary, sourced from `docs/workflows.md`
 - [EXAMPLES.md](EXAMPLES.md) — canned workflow shapes for common goals

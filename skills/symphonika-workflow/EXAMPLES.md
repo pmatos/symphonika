@@ -192,7 +192,7 @@ You are continuing work on {{branch.name}} after review feedback landed on the o
 
 ## 5. Using a built-in workflow template
 
-`workflow.use` splices a named, reusable sub-graph into the FSM instead of hand-authoring every state — see [REFERENCE.md](REFERENCE.md#reusable-workflow-templates--workflowuse-89) for the mechanics and the current built-in template list. This is Example 3's shape built from a template instead of by hand:
+`workflow.use` splices a named, reusable sub-graph into the FSM instead of hand-authoring every state — see [REFERENCE.md](REFERENCE.md#reusable-workflow-templates-workflowuse) for the mechanics and the current built-in template list. This is Example 3's shape, built from a template:
 
 ```yaml
 workflow:
@@ -214,7 +214,7 @@ workflow:
       terminal: blocked
 ```
 
-Read `docs/workflows.md` §9 in the Symphonika checkout before recommending a specific built-in — it documents each one's exact inputs, defaults, exits, and expanded behavior; confirm it still matches what's summarized in REFERENCE.md.
+See REFERENCE.md's Reusable workflow templates section (linked above) before recommending a specific built-in.
 
 ## Picking between shapes
 

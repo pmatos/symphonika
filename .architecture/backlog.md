@@ -4,6 +4,86 @@ Persisted candidate memory for `pm-deepen` refactor-audit runs. Each firing
 reconciles this file against merged/open PRs, reuses existing slugs so the dedup
 filter holds, and never deletes entries. Statuses change; rows stay.
 
+## resolve-scheduled-dispatch-context
+
+- **Status**: in-flight
+- **Score**: 21/25 (leverage 4, locality 4, blast radius 2, heat 5)
+- **PR**: #764
+- **Files**: ~3 estimated; 4 actual (new `src/lifecycle/scheduled-dispatch-context.ts`, `run-controller.ts`, new test, `CONTEXT.md` term — within tolerance)
+- **Modules**: `src/lifecycle/run-controller.ts` — five scheduled-dispatch prologues sharing project-resolve+token+repository+`refreshIssue`: `executeRetry` (1358-1417), `reEvaluateWaitingRun` (2417-2444, deliberately omits the `isLabelWritingGitHubIssuesApi` guard), `executeStateAdvance` (2833-2876), `executeContinuation` (3387-3431), `dispatchReviewFollowup` (3582-3688, interleaved); existing fresh-dispatch model `resolveAndClaim` (1008-1073)
+- **Summary**: A `resolveScheduledDispatchContext(ports, {project, issueNumber, requireLabelWritingApi})` returning `{kind:"resolved", repository, issue}` | `{kind:"dropped", reason}`, concentrating the token/repository/issue-refresh tail (the contiguous span in all five callers) and leaving eligibility + drop reaction at each caller (the `resolveAndClaim` discriminated-result house pattern). The project-resolve head stays a private `resolveDispatchProject`. `requireLabelWritingApi` is required; `reEvaluateWaitingRun` passes false to preserve its deliberate guard omission.
+- **First seen**: 2026-09-14
+- **Reason**: **Picked by the 2026-09-14 run** (top surviving candidate at 21/25; runner-up candidate `run-chain-tree-walk-cte` at 20/25, within 1 point). Classic "seam collapsing N duplicated prologues" pattern on the hottest file. Blast held at 2 despite one production file because the review surface spans five critical dispatch methods. Divergences preserved, not fixed: api-writability guard optional (reEval omits it — wait-park re-eval path, issues #731/#737/#740/#745), `providersConfig` loaded by callers that need it (2 of 5), drop logging/reaction per-caller. Implemented via design-it-twice winner Design A (ports-and-adapters exported free function — the only design whose adjudicated interface a failing test can pin without a reach-past cast); runner-up design B (single private method) lost on that plus leaving `dispatchReviewFollowup` out and needing a retry drop reorder. Empirical refinement: the prologue is not contiguous (retry/reviewFollowup interleave caller-specific checks), so the seam is the token/refresh tail, not the whole prologue. Added the `Scheduled Dispatch Context` term to CONTEXT.md. PR #764 opened 2026-09-14.
+
+### Run 2026-09-14 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M2EG403B` (adopted; conditions 1-4 held — non-default, 0 unique commits ahead of `origin/main`, no upstream, unpublished on origin). Not renamed per the adopted-branch rule; slug recorded here and in the report instead.
+- **Committed**: report + backlog (`f9b993d`), design section (`4df7d90`), implementation + CONTEXT.md term (`6d8f685`), this in-flight update.
+- **Evidence**: PR #764; quality gate green (lint, typecheck, format:check, knip, build; test 2867 passed — no flakes this run). Diff 4 files (est. ~3; the 4th is the `CONTEXT.md` term add, within tolerance). No published/exported package/CLI/wire interface changed. `origin/main` unchanged at push (0 behind); no rebase needed. Reconciled `tracked-pull-request-lookup` #747 → merged (docs, superseded); no in-flight PR blocked this run.
+- **Next**: human review of #764; `run-chain-tree-walk-cte` (20/25, runner-up candidate) is the natural next firing, with `handle-scheduled-dispatch-error` (20/25) as its adjacent follow-up on the same methods.
+
+## run-chain-tree-walk-cte
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
+- **Files**: ~1 estimated (+ test)
+- **Modules**: `src/run-store.ts` — byte-identical `WITH RECURSIVE up/down` chain-tree walk in `isRunChainFullyTerminal` (5636-5655) and `retirePullRequestDiscoveryChain` (5684-5700); precedent constant `RUN_CHAIN_ROOT_CTE` (~1174)
+- **Summary**: Extract the duplicated cycle-guarded chain-tree traversal (walk to chain root, then down to all descendants) into a `RUN_CHAIN_TREE_CTE` constant, like the existing root-CTE constant. Do NOT unify the deliberately-different ancestor-only walk at ~6015 (documented perf shape; see the SQLite-CTE-materialization memory).
+- **First seen**: 2026-09-14
+- **Reason**: Runner-up candidate to `resolve-scheduled-dispatch-context` this run (20/25, within 1 point). Sits on the #746/#753 trackPullRequest surface (landed 2026-09-13). Borderline against "shared SQL string = pure DRY", but the ~20-line shared correctness invariant (cycle guard + root-find + descend) pushes it into a genuine seam. Natural next firing.
+
+## handle-scheduled-dispatch-error
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
+- **Files**: ~1-2 estimated
+- **Modules**: `src/lifecycle/run-controller.ts` — near-identical post-dispatch `catch` in `executeStateAdvance` (~3089-3166) and `executeContinuation` (~3511-3573), structural cousins in `executeRetry`/`dispatchReviewFollowup`
+- **Summary**: One teardown owning the `RegistryShutdownError`→cancel-parent-iff-`getRun`-undefined / `CapBreachedError|IssueReservedError`→warn+reschedule+`cancelRunAfterScheduleRefused` / else-rethrow window that #663/#674 fixed.
+- **First seen**: 2026-09-14
+- **Reason**: **Adjacent to `resolve-scheduled-dispatch-context`, same methods, natural follow-up.** The epilogue twin of this run's pick; deferred because taking both in one PR would double the blast on the hottest file. Ties the runner-up on raw score (20/25) but coupled to the pick, so it should follow it, not precede it.
+
+## routine-claim-window-membership-seam
+
+- **Status**: proposed
+- **Score**: 19/25 (leverage 3, locality 4, blast radius 2, heat 5)
+- **Files**: ~2 estimated
+- **Modules**: `src/routines/dispatcher.ts` `confirmIssueClaimAction` (2460-2491), `observedNewPullRequestForBranch` (2999-3013); `src/routines/outcome.ts` `diffRoutineGithubSnapshots` (182-230)
+- **Summary**: A single `didActionHappenInWindow` snapshot-membership predicate that both the routine-outcome diff and the claim verifier call, removing the prose-compensated open/close/new-PR-within-window drift (comments at 2456-2459 and 2987-2998 admit the mirror).
+- **First seen**: 2026-09-14
+- **Reason**: New find; on this fortnight's hot routine outcome-claim verification surface (#751/#754/#762/#756). Distinct from the backlog `routine-github-observation` (capture, not verification). Sub-20 this run.
+
+## provider-validate-harness-seam
+
+- **Status**: proposed
+- **Score**: 18/25 (leverage 3, locality 4, blast radius 2, heat 4)
+- **Files**: ~4 estimated
+- **Modules**: `src/providers/codex.ts` (104-117), `src/providers/claude.ts` (69-78), `src/providers/omp.ts` (~134-143), `src/providers/provider-session.ts` (152-156)
+- **Summary**: Fold each adapter's `validate` render→parse→spread into the `createProviderSession` harness via a `validateCommand?` config callback, leaving each adapter only its probe body; stops `validate` and `runAttempt` tokenizing the command independently.
+- **First seen**: 2026-09-14
+- **Reason**: New find on the Agent Provider Session surface. Sub-20 this run; low-friction mid-tier future candidate.
+
+## issue-pr-label-editing-family
+
+- **Status**: proposed
+- **Score**: 18/25 (leverage 3, locality 4, blast radius 1, heat 3)
+- **Files**: ~1 estimated
+- **Modules**: `src/http/pages.ts` `renderIssueLabelsSection` (4953-4977) / `renderPullRequestLabelsSection` (5498-5522); banner twins ~4846/~5408
+- **Summary**: One label-editing section taking `(route, idField, note)` that owns the "`sym:*` read-only, everything else gets CSRF + snapshot-repo remove/add forms" policy once (a comment at 5404 already admits the structural identity).
+- **First seen**: 2026-09-14
+- **Reason**: New find; line-for-line duplicate policy that can drift. Sub-20 this run.
+
+## probe-shutdown-drift
+
+- **Status**: dropped
+- **Score**: n/a (not behaviour-preserving)
+- **Files**: ~3 estimated
+- **Modules**: `src/providers/codex.ts` `shutdownProbeProcess` (357-366), `src/providers/omp.ts` (~1506-1523)
+- **Summary**: The two probe-shutdown paths differ — codex stops at SIGTERM, omp escalates SIGTERM→SIGKILL and destroys pipes.
+- **First seen**: 2026-09-14
+- **Reason**: Unifying would give codex omp's SIGKILL escalation — a **behaviour change**, not a preserving extraction. A correctness item (a codex app-server ignoring SIGTERM leaks), not a deepening candidate. Recorded so the next firing does not re-derive it as a refactor.
+
 ## tracked-pull-request-lookup
 
 - **Status**: superseded

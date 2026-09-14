@@ -96,6 +96,18 @@ re-checks only for label-controlled work. State Advance, waiting rows, and PR Fo
 going on label drift and dependency drift alike, but still stop when the Issue closes.
 _Avoid_: dispatch eligibility when referring to active-run or scheduled-work re-checks
 
+**Scheduled Dispatch Context**:
+The Project, tracker repository, and freshly re-read Issue snapshot that every scheduled-dispatch
+entry point (retry, State Advance, Continuation, waiting-run re-evaluation, PR-review follow-up)
+resolves before acting on a due callback. Resolving it can drop the dispatch — the Project is gone or
+disabled, the tracker cannot write Operational Labels, its token is unresolvable, or the Issue refresh
+is unavailable — and each entry point maps that classified drop to its own reaction (bare return,
+warn, claim release, cancellation, or a typed dispatch result) while still owning the eligibility
+decision on a resolved Issue. The label-writing requirement is waived only for waiting-run
+re-evaluation (issue #731 lineage). It is the I/O-and-credential resolution the eligibility questions
+build on, not the questions themselves.
+_Avoid_: Dispatch Eligibility (the label/state predicate) when referring to this resolution
+
 **Required Eligibility Label**:
 A repository-owned GitHub issue label configured in a Dispatch Project's `issue_filters.labels_all`.
 Every configured Required Eligibility Label must exist in the Dispatch Project's repository before

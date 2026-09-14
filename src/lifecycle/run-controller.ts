@@ -6,6 +6,10 @@ import {
   BLOCKED_SENTINEL_FILENAME,
   clearBlockedSentinel
 } from "./blocked-sentinel.js";
+import {
+  resolveScheduledDispatchContext,
+  type ScheduledDispatchPorts
+} from "./scheduled-dispatch-context.js";
 
 import type { Logger } from "pino";
 
@@ -666,6 +670,7 @@ export class RunController {
     Map<string, RunControllerProjectConfig>
   >;
   private readonly providersLoader: () => Promise<RunControllerProvidersConfig>;
+  private readonly dispatchPorts: ScheduledDispatchPorts;
   private readonly pullRequestPolicyLoader: () => Promise<PullRequestFollowupPolicy>;
   private readonly runStore: RunStore;
   private readonly schedule: ScheduleHandler;
@@ -727,6 +732,14 @@ export class RunController {
     this.watchdogConfigLoader =
       options.watchdogConfigLoader ??
       ((): RunDeadlinePolicy => ({ enabled: false, maxRunMinutes: 0 }));
+    this.dispatchPorts = {
+      isLabelWritingApi: (): boolean =>
+        isLabelWritingGitHubIssuesApi(this.githubIssuesApi),
+      resolveToken: (tokenReference): string | undefined =>
+        resolveTokenFromEnv(tokenReference, this.env),
+      refreshIssue: (input): Promise<IssueSnapshot | null | undefined> =>
+        this.refreshIssue(input)
+    };
   }
 
   // Run-scoped: expiry is measured from the Run row's original `created_at`,
@@ -1005,6 +1018,28 @@ export class RunController {
   // one return-value protocol and neither caller needs its own try/catch.
   // Any OTHER exception (createRunId, loadWorkflow, a runStore write) is not
   // caught here and propagates to the caller unchanged.
+  // The project-resolve head shared by the five scheduled-dispatch entry
+  // points: load projects, look one up, and narrow it to a live Dispatch
+  // Project. The single drop reason is intentional -- each caller logs (or does
+  // not) its own message, so the head classifies and the caller reacts, exactly
+  // as resolveScheduledDispatchContext does for the token/refresh tail.
+  private async resolveDispatchProject(
+    projectName: string
+  ): Promise<
+    { kind: "resolved"; project: DispatchProjectConfig } | { kind: "dropped" }
+  > {
+    const projects = await this.projectsLoader();
+    const project = projects.get(projectName);
+    if (
+      project === undefined ||
+      project.disabled === true ||
+      !isDispatchProject(project)
+    ) {
+      return { kind: "dropped" };
+    }
+    return { kind: "resolved", project };
+  }
+
   private async resolveAndClaim(
     target: DispatchTarget,
     providersConfig: RunControllerProvidersConfig,
@@ -1355,19 +1390,15 @@ export class RunController {
   }
 
   async executeRetry(payload: RetryPayload): Promise<void> {
-    const projects = await this.projectsLoader();
-    const project = projects.get(payload.projectName);
-    if (
-      project === undefined ||
-      project.disabled === true ||
-      !isDispatchProject(project)
-    ) {
+    const resolved = await this.resolveDispatchProject(payload.projectName);
+    if (resolved.kind === "dropped") {
       this.logger?.warn(
         { projectName: payload.projectName, runId: payload.runId },
         "symphonika retry dropped: project disabled or removed"
       );
       return;
     }
+    const { project } = resolved;
 
     const provider = this.agentProviders[payload.providerName];
     if (provider === undefined) {
@@ -1384,44 +1415,35 @@ export class RunController {
 
     const providerCommand = payload.providerCommand;
 
-    if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
-      this.logger?.warn(
-        { runId: payload.runId },
-        "symphonika retry dropped: github tracker missing label writes"
-      );
-      return;
-    }
-
-    const token = resolveTokenFromEnv(project.tracker.token, this.env);
-    if (token === undefined) {
-      this.logger?.warn(
-        { runId: payload.runId },
-        "symphonika retry dropped: token not available"
-      );
-      return;
-    }
-    const repository = {
-      owner: project.tracker.owner,
-      repo: project.tracker.repo,
-      token
-    };
-
     // Re-validate eligibility before re-asserting sym:claimed and starting the
     // attempt. During the [10s, 30s, 2m] retry backoff the issue may have been
     // closed or lost required labels; reconcile cannot help here because a
     // scheduled retry is not present in activeRuns.list() during the window.
-    const refreshed = await this.refreshIssue({
+    const context = await resolveScheduledDispatchContext(this.dispatchPorts, {
       project,
       issueNumber: payload.issue.number,
-      repository
+      requireLabelWritingApi: true
     });
-    if (refreshed === undefined) {
-      this.logger?.warn(
-        { runId: payload.runId, projectName: payload.projectName },
-        "symphonika retry dropped: issue refresh unavailable"
-      );
+    if (context.kind === "dropped") {
+      if (context.reason === "label_writes_unavailable") {
+        this.logger?.warn(
+          { runId: payload.runId },
+          "symphonika retry dropped: github tracker missing label writes"
+        );
+      } else if (context.reason === "token_unavailable") {
+        this.logger?.warn(
+          { runId: payload.runId },
+          "symphonika retry dropped: token not available"
+        );
+      } else {
+        this.logger?.warn(
+          { runId: payload.runId, projectName: payload.projectName },
+          "symphonika retry dropped: issue refresh unavailable"
+        );
+      }
       return;
     }
+    const { repository, issue: refreshed } = context;
     if (refreshed === null || refreshed.state !== "open") {
       await this.cancelScheduledLifecycleWork({
         issueNumber: payload.issue.number,
@@ -2414,34 +2436,23 @@ export class RunController {
       return;
     }
 
-    const projects = await this.projectsLoader();
-    const project = projects.get(row.project);
-    if (
-      project === undefined ||
-      project.disabled === true ||
-      !isDispatchProject(project)
-    ) {
+    const resolved = await this.resolveDispatchProject(row.project);
+    if (resolved.kind === "dropped") {
       return;
     }
+    const { project } = resolved;
 
-    const token = resolveTokenFromEnv(project.tracker.token, this.env);
-    if (token === undefined) {
-      return;
-    }
-    const repository: GitHubIssueRepositoryInput = {
-      owner: project.tracker.owner,
-      repo: project.tracker.repo,
-      token
-    };
-
-    const refreshed = await this.refreshIssue({
+    const context = await resolveScheduledDispatchContext(this.dispatchPorts, {
       project,
       issueNumber: row.issueNumber,
-      repository
+      // Waiting-run re-eval is deliberately not gated on label-writing
+      // capability (issues #731/#737/#740/#745).
+      requireLabelWritingApi: false
     });
-    if (refreshed === undefined) {
+    if (context.kind === "dropped") {
       return;
     }
+    const { repository, issue: refreshed } = context;
     if (
       refreshed === null ||
       !evaluateRunContinuationEligibility(refreshed, project, {
@@ -2830,50 +2841,38 @@ export class RunController {
   }
 
   async executeStateAdvance(payload: StateAdvancePayload): Promise<void> {
-    const projects = await this.projectsLoader();
-    const project = projects.get(payload.projectName);
-    if (
-      project === undefined ||
-      project.disabled === true ||
-      !isDispatchProject(project)
-    ) {
+    const resolved = await this.resolveDispatchProject(payload.projectName);
+    if (resolved.kind === "dropped") {
       this.logger?.warn(
         { projectName: payload.projectName, parentRunId: payload.parentRunId },
         "symphonika state advance dropped: project disabled or removed"
       );
       return;
     }
+    const { project } = resolved;
 
     const providersConfig = await this.providersLoader();
 
-    if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
-      return;
-    }
-
-    const token = resolveTokenFromEnv(project.tracker.token, this.env);
-    if (token === undefined) {
-      return;
-    }
-    const repository = {
-      owner: project.tracker.owner,
-      repo: project.tracker.repo,
-      token
-    };
-
     // State advance asks the fsm_owned Continuation Eligibility question; see
     // evaluateRunContinuationEligibility.
-    const refreshed = await this.refreshIssue({
+    const context = await resolveScheduledDispatchContext(this.dispatchPorts, {
       project,
       issueNumber: payload.issue.number,
-      repository
+      requireLabelWritingApi: true
     });
-    if (refreshed === undefined) {
-      this.logger?.warn(
-        { projectName: payload.projectName, parentRunId: payload.parentRunId },
-        "symphonika state advance dropped: issue refresh unavailable"
-      );
+    if (context.kind === "dropped") {
+      if (context.reason === "refresh_unavailable") {
+        this.logger?.warn(
+          {
+            projectName: payload.projectName,
+            parentRunId: payload.parentRunId
+          },
+          "symphonika state advance dropped: issue refresh unavailable"
+        );
+      }
       return;
     }
+    const { repository, issue: refreshed } = context;
     if (
       refreshed === null ||
       !evaluateRunContinuationEligibility(refreshed, project, {
@@ -3384,51 +3383,39 @@ export class RunController {
   }
 
   async executeContinuation(payload: ContinuationPayload): Promise<void> {
-    const projects = await this.projectsLoader();
-    const project = projects.get(payload.projectName);
-    if (
-      project === undefined ||
-      project.disabled === true ||
-      !isDispatchProject(project)
-    ) {
+    const resolved = await this.resolveDispatchProject(payload.projectName);
+    if (resolved.kind === "dropped") {
       this.logger?.warn(
         { projectName: payload.projectName, parentRunId: payload.parentRunId },
         "symphonika continuation dropped: project disabled or removed"
       );
       return;
     }
+    const { project } = resolved;
 
     const providersConfig = await this.providersLoader();
-
-    if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
-      return;
-    }
-
-    const token = resolveTokenFromEnv(project.tracker.token, this.env);
-    if (token === undefined) {
-      return;
-    }
-    const repository = {
-      owner: project.tracker.owner,
-      repo: project.tracker.repo,
-      token
-    };
 
     // Re-check issue state at the moment the continuation fires. The success
     // path already checks before scheduling, but operators may remove
     // agent-ready or add needs-human during the short continuation delay.
-    const refreshed = await this.refreshIssue({
+    const context = await resolveScheduledDispatchContext(this.dispatchPorts, {
       project,
       issueNumber: payload.issue.number,
-      repository
+      requireLabelWritingApi: true
     });
-    if (refreshed === undefined) {
-      this.logger?.warn(
-        { projectName: payload.projectName, parentRunId: payload.parentRunId },
-        "symphonika continuation dropped: issue refresh unavailable"
-      );
+    if (context.kind === "dropped") {
+      if (context.reason === "refresh_unavailable") {
+        this.logger?.warn(
+          {
+            projectName: payload.projectName,
+            parentRunId: payload.parentRunId
+          },
+          "symphonika continuation dropped: issue refresh unavailable"
+        );
+      }
       return;
     }
+    const { repository, issue: refreshed } = context;
     if (refreshed === null || refreshed.state !== "open") {
       // Issue closure ends every Continuation Eligibility scope. The
       // one-shot callback has been consumed and no replacement step will be
@@ -3579,18 +3566,14 @@ export class RunController {
     projectName: string;
     review: ReviewFollowupContext;
   }): Promise<DispatchOneFreshResult> {
-    const projects = await this.projectsLoader();
-    const project = projects.get(input.projectName);
-    if (
-      project === undefined ||
-      project.disabled === true ||
-      !isDispatchProject(project)
-    ) {
+    const resolved = await this.resolveDispatchProject(input.projectName);
+    if (resolved.kind === "dropped") {
       return {
         dispatched: false,
         reason: "project disabled or removed"
       };
     }
+    const { project } = resolved;
 
     if (this.activeRuns.isIssueReserved(input.projectName, input.issueNumber)) {
       return {
@@ -3655,37 +3638,23 @@ export class RunController {
       };
     }
 
-    if (!isLabelWritingGitHubIssuesApi(this.githubIssuesApi)) {
-      return {
-        dispatched: false,
-        reason: "GitHub tracker does not support operational label writes"
-      };
-    }
-
-    const token = resolveTokenFromEnv(project.tracker.token, this.env);
-    if (token === undefined) {
-      return {
-        dispatched: false,
-        reason: `projects.${project.name}.tracker.token is not available`
-      };
-    }
-    const repository = {
-      owner: project.tracker.owner,
-      repo: project.tracker.repo,
-      token
-    };
-
-    const refreshed = await this.refreshIssue({
+    const context = await resolveScheduledDispatchContext(this.dispatchPorts, {
       project,
       issueNumber: input.issueNumber,
-      repository
+      requireLabelWritingApi: true
     });
-    if (refreshed === undefined) {
+    if (context.kind === "dropped") {
       return {
         dispatched: false,
-        reason: "issue refresh unavailable"
+        reason:
+          context.reason === "label_writes_unavailable"
+            ? "GitHub tracker does not support operational label writes"
+            : context.reason === "token_unavailable"
+              ? `projects.${project.name}.tracker.token is not available`
+              : "issue refresh unavailable"
       };
     }
+    const { repository, issue: refreshed } = context;
     if (refreshed === null || refreshed.state !== "open") {
       return {
         dispatched: false,

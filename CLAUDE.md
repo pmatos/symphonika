@@ -68,6 +68,21 @@ the check fails.
 
 ## Agent skills
 
+### Workflow-design skill
+
+`skills/symphonika-workflow/` (SKILL.md, REFERENCE.md, EXAMPLES.md) helps design and write a
+Workflow Contract. `docs/workflows.md` is the canonical authoring reference for the FSM's syntax and
+semantics — action kinds, predicates, `workflow.use` templates, templating variables, providers,
+terminal states; REFERENCE.md points into it rather than re-deriving facts independently, but still
+names a few things directly (e.g. the six action kinds) where that's more useful than a bare pointer.
+Both go stale silently: nothing fails CI when either drifts from `src/workflow/`,
+`src/lifecycle/run-controller.ts`, or `src/builtin-templates.ts`. Whenever a change in this PR alters
+FSM syntax or semantics — a new/removed action kind, predicate, provider, template, templating
+variable, or terminal-state behavior — update `docs/workflows.md` in the same PR, and check
+`skills/symphonika-workflow/` for anything it names directly rather than pointing at
+`docs/workflows.md`. When unsure whether a change qualifies, diff both docs' claims against the
+touched source rather than guessing.
+
 ### Issue tracker
 
 Issues live in GitHub Issues at `pmatos/symphonika` (via `gh` CLI). See `docs/agents/issue-tracker.md`.

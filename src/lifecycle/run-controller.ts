@@ -63,7 +63,7 @@ import {
   secretsForEmailConfig,
   type EmailNotificationConfig
 } from "../notifications/config.js";
-import { redactValueDeep } from "../redaction.js";
+import { redactAll, redactValueDeep } from "../redaction.js";
 import type { CancelReason, ProgressEdge, RunStore } from "../run-store.js";
 import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
@@ -4413,10 +4413,17 @@ export class RunController {
             }
           );
         } else if (!runCreated && claimed) {
-          // Failure between claim and createRun (rare): still mark sym:failed best-effort.
+          // Failure between claim and createRun (rare): still mark sym:failed
+          // best-effort. This reason is now also posted as a public issue
+          // comment (ClaimLabelWriter.markNeedsHuman), so it gets the same
+          // SPEC.md §6 redaction classifyFailure applies to every other
+          // reason source before it reaches markFailed.
           await this.claimLabels.markFailed({
             issueNumber: input.issue.number,
-            reason: error instanceof Error ? error.message : String(error),
+            reason: redactAll(
+              error instanceof Error ? error.message : String(error),
+              this.redactionInventory(input.repository.token)
+            ),
             repository: input.repository
           });
         } else if (!runCreated) {

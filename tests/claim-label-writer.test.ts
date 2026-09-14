@@ -304,6 +304,23 @@ describe("ClaimLabelWriter direct entries", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("still posts a comment naming the reason when both the terminal and human-needed label adds fail", async () => {
+    // The double-failure case: neither sym:blocked nor sym:human-needed ever
+    // lands, so the comment is the only trace left of why -- it must not be
+    // skipped just because the label write it usually follows also failed.
+    const { api, comments } = makeApi({
+      add: ["sym:blocked", "sym:human-needed"]
+    });
+    await new ClaimLabelWriter({ api }).markBlocked({
+      issueNumber: 7,
+      reason: "no_workspace_changes",
+      repository
+    });
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("no_workspace_changes");
+    expect(comments[0]?.body).not.toContain("marked this issue");
+  });
+
   it("posts a comment naming the reason once sym:human-needed is added", async () => {
     const { api, comments } = makeApi();
     await new ClaimLabelWriter({ api }).markBlocked({
@@ -356,5 +373,36 @@ describe("ClaimLabelWriter direct entries", () => {
       })
     ).resolves.toBeUndefined();
     expect(seq(calls)).toEqual(["add:sym:failed", "add:sym:human-needed"]);
+  });
+
+  it("fences a reason containing markdown/mention syntax instead of posting it raw", async () => {
+    const { api, comments } = makeApi();
+    const reason = "turn_failed: @someone said `exit 1` re #123";
+    await new ClaimLabelWriter({ api }).markFailed({
+      issueNumber: 7,
+      reason,
+      repository
+    });
+    expect(comments).toHaveLength(1);
+    const body = comments[0]?.body ?? "";
+    // The whole reason still appears verbatim (nothing was stripped)...
+    expect(body).toContain(reason);
+    // ...but it is wrapped in a fence wide enough to swallow the reason's own
+    // backtick, so GitHub renders it as inert text rather than parsing the
+    // @mention/#issue reference or letting the reason's backtick break out.
+    expect(body).toMatch(/`{3,}\n[\s\S]*@someone[\s\S]*\n`{3,}/);
+  });
+
+  it("truncates a very long reason before fencing it", async () => {
+    const { api, comments } = makeApi();
+    const reason = "x".repeat(2000);
+    await new ClaimLabelWriter({ api }).markBlocked({
+      issueNumber: 7,
+      reason,
+      repository
+    });
+    const body = comments[0]?.body ?? "";
+    expect(body).not.toContain(reason);
+    expect(body).toContain(`${"x".repeat(1000)}…`);
   });
 });

@@ -78,6 +78,29 @@ type IssueTarget = {
   repository: GitHubIssueRepositoryInput;
 };
 
+// `reason` on IssueBlockTarget below is provider stderr/output text or a raw
+// internal error message, never sanitized for markdown. Posting it verbatim
+// into a public issue comment would let a stray backtick, `@mention`, or
+// `#issue` reference get interpreted by GitHub. Fencing it -- with a fence
+// longer than any backtick run already in the text, so the reason itself can
+// never break out of its own fence -- and bounding its length neutralizes
+// that without altering the reason string callers see elsewhere
+// (terminal_reason, logs).
+const MAX_REASON_COMMENT_CHARS = 1000;
+
+function formatReasonForComment(reason: string): string {
+  const truncated =
+    reason.length > MAX_REASON_COMMENT_CHARS
+      ? `${reason.slice(0, MAX_REASON_COMMENT_CHARS)}…`
+      : reason;
+  const longestBacktickRun = (truncated.match(/`+/g) ?? []).reduce(
+    (max, run) => Math.max(max, run.length),
+    0
+  );
+  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}\n${truncated}\n${fence}`;
+}
+
 // markFailed/markBlocked/markNeedsHuman additionally require the human-
 // readable reason the run controller already computed for this outcome (its
 // `state_transition_reason`/`terminal_reason` write), so the sym:human-needed
@@ -336,8 +359,12 @@ export class ClaimLabelWriter {
   // markBlocked so a human-attention signal exists regardless of which terminal
   // path was taken. Its own try/catch keeps a sym:human-needed failure from
   // suppressing the caller, and vice versa. Never called directly by the
-  // controller, so it stays private.
+  // controller, so it stays private. Posts the explanatory comment below even
+  // when the label add itself failed -- the label and the comment are two
+  // independent human-attention signals, and losing the label write must
+  // never also cost the only trace of *why* a human is needed.
   private async markNeedsHuman(input: IssueBlockTarget): Promise<void> {
+    let labelAdded = true;
     try {
       await this.api.addLabelsToIssue({
         ...input.repository,
@@ -345,17 +372,19 @@ export class ClaimLabelWriter {
         labels: ["sym:human-needed"]
       });
     } catch (err) {
+      labelAdded = false;
       this.logger?.warn(
         { err, issueNumber: input.issueNumber },
         "symphonika failed to add sym:human-needed label"
       );
-      return;
     }
-    this.logger?.info(
-      { issueNumber: input.issueNumber },
-      "symphonika marked issue sym:human-needed"
-    );
-    await this.postHumanNeededComment(input);
+    if (labelAdded) {
+      this.logger?.info(
+        { issueNumber: input.issueNumber },
+        "symphonika marked issue sym:human-needed"
+      );
+    }
+    await this.postHumanNeededComment({ ...input, labelAdded });
   }
 
   // The label alone leaves no trace on the issue of *why* a human is being
@@ -364,14 +393,24 @@ export class ClaimLabelWriter {
   // tracked, and the only way to find that out was journalctl + the run
   // evidence directory. Independent try/catch, same as the label add above:
   // a comment failure must never be mistaken for the label having failed.
-  private async postHumanNeededComment(input: IssueBlockTarget): Promise<void> {
-    if (this.api.addIssueComment === undefined) {
+  private async postHumanNeededComment(
+    input: IssueBlockTarget & { labelAdded: boolean }
+  ): Promise<void> {
+    const addIssueComment = this.api.addIssueComment;
+    if (addIssueComment === undefined) {
+      this.logger?.debug(
+        { issueNumber: input.issueNumber },
+        "symphonika sym:human-needed comment skipped: tracker lacks addIssueComment"
+      );
       return;
     }
+    const intro = input.labelAdded
+      ? "Symphonika marked this issue `sym:human-needed`."
+      : "Symphonika could not add the `sym:human-needed` label, but is flagging this issue for human attention.";
     try {
-      await this.api.addIssueComment({
+      await addIssueComment({
         ...input.repository,
-        body: `Symphonika marked this issue \`sym:human-needed\`.\n\n**Reason:** ${input.reason}`,
+        body: `${intro}\n\n**Reason:**\n\n${formatReasonForComment(input.reason)}`,
         issueNumber: input.issueNumber
       });
     } catch (err) {

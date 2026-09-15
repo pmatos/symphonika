@@ -52,6 +52,7 @@ import type {
   RoutineFanoutHoldReason,
   RunStore
 } from "../run-store.js";
+import { isPathInside } from "../path-safety.js";
 import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
   evaluateRoutineSchedule,
@@ -62,7 +63,9 @@ import {
   diffRoutineGithubSnapshots,
   parseGithubClaimUrl,
   parseRoutineOutcomeClaim,
+  readRoutineOutcomeClaimFile,
   reconcileRoutineOutcome,
+  resolveRoutineOutcomeClaim,
   ROUTINE_OUTCOME_JSON_SCHEMA,
   type ObservedRoutineAction,
   type RoutineGithubSnapshot,
@@ -505,6 +508,46 @@ const ROUTINE_CANCELLATION_SETTLE_MS = 60_000;
 // bounded somehow, so it gets its own short, independent, non-fatal
 // timeout instead of reusing (or resurrecting) the cleared deadline.
 const CLAIM_URL_VERIFICATION_TIMEOUT_MS = 30_000;
+
+// Shared by runRoutineFiring's success and failure paths so the two can't
+// drift (they previously duplicated this block, once with a redaction list
+// that went stale across the file-read await). Takes both claims already
+// resolved — the caller races/bounds `readRoutineOutcomeClaimFile` itself,
+// the same way every sibling blocking call in this function does inline,
+// rather than this helper needing its own opinion on deadline/cancellation
+// semantics. `redactSecrets` is a closure, not a snapshot: called fresh here
+// rather than passed a precomputed value, so a Service Config reload that
+// lands during the caller's own file-read await is still honored.
+function resolveAndLogRoutineOutcomeClaim(input: {
+  fileClaim: RoutineOutcomeClaim | null;
+  firingId: string;
+  logger: Logger | undefined;
+  messageClaim: RoutineOutcomeClaim | null;
+  redactSecrets: () => string[];
+}): RoutineOutcomeClaim | null {
+  const resolved = resolveRoutineOutcomeClaim(
+    input.fileClaim,
+    input.messageClaim
+  );
+  if (resolved.disagreement) {
+    const disagreementRedactSecrets = input.redactSecrets();
+    input.logger?.warn(
+      {
+        fileClaim: redactRoutineOutcomeClaim(
+          input.fileClaim,
+          disagreementRedactSecrets
+        ),
+        firingId: input.firingId,
+        messageClaim: redactRoutineOutcomeClaim(
+          input.messageClaim,
+          disagreementRedactSecrets
+        )
+      },
+      "symphonika routine outcome claim file and final message disagree; file wins"
+    );
+  }
+  return resolved.claim;
+}
 
 export function synchronizeRoutineTargets(
   input: SynchronizeRoutineTargetsInput
@@ -1357,6 +1400,7 @@ async function runRoutineFiring(input: {
   let stderrLogPath: string | undefined;
   let normalizedIndexPath: string | undefined;
   let normalizedLogPath: string | undefined;
+  let outcomeClaimPath: string | undefined;
   let normalizedLogOffset = 0;
   let normalizedLogSequence = 1;
   let githubBefore: CapturedRoutineGithubSnapshot | null = null;
@@ -1402,6 +1446,7 @@ async function runRoutineFiring(input: {
     stderrLogPath = evidence.stderrLogPath;
     normalizedIndexPath = evidence.normalizedIndexPath;
     normalizedLogPath = evidence.normalizedLogPath;
+    outcomeClaimPath = evidence.outcomeClaimPath;
     input.runStore.updateRoutineFiringWorkspace({
       id: input.firingId,
       normalizedLogPath,
@@ -1547,7 +1592,27 @@ async function runRoutineFiring(input: {
     // (issue #757). A non-error `action: "none"` claim is the only shape this
     // widens; everything else (no claim, a different action, or an explicit
     // error) keeps the prior unconditional failure.
-    const claim = parseRoutineOutcomeClaim(events);
+    //
+    // The claim matters even on a cancelled firing (reconcileRoutineOutcome
+    // consults it regardless of terminal state below), so this read must not
+    // be gated behind `cancelEntry.cancelRequested` the way classification
+    // is a few lines down. Bounded by `deadline` only, not `cancellation`:
+    // unlike the git/GitHub calls that use both, this is a plain local file
+    // read with no coupling to the provider process a pending cancellation
+    // settlement is meant to abandon — racing it against `cancellation` too
+    // would risk an already-elapsed settlement window rejecting an
+    // unrelated read and routing this firing through the failure path's
+    // more expensive re-classification for no reason.
+    const fileOutcomeClaim = await deadline.race(
+      readRoutineOutcomeClaimFile(outcomeClaimPath, input.logger)
+    );
+    const claim = resolveAndLogRoutineOutcomeClaim({
+      fileClaim: fileOutcomeClaim,
+      firingId: input.firingId,
+      logger: input.logger,
+      messageClaim: parseRoutineOutcomeClaim(events),
+      redactSecrets
+    });
     const explicitNoActionClaim =
       claim !== null && claim.action === "none" && claim.status !== "error";
     let outcome: RoutineTerminalOutcome =
@@ -1913,6 +1978,26 @@ async function runRoutineFiring(input: {
       explainedFinalReason,
       resolvedRedactSecrets
     );
+    // The provider can have written the claim file before failing/timing
+    // out, so read it whenever evidence prep got far enough to know its
+    // path — same file-wins precedence, and same deadline-only bounding
+    // rationale, as the success path above. The deadline may already be
+    // expired here, same as the `githubAfter` snapshot and `commitsAhead`
+    // inspection above, so treat that as "file unavailable" rather than let
+    // it propagate, since there is no outer catch left to route into.
+    const failureFileClaim =
+      outcomeClaimPath === undefined
+        ? null
+        : await deadline
+            .race(readRoutineOutcomeClaimFile(outcomeClaimPath, input.logger))
+            .catch(() => null);
+    const failureClaim = resolveAndLogRoutineOutcomeClaim({
+      fileClaim: failureFileClaim,
+      firingId: input.firingId,
+      logger: input.logger,
+      messageClaim: parseRoutineOutcomeClaim(events),
+      redactSecrets
+    });
     input.runStore.completeRoutineFiring({
       commitsAhead,
       // ADR 0067 ranks a Routine's own declared deadline above any
@@ -1921,10 +2006,7 @@ async function runRoutineFiring(input: {
       firingDeadlineWon: timeoutWon,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
-        claim: redactRoutineOutcomeClaim(
-          parseRoutineOutcomeClaim(events),
-          resolvedRedactSecrets
-        ),
+        claim: redactRoutineOutcomeClaim(failureClaim, redactSecrets()),
         commitsAhead,
         expectsPr: input.routine.expectsPr,
         githubObservationAvailable: githubObservation.available,
@@ -2617,12 +2699,23 @@ async function prepareRoutineEvidence(input: {
 }): Promise<{
   normalizedIndexPath: string;
   normalizedLogPath: string;
+  outcomeClaimPath: string;
   prompt: string;
   promptPath: string;
   rawLogPath: string;
   stderrLogPath: string;
 }> {
   const routine = input.routine;
+  const evidencePaths = routineEvidencePaths(input.stateRoot, input.firingId);
+  // The routine prompt tells the agent the claim file path is "outside this
+  // workspace" (prompt-renderer.ts); enforce that rather than merely
+  // asserting it, mirroring persistRunEvidence's guard in
+  // workflow/autonomous-prompt.ts for the analogous issue-workflow case.
+  if (isPathInside(evidencePaths.directory, input.prepared.workspacePath)) {
+    throw new Error(
+      `routine evidence directory ${evidencePaths.directory} must be outside workspace ${input.prepared.workspacePath}`
+    );
+  }
   const rendered = renderRoutinePrompt({
     ...(routine.kind === "git"
       ? {
@@ -2633,6 +2726,7 @@ async function prepareRoutineEvidence(input: {
         }
       : {}),
     firing: { id: input.firingId },
+    outcomeClaimPath: evidencePaths.outcomeClaimPath,
     project: { name: input.project.name },
     provider: { command: input.providerCommand, name: input.providerName },
     routine: {
@@ -2650,7 +2744,6 @@ async function prepareRoutineEvidence(input: {
       root: path.resolve(input.configDir, input.project.workspace.root)
     }
   });
-  const evidencePaths = routineEvidencePaths(input.stateRoot, input.firingId);
   await mkdir(evidencePaths.directory, { recursive: true });
   const {
     normalizedIndexPath,
@@ -2707,6 +2800,7 @@ async function prepareRoutineEvidence(input: {
   return {
     normalizedIndexPath,
     normalizedLogPath,
+    outcomeClaimPath: evidencePaths.outcomeClaimPath,
     prompt: rendered.prompt,
     promptPath,
     rawLogPath,

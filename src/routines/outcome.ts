@@ -1,3 +1,7 @@
+import { open } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
+
+import type { Logger } from "pino";
 import { z } from "zod";
 
 import { sameIssueRepository } from "../issue-polling.js";
@@ -103,6 +107,32 @@ export type ReconcileRoutineOutcomeInput = {
   terminalState: "succeeded" | "failed" | "cancelled";
 };
 
+function parseRoutineOutcomeClaimCandidate(
+  candidate: unknown
+): RoutineOutcomeClaim | null {
+  const parsed = routineOutcomeClaimSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
+}
+
+// Shared by the message-based turn_completed claim and the file-based claim
+// (#759) — both are agent-authored JSON text validated against the same
+// schema, so a malformed or schema-invalid claim is treated as absent
+// identically on either channel. A leading BOM is stripped first: an editor
+// or shell redirect can prepend one to a file an agent writes, and
+// JSON.parse otherwise rejects an otherwise well-formed claim outright.
+export function parseRoutineOutcomeClaimText(
+  text: string
+): RoutineOutcomeClaim | null {
+  const unprefixed = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(unprefixed);
+  } catch {
+    return null;
+  }
+  return parseRoutineOutcomeClaimCandidate(candidate);
+}
+
 export function parseRoutineOutcomeClaim(
   events: NormalizedProviderEvent[]
 ): RoutineOutcomeClaim | null {
@@ -116,16 +146,116 @@ export function parseRoutineOutcomeClaim(
   if (completed === undefined) {
     return null;
   }
-  let candidate = completed.structuredOutput;
-  if (candidate === undefined && typeof completed.result === "string") {
-    try {
-      candidate = JSON.parse(completed.result);
-    } catch {
+  if (completed.structuredOutput !== undefined) {
+    return parseRoutineOutcomeClaimCandidate(completed.structuredOutput);
+  }
+  if (typeof completed.result === "string") {
+    return parseRoutineOutcomeClaimText(completed.result);
+  }
+  return null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
+// The claim file is agent-authored text, not a bounded structured-output
+// response — cap it well above a real claim's size before ever reading it,
+// so a runaway write can't be parsed as (or block on) an oversized file.
+const ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES = 64 * 1024;
+
+// Read after the provider process has exited, so there is no concurrent
+// writer. Missing, oversized, or malformed content is treated as absent,
+// mirroring the message-based claim's own permissiveness (ADR 0068). A
+// non-ENOENT stat failure (permissions, a briefly unreadable evidence
+// directory, ...) is logged rather than silently folded into "absent" the
+// way a routine ENOENT is, so an operator debugging a missing file claim
+// has a trail to follow. The caller is responsible for bounding this with
+// its own deadline — a stalled read on a slow/hung `stateRoot` has no
+// timeout of its own here.
+export async function readRoutineOutcomeClaimFile(
+  outcomeClaimPath: string,
+  logger: Logger | undefined
+): Promise<RoutineOutcomeClaim | null> {
+  let handle: FileHandle;
+  try {
+    handle = await open(outcomeClaimPath, "r");
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") {
+      logger?.warn(
+        { err: errorMessage(error), outcomeClaimPath },
+        "symphonika routine outcome claim file open failed; ignoring"
+      );
+    }
+    return null;
+  }
+  try {
+    // fstat/read the already-open handle rather than stat()-then-readFile()
+    // on the path twice: a path-based recheck would let the file underneath
+    // change (or be replaced by a symlink) between the two calls (a
+    // TOCTOU race); an open file descriptor keeps referring to the same
+    // inode no matter what happens to the path afterward.
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
       return null;
     }
+    if (stats.size > ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES) {
+      logger?.warn(
+        { outcomeClaimPath, size: stats.size },
+        "symphonika routine outcome claim file exceeds size cap; ignoring"
+      );
+      return null;
+    }
+    const text = await handle.readFile("utf8");
+    return parseRoutineOutcomeClaimText(text);
+  } catch (error) {
+    logger?.warn(
+      { err: errorMessage(error), outcomeClaimPath },
+      "symphonika routine outcome claim file read failed; ignoring"
+    );
+    return null;
+  } finally {
+    await handle.close();
   }
-  const parsed = routineOutcomeClaimSchema.safeParse(candidate);
-  return parsed.success ? parsed.data : null;
+}
+
+export type ResolvedRoutineOutcomeClaim = {
+  claim: RoutineOutcomeClaim | null;
+  disagreement: boolean;
+};
+
+// File wins over message when both are present and schema-valid: a file
+// write is a single, self-contained tool call that can't be truncated or
+// wrapped in surrounding commentary the way trailing prose in the final
+// turn can (docs/adr/0068-structured-routine-outcomes.md, amended by
+// ADR-2026-09-15-1017). `disagreement` lets the caller log the discarded
+// message claim without re-deriving the comparison.
+export function resolveRoutineOutcomeClaim(
+  fileClaim: RoutineOutcomeClaim | null,
+  messageClaim: RoutineOutcomeClaim | null
+): ResolvedRoutineOutcomeClaim {
+  const disagreement =
+    fileClaim !== null &&
+    messageClaim !== null &&
+    !claimsMatch(fileClaim, messageClaim);
+  return { claim: fileClaim ?? messageClaim, disagreement };
+}
+
+function claimsMatch(
+  left: RoutineOutcomeClaim,
+  right: RoutineOutcomeClaim
+): boolean {
+  return (
+    left.action === right.action &&
+    left.status === right.status &&
+    left.summary === right.summary &&
+    left.title === right.title &&
+    left.url === right.url
+  );
 }
 
 // Parses a claim's `url` into a GitHub pull/issue reference, scoped to the

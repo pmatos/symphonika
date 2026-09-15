@@ -30,6 +30,7 @@ export type RoutinePromptInput = {
     schedule_tz?: string | null;
     source_path: string;
   };
+  outcomeClaimPath: string;
   template: string;
   templatePath: string;
   workspace: {
@@ -72,23 +73,30 @@ const tagPattern = /{{\s*([^{}]+?)\s*}}/g;
 const ROUTINE_ONE_SHOT_NOTICE =
   "This routine firing is one-shot and will not be re-invoked. Complete all work before returning; do not schedule background work or finish with the expectation of a later wake-up.";
 
-const ROUTINE_OUTCOME_INSTRUCTIONS = [
-  "## Routine Outcome",
-  "",
-  "When you finish, report the Routine Outcome as exactly one JSON object, even when the work failed or nothing needed to change:",
-  "",
-  "```json",
-  "{",
-  '  "status":  "success" | "no_action" | "error",',
-  '  "action":  "pr" | "issue_opened" | "issue_closed" | "commit" | "none",',
-  '  "url":     "<pull request or issue URL, or null>",',
-  '  "title":   "<short human title>",',
-  '  "summary": "<one to three sentences describing what was done or why nothing was>"',
-  "}",
-  "```",
-  "",
-  "Do not wrap the final JSON object in prose. Symphonika cross-checks pull requests and issue changes against GitHub; a missing or malformed object does not fail the firing, but it makes the result less informative."
-].join("\n");
+// The file channel is the primary claim source; the final-message channel is
+// the fallback when a provider (notably Oh My Pi, which has no schema/
+// response-format lever) fails to write the file. See docs/adr/0068 and
+// ADR-2026-09-15-1017 for the precedence rule Symphonika applies when both
+// exist.
+function routineOutcomeInstructions(outcomeClaimPath: string): string {
+  return [
+    "## Routine Outcome",
+    "",
+    "When you finish, report the Routine Outcome as a JSON object, even when the work failed or nothing needed to change:",
+    "",
+    "```json",
+    "{",
+    '  "status":  "success" | "no_action" | "error",',
+    '  "action":  "pr" | "issue_opened" | "issue_closed" | "commit" | "none",',
+    '  "url":     "<pull request or issue URL, or null>",',
+    '  "title":   "<short human title>",',
+    '  "summary": "<one to three sentences describing what was done or why nothing was>"',
+    "}",
+    "```",
+    "",
+    `After all other work is complete, and immediately before your final message, write that exact JSON object to ${outcomeClaimPath} (a path outside this workspace). Then send the same object as your final message, with no wrapping prose. Symphonika cross-checks pull requests and issue changes against GitHub; a missing or malformed object on either channel does not fail the firing, but it makes the result less informative.`
+  ].join("\n");
+}
 
 export class RoutinePromptRenderError extends Error {
   readonly terminalReason = "prompt_render_error";
@@ -128,7 +136,7 @@ export function renderRoutinePrompt(
       AUTONOMY_PREAMBLE,
       ROUTINE_ONE_SHOT_NOTICE,
       rendered,
-      ROUTINE_OUTCOME_INSTRUCTIONS
+      routineOutcomeInstructions(input.outcomeClaimPath)
     ].join("\n"),
     templateContentHash: contentHash(input.template)
   };

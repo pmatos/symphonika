@@ -1,11 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   diffRoutineGithubSnapshots,
   formatRoutineOutcomeLine,
   parseGithubClaimUrl,
   parseRoutineOutcomeClaim,
-  reconcileRoutineOutcome
+  parseRoutineOutcomeClaimText,
+  readRoutineOutcomeClaimFile,
+  reconcileRoutineOutcome,
+  resolveRoutineOutcomeClaim
 } from "../src/routines/outcome.js";
 
 describe("Routine Outcome reconciliation", () => {
@@ -250,6 +257,91 @@ describe("Routine Outcome reconciliation", () => {
         }
       ])
     ).toBeNull();
+  });
+
+  const validClaimText = JSON.stringify({
+    action: "commit",
+    status: "success",
+    summary: "Committed the fix.",
+    title: "Fix the retry policy",
+    url: null
+  });
+  const validClaim = JSON.parse(validClaimText) as ReturnType<
+    typeof parseRoutineOutcomeClaimText
+  >;
+
+  it("parses a well-formed outcome claim file's exact text", () => {
+    expect(parseRoutineOutcomeClaimText(validClaimText)).toEqual(validClaim);
+  });
+
+  it("treats non-JSON claim file text as absent", () => {
+    expect(parseRoutineOutcomeClaimText("not json")).toBeNull();
+  });
+
+  it("treats schema-invalid claim file JSON as absent", () => {
+    expect(
+      parseRoutineOutcomeClaimText(JSON.stringify({ action: "pr" }))
+    ).toBeNull();
+  });
+
+  it("strips a leading UTF-8 BOM before parsing claim file text", () => {
+    const bomPrefixed = String.fromCharCode(0xfeff) + validClaimText;
+
+    expect(parseRoutineOutcomeClaimText(bomPrefixed)).toEqual(validClaim);
+  });
+
+  it("prefers the file claim over the message claim when both are valid", () => {
+    const messageClaim = parseRoutineOutcomeClaim([
+      {
+        result: JSON.stringify({
+          action: "none",
+          status: "no_action",
+          summary: "Nothing changed.",
+          title: "No action",
+          url: null
+        }),
+        type: "turn_completed"
+      }
+    ]);
+
+    const resolved = resolveRoutineOutcomeClaim(validClaim, messageClaim);
+
+    expect(resolved).toEqual({
+      claim: validClaim,
+      disagreement: true
+    });
+  });
+
+  it("falls back to the message claim when the file claim is absent", () => {
+    const messageClaim = parseRoutineOutcomeClaim([
+      {
+        structuredOutput: JSON.parse(validClaimText),
+        type: "turn_completed"
+      }
+    ]);
+
+    expect(resolveRoutineOutcomeClaim(null, messageClaim)).toEqual({
+      claim: messageClaim,
+      disagreement: false
+    });
+  });
+
+  it("reports no disagreement when the file and message claims agree", () => {
+    const messageClaim = JSON.parse(validClaimText) as ReturnType<
+      typeof parseRoutineOutcomeClaimText
+    >;
+
+    expect(resolveRoutineOutcomeClaim(validClaim, messageClaim)).toEqual({
+      claim: validClaim,
+      disagreement: false
+    });
+  });
+
+  it("resolves to no claim when neither channel has one", () => {
+    expect(resolveRoutineOutcomeClaim(null, null)).toEqual({
+      claim: null,
+      disagreement: false
+    });
   });
 
   it("verifies a claimed PR when the same GitHub action is observed", () => {
@@ -1124,5 +1216,72 @@ describe("Routine Outcome reconciliation", () => {
         )
       ).toBeNull();
     });
+  });
+});
+
+describe("readRoutineOutcomeClaimFile", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs.splice(0).map((dir) => rm(dir, { force: true, recursive: true }))
+    );
+  });
+
+  async function claimFilePath(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), "symphonika-claim-file-"));
+    tempDirs.push(dir);
+    return path.join(dir, "outcome.json");
+  }
+
+  it("returns null when the file does not exist", async () => {
+    const filePath = await claimFilePath();
+
+    expect(await readRoutineOutcomeClaimFile(filePath, undefined)).toBeNull();
+  });
+
+  it("reads and validates a well-formed claim file", async () => {
+    const filePath = await claimFilePath();
+    const claim = {
+      action: "commit",
+      status: "success",
+      summary: "Committed the fix.",
+      title: "Fix the retry policy",
+      url: null
+    };
+    await writeFile(filePath, JSON.stringify(claim), "utf8");
+
+    expect(await readRoutineOutcomeClaimFile(filePath, undefined)).toEqual(
+      claim
+    );
+  });
+
+  it("treats a file over the size cap as absent and logs a warning", async () => {
+    const filePath = await claimFilePath();
+    const oversized = JSON.stringify({
+      action: "commit",
+      status: "success",
+      summary: "x".repeat(128 * 1024),
+      title: "Too big",
+      url: null
+    });
+    await writeFile(filePath, oversized, "utf8");
+    const warnings: unknown[] = [];
+    const logger = { warn: (...args: unknown[]) => warnings.push(args) };
+
+    expect(
+      await readRoutineOutcomeClaimFile(
+        filePath,
+        logger as unknown as Parameters<typeof readRoutineOutcomeClaimFile>[1]
+      )
+    ).toBeNull();
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("treats malformed claim file JSON as absent", async () => {
+    const filePath = await claimFilePath();
+    await writeFile(filePath, "not json", "utf8");
+
+    expect(await readRoutineOutcomeClaimFile(filePath, undefined)).toBeNull();
   });
 });

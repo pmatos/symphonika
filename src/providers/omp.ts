@@ -608,11 +608,10 @@ function successfulResponse(raw: unknown): boolean {
 
 // See ADR-0066's amendment note (issue #777) for why only an explicit
 // `false` here is a rejection: omp/18.2.0 omits "data" entirely on success.
+// Both call sites already establish success before calling this, so it does
+// not re-check successfulResponse itself.
 function agentInvocationRejected(raw: unknown): boolean {
-  return (
-    successfulResponse(raw) &&
-    booleanField(objectField(raw, "data"), "agentInvoked") === false
-  );
+  return booleanField(objectField(raw, "data"), "agentInvoked") === false;
 }
 
 function negotiatedV2Response(raw: unknown): boolean {

@@ -1522,7 +1522,12 @@ describe("Oh My Pi RPC provider", () => {
     const workspacePath = path.join(root, "workspace");
     await mkdir(workspacePath, { recursive: true });
     const fakeOmpPath = path.join(root, "fake-no-agent-omp.mjs");
-    await writeFakeNoAgentOmp(fakeOmpPath);
+    await writeFakePromptRejectionOmp(fakeOmpPath, {
+      command: "prompt",
+      data: { agentInvoked: false },
+      success: true,
+      type: "response"
+    });
     const provider = createOmpProvider({ processScope: noopProcessScope() });
 
     const events = await collectProviderEvents(
@@ -1552,7 +1557,12 @@ describe("Oh My Pi RPC provider", () => {
     const workspacePath = path.join(root, "workspace");
     await mkdir(workspacePath, { recursive: true });
     const fakeOmpPath = path.join(root, "fake-rejected-prompt-omp.mjs");
-    await writeFakeRejectedPromptOmp(fakeOmpPath);
+    await writeFakePromptRejectionOmp(fakeOmpPath, {
+      command: "prompt",
+      error: "session busy",
+      success: false,
+      type: "response"
+    });
     const provider = createOmpProvider({ processScope: noopProcessScope() });
 
     const events = await collectProviderEvents(
@@ -2849,29 +2859,10 @@ async function writeFakePrematureExitOmp(filePath: string): Promise<void> {
   );
 }
 
-async function writeFakeNoAgentOmp(filePath: string): Promise<void> {
-  await writeFile(
-    filePath,
-    [
-      "import readline from 'node:readline';",
-      "const rl = readline.createInterface({ input: process.stdin });",
-      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
-      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
-      "for await (const line of rl) {",
-      "  const command = JSON.parse(line);",
-      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
-      "  if (command.type === 'prompt') {",
-      "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: false } });",
-      "    process.exit(0);",
-      "  }",
-      "}",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-}
-
-async function writeFakeRejectedPromptOmp(filePath: string): Promise<void> {
+async function writeFakePromptRejectionOmp(
+  filePath: string,
+  promptResponse: Record<string, unknown>
+): Promise<void> {
   await writeFile(
     filePath,
     [
@@ -2883,7 +2874,7 @@ async function writeFakeRejectedPromptOmp(filePath: string): Promise<void> {
       "  const command = JSON.parse(line);",
       "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-rejected', model: { provider: 'openai', id: 'gpt-5.4' } } });",
       "  if (command.type === 'prompt') {",
-      "    send({ id: command.id, type: 'response', command: 'prompt', success: false, error: 'session busy' });",
+      `    send({ id: command.id, ...${JSON.stringify(promptResponse)} });`,
       "    process.exit(0);",
       "  }",
       "}",

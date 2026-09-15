@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { Logger } from "pino";
@@ -63,7 +63,7 @@ import {
   diffRoutineGithubSnapshots,
   parseGithubClaimUrl,
   parseRoutineOutcomeClaim,
-  parseRoutineOutcomeClaimText,
+  readRoutineOutcomeClaimFile,
   reconcileRoutineOutcome,
   resolveRoutineOutcomeClaim,
   ROUTINE_OUTCOME_JSON_SCHEMA,
@@ -509,100 +509,37 @@ const ROUTINE_CANCELLATION_SETTLE_MS = 60_000;
 // timeout instead of reusing (or resurrecting) the cleared deadline.
 const CLAIM_URL_VERIFICATION_TIMEOUT_MS = 30_000;
 
-// The claim file is agent-authored text, not a bounded structured-output
-// response — cap it well above a real claim's size before ever reading it,
-// so a runaway write can't be parsed as (or block on) an oversized file.
-const ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES = 64 * 1024;
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error;
-}
-
-// Read after the provider process has exited, so there is no concurrent
-// writer. Missing, oversized, or malformed content is treated as absent,
-// mirroring the message-based claim's own permissiveness (ADR 0068). A
-// non-ENOENT stat failure (permissions, a briefly unreadable evidence
-// directory, ...) is logged rather than silently folded into "absent" the
-// way a routine ENOENT is, so an operator debugging a missing file claim
-// has a trail to follow.
-async function readRoutineOutcomeClaimFile(
-  outcomeClaimPath: string,
-  logger: Logger | undefined
-): Promise<RoutineOutcomeClaim | null> {
-  let size: number;
-  try {
-    const stats = await stat(outcomeClaimPath);
-    if (!stats.isFile()) {
-      return null;
-    }
-    size = stats.size;
-  } catch (error) {
-    if (!isNodeError(error) || error.code !== "ENOENT") {
-      logger?.warn(
-        { err: errorMessage(error), outcomeClaimPath },
-        "symphonika routine outcome claim file stat failed; ignoring"
-      );
-    }
-    return null;
-  }
-  if (size > ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES) {
-    logger?.warn(
-      { outcomeClaimPath, size },
-      "symphonika routine outcome claim file exceeds size cap; ignoring"
-    );
-    return null;
-  }
-  try {
-    const text = await readFile(outcomeClaimPath, "utf8");
-    return parseRoutineOutcomeClaimText(text);
-  } catch (error) {
-    logger?.warn(
-      { err: errorMessage(error), outcomeClaimPath },
-      "symphonika routine outcome claim file read failed; ignoring"
-    );
-    return null;
-  }
-}
-
 // Shared by runRoutineFiring's success and failure paths so the two can't
 // drift (they previously duplicated this block, once with a redaction list
-// that could go stale across the file-read await — see the `redactSecrets`
-// parameter below, always called fresh at the point of use rather than
-// snapshotted by the caller). `raceFileRead` lets each path bound the read
-// against its own deadline semantics: the success path lets a timeout
-// propagate to the outer catch like every sibling call, while the failure
-// path (already inside that catch, with no outer catch left to route into)
-// treats one as "file unavailable" instead. Deliberately not raced against
-// `cancellation` in either path — see the call sites for why.
-async function resolveAndLogRoutineOutcomeClaim(input: {
-  events: NormalizedProviderEvent[];
+// that went stale across the file-read await). Takes both claims already
+// resolved — the caller races/bounds `readRoutineOutcomeClaimFile` itself,
+// the same way every sibling blocking call in this function does inline,
+// rather than this helper needing its own opinion on deadline/cancellation
+// semantics. `redactSecrets` is a closure, not a snapshot: called fresh here
+// rather than passed a precomputed value, so a Service Config reload that
+// lands during the caller's own file-read await is still honored.
+function resolveAndLogRoutineOutcomeClaim(input: {
+  fileClaim: RoutineOutcomeClaim | null;
   firingId: string;
   logger: Logger | undefined;
-  outcomeClaimPath: string | undefined;
-  raceFileRead: (
-    operation: Promise<RoutineOutcomeClaim | null>
-  ) => Promise<RoutineOutcomeClaim | null>;
+  messageClaim: RoutineOutcomeClaim | null;
   redactSecrets: () => string[];
-}): Promise<RoutineOutcomeClaim | null> {
-  const fileClaim =
-    input.outcomeClaimPath === undefined
-      ? null
-      : await input.raceFileRead(
-          readRoutineOutcomeClaimFile(input.outcomeClaimPath, input.logger)
-        );
-  const messageClaim = parseRoutineOutcomeClaim(input.events);
-  const resolved = resolveRoutineOutcomeClaim(fileClaim, messageClaim);
+}): RoutineOutcomeClaim | null {
+  const resolved = resolveRoutineOutcomeClaim(
+    input.fileClaim,
+    input.messageClaim
+  );
   if (resolved.disagreement) {
     const disagreementRedactSecrets = input.redactSecrets();
     input.logger?.warn(
       {
         fileClaim: redactRoutineOutcomeClaim(
-          fileClaim,
+          input.fileClaim,
           disagreementRedactSecrets
         ),
         firingId: input.firingId,
         messageClaim: redactRoutineOutcomeClaim(
-          messageClaim,
+          input.messageClaim,
           disagreementRedactSecrets
         )
       },
@@ -1659,19 +1596,21 @@ async function runRoutineFiring(input: {
     // The claim matters even on a cancelled firing (reconcileRoutineOutcome
     // consults it regardless of terminal state below), so this read must not
     // be gated behind `cancelEntry.cancelRequested` the way classification
-    // is a few lines down. It is bounded by `deadline` only, not
-    // `cancellation`: unlike the git/GitHub calls that use both, this is a
-    // plain local file read with no coupling to the provider process a
-    // pending cancellation settlement is meant to abandon — racing it
-    // against `cancellation` too would risk an already-elapsed settlement
-    // window rejecting an unrelated read and routing this firing through
-    // the failure path's more expensive re-classification for no reason.
-    const claim = await resolveAndLogRoutineOutcomeClaim({
-      events,
+    // is a few lines down. Bounded by `deadline` only, not `cancellation`:
+    // unlike the git/GitHub calls that use both, this is a plain local file
+    // read with no coupling to the provider process a pending cancellation
+    // settlement is meant to abandon — racing it against `cancellation` too
+    // would risk an already-elapsed settlement window rejecting an
+    // unrelated read and routing this firing through the failure path's
+    // more expensive re-classification for no reason.
+    const fileOutcomeClaim = await deadline.race(
+      readRoutineOutcomeClaimFile(outcomeClaimPath, input.logger)
+    );
+    const claim = resolveAndLogRoutineOutcomeClaim({
+      fileClaim: fileOutcomeClaim,
       firingId: input.firingId,
       logger: input.logger,
-      outcomeClaimPath,
-      raceFileRead: (operation) => deadline.race(operation),
+      messageClaim: parseRoutineOutcomeClaim(events),
       redactSecrets
     });
     const explicitNoActionClaim =
@@ -2041,19 +1980,22 @@ async function runRoutineFiring(input: {
     );
     // The provider can have written the claim file before failing/timing
     // out, so read it whenever evidence prep got far enough to know its
-    // path — same file-wins precedence as the success path above. Bounded
-    // by `deadline` only (see the try-path comment above on why this local
-    // read isn't raced against `cancellation` the way the git/GitHub calls
-    // are); the deadline may already be expired here, same as the
-    // `githubAfter` snapshot and `commitsAhead` inspection above, so treat
-    // that as "file unavailable" rather than let it propagate, since there
-    // is no outer catch left to route into.
-    const failureClaim = await resolveAndLogRoutineOutcomeClaim({
-      events,
+    // path — same file-wins precedence, and same deadline-only bounding
+    // rationale, as the success path above. The deadline may already be
+    // expired here, same as the `githubAfter` snapshot and `commitsAhead`
+    // inspection above, so treat that as "file unavailable" rather than let
+    // it propagate, since there is no outer catch left to route into.
+    const failureFileClaim =
+      outcomeClaimPath === undefined
+        ? null
+        : await deadline
+            .race(readRoutineOutcomeClaimFile(outcomeClaimPath, input.logger))
+            .catch(() => null);
+    const failureClaim = resolveAndLogRoutineOutcomeClaim({
+      fileClaim: failureFileClaim,
       firingId: input.firingId,
       logger: input.logger,
-      outcomeClaimPath,
-      raceFileRead: (operation) => deadline.race(operation).catch(() => null),
+      messageClaim: parseRoutineOutcomeClaim(events),
       redactSecrets
     });
     input.runStore.completeRoutineFiring({

@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   diffRoutineGithubSnapshots,
@@ -6,6 +10,7 @@ import {
   parseGithubClaimUrl,
   parseRoutineOutcomeClaim,
   parseRoutineOutcomeClaimText,
+  readRoutineOutcomeClaimFile,
   reconcileRoutineOutcome,
   resolveRoutineOutcomeClaim
 } from "../src/routines/outcome.js";
@@ -1211,5 +1216,72 @@ describe("Routine Outcome reconciliation", () => {
         )
       ).toBeNull();
     });
+  });
+});
+
+describe("readRoutineOutcomeClaimFile", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs.splice(0).map((dir) => rm(dir, { force: true, recursive: true }))
+    );
+  });
+
+  async function claimFilePath(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), "symphonika-claim-file-"));
+    tempDirs.push(dir);
+    return path.join(dir, "outcome.json");
+  }
+
+  it("returns null when the file does not exist", async () => {
+    const filePath = await claimFilePath();
+
+    expect(await readRoutineOutcomeClaimFile(filePath, undefined)).toBeNull();
+  });
+
+  it("reads and validates a well-formed claim file", async () => {
+    const filePath = await claimFilePath();
+    const claim = {
+      action: "commit",
+      status: "success",
+      summary: "Committed the fix.",
+      title: "Fix the retry policy",
+      url: null
+    };
+    await writeFile(filePath, JSON.stringify(claim), "utf8");
+
+    expect(await readRoutineOutcomeClaimFile(filePath, undefined)).toEqual(
+      claim
+    );
+  });
+
+  it("treats a file over the size cap as absent and logs a warning", async () => {
+    const filePath = await claimFilePath();
+    const oversized = JSON.stringify({
+      action: "commit",
+      status: "success",
+      summary: "x".repeat(128 * 1024),
+      title: "Too big",
+      url: null
+    });
+    await writeFile(filePath, oversized, "utf8");
+    const warnings: unknown[] = [];
+    const logger = { warn: (...args: unknown[]) => warnings.push(args) };
+
+    expect(
+      await readRoutineOutcomeClaimFile(
+        filePath,
+        logger as unknown as Parameters<typeof readRoutineOutcomeClaimFile>[1]
+      )
+    ).toBeNull();
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("treats malformed claim file JSON as absent", async () => {
+    const filePath = await claimFilePath();
+    await writeFile(filePath, "not json", "utf8");
+
+    expect(await readRoutineOutcomeClaimFile(filePath, undefined)).toBeNull();
   });
 });

@@ -1,3 +1,6 @@
+import { readFile, stat } from "node:fs/promises";
+
+import type { Logger } from "pino";
 import { z } from "zod";
 
 import { sameIssueRepository } from "../issue-polling.js";
@@ -151,6 +154,67 @@ export function parseRoutineOutcomeClaim(
   return null;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
+// The claim file is agent-authored text, not a bounded structured-output
+// response — cap it well above a real claim's size before ever reading it,
+// so a runaway write can't be parsed as (or block on) an oversized file.
+const ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES = 64 * 1024;
+
+// Read after the provider process has exited, so there is no concurrent
+// writer. Missing, oversized, or malformed content is treated as absent,
+// mirroring the message-based claim's own permissiveness (ADR 0068). A
+// non-ENOENT stat failure (permissions, a briefly unreadable evidence
+// directory, ...) is logged rather than silently folded into "absent" the
+// way a routine ENOENT is, so an operator debugging a missing file claim
+// has a trail to follow. The caller is responsible for bounding this with
+// its own deadline — a stalled read on a slow/hung `stateRoot` has no
+// timeout of its own here.
+export async function readRoutineOutcomeClaimFile(
+  outcomeClaimPath: string,
+  logger: Logger | undefined
+): Promise<RoutineOutcomeClaim | null> {
+  let size: number;
+  try {
+    const stats = await stat(outcomeClaimPath);
+    if (!stats.isFile()) {
+      return null;
+    }
+    size = stats.size;
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") {
+      logger?.warn(
+        { err: errorMessage(error), outcomeClaimPath },
+        "symphonika routine outcome claim file stat failed; ignoring"
+      );
+    }
+    return null;
+  }
+  if (size > ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES) {
+    logger?.warn(
+      { outcomeClaimPath, size },
+      "symphonika routine outcome claim file exceeds size cap; ignoring"
+    );
+    return null;
+  }
+  try {
+    const text = await readFile(outcomeClaimPath, "utf8");
+    return parseRoutineOutcomeClaimText(text);
+  } catch (error) {
+    logger?.warn(
+      { err: errorMessage(error), outcomeClaimPath },
+      "symphonika routine outcome claim file read failed; ignoring"
+    );
+    return null;
+  }
+}
+
 export type ResolvedRoutineOutcomeClaim = {
   claim: RoutineOutcomeClaim | null;
   disagreement: boolean;
@@ -169,8 +233,21 @@ export function resolveRoutineOutcomeClaim(
   const disagreement =
     fileClaim !== null &&
     messageClaim !== null &&
-    JSON.stringify(fileClaim) !== JSON.stringify(messageClaim);
+    !claimsMatch(fileClaim, messageClaim);
   return { claim: fileClaim ?? messageClaim, disagreement };
+}
+
+function claimsMatch(
+  left: RoutineOutcomeClaim,
+  right: RoutineOutcomeClaim
+): boolean {
+  return (
+    left.action === right.action &&
+    left.status === right.status &&
+    left.summary === right.summary &&
+    left.title === right.title &&
+    left.url === right.url
+  );
 }
 
 // Parses a claim's `url` into a GitHub pull/issue reference, scoped to the

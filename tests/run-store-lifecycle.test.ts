@@ -66,6 +66,21 @@ function seedRun(
   return id;
 }
 
+function makeIssue(number: number) {
+  return {
+    body: "",
+    created_at: "2025-01-01T00:00:00Z",
+    id: number,
+    labels: ["agent-ready"],
+    number,
+    priority: 1,
+    state: "open" as const,
+    title: "fixture",
+    updated_at: "2025-01-01T00:00:00Z",
+    url: `https://example/${number}`
+  };
+}
+
 function evidence(branchName: string) {
   return {
     branchName,
@@ -1192,18 +1207,7 @@ describe("run-store lifecycle CRUD", () => {
     const store = openRunStore({ stateRoot: root });
     try {
       const branchName = "sym/vow/1276-fix";
-      const issue = {
-        body: "",
-        created_at: "2025-01-01T00:00:00Z",
-        id: 1276,
-        labels: ["agent-ready"],
-        number: 1276,
-        priority: 1,
-        state: "open" as const,
-        title: "fixture",
-        updated_at: "2025-01-01T00:00:00Z",
-        url: "https://example/1276"
-      };
+      const issue = makeIssue(1276);
 
       // An early stage (e.g. "plan") succeeded and continued into a later
       // stage (e.g. "implement") on the same branch. The later stage is
@@ -1261,25 +1265,19 @@ describe("run-store lifecycle CRUD", () => {
     }
   });
 
-  it.each(["blocked", "failed"] as const)(
-    "keeps suppressing a candidate once its continuation reaches %s, so the candidate can never independently re-exhaust and duplicate the terminal outcome (vow-lang/vow#1276)",
-    async (descendantState) => {
+  it.each([
+    ["blocked", [], false],
+    ["failed", [], false],
+    ["cancelled", ["plan-2"], true],
+    ["stale", ["plan-2"], true]
+  ] as const)(
+    "resolves discovery correctly once a continuation reaches %s (vow-lang/vow#1276)",
+    async (descendantState, expectedRunIds, expectedFollowupWork) => {
       const root = await makeTempRoot();
       const store = openRunStore({ stateRoot: root });
       try {
-        const branchName = `sym/vow/1276-terminal-${descendantState}`;
-        const issue = {
-          body: "",
-          created_at: "2025-01-01T00:00:00Z",
-          id: 1277,
-          labels: ["agent-ready"],
-          number: 1277,
-          priority: 1,
-          state: "open" as const,
-          title: "fixture",
-          updated_at: "2025-01-01T00:00:00Z",
-          url: "https://example/1277"
-        };
+        const branchName = `sym/vow/1276-${descendantState}`;
+        const issue = makeIssue(1277);
 
         const planId = seedRun(store, { id: "plan-2", issueNumber: 1277 });
         store.updateRunEvidence(planId, evidence(branchName));
@@ -1295,70 +1293,19 @@ describe("run-store lifecycle CRUD", () => {
         });
         store.updateRunEvidence("implement-2", evidence(branchName));
 
-        // "implement-2" itself reaches a terminal outcome that already
-        // delivered its own human-facing signal (either it exhausted PR
-        // discovery and was marked blocked, or it needed human input --
-        // which is stored as RunState "failed", see
-        // mapOutcomeToRunState). "plan-2" must not wake back up and repeat
-        // that signal -- there is no new information on this branch that
-        // its own pr_discovery_attempts clock could find.
+        // `blocked`/`failed` already delivered their own human-facing signal
+        // (PR-discovery exhaustion, or input_required via
+        // mapOutcomeToRunState), so "plan-2" must stay suppressed -- there is
+        // no new information on this branch its own clock could find.
+        // `cancelled`/`stale` are dead ends that don't reliably notify on
+        // their own, so "plan-2" must be allowed to resume discovery rather
+        // than leave the issue permanently unmonitored.
         store.updateRunState("implement-2", descendantState);
 
         expect(
           store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
-        ).toEqual([]);
-        expect(store.hasPullRequestFollowupWork()).toBe(false);
-      } finally {
-        store.close();
-      }
-    }
-  );
-
-  it.each(["cancelled", "stale"] as const)(
-    "lets a candidate resume discovery once its continuation is %s, since neither reliably notifies a human on its own",
-    async (descendantState) => {
-      const root = await makeTempRoot();
-      const store = openRunStore({ stateRoot: root });
-      try {
-        const branchName = `sym/vow/1276-deadend-${descendantState}`;
-        const issue = {
-          body: "",
-          created_at: "2025-01-01T00:00:00Z",
-          id: 1278,
-          labels: ["agent-ready"],
-          number: 1278,
-          priority: 1,
-          state: "open" as const,
-          title: "fixture",
-          updated_at: "2025-01-01T00:00:00Z",
-          url: "https://example/1278"
-        };
-
-        const planId = seedRun(store, { id: "plan-3", issueNumber: 1278 });
-        store.updateRunEvidence(planId, evidence(branchName));
-        store.updateRunState(planId, "succeeded");
-
-        store.createContinuationRun({
-          id: "implement-3",
-          issue,
-          parentRunId: planId,
-          projectName: "symphonika",
-          providerCommand: "fake",
-          providerName: "codex"
-        });
-        store.updateRunEvidence("implement-3", evidence(branchName));
-
-        // "implement-3" is a dead end that did not reliably deliver its own
-        // human-facing signal (an operator/watchdog cancellation outside
-        // closed-issue/eligibility-loss reasons, or a restart-recovery
-        // stale mark). "plan-3" must be allowed to pick discovery back up
-        // rather than leave the issue permanently unmonitored.
-        store.updateRunState("implement-3", descendantState);
-
-        expect(
-          store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
-        ).toEqual([planId]);
-        expect(store.hasPullRequestFollowupWork()).toBe(true);
+        ).toEqual(expectedRunIds);
+        expect(store.hasPullRequestFollowupWork()).toBe(expectedFollowupWork);
       } finally {
         store.close();
       }

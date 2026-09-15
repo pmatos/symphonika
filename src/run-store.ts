@@ -1209,61 +1209,34 @@ const RUN_CHAIN_ROOT_CTE = [
 ].join(" ");
 // A candidate stage (e.g. "plan") that has any continuation (e.g.
 // "implement") on the same branch is never the run that will discover a PR
-// right now -- the continuation is. Without this, the candidate's own
-// pr_discovery_attempts clock keeps ticking against a branch its
-// continuation hasn't finished pushing to yet, and can exhaust and wrongly
-// terminalize the issue while the continuation is still legitimately
-// working (vow-lang/vow#1276). A continuation is always created after its
-// candidate (continuation_parent_run_id points backward), so no separate
-// recency check is needed here -- candidate_descendant membership alone
-// establishes it.
+// right now -- the continuation is, in every state except the ones below.
+// A continuation is always created after its candidate
+// (continuation_parent_run_id points backward), so candidate_descendant
+// membership alone establishes precedence; no separate recency check is
+// needed (vow-lang/vow#1276).
 //
-// The exclusion is most descendant states, not a whitelist of "active"
-// ones: a whitelist has to be re-derived by hand for every RunState this
-// code doesn't already know about, and the original whitelist here
-// (queued/preparing_workspace/running/succeeded) missed this exact bug's
-// own failure mode. A continuation that itself exhausts
-// pr_discovery_attempts is marked `blocked`
-// (terminalizePullRequestDiscoveryExhausted) -- not "active" by any
-// whitelist reading, yet re-exposing the candidate at that point is
-// exactly wrong: the candidate shares the same branch that discovery was
-// just proven to have no PR for, so the candidate would only re-run the
-// same exhaustion and double up the blocked-outcome labels/notification on
-// a stage that actually succeeded. A continuation left `failed` is the
-// same story once a `RunState` reader might expect otherwise:
-// mapOutcomeToRunState (outcome-projection.ts) maps an `input_required`
-// *outcome* to RunState `"failed"`, so "the continuation is stalled
-// waiting on a human" shows up here as `state = 'failed'`, not some
-// separate value -- and that already delivered its own human-facing
-// terminal signal via claim-label-writer's markFailed, so a redundant one
-// from the candidate serves no purpose.
-//
-// `waiting`, `cancelled`, and `stale` are the exceptions -- the candidate
-// *is* allowed to resume its own clock when the nearest descendant is one
-// of these, same as the original whitelist implied by omission:
-// - `waiting` means a different, purpose-built mechanism (wait/merge_pr
-//   re-evaluation) has taken over discovery for that branch, which is
-//   genuinely a reason for an ancestor's own clock to matter again one hop
-//   up the chain (see the wait_for_pr_open scenario in the
-//   "vow-lang/vow#1276" test).
-// - `cancelled` (operator/watchdog reasons other than closed-issue/
-//   eligibility-loss) and `stale` (restart recovery, run-controller.ts)
-//   are dead ends that do *not* reliably deliver their own human-facing
-//   signal the way `blocked`/`failed` do -- claim-label-writer's cancelled
-//   branch only notifies for closed-issue/eligibility-loss reasons, and the
-//   only other safety net for an abandoned claim is the separate,
-//   GitHub-label-level `detectStaleClaims` sweep (stale-claims.ts), not
-//   this mechanism. So they're left able to hand discovery back to the
-//   candidate rather than depend solely on that sweep, matching this PR's
-//   original (unfixed) treatment of those two states.
-//
-// branch_name equality also treats an unknown (NULL) descendant branch as a
+// This is an exclusion list, not a whitelist of "active" states: a
+// whitelist must be re-derived by hand for every RunState this code
+// doesn't already know about, and the original whitelist here missed
+// `blocked`/`failed` -- see ADR-2026-09-10-2031's addendum for the full
+// per-state rationale (why those two must keep suppressing rather than let
+// the candidate re-exhaust and duplicate a terminal outcome, while
+// `waiting`/`cancelled`/`stale` hand discovery back to the candidate).
+const PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES: ReadonlySet<RunState> = new Set(
+  ["waiting", "cancelled", "stale"]
+);
+const PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES_SQL_LIST = [
+  ...PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES
+]
+  .map((state) => `'${state}'`)
+  .join(", ");
+// branch_name equality treats an unknown (NULL) descendant branch as a
 // match rather than a mismatch: a descendant reached via a branchless
 // waiting park (createWaitingRun's conditional branchName, inherited as
 // NULL by a later createContinuationRun) is still the same chain and still
-// hasn't recorded the branch it will finish on -- requiring an exact,
-// non-NULL match would silently stop suppressing for that window, since
-// SQL equality against NULL is never true.
+// hasn't recorded the branch it will finish on -- an exact, non-NULL match
+// would silently stop suppressing for that window, since SQL equality
+// against NULL is never true.
 const RUN_CHAIN_ACTIVE_DESCENDANT_SUPPRESSION = [
   "and not exists (",
   "  select 1 from candidate_descendant cd",
@@ -1274,7 +1247,7 @@ const RUN_CHAIN_ACTIVE_DESCENDANT_SUPPRESSION = [
   "    descendant.branch_name = runs.branch_name",
   "    or descendant.branch_name is null",
   "  )",
-  "  and descendant.state not in ('waiting', 'cancelled', 'stale')",
+  `  and descendant.state not in (${PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES_SQL_LIST})`,
   ")"
 ].join(" ");
 // Assembles the CTE, eligibility predicate and suppression clauses in the

@@ -1189,10 +1189,97 @@ const RUN_CHAIN_ROOT_CTE = [
   "  from run_chain_walk",
   "  join runs root_run on root_run.id = run_chain_walk.ancestor_id",
   "  where root_run.continuation_parent_run_id is null",
+  "),",
+  // Directional companion to run_chain_walk above, which only ever walks
+  // *up* from a fixed anchor set to find a shared root: it can't answer
+  // "does this candidate already have a descendant at work". Walking
+  // *down* the continuation chain from the same candidate set answers
+  // that, at the same bounded cost as the anchor set itself rather than a
+  // full-table scan.
+  "candidate_descendant(candidate_id, id) as (",
+  "  select id, id from runs",
+  "  where (",
+  PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE,
+  "  )",
+  "  union all",
+  "  select candidate_descendant.candidate_id, r.id",
+  "  from candidate_descendant",
+  "  join runs r on r.continuation_parent_run_id = candidate_descendant.id",
   ")"
 ].join(" ");
-// Assembles the CTE, eligibility predicate and suppression clause in the one
-// fixed order both call sites need, so that order can't be recomposed
+// A candidate stage (e.g. "plan") that has any continuation (e.g.
+// "implement") on the same branch is never the run that will discover a PR
+// right now -- the continuation is, in every state except the ones below.
+// A continuation is always created after its candidate
+// (continuation_parent_run_id points backward), so candidate_descendant
+// membership alone establishes precedence; no separate recency check is
+// needed (vow-lang/vow#1276).
+//
+// This is an exclusion list, not a whitelist of "active" states: a
+// whitelist must be re-derived by hand for every RunState this code
+// doesn't already know about, and the original whitelist here missed
+// `blocked`/`failed` -- see ADR-2026-09-10-2031's addendum for the full
+// per-state rationale (why those two must keep suppressing rather than let
+// the candidate re-exhaust and duplicate a terminal outcome, while
+// `waiting`/`cancelled`/`stale` hand discovery back to the candidate).
+const PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES: ReadonlySet<RunState> = new Set(
+  ["waiting", "cancelled", "stale"]
+);
+const PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES_SQL_LIST = [
+  ...PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES
+]
+  .map((state) => `'${state}'`)
+  .join(", ");
+// closed_issue/eligibility_loss cancellations already release the claim
+// (ClaimLabelWriter.applyTerminal), so -- unlike other cancel reasons -- they
+// must keep suppressing the same way blocked/failed do (see the ADR
+// addendum).
+const PR_DISCOVERY_NOTIFIED_CANCEL_REASONS: ReadonlySet<CancelReason> = new Set(
+  ["closed_issue", "eligibility_loss"]
+);
+const PR_DISCOVERY_NOTIFIED_CANCEL_REASONS_SQL_LIST = [
+  ...PR_DISCOVERY_NOTIFIED_CANCEL_REASONS
+]
+  .map((reason) => `'${reason}'`)
+  .join(", ");
+// branch_name equality treats an unknown (NULL) descendant branch as a
+// match rather than a mismatch: a descendant reached via a branchless
+// waiting park (createWaitingRun's conditional branchName, inherited as
+// NULL by a later createContinuationRun) is still the same chain and still
+// hasn't recorded the branch it will finish on -- an exact, non-NULL match
+// would silently stop suppressing for that window, since SQL equality
+// against NULL is never true.
+const RUN_CHAIN_ACTIVE_DESCENDANT_SUPPRESSION = [
+  "and not exists (",
+  "  select 1 from candidate_descendant cd",
+  "  join runs descendant on descendant.id = cd.id",
+  "  where cd.candidate_id = runs.id",
+  "  and descendant.id <> runs.id",
+  "  and (",
+  "    descendant.branch_name = runs.branch_name",
+  "    or descendant.branch_name is null",
+  "  )",
+  // A blocked/failed descendant that itself has a further continuation was
+  // bypassed by fsmContinuing (ADR 0058) and never notified a human -- look
+  // through it to the real frontier instead of treating it as final.
+  "  and (",
+  "    descendant.state not in ('blocked', 'failed')",
+  "    or not exists (",
+  "      select 1 from runs superseding",
+  "      where superseding.continuation_parent_run_id = descendant.id",
+  "    )",
+  "  )",
+  "  and (",
+  `    descendant.state not in (${PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES_SQL_LIST})`,
+  "    or (",
+  "      descendant.state = 'cancelled'",
+  `      and descendant.cancel_reason in (${PR_DISCOVERY_NOTIFIED_CANCEL_REASONS_SQL_LIST})`,
+  "    )",
+  "  )",
+  ")"
+].join(" ");
+// Assembles the CTE, eligibility predicate and suppression clauses in the
+// one fixed order both call sites need, so that order can't be recomposed
 // differently (and drift) at each call site.
 function buildPullRequestDiscoveryQuery(
   fromRunsClause: string,
@@ -1204,6 +1291,7 @@ function buildPullRequestDiscoveryQuery(
     "where",
     PULL_REQUEST_DISCOVERY_ELIGIBLE_RUN_PREDICATE,
     RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION,
+    RUN_CHAIN_ACTIVE_DESCENDANT_SUPPRESSION,
     tailSql
   ].join(" ");
 }

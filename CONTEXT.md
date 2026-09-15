@@ -268,6 +268,26 @@ nearest recorded `branch_name` found by walking from the waiting run's own row u
 ancestors. Both guard the same failure — a mid-chain issue-title edit diverging a continuation's
 branch from an ancestor's tracked PR despite sharing a chain root (see the addendum, issue #745).
 Chain membership stays the identity; branch equality only narrows it, never replaces it.
+
+PR Follow-up discovery suppression also excludes a candidate that has any continuation descendant
+at all, not just one owning a tracked pull request: a candidate stage a chain has already moved
+past is never the run that will surface a PR, so it must not independently run out its own
+`pr_discovery_attempts` and terminalize the issue while — or after — that continuation does the
+real work (see ADR-2026-09-10-2031's addendum, vow-lang/vow#1276). The exclusion covers most
+descendant states, including a continuation that has itself already gone terminal (`blocked`,
+`failed`) — reaching either of those already delivered its own human-facing signal, so letting the
+candidate resume would only produce a redundant, confusing second one on a stage that actually
+succeeded — but only if nothing has continued *from* that terminal descendant: a `blocked`/`failed`
+row the FSM advanced past anyway (never notified, see ADR 0058's `fsmContinuing`) is skipped in
+favor of its own continuation, so a stale intermediate link can't permanently trap the candidate
+once the real frontier further down the chain has resolved. A `wait`/`merge_pr` park, a `cancelled`
+continuation, or a `stale` one are the exceptions: a park hands discovery duty to that other,
+purpose-built mechanism instead of retiring it, while a cancelled or stale continuation is a dead
+end that doesn't reliably notify a human via this mechanism, so the candidate is left able to pick
+discovery back up rather than depend solely on the separate, GitHub-label-level stale-claim sweep
+(`detectStaleClaims`) to ever surface it — except a `cancelled` continuation whose `cancel_reason`
+is `closed_issue`/`eligibility_loss`, which already released the claim on its own and so is treated
+like `blocked`/`failed` instead.
 _Avoid_: branch, issue when identifying which chain owns a tracked pull request
 
 **Adopted Run**:

@@ -1547,6 +1547,41 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("fails the turn once, cleanly, when the prompt RPC command itself is rejected", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-rejected-prompt-omp.mjs");
+    await writeFakeRejectedPromptOmp(fakeOmpPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    const turnFailedEvents = events
+      .map((event) => event.normalized)
+      .filter((event) => event?.type === "turn_failed");
+    expect(turnFailedEvents).toMatchObject([
+      {
+        command: "prompt",
+        message: "session busy",
+        type: "turn_failed"
+      }
+    ]);
+    expect(events.at(-1)?.normalized).toMatchObject({
+      exitCode: 0,
+      type: "process_exit"
+    });
+  });
+
   it("completes the turn when the prompt response omits data and agent_start arrives asynchronously", async () => {
     // Live-captured shape from omp/18.2.0 (issue #777): the "prompt" response
     // carries no "data" field at all, and the only signal that the agent
@@ -1582,6 +1617,13 @@ describe("Oh My Pi RPC provider", () => {
       { result: "hi", type: "turn_completed" },
       { exitCode: 0, type: "process_exit" }
     ]);
+    // agent_start has no normalized counterpart (mapOmpFrame passes it
+    // through as raw-only), but it is still the frame this test is named
+    // for: assert it was retained as raw evidence so a change that stops
+    // forwarding raw-only frames is caught here rather than silently.
+    expect(
+      events.some((event) => objectField(event.raw, "type") === "agent_start")
+    ).toBe(true);
   });
 
   it("fails before sending commands when OMP emits an incompatible ready frame", async () => {
@@ -2820,6 +2862,28 @@ async function writeFakeNoAgentOmp(filePath: string): Promise<void> {
       "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-335', model: { provider: 'openai', id: 'gpt-5.4' } } });",
       "  if (command.type === 'prompt') {",
       "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: false } });",
+      "    process.exit(0);",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeRejectedPromptOmp(filePath: string): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-rejected', model: { provider: 'openai', id: 'gpt-5.4' } } });",
+      "  if (command.type === 'prompt') {",
+      "    send({ id: command.id, type: 'response', command: 'prompt', success: false, error: 'session busy' });",
       "    process.exit(0);",
       "  }",
       "}",

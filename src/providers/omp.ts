@@ -240,7 +240,10 @@ async function* runOmpTurn(
   if (prompt.stopped) {
     return;
   }
-  if (agentInvocationRejected(prompt.response)) {
+  if (
+    !successfulResponse(prompt.response) ||
+    agentInvocationRejected(prompt.response)
+  ) {
     await shutdownProviderProcess(child);
     yield* drainUntilExit(queue, activeRun);
     return;
@@ -603,11 +606,8 @@ function successfulResponse(raw: unknown): boolean {
   );
 }
 
-// omp/17.1.8 always reported an explicit boolean here; omp/18.2.0 (issue
-// #777) accepts the prompt with a bare {success:true} and no "data" field at
-// all, signaling that the agent actually started only via a later, async
-// {"type":"agent_start"} frame. Only an explicit `false` is a deterministic
-// rejection; a missing field must not be treated the same way.
+// See ADR-0066's amendment note (issue #777) for why only an explicit
+// `false` here is a rejection: omp/18.2.0 omits "data" entirely on success.
 function agentInvocationRejected(raw: unknown): boolean {
   return (
     successfulResponse(raw) &&

@@ -10,6 +10,7 @@ const baseInput = {
   firing: {
     id: "fire-1"
   },
+  outcomeClaimPath: "/tmp/state/logs/routines/fire-1/outcome.json",
   project: {
     name: "symphonika"
   },
@@ -95,10 +96,18 @@ describe("RoutinePromptRenderer", () => {
       "This routine firing is one-shot and will not be re-invoked"
     );
     expect(routinePrompt.prompt).toContain(
-      "When you finish, report the Routine Outcome as exactly one JSON object"
+      "When you finish, report the Routine Outcome as a JSON object"
     );
     expect(routinePrompt.prompt).toContain(
       '"action":  "pr" | "issue_opened" | "issue_closed" | "commit" | "none"'
+    );
+  });
+
+  it("instructs writing the outcome claim to the evidence file path", () => {
+    const rendered = renderRoutinePrompt(baseInput);
+
+    expect(rendered.prompt).toContain(
+      `write that exact JSON object to ${baseInput.outcomeClaimPath}`
     );
   });
 

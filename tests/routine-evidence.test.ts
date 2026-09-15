@@ -117,7 +117,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 import {
   encodeRoutineEventIndexRecord,
-  readRecentRoutineEvents
+  readRecentRoutineEvents,
+  routineEvidencePaths
 } from "../src/routines/evidence.js";
 
 afterEach(() => {
@@ -139,6 +140,16 @@ function indexedLog(lines: string[]): { contents: Buffer; index: Buffer } {
     index: Buffer.concat(records)
   };
 }
+
+describe("routineEvidencePaths", () => {
+  it("derives an outcome claim path alongside the other evidence files", () => {
+    const paths = routineEvidencePaths("/state", "fire-1");
+
+    expect(paths.outcomeClaimPath).toBe(
+      "/state/logs/routines/fire-1/outcome.json"
+    );
+  });
+});
 
 describe("readRecentRoutineEvents", () => {
   it("reads only a bounded suffix when the evidence log has no index", async () => {

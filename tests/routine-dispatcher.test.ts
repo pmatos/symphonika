@@ -27,6 +27,7 @@ import {
   fireRoutineNow,
   type DispatchDueRoutinesInput
 } from "../src/routines/dispatcher.js";
+import { routineEvidencePaths } from "../src/routines/evidence.js";
 import type { TargetedRoutineDeclaration } from "../src/routines/types.js";
 import type {
   PreparedRoutineWorkspace,
@@ -10770,6 +10771,410 @@ describe("RoutineFiringDispatcher", () => {
       expect(
         runStore.listRoutines().find((r) => r.name === "broken-routine")?.state
       ).toBe("invalid");
+    } finally {
+      runStore.close();
+    }
+  });
+});
+
+describe("Routine Outcome Claim file channel (#759)", () => {
+  function reportRoutineProject(root: string) {
+    return {
+      ...runStoreProjectFixture(),
+      routines: [
+        {
+          kind: "report" as const,
+          name: "daily-report",
+          prompt: "Report.",
+          provider: null,
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: path.join(root, "daily-report.md"),
+          projectName: "alpha"
+        }
+      ]
+    };
+  }
+
+  it("reads the outcome claim file when the provider never emits a final-message claim", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const firingId = "fire-claim-file-only";
+    const outcomeClaimPath = routineEvidencePaths(
+      stateRoot,
+      firingId
+    ).outcomeClaimPath;
+    const fileClaim = {
+      action: "issue_opened",
+      status: "success",
+      summary: "Filed a follow-up issue.",
+      title: "Track the retry policy cleanup",
+      url: "https://github.com/pmatos/alpha/issues/9"
+    };
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await writeFile(outcomeClaimPath, JSON.stringify(fileClaim), "utf8");
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => firingId,
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", reportRoutineProject(root)]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFiring(firingId)).toMatchObject({
+        outcome: {
+          action: "issue_opened",
+          source: "codex",
+          status: "success",
+          summary: "Filed a follow-up issue.",
+          title: "Track the retry policy cleanup",
+          url: "https://github.com/pmatos/alpha/issues/9"
+        },
+        state: "succeeded"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("prefers the outcome claim file over a disagreeing final-message claim", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const firingId = "fire-claim-file-wins";
+    const outcomeClaimPath = routineEvidencePaths(
+      stateRoot,
+      firingId
+    ).outcomeClaimPath;
+    const fileClaim = {
+      action: "commit",
+      status: "success",
+      summary: "Committed the fix as the last action.",
+      title: "Fix the retry policy",
+      url: null
+    };
+    const messageClaim = JSON.stringify({
+      action: "none",
+      status: "no_action",
+      summary: "Stale claim from before the commit.",
+      title: "Nothing to do",
+      url: null
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await writeFile(outcomeClaimPath, JSON.stringify(fileClaim), "utf8");
+        yield {
+          normalized: { result: messageClaim, type: "turn_completed" },
+          raw: { result: messageClaim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => firingId,
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", reportRoutineProject(root)]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFiring(firingId)?.outcome).toMatchObject({
+        action: "commit",
+        summary: "Committed the fix as the last action.",
+        title: "Fix the retry policy"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("falls back to the final-message claim when the outcome claim file exceeds the size cap", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const firingId = "fire-claim-file-oversized";
+    const outcomeClaimPath = routineEvidencePaths(
+      stateRoot,
+      firingId
+    ).outcomeClaimPath;
+    const messageClaim = JSON.stringify({
+      action: "none",
+      status: "no_action",
+      summary: "Nothing needed to change.",
+      title: "No action",
+      url: null
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        const oversized = JSON.stringify({
+          action: "commit",
+          status: "success",
+          summary: "x".repeat(128 * 1024),
+          title: "Too big",
+          url: null
+        });
+        await writeFile(outcomeClaimPath, oversized, "utf8");
+        yield {
+          normalized: { result: messageClaim, type: "turn_completed" },
+          raw: { result: messageClaim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => firingId,
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", reportRoutineProject(root)]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(runStore.getRoutineFiring(firingId)?.outcome).toMatchObject({
+        action: "none",
+        status: "no_action",
+        title: "No action"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("reads a claim file the provider wrote before crashing, without it overriding an unconfirmed failure", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const firingId = "fire-claim-file-crash-unconfirmed";
+    const outcomeClaimPath = routineEvidencePaths(
+      stateRoot,
+      firingId
+    ).outcomeClaimPath;
+    const fileClaim = {
+      action: "commit",
+      status: "success",
+      summary: "Committed before the crash.",
+      title: "Partial fix",
+      url: null
+    };
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await writeFile(outcomeClaimPath, JSON.stringify(fileClaim), "utf8");
+        yield {
+          normalized: { message: "crashing", type: "message" },
+          raw: { delta: "crashing" }
+        };
+        throw new Error("provider crashed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => firingId,
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", reportRoutineProject(root)]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      // No GitHub observation is wired up for this project, so ADR 0068 rule
+      // 6 discards any claim (file or message) on a failed firing with no
+      // corroborating observed action — proving the new file read doesn't
+      // short-circuit that unconditional discard.
+      expect(runStore.getRoutineFiring(firingId)).toMatchObject({
+        outcome: {
+          action: "none",
+          source: "symphonika",
+          status: "error",
+          summary: "provider crashed"
+        },
+        state: "failed"
+      });
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("uses a claim file's own fields, sourced to the provider, when a crashed firing's action is independently observed on GitHub", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const firingId = "fire-claim-file-crash-observed";
+    const outcomeClaimPath = routineEvidencePaths(
+      stateRoot,
+      firingId
+    ).outcomeClaimPath;
+    const fileClaim = {
+      action: "issue_opened",
+      status: "success",
+      summary: "Filed a follow-up issue before crashing.",
+      title: "Track a follow-up refactor",
+      url: "https://github.com/pmatos/alpha/issues/5"
+    };
+    const listIssues = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          created_at: "2026-05-22T09:30:00.000Z",
+          html_url: "https://github.com/pmatos/alpha/issues/5",
+          number: 5,
+          state: "open",
+          title: "Track a follow-up refactor"
+        }
+      ]);
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await writeFile(outcomeClaimPath, JSON.stringify(fileClaim), "utf8");
+        yield {
+          normalized: { message: "crashing", type: "message" },
+          raw: { delta: "crashing" }
+        };
+        throw new Error("provider crashed");
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => firingId,
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi: {
+          listIssues,
+          listOpenIssues: vi.fn().mockResolvedValue([])
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        logger: pino({ enabled: false }),
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", reportRoutineProject(root)]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(listIssues).toHaveBeenCalledTimes(2);
+      expect(runStore.getRoutineFiring(firingId)).toMatchObject({
+        outcome: {
+          action: "issue_opened",
+          source: "codex",
+          status: "success",
+          summary: "Filed a follow-up issue before crashing.",
+          title: "Track a follow-up refactor",
+          url: "https://github.com/pmatos/alpha/issues/5",
+          verified: true
+        },
+        state: "failed"
+      });
     } finally {
       runStore.close();
     }

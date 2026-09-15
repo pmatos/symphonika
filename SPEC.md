@@ -673,12 +673,15 @@ top-level objects are:
 `kind: report`; `issue` and `run` are unavailable to every Routine kind. Referencing an unavailable
 object fails rendering with terminal reason `prompt_render_error`.
 
-Every rendered Routine prompt also requires a final JSON Routine Outcome Claim with
-`status`, `action`, `url`, `title`, and `summary`. This prompt-level contract applies to every
-provider. Claude and Codex additionally receive the same JSON Schema through `--json-schema` and
-`turn/start.outputSchema` respectively, but the provider-specific mechanism is reinforcement rather
-than the parsing mechanism. A missing, non-JSON, or schema-invalid final claim does not fail the
-firing.
+Every rendered Routine prompt also requires a JSON Routine Outcome Claim with `status`, `action`,
+`url`, `title`, and `summary`, written to a per-firing evidence file path outside the workspace as
+the agent's last action and also sent as its final message. This prompt-level contract applies to
+every provider; the file channel is what makes it provider-agnostic even for Oh My Pi, which has no
+schema/response-format lever. Claude and Codex additionally receive the same JSON Schema on the
+message channel through `--json-schema` and `turn/start.outputSchema` respectively, but the
+provider-specific mechanism is reinforcement rather than the parsing mechanism. When both channels
+produce a schema-valid claim, the file one wins (ADR 0068's #759 amendment). A missing, non-JSON, or
+schema-invalid claim on either channel does not fail the firing.
 
 The preamble tells the agent:
 
@@ -1254,8 +1257,10 @@ recording. Routine PR discovery is informational only beyond feeding the `expect
 below: it never enters PR Follow-up, review re-dispatch, or auto-merge.
 
 The dispatcher asks every provider for the same Routine Outcome Claim
-`{status, action, url, title, summary}` and parses it only from the final normalized
-`turn_completed` event. When tracker configuration and GitHub reads are available, it snapshots
+`{status, action, url, title, summary}` and resolves it from two channels: a claim file written
+outside the workspace, read back after the provider process exits, and the final normalized
+`turn_completed` event. The file wins when both are present and schema-valid; the `turn_completed`
+claim is the fallback. When tracker configuration and GitHub reads are available, it snapshots
 repository issues before and after provider execution, bounded to a window sized for a single firing
 rather than the repository's full history; `kind: git` firings also snapshot open pull requests on
 the firing branch. It observes newly opened pull requests, newly opened issues, and issues that

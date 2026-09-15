@@ -103,6 +103,29 @@ export type ReconcileRoutineOutcomeInput = {
   terminalState: "succeeded" | "failed" | "cancelled";
 };
 
+function parseRoutineOutcomeClaimCandidate(
+  candidate: unknown
+): RoutineOutcomeClaim | null {
+  const parsed = routineOutcomeClaimSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
+}
+
+// Shared by the message-based turn_completed claim and the file-based claim
+// (#759) — both are agent-authored JSON text validated against the same
+// schema, so a malformed or schema-invalid claim is treated as absent
+// identically on either channel.
+export function parseRoutineOutcomeClaimText(
+  text: string
+): RoutineOutcomeClaim | null {
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return parseRoutineOutcomeClaimCandidate(candidate);
+}
+
 export function parseRoutineOutcomeClaim(
   events: NormalizedProviderEvent[]
 ): RoutineOutcomeClaim | null {
@@ -116,16 +139,43 @@ export function parseRoutineOutcomeClaim(
   if (completed === undefined) {
     return null;
   }
-  let candidate = completed.structuredOutput;
-  if (candidate === undefined && typeof completed.result === "string") {
-    try {
-      candidate = JSON.parse(completed.result);
-    } catch {
-      return null;
-    }
+  if (completed.structuredOutput !== undefined) {
+    return parseRoutineOutcomeClaimCandidate(completed.structuredOutput);
   }
-  const parsed = routineOutcomeClaimSchema.safeParse(candidate);
-  return parsed.success ? parsed.data : null;
+  if (typeof completed.result === "string") {
+    return parseRoutineOutcomeClaimText(completed.result);
+  }
+  return null;
+}
+
+type RoutineOutcomeClaimChannel = "file" | "message" | "none";
+
+export type ResolvedRoutineOutcomeClaim = {
+  channel: RoutineOutcomeClaimChannel;
+  claim: RoutineOutcomeClaim | null;
+  disagreement: boolean;
+};
+
+// File wins over message when both are present and schema-valid: writing the
+// claim file is a deliberate last tool call, which is stronger evidence than
+// trailing prose in the final turn (docs/adr/0068-structured-routine-outcomes.md,
+// amended by the dated ADR accompanying #759). `disagreement` lets the caller
+// log the discarded message claim without re-deriving the comparison.
+export function resolveRoutineOutcomeClaim(
+  fileClaim: RoutineOutcomeClaim | null,
+  messageClaim: RoutineOutcomeClaim | null
+): ResolvedRoutineOutcomeClaim {
+  const disagreement =
+    fileClaim !== null &&
+    messageClaim !== null &&
+    JSON.stringify(fileClaim) !== JSON.stringify(messageClaim);
+  if (fileClaim !== null) {
+    return { channel: "file", claim: fileClaim, disagreement };
+  }
+  if (messageClaim !== null) {
+    return { channel: "message", claim: messageClaim, disagreement };
+  }
+  return { channel: "none", claim: null, disagreement: false };
 }
 
 // Parses a claim's `url` into a GitHub pull/issue reference, scoped to the

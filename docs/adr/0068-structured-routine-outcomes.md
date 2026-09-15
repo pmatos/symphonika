@@ -31,12 +31,15 @@ Every terminal Routine Firing may carry one canonical **Routine Outcome**:
 - `source`: `codex | claude | omp | gh | git | symphonika`
 
 The first five fields form the **Routine Outcome Claim** requested by the standard routine prompt.
-The provider's final normalized `turn_completed` event is the only claim source. Claude and Codex
-also receive the same JSON Schema, through `--json-schema` and `turn/start.outputSchema`
+There are two claim sources — a file the routine prompt asks the agent to write outside the
+workspace as its last action, and the provider's final normalized `turn_completed` event — with the
+file taking precedence whenever both are present and schema-valid (see the dated ADR amending this
+one for the rationale and Oh My Pi's lack of a schema lever). Claude and Codex also receive the same
+JSON Schema on the message channel, through `--json-schema` and `turn/start.outputSchema`
 respectively; this is reinforcement, not the contract, per openai/codex#15451 — tools active
 alongside `outputSchema` can still make the model degrade to malformed text, which is no worse than
 the unconstrained prose every provider falls back to. Missing, malformed, or schema-invalid claims
-are treated as absent and do not fail a firing.
+on either channel are treated as absent and do not fail a firing.
 
 For Projects with tracker configuration, the dispatcher reads repository issues before and after
 provider execution, bounded to a window wide enough to cover any single firing rather than the

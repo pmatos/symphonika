@@ -1,4 +1,4 @@
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { Logger } from "pino";
@@ -62,7 +62,9 @@ import {
   diffRoutineGithubSnapshots,
   parseGithubClaimUrl,
   parseRoutineOutcomeClaim,
+  parseRoutineOutcomeClaimText,
   reconcileRoutineOutcome,
+  resolveRoutineOutcomeClaim,
   ROUTINE_OUTCOME_JSON_SCHEMA,
   type ObservedRoutineAction,
   type RoutineGithubSnapshot,
@@ -74,7 +76,8 @@ import {
 } from "./prompt-renderer.js";
 import {
   encodeRoutineEventIndexRecord,
-  routineEvidencePaths
+  routineEvidencePaths,
+  statRoutineEvidenceFile
 } from "./evidence.js";
 import type {
   RoutineDeferralReason,
@@ -505,6 +508,41 @@ const ROUTINE_CANCELLATION_SETTLE_MS = 60_000;
 // bounded somehow, so it gets its own short, independent, non-fatal
 // timeout instead of reusing (or resurrecting) the cleared deadline.
 const CLAIM_URL_VERIFICATION_TIMEOUT_MS = 30_000;
+
+// The claim file is agent-authored text, not a bounded structured-output
+// response — cap it well above a real claim's size before ever reading it,
+// so a runaway write can't be parsed as (or block on) an oversized file.
+const ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES = 64 * 1024;
+
+// Read after the provider process has exited, so there is no concurrent
+// writer. Missing, oversized, or malformed content is treated as absent,
+// mirroring the message-based claim's own permissiveness (ADR 0068).
+async function readRoutineOutcomeClaimFile(
+  outcomeClaimPath: string,
+  logger: Logger | undefined
+): Promise<RoutineOutcomeClaim | null> {
+  const size = await statRoutineEvidenceFile(outcomeClaimPath);
+  if (size === undefined) {
+    return null;
+  }
+  if (size > ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES) {
+    logger?.warn(
+      { outcomeClaimPath, size },
+      "symphonika routine outcome claim file exceeds size cap; ignoring"
+    );
+    return null;
+  }
+  try {
+    const text = await readFile(outcomeClaimPath, "utf8");
+    return parseRoutineOutcomeClaimText(text);
+  } catch (error) {
+    logger?.warn(
+      { err: errorMessage(error), outcomeClaimPath },
+      "symphonika routine outcome claim file read failed; ignoring"
+    );
+    return null;
+  }
+}
 
 export function synchronizeRoutineTargets(
   input: SynchronizeRoutineTargetsInput
@@ -1357,6 +1395,7 @@ async function runRoutineFiring(input: {
   let stderrLogPath: string | undefined;
   let normalizedIndexPath: string | undefined;
   let normalizedLogPath: string | undefined;
+  let outcomeClaimPath: string | undefined;
   let normalizedLogOffset = 0;
   let normalizedLogSequence = 1;
   let githubBefore: CapturedRoutineGithubSnapshot | null = null;
@@ -1402,6 +1441,7 @@ async function runRoutineFiring(input: {
     stderrLogPath = evidence.stderrLogPath;
     normalizedIndexPath = evidence.normalizedIndexPath;
     normalizedLogPath = evidence.normalizedLogPath;
+    outcomeClaimPath = evidence.outcomeClaimPath;
     input.runStore.updateRoutineFiringWorkspace({
       id: input.firingId,
       normalizedLogPath,
@@ -1547,7 +1587,26 @@ async function runRoutineFiring(input: {
     // (issue #757). A non-error `action: "none"` claim is the only shape this
     // widens; everything else (no claim, a different action, or an explicit
     // error) keeps the prior unconditional failure.
-    const claim = parseRoutineOutcomeClaim(events);
+    const fileOutcomeClaim = await readRoutineOutcomeClaimFile(
+      outcomeClaimPath,
+      input.logger
+    );
+    const messageOutcomeClaim = parseRoutineOutcomeClaim(events);
+    const resolvedOutcomeClaim = resolveRoutineOutcomeClaim(
+      fileOutcomeClaim,
+      messageOutcomeClaim
+    );
+    if (resolvedOutcomeClaim.disagreement) {
+      input.logger?.warn(
+        {
+          fileClaim: fileOutcomeClaim,
+          firingId: input.firingId,
+          messageClaim: messageOutcomeClaim
+        },
+        "symphonika routine outcome claim file and final message disagree; file wins"
+      );
+    }
+    const claim = resolvedOutcomeClaim.claim;
     const explicitNoActionClaim =
       claim !== null && claim.action === "none" && claim.status !== "error";
     let outcome: RoutineTerminalOutcome =
@@ -1913,6 +1972,28 @@ async function runRoutineFiring(input: {
       explainedFinalReason,
       resolvedRedactSecrets
     );
+    // The provider can have written the claim file before failing/timing
+    // out, so read it whenever evidence prep got far enough to know its
+    // path — same file-wins precedence as the success path above.
+    const failureFileOutcomeClaim =
+      outcomeClaimPath === undefined
+        ? null
+        : await readRoutineOutcomeClaimFile(outcomeClaimPath, input.logger);
+    const failureMessageOutcomeClaim = parseRoutineOutcomeClaim(events);
+    const resolvedFailureOutcomeClaim = resolveRoutineOutcomeClaim(
+      failureFileOutcomeClaim,
+      failureMessageOutcomeClaim
+    );
+    if (resolvedFailureOutcomeClaim.disagreement) {
+      input.logger?.warn(
+        {
+          fileClaim: failureFileOutcomeClaim,
+          firingId: input.firingId,
+          messageClaim: failureMessageOutcomeClaim
+        },
+        "symphonika routine outcome claim file and final message disagree; file wins"
+      );
+    }
     input.runStore.completeRoutineFiring({
       commitsAhead,
       // ADR 0067 ranks a Routine's own declared deadline above any
@@ -1922,7 +2003,7 @@ async function runRoutineFiring(input: {
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
         claim: redactRoutineOutcomeClaim(
-          parseRoutineOutcomeClaim(events),
+          resolvedFailureOutcomeClaim.claim,
           resolvedRedactSecrets
         ),
         commitsAhead,
@@ -2617,12 +2698,14 @@ async function prepareRoutineEvidence(input: {
 }): Promise<{
   normalizedIndexPath: string;
   normalizedLogPath: string;
+  outcomeClaimPath: string;
   prompt: string;
   promptPath: string;
   rawLogPath: string;
   stderrLogPath: string;
 }> {
   const routine = input.routine;
+  const evidencePaths = routineEvidencePaths(input.stateRoot, input.firingId);
   const rendered = renderRoutinePrompt({
     ...(routine.kind === "git"
       ? {
@@ -2633,6 +2716,7 @@ async function prepareRoutineEvidence(input: {
         }
       : {}),
     firing: { id: input.firingId },
+    outcomeClaimPath: evidencePaths.outcomeClaimPath,
     project: { name: input.project.name },
     provider: { command: input.providerCommand, name: input.providerName },
     routine: {
@@ -2650,7 +2734,6 @@ async function prepareRoutineEvidence(input: {
       root: path.resolve(input.configDir, input.project.workspace.root)
     }
   });
-  const evidencePaths = routineEvidencePaths(input.stateRoot, input.firingId);
   await mkdir(evidencePaths.directory, { recursive: true });
   const {
     normalizedIndexPath,
@@ -2707,6 +2790,7 @@ async function prepareRoutineEvidence(input: {
   return {
     normalizedIndexPath,
     normalizedLogPath,
+    outcomeClaimPath: evidencePaths.outcomeClaimPath,
     prompt: rendered.prompt,
     promptPath,
     rawLogPath,

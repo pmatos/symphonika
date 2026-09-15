@@ -5,7 +5,9 @@ import {
   formatRoutineOutcomeLine,
   parseGithubClaimUrl,
   parseRoutineOutcomeClaim,
-  reconcileRoutineOutcome
+  parseRoutineOutcomeClaimText,
+  reconcileRoutineOutcome,
+  resolveRoutineOutcomeClaim
 } from "../src/routines/outcome.js";
 
 describe("Routine Outcome reconciliation", () => {
@@ -250,6 +252,89 @@ describe("Routine Outcome reconciliation", () => {
         }
       ])
     ).toBeNull();
+  });
+
+  const validClaimText = JSON.stringify({
+    action: "commit",
+    status: "success",
+    summary: "Committed the fix.",
+    title: "Fix the retry policy",
+    url: null
+  });
+  const validClaim = JSON.parse(validClaimText) as ReturnType<
+    typeof parseRoutineOutcomeClaimText
+  >;
+
+  it("parses a well-formed outcome claim file's exact text", () => {
+    expect(parseRoutineOutcomeClaimText(validClaimText)).toEqual(validClaim);
+  });
+
+  it("treats non-JSON claim file text as absent", () => {
+    expect(parseRoutineOutcomeClaimText("not json")).toBeNull();
+  });
+
+  it("treats schema-invalid claim file JSON as absent", () => {
+    expect(
+      parseRoutineOutcomeClaimText(JSON.stringify({ action: "pr" }))
+    ).toBeNull();
+  });
+
+  it("prefers the file claim over the message claim when both are valid", () => {
+    const messageClaim = parseRoutineOutcomeClaim([
+      {
+        result: JSON.stringify({
+          action: "none",
+          status: "no_action",
+          summary: "Nothing changed.",
+          title: "No action",
+          url: null
+        }),
+        type: "turn_completed"
+      }
+    ]);
+
+    const resolved = resolveRoutineOutcomeClaim(validClaim, messageClaim);
+
+    expect(resolved).toEqual({
+      channel: "file",
+      claim: validClaim,
+      disagreement: true
+    });
+  });
+
+  it("falls back to the message claim when the file claim is absent", () => {
+    const messageClaim = parseRoutineOutcomeClaim([
+      {
+        structuredOutput: JSON.parse(validClaimText),
+        type: "turn_completed"
+      }
+    ]);
+
+    expect(resolveRoutineOutcomeClaim(null, messageClaim)).toEqual({
+      channel: "message",
+      claim: messageClaim,
+      disagreement: false
+    });
+  });
+
+  it("reports no disagreement when the file and message claims agree", () => {
+    const messageClaim = JSON.parse(validClaimText) as ReturnType<
+      typeof parseRoutineOutcomeClaimText
+    >;
+
+    expect(resolveRoutineOutcomeClaim(validClaim, messageClaim)).toEqual({
+      channel: "file",
+      claim: validClaim,
+      disagreement: false
+    });
+  });
+
+  it("resolves to no claim when neither channel has one", () => {
+    expect(resolveRoutineOutcomeClaim(null, null)).toEqual({
+      channel: "none",
+      claim: null,
+      disagreement: false
+    });
   });
 
   it("verifies a claimed PR when the same GitHub action is observed", () => {

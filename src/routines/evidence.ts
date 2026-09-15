@@ -367,6 +367,7 @@ export type RoutineEvidencePaths = {
   directory: string;
   normalizedIndexPath: string;
   normalizedLogPath: string;
+  outcomeClaimPath: string;
   promptMetadataPath: string;
   promptPath: string;
   rawLogPath: string;
@@ -389,6 +390,7 @@ export function routineEvidencePaths(
     directory,
     normalizedIndexPath: routineEventIndexPath(normalizedLogPath),
     normalizedLogPath,
+    outcomeClaimPath: path.join(directory, "outcome.json"),
     promptMetadataPath: path.join(directory, "prompt-metadata.json"),
     promptPath: path.join(directory, "prompt.md"),
     rawLogPath,

@@ -4,6 +4,7 @@ import type {
   GitHubIssueRepositoryInput,
   GitHubIssuesApi
 } from "../issue-polling.js";
+import { tryAddIssueComment } from "../issue-polling.js";
 import type { CancelReason } from "../run-store.js";
 
 import { CANCEL_REASONS } from "./active-runs.js";
@@ -17,9 +18,12 @@ import { isBlockedOutcome } from "./outcome-projection.js";
 // assigns to this alias, so RunController never names it. Only the two label
 // methods are required here — `GitHubIssuesApi`'s one required member,
 // `listOpenIssues`, has no business in a terminal-label test double.
+// `addIssueComment` stays optional, matching its declaration on
+// `GitHubIssuesApi` itself, so a test double need not implement it either.
 type LabelWritingApi = Required<
   Pick<GitHubIssuesApi, "addLabelsToIssue" | "removeLabelsFromIssue">
->;
+> &
+  Pick<GitHubIssuesApi, "addIssueComment">;
 
 // The terminal-outcome input the run controller builds once per termination.
 // Moved verbatim from run-controller so the module that owns the label decision
@@ -74,6 +78,39 @@ type IssueTarget = {
   issueNumber: number;
   repository: GitHubIssueRepositoryInput;
 };
+
+// `reason` on IssueBlockTarget below is provider stderr/output text or a raw
+// internal error message, never sanitized for markdown. Posting it verbatim
+// into a public issue comment would let a stray backtick, `@mention`, or
+// `#issue` reference get interpreted by GitHub. Fencing it -- with a fence
+// longer than any backtick run already in the text, so the reason itself can
+// never break out of its own fence -- and bounding its length neutralizes
+// that without altering the reason string callers see elsewhere
+// (terminal_reason, logs).
+const MAX_REASON_COMMENT_CHARS = 1000;
+
+function formatReasonForComment(reason: string): string {
+  // Array.from splits on code points, not UTF-16 code units, so a truncation
+  // cut can never land inside a surrogate pair the way String#slice's raw
+  // code-unit indexing could (mangling an astral character echoed from
+  // provider stdout/stderr into an unpaired-surrogate replacement glyph).
+  const truncated =
+    reason.length > MAX_REASON_COMMENT_CHARS
+      ? `${Array.from(reason).slice(0, MAX_REASON_COMMENT_CHARS).join("")}…`
+      : reason;
+  const longestBacktickRun = (truncated.match(/`+/g) ?? []).reduce(
+    (max, run) => Math.max(max, run.length),
+    0
+  );
+  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}\n${truncated}\n${fence}`;
+}
+
+// markFailed/markBlocked/markNeedsHuman additionally require the human-
+// readable reason the run controller already computed for this outcome (its
+// `state_transition_reason`/`terminal_reason` write), so the sym:human-needed
+// comment below never drifts from the DB's own record of why.
+type IssueBlockTarget = IssueTarget & { reason: string };
 
 // Owns the orchestrator-owned terminal-outcome operational labels: the
 // sym:running removal, the sym:failed/sym:blocked add-then-sym:human-needed
@@ -191,6 +228,7 @@ export class ClaimLabelWriter {
     if (input.outcome.kind === "input_required") {
       await this.markFailed({
         issueNumber: input.issueNumber,
+        reason: input.outcome.reason,
         repository: input.repository
       });
     } else if (
@@ -201,11 +239,13 @@ export class ClaimLabelWriter {
       if (isBlockedOutcome(input.outcome)) {
         await this.markBlocked({
           issueNumber: input.issueNumber,
+          reason: input.outcome.reason,
           repository: input.repository
         });
       } else {
         await this.markFailed({
           issueNumber: input.issueNumber,
+          reason: input.outcome.reason,
           repository: input.repository
         });
       }
@@ -253,46 +293,35 @@ export class ClaimLabelWriter {
     }
   }
 
-  async markFailed(input: IssueTarget): Promise<void> {
-    try {
-      await this.api.addLabelsToIssue({
-        ...input.repository,
-        issueNumber: input.issueNumber,
-        labels: ["sym:failed"]
-      });
-    } catch (err) {
-      this.logger?.warn(
-        { err, issueNumber: input.issueNumber },
-        "symphonika failed to add sym:failed label; sym:claimed left in place"
-      );
-      await this.markNeedsHuman(input);
-      return;
-    }
-    this.logger?.info(
-      { issueNumber: input.issueNumber },
-      "symphonika marked issue sym:failed"
-    );
-    await this.markNeedsHuman(input);
+  async markFailed(input: IssueBlockTarget): Promise<void> {
+    await this.markTerminalLabel(input, "sym:failed");
   }
 
-  async markBlocked(input: IssueTarget): Promise<void> {
+  async markBlocked(input: IssueBlockTarget): Promise<void> {
+    await this.markTerminalLabel(input, "sym:blocked");
+  }
+
+  private async markTerminalLabel(
+    input: IssueBlockTarget,
+    label: "sym:blocked" | "sym:failed"
+  ): Promise<void> {
     try {
       await this.api.addLabelsToIssue({
         ...input.repository,
         issueNumber: input.issueNumber,
-        labels: ["sym:blocked"]
+        labels: [label]
       });
     } catch (err) {
       this.logger?.warn(
         { err, issueNumber: input.issueNumber },
-        "symphonika failed to add sym:blocked label; sym:claimed left in place"
+        `symphonika failed to add ${label} label; sym:claimed left in place`
       );
       await this.markNeedsHuman(input);
       return;
     }
     this.logger?.info(
       { issueNumber: input.issueNumber },
-      "symphonika marked issue sym:blocked"
+      `symphonika marked issue ${label}`
     );
     await this.markNeedsHuman(input);
   }
@@ -324,8 +353,12 @@ export class ClaimLabelWriter {
   // markBlocked so a human-attention signal exists regardless of which terminal
   // path was taken. Its own try/catch keeps a sym:human-needed failure from
   // suppressing the caller, and vice versa. Never called directly by the
-  // controller, so it stays private.
-  private async markNeedsHuman(input: IssueTarget): Promise<void> {
+  // controller, so it stays private. Posts the explanatory comment below even
+  // when the label add itself failed -- the label and the comment are two
+  // independent human-attention signals, and losing the label write must
+  // never also cost the only trace of *why* a human is needed.
+  private async markNeedsHuman(input: IssueBlockTarget): Promise<void> {
+    let labelAdded = true;
     try {
       await this.api.addLabelsToIssue({
         ...input.repository,
@@ -333,15 +366,51 @@ export class ClaimLabelWriter {
         labels: ["sym:human-needed"]
       });
     } catch (err) {
+      labelAdded = false;
       this.logger?.warn(
         { err, issueNumber: input.issueNumber },
         "symphonika failed to add sym:human-needed label"
       );
-      return;
     }
-    this.logger?.info(
-      { issueNumber: input.issueNumber },
-      "symphonika marked issue sym:human-needed"
+    if (labelAdded) {
+      this.logger?.info(
+        { issueNumber: input.issueNumber },
+        "symphonika marked issue sym:human-needed"
+      );
+    }
+    await this.postHumanNeededComment(input, labelAdded);
+  }
+
+  // The label alone leaves no trace on the issue of *why* a human is being
+  // asked to look -- see vow-lang/vow#1276, where a stale bookkeeping row
+  // marked an issue sym:human-needed with a real PR already open and being
+  // tracked, and the only way to find that out was journalctl + the run
+  // evidence directory. Routed through the shared bestEffort/tryAddIssueComment
+  // pair (same as postIssueContentComment in run-controller.ts) so a comment
+  // failure is handled the same way as every other best-effort write here,
+  // and never mistaken for the label having failed.
+  private async postHumanNeededComment(
+    input: IssueBlockTarget,
+    labelAdded: boolean
+  ): Promise<void> {
+    const intro = labelAdded
+      ? "Symphonika marked this issue `sym:human-needed`."
+      : "Symphonika could not add the `sym:human-needed` label, but is flagging this issue for human attention.";
+    await this.bestEffort(
+      async () => {
+        const posted = await tryAddIssueComment(this.api, {
+          ...input.repository,
+          body: `${intro}\n\n**Reason:**\n\n${formatReasonForComment(input.reason)}`,
+          issueNumber: input.issueNumber
+        });
+        if (!posted) {
+          this.logger?.debug(
+            { issueNumber: input.issueNumber },
+            "symphonika sym:human-needed comment skipped: tracker lacks addIssueComment"
+          );
+        }
+      },
+      { issueNumber: input.issueNumber, operation: "addIssueComment" }
     );
   }
 

@@ -63,7 +63,7 @@ import {
   secretsForEmailConfig,
   type EmailNotificationConfig
 } from "../notifications/config.js";
-import { redactValueDeep } from "../redaction.js";
+import { redactAll, redactValueDeep } from "../redaction.js";
 import type { CancelReason, ProgressEdge, RunStore } from "../run-store.js";
 import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
@@ -157,7 +157,8 @@ import {
   buildCapReachedReason,
   buildMergePrRefusedReason,
   buildNoPullRequestTrackedReason,
-  buildPullRequestDiscoveryExhaustedReason
+  buildPullRequestDiscoveryExhaustedReason,
+  formatCapReachedReason
 } from "./terminal-reason.js";
 
 export type WorkflowSnapshot = {
@@ -1909,6 +1910,7 @@ export class RunController {
     this.runStore.updateRunState(input.runId, "blocked");
     await this.claimLabels.markBlocked({
       issueNumber: input.issueNumber,
+      reason,
       repository: input.repository
     });
     await this.claimLabels.release({
@@ -1954,6 +1956,7 @@ export class RunController {
     this.runStore.updateRunState(input.runId, "blocked");
     await this.claimLabels.markBlocked({
       issueNumber: input.issueNumber,
+      reason: input.reason,
       repository: input.repository
     });
     await this.releaseWaitTerminalClaim(input);
@@ -2191,8 +2194,14 @@ export class RunController {
             return undefined;
           }
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
+          // Redacted here (not just at the claim/createRun failure path)
+          // because this message also flows into terminateRefusal ->
+          // terminateMergePrRefusal -> markBlocked, which now posts it as a
+          // public sym:human-needed comment (SPEC.md §6).
+          const message = redactAll(
+            error instanceof Error ? error.message : String(error),
+            this.redactionInventory(repository.token)
+          );
           if (isPermanentMergeRefusal(error)) {
             const attempt = this.runStore.incrementMergeRefusalCount(runId);
             if (attempt < MAX_MERGE_REFUSAL_ATTEMPTS) {
@@ -2889,7 +2898,14 @@ export class RunController {
         forceReload: true
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      // Redacted: this reason now also reaches a public sym:human-needed
+      // comment via failScheduledRunBeforeProvider -> applyTerminal ->
+      // markFailed (SPEC.md §6), same as the two run-controller.ts call
+      // sites already fixed for the same reason.
+      const message = redactAll(
+        error instanceof Error ? error.message : String(error),
+        this.redactionInventory(repository.token)
+      );
       const fallback = this.lastKnownGoodLoadedWorkflow(project.workflow);
       if (fallback === undefined) {
         const providerName = project.agent.provider;
@@ -4411,9 +4427,17 @@ export class RunController {
             }
           );
         } else if (!runCreated && claimed) {
-          // Failure between claim and createRun (rare): still mark sym:failed best-effort.
+          // Failure between claim and createRun (rare): still mark sym:failed
+          // best-effort. This reason is now also posted as a public issue
+          // comment (ClaimLabelWriter.markNeedsHuman), so it gets the same
+          // SPEC.md §6 redaction classifyFailure applies to every other
+          // reason source before it reaches markFailed.
           await this.claimLabels.markFailed({
             issueNumber: input.issue.number,
+            reason: redactAll(
+              error instanceof Error ? error.message : String(error),
+              this.redactionInventory(input.repository.token)
+            ),
             repository: input.repository
           });
         } else if (!runCreated) {
@@ -5762,11 +5786,13 @@ export class RunController {
         if (isBlockedOutcome(input.outcome)) {
           await this.claimLabels.markBlocked({
             issueNumber: input.issue.number,
+            reason: input.outcome.reason,
             repository: input.repository
           });
         } else {
           await this.claimLabels.markFailed({
             issueNumber: input.issue.number,
+            reason: input.outcome.reason,
             repository: input.repository
           });
         }
@@ -5963,15 +5989,20 @@ export class RunController {
         },
         "symphonika continuation cap reached; marking issue failed"
       );
+      const capReason = buildCapReachedReason(kind);
       this.runStore.createCapReachedFailureRun({
         id: capId,
         issue: refreshed,
         parentRunId: input.runId,
         projectName: input.project.name,
-        reason: buildCapReachedReason(kind)
+        reason: capReason
       });
       await this.claimLabels.markFailed({
         issueNumber: input.issue.number,
+        // capReason (above) is the terse machine token parseCapReachedReason
+        // reads back for cli.ts/http/pages.ts; the public comment needs the
+        // human-readable sentence those same call sites render from it.
+        reason: formatCapReachedReason(kind, succeededContinuations),
         repository: input.repository
       });
       // The continuation loop stops here -- no further continuation will be

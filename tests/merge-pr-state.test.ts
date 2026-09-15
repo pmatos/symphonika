@@ -5,6 +5,7 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  GitHubIssueCommentInput,
   GitHubIssuesApi,
   RawGitHubPullRequestFollowupState
 } from "../src/issue-polling.js";
@@ -643,6 +644,68 @@ describe("merge_pr state lifecycle", () => {
       expect(removeLabelsFromIssue).toHaveBeenCalledWith(
         expect.objectContaining({ labels: ["sym:claimed", "sym:stale"] })
       );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("redacts the repository token out of the merge-refusal error before it reaches the public comment", async () => {
+    // Regression for the sym:human-needed comment feature: a raw GitHub/Octokit
+    // error message reaching markBlocked now also becomes public issue-comment
+    // text, so the token embedded in this refusal error must never appear in
+    // the posted comment body.
+    const root = await makeTempRoot();
+    await writeMergePrWorkflow(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      seedWaitingMergePrRun(store, issue);
+      store.trackPullRequest({
+        branchName: "sym/symphonika/97-merge-pr-acceptance-fixture",
+        headSha: "abc123",
+        issueNumber: issue.number,
+        prNumber: 99,
+        prUrl: "https://example.test/pr/99",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const addIssueComment = vi
+        .fn<(input: GitHubIssueCommentInput) => Promise<void>>()
+        .mockResolvedValue(undefined);
+      const refusal = Object.assign(
+        new Error("Protected branch update failed for token secret-token"),
+        { status: 405 }
+      );
+      const githubIssuesApi: GitHubIssuesApi = {
+        addIssueComment,
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockRejectedValue(refusal),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      for (let attempt = 1; attempt < 5; attempt += 1) {
+        await controller.reEvaluateWaitingRun("merge-pr-run");
+      }
+      await controller.reEvaluateWaitingRun("merge-pr-run");
+
+      expect(store.getRun("merge-pr-run")?.state).toBe("blocked");
+      expect(addIssueComment).toHaveBeenCalledTimes(1);
+      const body = addIssueComment.mock.calls[0]?.[0]?.body ?? "";
+      expect(body).not.toContain("secret-token");
+      expect(body).toContain("[REDACTED]");
     } finally {
       store.close();
     }

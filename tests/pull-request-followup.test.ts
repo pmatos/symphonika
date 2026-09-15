@@ -1436,7 +1436,9 @@ describe("pull request follow-up", () => {
       }
 
       const project = projectConfig();
+      const addIssueComment = vi.fn().mockResolvedValue(undefined);
       const githubIssuesApi: GitHubIssuesApi = {
+        addIssueComment,
         addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
         getPullRequestFollowupState: vi.fn(),
         listOpenIssues: vi.fn().mockResolvedValue([]),
@@ -1480,6 +1482,18 @@ describe("pull request follow-up", () => {
       );
       expect(githubIssuesApi.addLabelsToIssue).toHaveBeenCalledWith(
         expect.objectContaining({ labels: ["sym:human-needed"] })
+      );
+      // The sym:human-needed label alone left no trace of *why* on the issue
+      // itself (see vow-lang/vow#1276); a comment naming the reason closes
+      // that gap.
+      const commentCall = addIssueComment.mock.calls[0]?.[0] as
+        { body?: string; issueNumber?: number } | undefined;
+      expect(commentCall?.issueNumber).toBe(run?.issueNumber);
+      expect(commentCall?.body).toContain(
+        buildPullRequestDiscoveryExhaustedReason(
+          branchName,
+          MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS
+        )
       );
       expect(githubIssuesApi.removeLabelsFromIssue).toHaveBeenCalledWith(
         expect.objectContaining({

@@ -55,8 +55,12 @@ Private frame parsing and event-mapping helpers are tested only through `AgentPr
    response. Otherwise continue with protocol v1.
 5. Send `get_state`; emit `session_started` from its `sessionId`, model, and session-file data.
 6. Send the rendered Autonomous Prompt with the `prompt` command and require its correlated
-   acknowledgement. A response that reports `agentInvoked: false` is a deterministic turn failure
-   because a Symphonika Run must execute the coding agent.
+   acknowledgement. A response that explicitly reports `agentInvoked: false` is a deterministic turn
+   failure because a Symphonika Run must execute the coding agent. A response that omits `data`
+   entirely (observed on `omp/18.2.0`, see issue #777) is accepted rather than rejected: that build
+   signals the agent starting only via a later, asynchronous `{"type":"agent_start"}` frame, and the
+   adapter relies on the subsequent event stream (or a `process_exit` without a terminal `agent_end`)
+   to determine success or failure instead of gating on the prompt response itself.
 7. Stream Agent Session events until a terminal `agent_end`. An `agent_end` carrying
    `isTerminal: false` is non-terminal because asynchronous delivery will resume the session.
 8. Close stdin after terminal completion. OMP drains accepted work, disposes the session, and exits;
@@ -83,8 +87,8 @@ The initial mapping is:
 - `message_end` for an assistant message with usage -> `usage_updated`
 - `tool_execution_start` -> `tool_call`
 - `turn_end` -> `turn_completed`
-- assistant error events, error notices, failed command responses, or prompt completion without an
-  invoked agent -> `turn_failed`
+- assistant error events, error notices, failed command responses, or an explicit `agentInvoked: false`
+  on the prompt response -> `turn_failed`
 - interactive `extension_ui_request` methods (`select`, `confirm`, `input`, `editor`, or
   `open_url`) -> `input_required`
 - child-process or framing errors -> `turn_failed` or `malformed_event` as appropriate

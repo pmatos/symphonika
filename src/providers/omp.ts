@@ -240,7 +240,10 @@ async function* runOmpTurn(
   if (prompt.stopped) {
     return;
   }
-  if (!agentInvokedResponse(prompt.response)) {
+  if (
+    !successfulResponse(prompt.response) ||
+    agentInvocationRejected(prompt.response)
+  ) {
     await shutdownProviderProcess(child);
     yield* drainUntilExit(queue, activeRun);
     return;
@@ -468,7 +471,7 @@ function mapPromptResponse(raw: unknown): ProviderEvent {
   if (!successfulResponse(raw)) {
     return mapFailedResponse(raw);
   }
-  if (booleanField(objectField(raw, "data"), "agentInvoked") !== true) {
+  if (agentInvocationRejected(raw)) {
     return {
       normalized: {
         command: "prompt",
@@ -603,11 +606,12 @@ function successfulResponse(raw: unknown): boolean {
   );
 }
 
-function agentInvokedResponse(raw: unknown): boolean {
-  return (
-    successfulResponse(raw) &&
-    booleanField(objectField(raw, "data"), "agentInvoked") === true
-  );
+// See ADR-0066's amendment note (issue #777) for why only an explicit
+// `false` here is a rejection: omp/18.2.0 omits "data" entirely on success.
+// Both call sites already establish success before calling this, so it does
+// not re-check successfulResponse itself.
+function agentInvocationRejected(raw: unknown): boolean {
+  return booleanField(objectField(raw, "data"), "agentInvoked") === false;
 }
 
 function negotiatedV2Response(raw: unknown): boolean {

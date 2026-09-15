@@ -180,6 +180,7 @@ describe("dispatch continuation cap", () => {
     };
 
     const githubIssuesApi = {
+      addIssueComment: vi.fn().mockResolvedValue(undefined),
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       // every refresh returns the issue still eligible
       getIssue: vi
@@ -263,6 +264,16 @@ describe("dispatch continuation cap", () => {
         .map(([call]) => call as { labels: string[] })
         .filter((call) => call.labels[0] === "sym:failed");
       expect(failedAdds.length).toBeGreaterThanOrEqual(1);
+
+      // The sym:human-needed comment must carry the human-readable sentence
+      // (as cli.ts/http/pages.ts render for this same CapReachedKind), not
+      // the terse cap_reached:no_commits machine token createCapReachedFailureRun
+      // persists for parseCapReachedReason to read back.
+      const capComment = githubIssuesApi.addIssueComment.mock.calls
+        .map(([call]) => call as { body: string })
+        .find((call) => call.body.includes("no commits on issue branch"));
+      expect(capComment).toBeDefined();
+      expect(capComment?.body).not.toContain("cap_reached:no_commits");
 
       // This is a non-raw-FSM (markdown) workflow, so every one of the 3
       // successful runs above (1 fresh + 2 continuations) is a

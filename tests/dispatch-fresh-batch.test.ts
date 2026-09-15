@@ -4,7 +4,11 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { IssuePollStatus, IssueSnapshot } from "../src/issue-polling.js";
+import type {
+  GitHubIssueCommentInput,
+  IssuePollStatus,
+  IssueSnapshot
+} from "../src/issue-polling.js";
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
 import {
   createHostPressureGate,
@@ -82,6 +86,7 @@ function projectConfig(
 async function createHarness(
   specs: ProjectSpec[],
   options: {
+    addIssueComment?: (input: GitHubIssueCommentInput) => Promise<void>;
     createRunId?: () => string;
     globalConcurrencyLoader?: () => Promise<{
       maxInFlight: number | undefined;
@@ -122,6 +127,9 @@ async function createHarness(
     emailConfigLoader: () => undefined,
     env: { GITHUB_TOKEN: "secret" },
     githubIssuesApi: {
+      ...(options.addIssueComment === undefined
+        ? {}
+        : { addIssueComment: options.addIssueComment }),
       addLabelsToIssue,
       listOpenIssues: vi.fn().mockResolvedValue([]),
       listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
@@ -298,6 +306,33 @@ describe("RunController.dispatchFresh", () => {
 
     expect(registered).toHaveLength(2);
     await Promise.all(registered);
+  });
+
+  it("redacts the repository token out of a claim/createRun failure before it reaches the public comment", async () => {
+    // Regression for the sym:human-needed comment feature: a raw error
+    // between the claim label add and runStore.createRun now also reaches
+    // markFailed -> the public comment (claimAndPersistRun, run-controller.ts
+    // ~4429), so a token embedded in that error must never appear in it.
+    const addIssueComment = vi
+      .fn<(input: GitHubIssueCommentInput) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const harness = await createHarness([{ name: "alpha" }], {
+      addIssueComment
+    });
+    vi.spyOn(harness.runStore, "createRun").mockImplementationOnce(() => {
+      throw new Error("db write failed for token secret");
+    });
+
+    await expect(
+      harness.controller.dispatchFresh(
+        pollStatus([{ issueNumber: 1, project: "alpha" }])
+      )
+    ).rejects.toThrow("db write failed for token secret");
+
+    expect(addIssueComment).toHaveBeenCalledTimes(1);
+    const body = (addIssueComment.mock.calls[0]?.[0] as { body: string }).body;
+    expect(body).not.toContain("token secret");
+    expect(body).toContain("token [REDACTED]");
   });
 
   it("stops claiming once the global cap is reached, leaving later candidates untouched", async () => {

@@ -157,7 +157,8 @@ import {
   buildCapReachedReason,
   buildMergePrRefusedReason,
   buildNoPullRequestTrackedReason,
-  buildPullRequestDiscoveryExhaustedReason
+  buildPullRequestDiscoveryExhaustedReason,
+  formatCapReachedReason
 } from "./terminal-reason.js";
 
 export type WorkflowSnapshot = {
@@ -2897,7 +2898,14 @@ export class RunController {
         forceReload: true
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      // Redacted: this reason now also reaches a public sym:human-needed
+      // comment via failScheduledRunBeforeProvider -> applyTerminal ->
+      // markFailed (SPEC.md §6), same as the two run-controller.ts call
+      // sites already fixed for the same reason.
+      const message = redactAll(
+        error instanceof Error ? error.message : String(error),
+        this.redactionInventory(repository.token)
+      );
       const fallback = this.lastKnownGoodLoadedWorkflow(project.workflow);
       if (fallback === undefined) {
         const providerName = project.agent.provider;
@@ -5991,7 +5999,10 @@ export class RunController {
       });
       await this.claimLabels.markFailed({
         issueNumber: input.issue.number,
-        reason: capReason,
+        // capReason (above) is the terse machine token parseCapReachedReason
+        // reads back for cli.ts/http/pages.ts; the public comment needs the
+        // human-readable sentence those same call sites render from it.
+        reason: formatCapReachedReason(kind, succeededContinuations),
         repository: input.repository
       });
       // The continuation loop stops here -- no further continuation will be

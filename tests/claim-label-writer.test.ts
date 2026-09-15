@@ -395,4 +395,20 @@ describe("ClaimLabelWriter direct entries", () => {
     expect(body).not.toContain(reason);
     expect(body).toContain(`${"x".repeat(1000)}…`);
   });
+
+  it("truncates on a code-point boundary instead of splitting a surrogate pair", async () => {
+    // 😀 (U+1F600) is a 2-code-unit surrogate pair; place it straddling the
+    // 1000-code-unit cut so a raw String#slice(0, 1000) would keep only its
+    // leading high surrogate, corrupting the emoji into an unpaired
+    // surrogate. Array.from-based truncation keeps it whole instead.
+    const reason = `${"x".repeat(999)}😀${"y".repeat(1000)}`;
+    const { api, comments } = makeApi();
+    await new ClaimLabelWriter({ api }).markBlocked({
+      issueNumber: 7,
+      reason,
+      repository
+    });
+    const body = comments[0]?.body ?? "";
+    expect(body).toContain(`${"x".repeat(999)}😀…`);
+  });
 });

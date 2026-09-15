@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
 import type {
+  GitHubIssueCommentInput,
   GitHubIssuesApi,
   RawGitHubPullRequestFollowupState
 } from "../src/issue-polling.js";
@@ -2384,6 +2385,66 @@ describe("wait state lifecycle", () => {
         cancelReason: "daemon_shutdown",
         state: "cancelled"
       });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("redacts the repository token out of a workflow-reload failure before it reaches the public comment", async () => {
+    // Regression for the sym:human-needed comment feature: loadWorkflow's
+    // readFile throw (workflow_load_failed) now also reaches
+    // failScheduledRunBeforeProvider -> applyTerminal -> markFailed -> the
+    // public comment, so a token embedded in the (missing) workflow file's
+    // resolved path must never appear in the posted comment body.
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.updateRunState("parent-run", "succeeded");
+
+      const addIssueComment = vi
+        .fn<(input: GitHubIssueCommentInput) => Promise<void>>()
+        .mockResolvedValue(undefined);
+      const githubIssuesApi: GitHubIssuesApi = {
+        addIssueComment,
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        // No workflow.yml is ever written: loadWorkflow's readFile throws
+        // ENOENT with this resolved path embedded in its message, standing
+        // in for a secret an Octokit/provider error might just as easily
+        // carry.
+        project: projectFixture("./secret-token-missing-workflow.yml"),
+        root,
+        runStore: store
+      });
+
+      await controller.executeStateAdvance({
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika",
+        toStateId: "implementing"
+      });
+
+      expect(store.getRun("wait-rerun-1")).toMatchObject({ state: "failed" });
+      expect(addIssueComment).toHaveBeenCalledTimes(1);
+      const body = addIssueComment.mock.calls[0]?.[0]?.body ?? "";
+      expect(body).not.toContain("secret-token");
+      expect(body).toContain("[REDACTED]");
     } finally {
       store.close();
     }

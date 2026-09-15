@@ -90,9 +90,13 @@ type IssueTarget = {
 const MAX_REASON_COMMENT_CHARS = 1000;
 
 function formatReasonForComment(reason: string): string {
+  // Array.from splits on code points, not UTF-16 code units, so a truncation
+  // cut can never land inside a surrogate pair the way String#slice's raw
+  // code-unit indexing could (mangling an astral character echoed from
+  // provider stdout/stderr into an unpaired-surrogate replacement glyph).
   const truncated =
     reason.length > MAX_REASON_COMMENT_CHARS
-      ? `${reason.slice(0, MAX_REASON_COMMENT_CHARS)}…`
+      ? `${Array.from(reason).slice(0, MAX_REASON_COMMENT_CHARS).join("")}…`
       : reason;
   const longestBacktickRun = (truncated.match(/`+/g) ?? []).reduce(
     (max, run) => Math.max(max, run.length),

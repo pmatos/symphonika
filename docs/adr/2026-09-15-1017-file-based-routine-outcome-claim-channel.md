@@ -14,8 +14,12 @@ of the same investigation).
 
 Symphonika already has run-evidence infrastructure outside the agent's workspace:
 `routineEvidencePaths()` (`src/routines/evidence.ts`) derives a per-firing directory under
-`<stateRoot>/logs/routines/<firingId>/`, guarded against ever resolving inside the workspace, that
-already holds the prompt, prompt metadata, and provider logs. A tool call that writes a file to a
+`<stateRoot>/logs/routines/<firingId>/` that already holds the prompt, prompt metadata, and provider
+logs. `prepareRoutineEvidence` (`src/routines/dispatcher.ts`) enforces that this directory can never
+resolve inside the prepared workspace path — an `isPathInside` check that fails the firing outright
+(before the provider is ever started) rather than silently letting a misconfigured `workspace.root`
+put evidence inside the agent's own git tree, mirroring `persistRunEvidence`'s existing guard for
+issue-workflow evidence in `src/workflow/autonomous-prompt.ts`. A tool call that writes a file to a
 path Symphonika names and then reads back post-hoc is provider-agnostic — it needs no schema support
 from any provider, so it closes the OMP gap without depending on an upstream flag that may never
 exist for that provider.
@@ -68,6 +72,10 @@ before, regardless of which channel produced it.
 
 ## Consequences
 
+- A `workspace.root` misconfigured to coincide with or nest under `stateRoot` now fails the firing
+  with a terminal reason naming both paths, before the provider ever starts, instead of silently
+  letting `outcome.json` (or the rest of the evidence directory) land inside the workspace where a
+  routine's own `git add -A` could sweep it into a commit.
 - The file channel depends on SPEC.md §11.3's full-permission execution contract (Codex
   `sandbox_mode=danger-full-access`, Claude `--dangerously-skip-permissions`, OMP `--auto-approve`):
   a provider confined to writing inside its own workspace would be unable to write the file and would

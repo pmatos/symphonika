@@ -94,7 +94,7 @@ function routineOutcomeInstructions(outcomeClaimPath: string): string {
     "}",
     "```",
     "",
-    `Before your final message, write that exact JSON object to ${outcomeClaimPath} (a path outside this workspace). Then send the same object as your final message, with no wrapping prose. Symphonika cross-checks pull requests and issue changes against GitHub; a missing or malformed object on either channel does not fail the firing, but it makes the result less informative.`
+    `After all other work is complete, and immediately before your final message, write that exact JSON object to ${outcomeClaimPath} (a path outside this workspace). Then send the same object as your final message, with no wrapping prose. Symphonika cross-checks pull requests and issue changes against GitHub; a missing or malformed object on either channel does not fail the firing, but it makes the result less informative.`
   ].join("\n");
 }
 

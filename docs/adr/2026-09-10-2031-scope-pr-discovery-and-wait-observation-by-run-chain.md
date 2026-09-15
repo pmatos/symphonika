@@ -235,6 +235,40 @@ addendum above does: a descendant reached via a branchless `createWaitingRun` pa
 NULL by a later `createContinuationRun`, is still the same chain and simply hasn't recorded the
 branch it will finish on yet.
 
+### Addendum (2026-09-15, PR #774 review): pass through a bypassed link, and cancel_reason
+
+Two gaps in the addendum above, found by code review and confirmed live against the FSM/label
+code (not just the SQL): `RUN_CHAIN_ACTIVE_DESCENDANT_SUPPRESSION` walks *every* transitive
+descendant, not only the nearest one, and treated `descendant.state` as the whole story for both
+`blocked`/`failed` and `cancelled`.
+
+**Bypassed blocked/failed links.** A per-state outcome that projects to `blocked` (e.g.
+`no_workspace_changes`) does not stop the raw FSM from advancing when `applyWorkflowOutcome`
+decides to (ADR 0058's `fsmContinuing`): `run-controller.ts` writes the row's own state as
+`blocked` and, in the same call, suppresses `claimLabels.markBlocked` because the FSM is
+continuing — so that row is marked `blocked` forever with no human notification, and its
+continuation is created from it as normal. Chain `plan → a (blocked, bypassed) → b`: the original
+addendum's exclusion, applied to *every* descendant, saw `a`'s `blocked` state and suppressed
+`plan` permanently, even once `b` (the actual frontier) resolved to `cancelled`/`stale` — silently
+abandoning PR discovery for the issue for good, since `plan`'s own bounded-attempts fallback never
+gets to run either. The fix: a `blocked`/`failed` descendant only counts toward suppression if
+nothing continued from it (`not exists (select 1 from runs where continuation_parent_run_id =
+descendant.id)`); one that was bypassed is skipped so the check falls through to its own
+continuation instead. A descendant still actively working (`queued`/`preparing_workspace`/
+`running`) is unaffected — it always counts, continuation or not — so `plan` still stays
+suppressed for as long as `b` itself is unresolved.
+
+**cancel_reason on a cancelled descendant.** `cancelled` alone was treated as always resumable, but
+`ClaimLabelWriter.applyTerminal`'s cancelled branch only releases the claim (a real human-facing
+signal) for `cancel_reason` `closed_issue`/`eligibility_loss` — every other reason
+(`operator`/`no_progress`/`no_convergence`/`run_timeout`/`daemon_shutdown`) leaves the claim
+untouched. Letting a `closed_issue`/`eligibility_loss` cancellation resume the candidate's own
+clock reproduces this addendum's original bug on a delay: once it exhausts,
+`terminalizePullRequestDiscoveryExhausted` unconditionally calls `markBlocked` and `release` with
+no check that the issue is still open, re-labelling and re-releasing an issue that was already
+closed or had its eligibility deliberately revoked. Fixed by narrowing the `cancelled` exemption to
+reasons other than `closed_issue`/`eligibility_loss`.
+
 ## Consequences
 
 - A redispatch of an issue whose title has not changed (reusing the same deterministic branch

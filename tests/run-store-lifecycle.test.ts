@@ -1312,6 +1312,130 @@ describe("run-store lifecycle CRUD", () => {
     }
   );
 
+  it.each([
+    ["cancelled", ["plan-4"]],
+    ["stale", ["plan-4"]]
+  ] as const)(
+    "resumes discovery once a bypassed blocked link's own continuation reaches %s (vow-lang/vow#1276)",
+    async (leafState, expectedRunIds) => {
+      const root = await makeTempRoot();
+      const store = openRunStore({ stateRoot: root });
+      try {
+        const branchName = `sym/vow/1276-passthrough-${leafState}`;
+        const planId = seedRun(store, { id: "plan-4", issueNumber: 1279 });
+        store.updateRunEvidence(planId, evidence(branchName));
+        store.updateRunState(planId, "succeeded");
+
+        // "a" reached a terminal outcome that mapOutcomeToRunState projects
+        // to "blocked" (e.g. no_workspace_changes), but the raw FSM advanced
+        // past it anyway (ADR 0058's fsmContinuing), so markBlocked was
+        // suppressed and "a" was never surfaced to a human.
+        store.createContinuationRun({
+          id: "a",
+          issue: makeIssue(1279),
+          parentRunId: planId,
+          projectName: "symphonika",
+          providerCommand: "fake",
+          providerName: "codex"
+        });
+        store.updateRunEvidence("a", evidence(branchName));
+        store.updateRunState("a", "blocked");
+
+        store.createContinuationRun({
+          id: "b",
+          issue: makeIssue(1279),
+          parentRunId: "a",
+          projectName: "symphonika",
+          providerCommand: "fake",
+          providerName: "codex"
+        });
+        store.updateRunEvidence("b", evidence(branchName));
+        store.updateRunState("b", leafState);
+
+        expect(
+          store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+        ).toEqual(expectedRunIds);
+      } finally {
+        store.close();
+      }
+    }
+  );
+
+  it("suppresses discovery while the bypassed blocked link's own continuation is still running (vow-lang/vow#1276)", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      const branchName = "sym/vow/1276-passthrough-running";
+      const planId = seedRun(store, { id: "plan-5", issueNumber: 1280 });
+      store.updateRunEvidence(planId, evidence(branchName));
+      store.updateRunState(planId, "succeeded");
+
+      store.createContinuationRun({
+        id: "a2",
+        issue: makeIssue(1280),
+        parentRunId: planId,
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.updateRunEvidence("a2", evidence(branchName));
+      store.updateRunState("a2", "blocked");
+
+      store.createContinuationRun({
+        id: "b2",
+        issue: makeIssue(1280),
+        parentRunId: "a2",
+        projectName: "symphonika",
+        providerCommand: "fake",
+        providerName: "codex"
+      });
+      store.updateRunEvidence("b2", evidence(branchName));
+      store.updateRunState("b2", "running");
+
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it.each([
+    ["closed_issue", []],
+    ["eligibility_loss", []],
+    ["operator", ["plan-6"]]
+  ] as const)(
+    "resumes discovery only when a cancelled continuation's cancel_reason is %s (vow-lang/vow#1276)",
+    async (cancelReason, expectedRunIds) => {
+      const root = await makeTempRoot();
+      const store = openRunStore({ stateRoot: root });
+      try {
+        const branchName = `sym/vow/1276-cancelreason-${cancelReason}`;
+        const planId = seedRun(store, { id: "plan-6", issueNumber: 1281 });
+        store.updateRunEvidence(planId, evidence(branchName));
+        store.updateRunState(planId, "succeeded");
+
+        store.createContinuationRun({
+          id: "implement-6",
+          issue: makeIssue(1281),
+          parentRunId: planId,
+          projectName: "symphonika",
+          providerCommand: "fake",
+          providerName: "codex"
+        });
+        store.updateRunEvidence("implement-6", evidence(branchName));
+        store.markCancelRequested("implement-6", cancelReason);
+        store.updateRunState("implement-6", "cancelled");
+
+        expect(
+          store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+        ).toEqual(expectedRunIds);
+      } finally {
+        store.close();
+      }
+    }
+  );
+
   it("does not suppress discovery via a legacy chain whose continuation branch diverged from its tracked ancestor's branch (issue #745)", async () => {
     const root = await makeTempRoot();
     const store = openRunStore({ stateRoot: root });

@@ -1230,6 +1230,18 @@ const PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES_SQL_LIST = [
 ]
   .map((state) => `'${state}'`)
   .join(", ");
+// closed_issue/eligibility_loss cancellations already release the claim
+// (ClaimLabelWriter.applyTerminal), so -- unlike other cancel reasons -- they
+// must keep suppressing the same way blocked/failed do (see the ADR
+// addendum).
+const PR_DISCOVERY_NOTIFIED_CANCEL_REASONS: ReadonlySet<CancelReason> = new Set(
+  ["closed_issue", "eligibility_loss"]
+);
+const PR_DISCOVERY_NOTIFIED_CANCEL_REASONS_SQL_LIST = [
+  ...PR_DISCOVERY_NOTIFIED_CANCEL_REASONS
+]
+  .map((reason) => `'${reason}'`)
+  .join(", ");
 // branch_name equality treats an unknown (NULL) descendant branch as a
 // match rather than a mismatch: a descendant reached via a branchless
 // waiting park (createWaitingRun's conditional branchName, inherited as
@@ -1247,7 +1259,23 @@ const RUN_CHAIN_ACTIVE_DESCENDANT_SUPPRESSION = [
   "    descendant.branch_name = runs.branch_name",
   "    or descendant.branch_name is null",
   "  )",
-  `  and descendant.state not in (${PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES_SQL_LIST})`,
+  // A blocked/failed descendant that itself has a further continuation was
+  // bypassed by fsmContinuing (ADR 0058) and never notified a human -- look
+  // through it to the real frontier instead of treating it as final.
+  "  and (",
+  "    descendant.state not in ('blocked', 'failed')",
+  "    or not exists (",
+  "      select 1 from runs superseding",
+  "      where superseding.continuation_parent_run_id = descendant.id",
+  "    )",
+  "  )",
+  "  and (",
+  `    descendant.state not in (${PR_DISCOVERY_RESUMABLE_DESCENDANT_STATES_SQL_LIST})`,
+  "    or (",
+  "      descendant.state = 'cancelled'",
+  `      and descendant.cancel_reason in (${PR_DISCOVERY_NOTIFIED_CANCEL_REASONS_SQL_LIST})`,
+  "    )",
+  "  )",
   ")"
 ].join(" ");
 // Assembles the CTE, eligibility predicate and suppression clauses in the

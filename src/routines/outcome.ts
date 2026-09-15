@@ -1,4 +1,5 @@
-import { readFile, stat } from "node:fs/promises";
+import { open } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 
 import type { Logger } from "pino";
 import { z } from "zod";
@@ -180,31 +181,36 @@ export async function readRoutineOutcomeClaimFile(
   outcomeClaimPath: string,
   logger: Logger | undefined
 ): Promise<RoutineOutcomeClaim | null> {
-  let size: number;
+  let handle: FileHandle;
   try {
-    const stats = await stat(outcomeClaimPath);
-    if (!stats.isFile()) {
-      return null;
-    }
-    size = stats.size;
+    handle = await open(outcomeClaimPath, "r");
   } catch (error) {
     if (!isNodeError(error) || error.code !== "ENOENT") {
       logger?.warn(
         { err: errorMessage(error), outcomeClaimPath },
-        "symphonika routine outcome claim file stat failed; ignoring"
+        "symphonika routine outcome claim file open failed; ignoring"
       );
     }
     return null;
   }
-  if (size > ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES) {
-    logger?.warn(
-      { outcomeClaimPath, size },
-      "symphonika routine outcome claim file exceeds size cap; ignoring"
-    );
-    return null;
-  }
   try {
-    const text = await readFile(outcomeClaimPath, "utf8");
+    // fstat/read the already-open handle rather than stat()-then-readFile()
+    // on the path twice: a path-based recheck would let the file underneath
+    // change (or be replaced by a symlink) between the two calls (a
+    // TOCTOU race); an open file descriptor keeps referring to the same
+    // inode no matter what happens to the path afterward.
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      return null;
+    }
+    if (stats.size > ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES) {
+      logger?.warn(
+        { outcomeClaimPath, size: stats.size },
+        "symphonika routine outcome claim file exceeds size cap; ignoring"
+      );
+      return null;
+    }
+    const text = await handle.readFile("utf8");
     return parseRoutineOutcomeClaimText(text);
   } catch (error) {
     logger?.warn(
@@ -212,6 +218,8 @@ export async function readRoutineOutcomeClaimFile(
       "symphonika routine outcome claim file read failed; ignoring"
     );
     return null;
+  } finally {
+    await handle.close();
   }
 }
 

@@ -311,7 +311,7 @@ _Avoid_: run when specifically referring to non-issue scheduled execution
 
 **Routine Outcome Claim**:
 The provider-reported `{status, action, url, title, summary}` object resolved from a Routine
-Firing's two claim channels — a file written outside the workspace as the agent's last action, and
+Firing's two claim channels — a file written outside the workspace as a deliberate tool call, and
 the final normalized event of the firing — with the file taking precedence when both are present and
 valid. It is evidence to reconcile, not proof that the claimed action happened.
 _Avoid_: Routine Outcome when referring to the provider's unverified input

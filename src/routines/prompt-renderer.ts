@@ -75,8 +75,9 @@ const ROUTINE_ONE_SHOT_NOTICE =
 
 // The file channel is the primary claim source; the final-message channel is
 // the fallback when a provider (notably Oh My Pi, which has no schema/
-// response-format lever) fails to write the file. See docs/adr/0068 and its
-// #759 amendment for the precedence rule Symphonika applies when both exist.
+// response-format lever) fails to write the file. See docs/adr/0068 and
+// ADR-2026-09-15-1017 for the precedence rule Symphonika applies when both
+// exist.
 function routineOutcomeInstructions(outcomeClaimPath: string): string {
   return [
     "## Routine Outcome",
@@ -93,7 +94,7 @@ function routineOutcomeInstructions(outcomeClaimPath: string): string {
     "}",
     "```",
     "",
-    `As your last action, write that exact JSON object to ${outcomeClaimPath} (a path outside this workspace). Then also send the same object as your final message, with no wrapping prose. Symphonika cross-checks pull requests and issue changes against GitHub; a missing or malformed object on either channel does not fail the firing, but it makes the result less informative.`
+    `Before your final message, write that exact JSON object to ${outcomeClaimPath} (a path outside this workspace). Then send the same object as your final message, with no wrapping prose. Symphonika cross-checks pull requests and issue changes against GitHub; a missing or malformed object on either channel does not fail the firing, but it makes the result less informative.`
   ].join("\n");
 }
 

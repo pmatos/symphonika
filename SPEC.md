@@ -674,14 +674,14 @@ top-level objects are:
 object fails rendering with terminal reason `prompt_render_error`.
 
 Every rendered Routine prompt also requires a JSON Routine Outcome Claim with `status`, `action`,
-`url`, `title`, and `summary`, written to a per-firing evidence file path outside the workspace as
-the agent's last action and also sent as its final message. This prompt-level contract applies to
-every provider; the file channel is what makes it provider-agnostic even for Oh My Pi, which has no
-schema/response-format lever. Claude and Codex additionally receive the same JSON Schema on the
-message channel through `--json-schema` and `turn/start.outputSchema` respectively, but the
-provider-specific mechanism is reinforcement rather than the parsing mechanism. When both channels
-produce a schema-valid claim, the file one wins (ADR 0068's #759 amendment). A missing, non-JSON, or
-schema-invalid claim on either channel does not fail the firing.
+`url`, `title`, and `summary`, written to a per-firing evidence file path outside the workspace and
+also sent as its final message. This prompt-level contract applies to every provider; the file
+channel is what makes it provider-agnostic even for Oh My Pi, which has no schema/response-format
+lever. Claude and Codex additionally receive the same JSON Schema on the message channel through
+`--json-schema` and `turn/start.outputSchema` respectively, but the provider-specific mechanism is
+reinforcement rather than the parsing mechanism. When both channels produce a schema-valid claim,
+the file one wins (ADR-2026-09-15-1017). A missing, non-JSON, or schema-invalid claim on either
+channel does not fail the firing.
 
 The preamble tells the agent:
 

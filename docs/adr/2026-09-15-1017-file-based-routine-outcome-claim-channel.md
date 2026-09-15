@@ -48,9 +48,11 @@ text like the message claim, so it gets the same treatment:
   ever reaching a `turn_completed` event.
 
 **Precedence**: when both channels produce a schema-valid claim and they disagree, the file wins.
-Writing the file is a deliberate, distinct tool call the agent takes as an explicit last action,
-which is stronger evidence of intent than trailing prose in a final message that could be truncated,
-wrapped in commentary, or otherwise malformed before Symphonika ever parses it. When the file is
+Writing the file is a single, self-contained tool call — it can't be truncated, wrapped in
+surrounding commentary, or otherwise mangled the way trailing prose in a final message can be before
+Symphonika ever parses it. (The prompt asks for the file write before the final message, not after,
+so this isn't a recency argument — an agent that revises its answer between the two would have the
+stale file claim win. The reliability argument stands on its own regardless.) When the file is
 absent or invalid, the message-based claim is used exactly as ADR 0068 already specifies — the file
 is additive, not a replacement, so a provider or prompt that never adopts the file-write instruction
 degrades to today's behavior with no code change on Symphonika's side. A disagreement between the

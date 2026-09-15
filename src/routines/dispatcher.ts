@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { Logger } from "pino";
@@ -52,6 +52,7 @@ import type {
   RoutineFanoutHoldReason,
   RunStore
 } from "../run-store.js";
+import { isPathInside } from "../path-safety.js";
 import { WorkspacePreparationCleanupError } from "../workspace.js";
 import {
   evaluateRoutineSchedule,
@@ -76,8 +77,7 @@ import {
 } from "./prompt-renderer.js";
 import {
   encodeRoutineEventIndexRecord,
-  routineEvidencePaths,
-  statRoutineEvidenceFile
+  routineEvidencePaths
 } from "./evidence.js";
 import type {
   RoutineDeferralReason,
@@ -514,15 +514,35 @@ const CLAIM_URL_VERIFICATION_TIMEOUT_MS = 30_000;
 // so a runaway write can't be parsed as (or block on) an oversized file.
 const ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES = 64 * 1024;
 
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
 // Read after the provider process has exited, so there is no concurrent
 // writer. Missing, oversized, or malformed content is treated as absent,
-// mirroring the message-based claim's own permissiveness (ADR 0068).
+// mirroring the message-based claim's own permissiveness (ADR 0068). A
+// non-ENOENT stat failure (permissions, a briefly unreadable evidence
+// directory, ...) is logged rather than silently folded into "absent" the
+// way a routine ENOENT is, so an operator debugging a missing file claim
+// has a trail to follow.
 async function readRoutineOutcomeClaimFile(
   outcomeClaimPath: string,
   logger: Logger | undefined
 ): Promise<RoutineOutcomeClaim | null> {
-  const size = await statRoutineEvidenceFile(outcomeClaimPath);
-  if (size === undefined) {
+  let size: number;
+  try {
+    const stats = await stat(outcomeClaimPath);
+    if (!stats.isFile()) {
+      return null;
+    }
+    size = stats.size;
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") {
+      logger?.warn(
+        { err: errorMessage(error), outcomeClaimPath },
+        "symphonika routine outcome claim file stat failed; ignoring"
+      );
+    }
     return null;
   }
   if (size > ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES) {
@@ -542,6 +562,53 @@ async function readRoutineOutcomeClaimFile(
     );
     return null;
   }
+}
+
+// Shared by runRoutineFiring's success and failure paths so the two can't
+// drift (they previously duplicated this block, once with a redaction list
+// that could go stale across the file-read await — see the `redactSecrets`
+// parameter below, always called fresh at the point of use rather than
+// snapshotted by the caller). `raceFileRead` lets each path bound the read
+// against its own deadline/cancellation semantics: the success path lets a
+// timeout propagate to the outer catch like every sibling call, while the
+// failure path (already inside that catch, with no outer catch left to
+// route into) treats one as "file unavailable" instead.
+async function resolveAndLogRoutineOutcomeClaim(input: {
+  events: NormalizedProviderEvent[];
+  firingId: string;
+  logger: Logger | undefined;
+  outcomeClaimPath: string | undefined;
+  raceFileRead: (
+    operation: Promise<RoutineOutcomeClaim | null>
+  ) => Promise<RoutineOutcomeClaim | null>;
+  redactSecrets: () => string[];
+}): Promise<RoutineOutcomeClaim | null> {
+  const fileClaim =
+    input.outcomeClaimPath === undefined
+      ? null
+      : await input.raceFileRead(
+          readRoutineOutcomeClaimFile(input.outcomeClaimPath, input.logger)
+        );
+  const messageClaim = parseRoutineOutcomeClaim(input.events);
+  const resolved = resolveRoutineOutcomeClaim(fileClaim, messageClaim);
+  if (resolved.disagreement) {
+    const disagreementRedactSecrets = input.redactSecrets();
+    input.logger?.warn(
+      {
+        fileClaim: redactRoutineOutcomeClaim(
+          fileClaim,
+          disagreementRedactSecrets
+        ),
+        firingId: input.firingId,
+        messageClaim: redactRoutineOutcomeClaim(
+          messageClaim,
+          disagreementRedactSecrets
+        )
+      },
+      "symphonika routine outcome claim file and final message disagree; file wins"
+    );
+  }
+  return resolved.claim;
 }
 
 export function synchronizeRoutineTargets(
@@ -1587,33 +1654,14 @@ async function runRoutineFiring(input: {
     // (issue #757). A non-error `action: "none"` claim is the only shape this
     // widens; everything else (no claim, a different action, or an explicit
     // error) keeps the prior unconditional failure.
-    const fileOutcomeClaim = await readRoutineOutcomeClaimFile(
+    const claim = await resolveAndLogRoutineOutcomeClaim({
+      events,
+      firingId: input.firingId,
+      logger: input.logger,
       outcomeClaimPath,
-      input.logger
-    );
-    const messageOutcomeClaim = parseRoutineOutcomeClaim(events);
-    const resolvedOutcomeClaim = resolveRoutineOutcomeClaim(
-      fileOutcomeClaim,
-      messageOutcomeClaim
-    );
-    if (resolvedOutcomeClaim.disagreement) {
-      const disagreementRedactSecrets = redactSecrets();
-      input.logger?.warn(
-        {
-          fileClaim: redactRoutineOutcomeClaim(
-            fileOutcomeClaim,
-            disagreementRedactSecrets
-          ),
-          firingId: input.firingId,
-          messageClaim: redactRoutineOutcomeClaim(
-            messageOutcomeClaim,
-            disagreementRedactSecrets
-          )
-        },
-        "symphonika routine outcome claim file and final message disagree; file wins"
-      );
-    }
-    const claim = resolvedOutcomeClaim.claim;
+      raceFileRead: (operation) => cancellation.race(deadline.race(operation)),
+      redactSecrets
+    });
     const explicitNoActionClaim =
       claim !== null && claim.action === "none" && claim.status !== "error";
     let outcome: RoutineTerminalOutcome =
@@ -1981,32 +2029,21 @@ async function runRoutineFiring(input: {
     );
     // The provider can have written the claim file before failing/timing
     // out, so read it whenever evidence prep got far enough to know its
-    // path — same file-wins precedence as the success path above.
-    const failureFileOutcomeClaim =
-      outcomeClaimPath === undefined
-        ? null
-        : await readRoutineOutcomeClaimFile(outcomeClaimPath, input.logger);
-    const failureMessageOutcomeClaim = parseRoutineOutcomeClaim(events);
-    const resolvedFailureOutcomeClaim = resolveRoutineOutcomeClaim(
-      failureFileOutcomeClaim,
-      failureMessageOutcomeClaim
-    );
-    if (resolvedFailureOutcomeClaim.disagreement) {
-      input.logger?.warn(
-        {
-          fileClaim: redactRoutineOutcomeClaim(
-            failureFileOutcomeClaim,
-            resolvedRedactSecrets
-          ),
-          firingId: input.firingId,
-          messageClaim: redactRoutineOutcomeClaim(
-            failureMessageOutcomeClaim,
-            resolvedRedactSecrets
-          )
-        },
-        "symphonika routine outcome claim file and final message disagree; file wins"
-      );
-    }
+    // path — same file-wins precedence as the success path above. The
+    // deadline may already be expired here, or a cancellation settlement
+    // may already have abandoned pending work (same reasoning as the
+    // `githubAfter` snapshot and `commitsAhead` inspection above): treat
+    // either as "file unavailable" rather than let it propagate, since
+    // there is no outer catch left to route into.
+    const failureClaim = await resolveAndLogRoutineOutcomeClaim({
+      events,
+      firingId: input.firingId,
+      logger: input.logger,
+      outcomeClaimPath,
+      raceFileRead: (operation) =>
+        cancellation.race(deadline.race(operation)).catch(() => null),
+      redactSecrets
+    });
     input.runStore.completeRoutineFiring({
       commitsAhead,
       // ADR 0067 ranks a Routine's own declared deadline above any
@@ -2015,10 +2052,7 @@ async function runRoutineFiring(input: {
       firingDeadlineWon: timeoutWon,
       id: input.firingId,
       outcome: reconcileRoutineOutcome({
-        claim: redactRoutineOutcomeClaim(
-          resolvedFailureOutcomeClaim.claim,
-          resolvedRedactSecrets
-        ),
+        claim: redactRoutineOutcomeClaim(failureClaim, redactSecrets()),
         commitsAhead,
         expectsPr: input.routine.expectsPr,
         githubObservationAvailable: githubObservation.available,
@@ -2719,6 +2753,15 @@ async function prepareRoutineEvidence(input: {
 }> {
   const routine = input.routine;
   const evidencePaths = routineEvidencePaths(input.stateRoot, input.firingId);
+  // The routine prompt tells the agent the claim file path is "outside this
+  // workspace" (prompt-renderer.ts); enforce that rather than merely
+  // asserting it, mirroring persistRunEvidence's guard in
+  // workflow/autonomous-prompt.ts for the analogous issue-workflow case.
+  if (isPathInside(evidencePaths.directory, input.prepared.workspacePath)) {
+    throw new Error(
+      `routine evidence directory ${evidencePaths.directory} must be outside workspace ${input.prepared.workspacePath}`
+    );
+  }
   const rendered = renderRoutinePrompt({
     ...(routine.kind === "git"
       ? {

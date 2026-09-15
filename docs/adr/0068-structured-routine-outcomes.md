@@ -32,9 +32,9 @@ Every terminal Routine Firing may carry one canonical **Routine Outcome**:
 
 The first five fields form the **Routine Outcome Claim** requested by the standard routine prompt.
 There are two claim sources — a file the routine prompt asks the agent to write outside the
-workspace as its last action, and the provider's final normalized `turn_completed` event — with the
-file taking precedence whenever both are present and schema-valid (see the dated ADR amending this
-one for the rationale and Oh My Pi's lack of a schema lever). Claude and Codex also receive the same
+workspace as a deliberate tool call, and the provider's final normalized `turn_completed` event —
+with the file taking precedence whenever both are present and schema-valid (see ADR-2026-09-15-1017
+for the rationale and Oh My Pi's lack of a schema lever). Claude and Codex also receive the same
 JSON Schema on the message channel, through `--json-schema` and `turn/start.outputSchema`
 respectively; this is reinforcement, not the contract, per openai/codex#15451 — tools active
 alongside `outputSchema` can still make the model degrade to malformed text, which is no worse than

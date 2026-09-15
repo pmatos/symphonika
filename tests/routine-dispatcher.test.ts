@@ -10795,6 +10795,48 @@ describe("Routine Outcome Claim file channel (#759)", () => {
     };
   }
 
+  it("fails the firing rather than let a misconfigured workspace path swallow the evidence directory", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const firingId = "fire-claim-workspace-collision";
+    const collidingWorkspacePath = path.resolve(stateRoot, "logs");
+    const provider = quietProvider();
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => firingId,
+        globalConcurrency: { maxInFlight: undefined },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: collidingWorkspacePath
+          }),
+        projects: new Map([["alpha", reportRoutineProject(root)]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      expect(provider.runAttempt).not.toHaveBeenCalled();
+      const firing = runStore.getRoutineFiring(firingId);
+      expect(firing?.state).toBe("failed");
+      expect(firing?.terminalReason).toContain("must be outside workspace");
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("reads the outcome claim file when the provider never emits a final-message claim", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

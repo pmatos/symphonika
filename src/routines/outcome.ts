@@ -113,13 +113,16 @@ function parseRoutineOutcomeClaimCandidate(
 // Shared by the message-based turn_completed claim and the file-based claim
 // (#759) — both are agent-authored JSON text validated against the same
 // schema, so a malformed or schema-invalid claim is treated as absent
-// identically on either channel.
+// identically on either channel. A leading BOM is stripped first: an editor
+// or shell redirect can prepend one to a file an agent writes, and
+// JSON.parse otherwise rejects an otherwise well-formed claim outright.
 export function parseRoutineOutcomeClaimText(
   text: string
 ): RoutineOutcomeClaim | null {
+  const unprefixed = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   let candidate: unknown;
   try {
-    candidate = JSON.parse(text);
+    candidate = JSON.parse(unprefixed);
   } catch {
     return null;
   }
@@ -148,19 +151,17 @@ export function parseRoutineOutcomeClaim(
   return null;
 }
 
-type RoutineOutcomeClaimChannel = "file" | "message" | "none";
-
 export type ResolvedRoutineOutcomeClaim = {
-  channel: RoutineOutcomeClaimChannel;
   claim: RoutineOutcomeClaim | null;
   disagreement: boolean;
 };
 
-// File wins over message when both are present and schema-valid: writing the
-// claim file is a deliberate last tool call, which is stronger evidence than
-// trailing prose in the final turn (docs/adr/0068-structured-routine-outcomes.md,
-// amended by the dated ADR accompanying #759). `disagreement` lets the caller
-// log the discarded message claim without re-deriving the comparison.
+// File wins over message when both are present and schema-valid: a file
+// write is a single, self-contained tool call that can't be truncated or
+// wrapped in surrounding commentary the way trailing prose in the final
+// turn can (docs/adr/0068-structured-routine-outcomes.md, amended by
+// ADR-2026-09-15-1017). `disagreement` lets the caller log the discarded
+// message claim without re-deriving the comparison.
 export function resolveRoutineOutcomeClaim(
   fileClaim: RoutineOutcomeClaim | null,
   messageClaim: RoutineOutcomeClaim | null
@@ -169,13 +170,7 @@ export function resolveRoutineOutcomeClaim(
     fileClaim !== null &&
     messageClaim !== null &&
     JSON.stringify(fileClaim) !== JSON.stringify(messageClaim);
-  if (fileClaim !== null) {
-    return { channel: "file", claim: fileClaim, disagreement };
-  }
-  if (messageClaim !== null) {
-    return { channel: "message", claim: messageClaim, disagreement };
-  }
-  return { channel: "none", claim: null, disagreement: false };
+  return { claim: fileClaim ?? messageClaim, disagreement };
 }
 
 // Parses a claim's `url` into a GitHub pull/issue reference, scoped to the

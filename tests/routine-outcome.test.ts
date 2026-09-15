@@ -279,6 +279,12 @@ describe("Routine Outcome reconciliation", () => {
     ).toBeNull();
   });
 
+  it("strips a leading UTF-8 BOM before parsing claim file text", () => {
+    const bomPrefixed = String.fromCharCode(0xfeff) + validClaimText;
+
+    expect(parseRoutineOutcomeClaimText(bomPrefixed)).toEqual(validClaim);
+  });
+
   it("prefers the file claim over the message claim when both are valid", () => {
     const messageClaim = parseRoutineOutcomeClaim([
       {
@@ -296,7 +302,6 @@ describe("Routine Outcome reconciliation", () => {
     const resolved = resolveRoutineOutcomeClaim(validClaim, messageClaim);
 
     expect(resolved).toEqual({
-      channel: "file",
       claim: validClaim,
       disagreement: true
     });
@@ -311,7 +316,6 @@ describe("Routine Outcome reconciliation", () => {
     ]);
 
     expect(resolveRoutineOutcomeClaim(null, messageClaim)).toEqual({
-      channel: "message",
       claim: messageClaim,
       disagreement: false
     });
@@ -323,7 +327,6 @@ describe("Routine Outcome reconciliation", () => {
     >;
 
     expect(resolveRoutineOutcomeClaim(validClaim, messageClaim)).toEqual({
-      channel: "file",
       claim: validClaim,
       disagreement: false
     });
@@ -331,7 +334,6 @@ describe("Routine Outcome reconciliation", () => {
 
   it("resolves to no claim when neither channel has one", () => {
     expect(resolveRoutineOutcomeClaim(null, null)).toEqual({
-      channel: "none",
       claim: null,
       disagreement: false
     });

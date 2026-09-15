@@ -4,6 +4,7 @@ import type {
   GitHubIssueRepositoryInput,
   GitHubIssuesApi
 } from "../issue-polling.js";
+import { tryAddIssueComment } from "../issue-polling.js";
 import type { CancelReason } from "../run-store.js";
 
 import { CANCEL_REASONS } from "./active-runs.js";
@@ -289,45 +290,34 @@ export class ClaimLabelWriter {
   }
 
   async markFailed(input: IssueBlockTarget): Promise<void> {
-    try {
-      await this.api.addLabelsToIssue({
-        ...input.repository,
-        issueNumber: input.issueNumber,
-        labels: ["sym:failed"]
-      });
-    } catch (err) {
-      this.logger?.warn(
-        { err, issueNumber: input.issueNumber },
-        "symphonika failed to add sym:failed label; sym:claimed left in place"
-      );
-      await this.markNeedsHuman(input);
-      return;
-    }
-    this.logger?.info(
-      { issueNumber: input.issueNumber },
-      "symphonika marked issue sym:failed"
-    );
-    await this.markNeedsHuman(input);
+    await this.markTerminalLabel(input, "sym:failed");
   }
 
   async markBlocked(input: IssueBlockTarget): Promise<void> {
+    await this.markTerminalLabel(input, "sym:blocked");
+  }
+
+  private async markTerminalLabel(
+    input: IssueBlockTarget,
+    label: "sym:blocked" | "sym:failed"
+  ): Promise<void> {
     try {
       await this.api.addLabelsToIssue({
         ...input.repository,
         issueNumber: input.issueNumber,
-        labels: ["sym:blocked"]
+        labels: [label]
       });
     } catch (err) {
       this.logger?.warn(
         { err, issueNumber: input.issueNumber },
-        "symphonika failed to add sym:blocked label; sym:claimed left in place"
+        `symphonika failed to add ${label} label; sym:claimed left in place`
       );
       await this.markNeedsHuman(input);
       return;
     }
     this.logger?.info(
       { issueNumber: input.issueNumber },
-      "symphonika marked issue sym:blocked"
+      `symphonika marked issue ${label}`
     );
     await this.markNeedsHuman(input);
   }
@@ -384,41 +374,40 @@ export class ClaimLabelWriter {
         "symphonika marked issue sym:human-needed"
       );
     }
-    await this.postHumanNeededComment({ ...input, labelAdded });
+    await this.postHumanNeededComment(input, labelAdded);
   }
 
   // The label alone leaves no trace on the issue of *why* a human is being
   // asked to look -- see vow-lang/vow#1276, where a stale bookkeeping row
   // marked an issue sym:human-needed with a real PR already open and being
   // tracked, and the only way to find that out was journalctl + the run
-  // evidence directory. Independent try/catch, same as the label add above:
-  // a comment failure must never be mistaken for the label having failed.
+  // evidence directory. Routed through the shared bestEffort/tryAddIssueComment
+  // pair (same as postIssueContentComment in run-controller.ts) so a comment
+  // failure is handled the same way as every other best-effort write here,
+  // and never mistaken for the label having failed.
   private async postHumanNeededComment(
-    input: IssueBlockTarget & { labelAdded: boolean }
+    input: IssueBlockTarget,
+    labelAdded: boolean
   ): Promise<void> {
-    const addIssueComment = this.api.addIssueComment;
-    if (addIssueComment === undefined) {
-      this.logger?.debug(
-        { issueNumber: input.issueNumber },
-        "symphonika sym:human-needed comment skipped: tracker lacks addIssueComment"
-      );
-      return;
-    }
-    const intro = input.labelAdded
+    const intro = labelAdded
       ? "Symphonika marked this issue `sym:human-needed`."
       : "Symphonika could not add the `sym:human-needed` label, but is flagging this issue for human attention.";
-    try {
-      await addIssueComment({
-        ...input.repository,
-        body: `${intro}\n\n**Reason:**\n\n${formatReasonForComment(input.reason)}`,
-        issueNumber: input.issueNumber
-      });
-    } catch (err) {
-      this.logger?.warn(
-        { err, issueNumber: input.issueNumber },
-        "symphonika failed to post sym:human-needed comment"
-      );
-    }
+    await this.bestEffort(
+      async () => {
+        const posted = await tryAddIssueComment(this.api, {
+          ...input.repository,
+          body: `${intro}\n\n**Reason:**\n\n${formatReasonForComment(input.reason)}`,
+          issueNumber: input.issueNumber
+        });
+        if (!posted) {
+          this.logger?.debug(
+            { issueNumber: input.issueNumber },
+            "symphonika sym:human-needed comment skipped: tracker lacks addIssueComment"
+          );
+        }
+      },
+      { issueNumber: input.issueNumber, operation: "addIssueComment" }
+    );
   }
 
   private async bestEffort(

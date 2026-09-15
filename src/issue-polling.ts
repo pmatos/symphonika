@@ -969,7 +969,7 @@ export async function tryCloseIssue(
 }
 
 export async function tryAddIssueComment(
-  api: GitHubIssuesApi,
+  api: Pick<GitHubIssuesApi, "addIssueComment">,
   input: GitHubIssueCommentInput
 ): Promise<boolean> {
   if (api.addIssueComment === undefined) {

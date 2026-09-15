@@ -2193,8 +2193,14 @@ export class RunController {
             return undefined;
           }
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
+          // Redacted here (not just at the claim/createRun failure path)
+          // because this message also flows into terminateRefusal ->
+          // terminateMergePrRefusal -> markBlocked, which now posts it as a
+          // public sym:human-needed comment (SPEC.md §6).
+          const message = redactAll(
+            error instanceof Error ? error.message : String(error),
+            this.redactionInventory(repository.token)
+          );
           if (isPermanentMergeRefusal(error)) {
             const attempt = this.runStore.incrementMergeRefusalCount(runId);
             if (attempt < MAX_MERGE_REFUSAL_ATTEMPTS) {

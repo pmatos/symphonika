@@ -14,10 +14,11 @@ const repository = { owner: "octo", repo: "sym", token: "t0k" };
 
 type Recorded = { op: "add" | "remove"; issueNumber: number; labels: string[] };
 
-function makeApi(
-  fail?: { add?: string[]; comment?: boolean; remove?: string[] },
-  options?: { withComment?: boolean }
-): {
+function makeApi(fail?: {
+  add?: string[];
+  comment?: boolean | "missing";
+  remove?: string[];
+}): {
   api: {
     addIssueComment?: (input: GitHubIssueCommentInput) => Promise<void>;
     addLabelsToIssue: (input: GitHubIssueLabelInput) => Promise<void>;
@@ -51,7 +52,7 @@ function makeApi(
   };
   return {
     api: {
-      ...(options?.withComment === false
+      ...(fail?.comment === "missing"
         ? {}
         : { addIssueComment: vi.fn(addIssueComment) }),
       addLabelsToIssue: vi.fn(record("add", fail?.add)),
@@ -293,17 +294,6 @@ describe("ClaimLabelWriter direct entries", () => {
     expect(seq(calls)).toEqual(["add:sym:failed", "add:sym:human-needed"]);
   });
 
-  it("resolves without rejecting even when the human-needed fallback itself throws", async () => {
-    const { api } = makeApi({ add: ["sym:blocked", "sym:human-needed"] });
-    await expect(
-      new ClaimLabelWriter({ api }).markBlocked({
-        issueNumber: 7,
-        reason: "no_workspace_changes",
-        repository
-      })
-    ).resolves.toBeUndefined();
-  });
-
   it("still posts a comment naming the reason when both the terminal and human-needed label adds fail", async () => {
     // The double-failure case: neither sym:blocked nor sym:human-needed ever
     // lands, so the comment is the only trace left of why -- it must not be
@@ -364,7 +354,7 @@ describe("ClaimLabelWriter direct entries", () => {
   });
 
   it("skips commenting without throwing when the API has no addIssueComment", async () => {
-    const { api, calls } = makeApi(undefined, { withComment: false });
+    const { api, calls } = makeApi({ comment: "missing" });
     await expect(
       new ClaimLabelWriter({ api }).markFailed({
         issueNumber: 7,

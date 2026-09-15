@@ -66,6 +66,12 @@ before, regardless of which channel produced it.
 
 ## Consequences
 
+- The file channel depends on SPEC.md §11.3's full-permission execution contract (Codex
+  `sandbox_mode=danger-full-access`, Claude `--dangerously-skip-permissions`, OMP `--auto-approve`):
+  a provider confined to writing inside its own workspace would be unable to write the file and would
+  silently degrade to the message-based fallback. All three default provider commands run
+  full-permission today, so this holds; a future provider or configuration that sandboxes writes to
+  the workspace would need its own accommodation.
 - Oh My Pi (and any future provider without a schema lever) gets an equally reliable Routine Outcome
   Claim path to Claude and Codex, without Symphonika depending on an upstream flag for it.
 - A provider that ignores the new instruction, or a routine prompt template predating this change

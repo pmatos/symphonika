@@ -1597,11 +1597,18 @@ async function runRoutineFiring(input: {
       messageOutcomeClaim
     );
     if (resolvedOutcomeClaim.disagreement) {
+      const disagreementRedactSecrets = redactSecrets();
       input.logger?.warn(
         {
-          fileClaim: fileOutcomeClaim,
+          fileClaim: redactRoutineOutcomeClaim(
+            fileOutcomeClaim,
+            disagreementRedactSecrets
+          ),
           firingId: input.firingId,
-          messageClaim: messageOutcomeClaim
+          messageClaim: redactRoutineOutcomeClaim(
+            messageOutcomeClaim,
+            disagreementRedactSecrets
+          )
         },
         "symphonika routine outcome claim file and final message disagree; file wins"
       );
@@ -1987,9 +1994,15 @@ async function runRoutineFiring(input: {
     if (resolvedFailureOutcomeClaim.disagreement) {
       input.logger?.warn(
         {
-          fileClaim: failureFileOutcomeClaim,
+          fileClaim: redactRoutineOutcomeClaim(
+            failureFileOutcomeClaim,
+            resolvedRedactSecrets
+          ),
           firingId: input.firingId,
-          messageClaim: failureMessageOutcomeClaim
+          messageClaim: redactRoutineOutcomeClaim(
+            failureMessageOutcomeClaim,
+            resolvedRedactSecrets
+          )
         },
         "symphonika routine outcome claim file and final message disagree; file wins"
       );

@@ -10940,6 +10940,108 @@ describe("Routine Outcome Claim file channel (#759)", () => {
     }
   });
 
+  it("redacts a secret from both claims in the disagreement warning log, and from the persisted file-sourced outcome", async () => {
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const runStore = openRunStore({ stateRoot });
+    const firingId = "fire-claim-file-disagreement-redact";
+    const secret = "smtp-password-that-must-never-leak-in-a-claim";
+    const outcomeClaimPath = routineEvidencePaths(
+      stateRoot,
+      firingId
+    ).outcomeClaimPath;
+    const fileClaim = {
+      action: "commit",
+      status: "success",
+      summary: `leaked env value ${secret} in file summary`,
+      title: "Fix the retry policy",
+      url: null
+    };
+    const messageClaim = JSON.stringify({
+      action: "none",
+      status: "no_action",
+      summary: `leaked env value ${secret} in message summary`,
+      title: "Nothing to do",
+      url: null
+    });
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await writeFile(outcomeClaimPath, JSON.stringify(fileClaim), "utf8");
+        yield {
+          normalized: { result: messageClaim, type: "turn_completed" },
+          raw: { result: messageClaim }
+        };
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+    const logger = pino({ enabled: false });
+    const logWarn = vi.spyOn(logger, "warn");
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => firingId,
+        env: { SMTP_TEST_PASSWORD: secret },
+        globalConcurrency: { maxInFlight: undefined },
+        logger,
+        notification: {
+          createSink: () => ({
+            deliver() {
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath: path.join(root, "workspace")
+          }),
+        projects: new Map([["alpha", reportRoutineProject(root)]]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const disagreementLog = logWarn.mock.calls.find(
+        ([, message]) =>
+          message ===
+          "symphonika routine outcome claim file and final message disagree; file wins"
+      );
+      expect(disagreementLog).toBeDefined();
+      expect(JSON.stringify(disagreementLog?.[0])).not.toContain(secret);
+
+      const firing = runStore.getRoutineFiring(firingId);
+      expect(firing?.outcome?.summary).not.toContain(secret);
+      expect(firing?.outcome?.summary).toContain("[REDACTED]");
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("falls back to the final-message claim when the outcome claim file exceeds the size cap", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

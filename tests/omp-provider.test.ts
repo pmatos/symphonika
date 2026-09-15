@@ -1547,6 +1547,43 @@ describe("Oh My Pi RPC provider", () => {
     });
   });
 
+  it("completes the turn when the prompt response omits data and agent_start arrives asynchronously", async () => {
+    // Live-captured shape from omp/18.2.0 (issue #777): the "prompt" response
+    // carries no "data" field at all, and the only signal that the agent
+    // actually started is a later, out-of-band {"type":"agent_start"} frame.
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const fakeOmpPath = path.join(root, "fake-no-data-prompt-omp.mjs");
+    await writeFakeNoDataPromptResponseOmp(fakeOmpPath);
+    const provider = createOmpProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeOmpPath} --mode rpc --auto-approve`,
+          name: "omp"
+        },
+        workspacePath
+      })
+    );
+
+    expect(
+      events
+        .map((event) => event.normalized)
+        .find((event) => event?.type === "turn_failed")
+    ).toBeUndefined();
+    expect(
+      events.map((event) => event.normalized).filter(Boolean)
+    ).toMatchObject([
+      { type: "session_started" },
+      { message: "hi", messageKind: "text", type: "message" },
+      { result: "hi", type: "turn_completed" },
+      { exitCode: 0, type: "process_exit" }
+    ]);
+  });
+
   it("fails before sending commands when OMP emits an incompatible ready frame", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -2784,6 +2821,35 @@ async function writeFakeNoAgentOmp(filePath: string): Promise<void> {
       "  if (command.type === 'prompt') {",
       "    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { agentInvoked: false } });",
       "    process.exit(0);",
+      "  }",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function writeFakeNoDataPromptResponseOmp(
+  filePath: string
+): Promise<void> {
+  await writeFile(
+    filePath,
+    [
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }",
+      "send({ type: 'ready', protocolVersion: 1, supportedProtocolVersions: [1, 2], maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864 });",
+      "for await (const line of rl) {",
+      "  const command = JSON.parse(line);",
+      "  if (command.type === 'negotiate_protocol') send({ id: command.id, type: 'response', command: 'negotiate_protocol', success: true, data: { protocolVersion: 2 } });",
+      "  if (command.type === 'get_state') send({ id: command.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'omp-session-777', model: { provider: 'google', id: 'gemini-3.1-pro-preview' } } });",
+      "  if (command.type === 'prompt') {",
+      "    send({ id: command.id, type: 'response', command: 'prompt', success: true });",
+      "    send({ type: 'agent_start' });",
+      "    send({ type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'hi', partial: { role: 'assistant' } } });",
+      "    send({ type: 'message_end', message: { role: 'assistant' } });",
+      "    send({ type: 'turn_end', message: { role: 'assistant' }, toolResults: [] });",
+      "    send({ type: 'agent_end', isTerminal: true, messages: [] });",
       "  }",
       "}",
       ""

@@ -53,9 +53,21 @@ The initial normalized mapping is:
 - assistant `message_end` usage -> `usage_updated`
 - `tool_execution_start` -> `tool_call`
 - `turn_end` -> `turn_completed`
-- assistant errors, error notices, failed commands, or `agentInvoked: false` -> `turn_failed`
+- assistant errors, error notices, failed commands, or an explicit `agentInvoked: false` -> `turn_failed`
 - interactive `extension_ui_request` methods -> `input_required`
 - child close -> `process_exit`
+
+**Amendment note (issue #777):** the `prompt` response's `data.agentInvoked` field was observed on
+`omp/17.1.8` as always present and boolean. `omp/18.2.0` instead acknowledges the prompt with a bare
+`{"success":true}` and no `data` field at all; the only signal that the agent actually started is a
+later, out-of-band `{"type":"agent_start"}` frame, which the adapter does not gate on. The adapter
+therefore only treats an explicit `agentInvoked: false` as a synchronous rejection; a missing field is
+accepted and the turn proceeds to stream normally, relying on subsequent real activity
+(`message_update`, `tool_execution_start`, `turn_end`, `agent_end`) or a `process_exit` without a
+terminal `agent_end` to resolve success or failure. If OMP instead accepts the prompt and then neither
+streams activity nor exits, the adapter has no protocol-level signal to fail on; the Watchdog's
+wall-clock liveness cap (ADR 0054/0087/0091) is the only backstop for that case, not the adapter
+itself.
 
 OMP does not expose a stable turn id in Agent Session events, so the adapter does not synthesize
 one. Message, token-usage, tool-call, and Workspace-mtime signals still advance the Watchdog.

@@ -56,6 +56,7 @@ The initial normalized mapping is:
 - assistant errors, error notices, failed commands, or an explicit `agentInvoked: false` -> `turn_failed`
 - interactive `extension_ui_request` methods -> `input_required`
 - child close -> `process_exit`
+- `agent_start` -> `progress` (`signal: "agent_start"`, added by the issue #779 amendment below)
 
 **Amendment note (issue #777):** the `prompt` response's `data.agentInvoked` field was observed on
 `omp/17.1.8` as always present and boolean. `omp/18.2.0` instead acknowledges the prompt with a bare
@@ -71,6 +72,13 @@ itself.
 
 OMP does not expose a stable turn id in Agent Session events, so the adapter does not synthesize
 one. Message, token-usage, tool-call, and Workspace-mtime signals still advance the Watchdog.
+
+**Amendment note (issue #779):** the async `{"type":"agent_start"}` frame introduced by the previous
+amendment no longer passes through as raw-only evidence. It maps to a `progress` event
+(`signal: "agent_start"`), the same payload-free Watchdog liveness marker ADR 0087 defines for
+Codex's `command_output` and `workspace_diff` signals — see ADR 0087's and ADR 0054's own amendment
+notes. Unlike those, `agent_start` fires once per prompt rather than as a high-frequency stream, so
+it carries no rate limit.
 
 ### Default command
 

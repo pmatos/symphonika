@@ -131,6 +131,11 @@ describe("Oh My Pi RPC provider", () => {
         type: "session_started"
       },
       {
+        sessionId: "omp-session-335",
+        signal: "agent_start",
+        type: "progress"
+      },
+      {
         message: "working",
         messageKind: "text",
         sessionId: "omp-session-335",
@@ -1623,13 +1628,13 @@ describe("Oh My Pi RPC provider", () => {
       events.map((event) => event.normalized).filter(Boolean)
     ).toMatchObject([
       { type: "session_started" },
+      { signal: "agent_start", type: "progress" },
       { message: "hi", messageKind: "text", type: "message" },
       { result: "hi", type: "turn_completed" },
       { exitCode: 0, type: "process_exit" }
     ]);
-    // agent_start has no normalized counterpart (mapOmpFrame passes it
-    // through as raw-only), but it is still the frame this test is named
-    // for: assert it was retained as raw evidence so a change that stops
+    // agent_start is the frame this test is named for: assert it was also
+    // retained as raw evidence, not just normalized, so a change that stops
     // forwarding raw-only frames is caught here rather than silently.
     expect(
       events.some((event) => objectField(event.raw, "type") === "agent_start")

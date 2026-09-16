@@ -299,6 +299,21 @@ function providerEventFromQueueItem(
 function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
   const type = stringField(raw, "type");
 
+  // Payload-free Watchdog liveness marker (ADR 0087); the async agent_start
+  // frame carries no fields worth persisting beyond that OMP started the
+  // agent, and it fires once per prompt rather than as a rate-limited stream,
+  // so no throttle applies here (contrast codex-events.ts's progressMarkerEvent).
+  if (type === "agent_start") {
+    return {
+      normalized: {
+        sessionId: activeRun.sessionId,
+        signal: "agent_start",
+        type: "progress"
+      },
+      raw
+    };
+  }
+
   if (type === "extension_ui_request") {
     const method = stringField(raw, "method");
     if (

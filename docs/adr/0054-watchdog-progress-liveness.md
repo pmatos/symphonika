@@ -82,6 +82,8 @@ A Progress Signal is the tuple:
   reasoning `item/started` and `item/completed` even when no reasoning summary is available (issue
   #590). This signal carries a Run through both long tools and otherwise-silent model reasoning.
   Claude and Oh My Pi emit no equivalent notification, so the signal reads `null` for them.
+  **Amendment (issue #779):** Oh My Pi now emits one such marker, from its async `agent_start`
+  frame; see the updated table row below. Claude is still unaffected.
 
 What each provider actually emits, per signal:
 
@@ -92,7 +94,7 @@ What each provider actually emits, per signal:
 | 3. `turn_id_set_size` | never — emits `sessionId`, not `turnId` | one `turnId` per turn; a single-turn Run never advances it | never — no stable turn id (see `turn_end`) |
 | 4. `output_tokens_total` | per-message `usage.output_tokens`, summed | cumulative `tokenUsage.total.outputTokens` | per-message `usage.output` mapped to `outputTokens`, summed |
 | 5. `last_message_at` | `content_block_delta` / `text_delta` | `item/agentMessage/delta` | streamed assistant message text |
-| 6. `last_progress_at` | never | `item/commandExecution/outputDelta`, `turn/diff/updated`, reasoning item boundaries | never |
+| 6. `last_progress_at` | never | `item/commandExecution/outputDelta`, `turn/diff/updated`, reasoning item boundaries | `agent_start` |
 
 No provider is covered by every signal. Claude Runs rely on 1, 2, 4, and 5; Codex Runs can rely on
 any of the six, and signals 1, 4, and 6 were each dead for Codex at some point in this ADR's

@@ -59,6 +59,12 @@ Suppressed notifications still reach the raw log. Five seconds is far below the 
 Claude and Oh My Pi emit no equivalent notification today and are unaffected; the signal reads
 `null` for them, which the any-of rule already tolerates.
 
+**Amendment note (issue #779):** Oh My Pi is no longer entirely unaffected. Its async
+`{"type":"agent_start"}` frame — previously raw-only evidence (see ADR 0066's issue #777 amendment)
+— now maps to `signal: "agent_start"`. Unlike the Codex markers above, it is not a high-frequency
+delta stream (it fires once per prompt, not per output chunk or diff update), so it carries no rate
+limit. Claude remains unaffected; the signal still reads `null` for it.
+
 ### An mtime opt-in: `watchdog.mtime_include`
 
 The built-in exclusion set stays. It is well-motivated — ADR 0086 records how a rebuild-and-crash

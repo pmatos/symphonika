@@ -299,6 +299,19 @@ function providerEventFromQueueItem(
 function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
   const type = stringField(raw, "type");
 
+  // Watchdog liveness marker (ADR 0087, issue #779 amendment). Fires once per
+  // prompt, so no throttle (cf. codex-events.ts's progressMarkerEvent).
+  if (type === "agent_start") {
+    return {
+      normalized: {
+        sessionId: activeRun.sessionId,
+        signal: "agent_start",
+        type: "progress"
+      },
+      raw
+    };
+  }
+
   if (type === "extension_ui_request") {
     const method = stringField(raw, "method");
     if (

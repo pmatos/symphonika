@@ -94,8 +94,7 @@ The initial mapping is:
 - child-process or framing errors -> `turn_failed` or `malformed_event` as appropriate
 - child close -> `process_exit`
 - the async `agent_start` frame -> `progress` (`signal: "agent_start"`), a payload-free Watchdog
-  liveness marker (ADR 0087) added for issue #779. It fires once per prompt rather than as a
-  high-frequency stream, so it carries no rate limit, unlike Codex's markers of the same type.
+  liveness marker (ADR 0087's issue #779 amendment)
 
 Non-interactive UI notifications such as widget, status, title, editor-text, cancel, and notify
 updates remain raw-only evidence. All protocol frames remain in the raw Provider Event Log even

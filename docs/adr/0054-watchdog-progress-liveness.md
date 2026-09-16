@@ -83,7 +83,9 @@ A Progress Signal is the tuple:
   #590). This signal carries a Run through both long tools and otherwise-silent model reasoning.
   Claude and Oh My Pi emit no equivalent notification, so the signal reads `null` for them.
   **Amendment (issue #779):** Oh My Pi now emits one such marker, from its async `agent_start`
-  frame; see the updated table row below. Claude is still unaffected.
+  frame; see the updated table row below. Unlike Codex's per-chunk stream, `agent_start` fires once
+  at the start of a prompt, not continuously, so it does not carry a Run through a long mid-turn
+  gap the way Codex's markers do. Claude is still unaffected.
 
 What each provider actually emits, per signal:
 

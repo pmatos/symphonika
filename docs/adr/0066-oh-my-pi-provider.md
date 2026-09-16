@@ -76,9 +76,7 @@ one. Message, token-usage, tool-call, and Workspace-mtime signals still advance 
 **Amendment note (issue #779):** the async `{"type":"agent_start"}` frame introduced by the previous
 amendment no longer passes through as raw-only evidence. It maps to a `progress` event
 (`signal: "agent_start"`), the same payload-free Watchdog liveness marker ADR 0087 defines for
-Codex's `command_output` and `workspace_diff` signals — see ADR 0087's and ADR 0054's own amendment
-notes. Unlike those, `agent_start` fires once per prompt rather than as a high-frequency stream, so
-it carries no rate limit.
+Codex — see ADR 0087's and ADR 0054's own amendment notes for why it carries no rate limit.
 
 ### Default command
 

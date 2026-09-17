@@ -1890,6 +1890,100 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it("hides the resume command when workspacePath is empty despite a recorded session", async () => {
+    const test = await setup();
+    try {
+      const attemptId = seedRunningAttempt(
+        test.runStore,
+        "run-resume-no-workspace",
+        test.stateRoot
+      );
+      test.runStore.recordProviderEvent({
+        attemptId,
+        normalized: { sessionId: "session-1", type: "session_started" },
+        raw: {},
+        receivedAt: new Date().toISOString(),
+        runId: "run-resume-no-workspace",
+        sequence: 1
+      });
+      test.runStore.updateRunState("run-resume-no-workspace", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-resume-no-workspace");
+      const body = await response.text();
+
+      expect(body).not.toContain("Copy resume command");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("hides the resume command for an unrecognized provider name", async () => {
+    const test = await setup();
+    try {
+      test.runStore.createRun({
+        id: "run-resume-bad-provider",
+        issue: sampleIssue({ number: 603, title: "Unknown provider" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "unknown-provider" as unknown as "codex"
+      });
+      test.runStore.updateRunEvidence("run-resume-bad-provider", {
+        branchName: "sym/run-resume-bad-provider",
+        branchRef: "refs/heads/sym/run-resume-bad-provider",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: "",
+        workspacePath: "/workspaces/603-unknown-provider"
+      });
+      test.runStore.createAttempt({
+        attemptNumber: 1,
+        branchName: "sym/run-resume-bad-provider",
+        branchRef: "refs/heads/sym/run-resume-bad-provider",
+        id: "run-resume-bad-provider-attempt-1",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        providerCommand: "x",
+        providerName: "unknown-provider" as unknown as "codex",
+        rawLogPath: "",
+        runId: "run-resume-bad-provider",
+        state: "failed",
+        workflowGraphPath: "",
+        workspacePath: "/workspaces/603-unknown-provider"
+      });
+      test.runStore.recordProviderEvent({
+        attemptId: "run-resume-bad-provider-attempt-1",
+        normalized: { sessionId: "session-1", type: "session_started" },
+        raw: {},
+        receivedAt: new Date().toISOString(),
+        runId: "run-resume-bad-provider",
+        sequence: 1
+      });
+      test.runStore.updateRunState("run-resume-bad-provider", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-resume-bad-provider");
+      const body = await response.text();
+
+      expect(body).not.toContain("Copy resume command");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("renders the workflow graph summary and link on the run-detail page", async () => {
     const test = await setup();
     try {

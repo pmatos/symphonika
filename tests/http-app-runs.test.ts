@@ -118,6 +118,66 @@ function seedRunningAttempt(
   return attemptId;
 }
 
+// Like seedRunningAttempt, but also records run-level evidence (workspace
+// path, branch) via updateRunEvidence and lets the caller pick the provider
+// and terminal state — the resume-command tests need a real run-level
+// workspacePath (only updateRunEvidence sets it; seedRunningAttempt's
+// workspacePath argument only lands on the attempt row) and a provider other
+// than the hardcoded "codex".
+function seedTerminalAttempt(
+  runStore: RunStore,
+  runId: string,
+  options: {
+    issueNumber: number;
+    issueTitle?: string;
+    providerName: string;
+    state: RunState;
+    workspacePath: string;
+  }
+): string {
+  const providerName = options.providerName as unknown as "codex";
+  runStore.createRun({
+    id: runId,
+    issue: sampleIssue({
+      number: options.issueNumber,
+      ...(options.issueTitle === undefined ? {} : { title: options.issueTitle })
+    }),
+    projectName: "alpha",
+    providerCommand: "x",
+    providerName
+  });
+  runStore.updateRunEvidence(runId, {
+    branchName: `sym/${runId}`,
+    branchRef: `refs/heads/sym/${runId}`,
+    issueSnapshotPath: "",
+    metadataPath: "",
+    normalizedLogPath: "",
+    promptPath: "",
+    rawLogPath: "",
+    workflowGraphPath: "",
+    workspacePath: options.workspacePath
+  });
+  const attemptId = `${runId}-attempt-1`;
+  runStore.createAttempt({
+    attemptNumber: 1,
+    branchName: `sym/${runId}`,
+    branchRef: `refs/heads/sym/${runId}`,
+    id: attemptId,
+    issueSnapshotPath: "",
+    metadataPath: "",
+    normalizedLogPath: "",
+    promptPath: "",
+    providerCommand: "x",
+    providerName,
+    rawLogPath: "",
+    runId,
+    state: options.state,
+    workflowGraphPath: "",
+    workspacePath: options.workspacePath
+  });
+  return attemptId;
+}
+
 describe("HTTP app — runs API and pages", () => {
   it("shows each Run's current workflow state on /runs", async () => {
     const test = await setup();
@@ -1697,6 +1757,212 @@ describe("HTTP app — runs API and pages", () => {
       expect(body).toContain('class="plan-item plan-item--completed"');
       expect(body).toContain('class="plan-item plan-item--in_progress"');
       expect(body).toContain('class="plan-item plan-item--pending"');
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a copy-resume-command button for a failed run with a recorded session", async () => {
+    const test = await setup();
+    try {
+      const attemptId = seedTerminalAttempt(
+        test.runStore,
+        "run-resume-failed",
+        {
+          issueNumber: 601,
+          issueTitle: "Resume this",
+          providerName: "claude",
+          state: "failed",
+          workspacePath: "/workspaces/601-resume-this"
+        }
+      );
+      test.runStore.recordProviderEvent({
+        attemptId,
+        normalized: { sessionId: "session-abc", type: "session_started" },
+        raw: { session_id: "session-abc" },
+        receivedAt: new Date().toISOString(),
+        runId: "run-resume-failed",
+        sequence: 1
+      });
+      test.runStore.updateRunState("run-resume-failed", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-resume-failed");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain("Copy resume command");
+      expect(body).toContain(
+        "cd &#39;/workspaces/601-resume-this&#39; &amp;&amp; claude --resume &#39;session-abc&#39;"
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows the resume command for blocked and stale runs", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      for (const state of ["blocked", "stale"] as const) {
+        const runId = `run-resume-${state}`;
+        const attemptId = seedTerminalAttempt(test.runStore, runId, {
+          issueNumber: 602,
+          issueTitle: "Resume this too",
+          providerName: "codex",
+          state,
+          workspacePath: `/workspaces/${runId}`
+        });
+        test.runStore.recordProviderEvent({
+          attemptId,
+          normalized: { sessionId: "thread-1", type: "session_started" },
+          raw: {},
+          receivedAt: new Date().toISOString(),
+          runId,
+          sequence: 1
+        });
+        test.runStore.updateRunState(runId, state);
+
+        const response = await app.request(`/runs/${runId}`);
+        const body = await response.text();
+
+        expect(body).toContain("Copy resume command");
+        expect(body).toContain("codex resume &#39;thread-1&#39;");
+      }
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("hides the resume command for a succeeded run", async () => {
+    const test = await setup();
+    try {
+      const attemptId = seedRunningAttempt(
+        test.runStore,
+        "run-resume-succeeded",
+        test.stateRoot
+      );
+      test.runStore.recordProviderEvent({
+        attemptId,
+        normalized: { sessionId: "session-1", type: "session_started" },
+        raw: {},
+        receivedAt: new Date().toISOString(),
+        runId: "run-resume-succeeded",
+        sequence: 1
+      });
+      test.runStore.updateRunState("run-resume-succeeded", "succeeded");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-resume-succeeded");
+      const body = await response.text();
+
+      expect(body).not.toContain("Copy resume command");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("hides the resume command when no session was ever recorded", async () => {
+    const test = await setup();
+    try {
+      seedRunningAttempt(
+        test.runStore,
+        "run-resume-no-session",
+        test.stateRoot
+      );
+      test.runStore.updateRunState("run-resume-no-session", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-resume-no-session");
+      const body = await response.text();
+
+      expect(body).not.toContain("Copy resume command");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("hides the resume command when workspacePath is empty despite a recorded session", async () => {
+    const test = await setup();
+    try {
+      const attemptId = seedRunningAttempt(
+        test.runStore,
+        "run-resume-no-workspace",
+        test.stateRoot
+      );
+      test.runStore.recordProviderEvent({
+        attemptId,
+        normalized: { sessionId: "session-1", type: "session_started" },
+        raw: {},
+        receivedAt: new Date().toISOString(),
+        runId: "run-resume-no-workspace",
+        sequence: 1
+      });
+      test.runStore.updateRunState("run-resume-no-workspace", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-resume-no-workspace");
+      const body = await response.text();
+
+      expect(body).not.toContain("Copy resume command");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("hides the resume command for an unrecognized provider name", async () => {
+    const test = await setup();
+    try {
+      const attemptId = seedTerminalAttempt(
+        test.runStore,
+        "run-resume-bad-provider",
+        {
+          issueNumber: 603,
+          issueTitle: "Unknown provider",
+          providerName: "unknown-provider",
+          state: "failed",
+          workspacePath: "/workspaces/603-unknown-provider"
+        }
+      );
+      test.runStore.recordProviderEvent({
+        attemptId,
+        normalized: { sessionId: "session-1", type: "session_started" },
+        raw: {},
+        receivedAt: new Date().toISOString(),
+        runId: "run-resume-bad-provider",
+        sequence: 1
+      });
+      test.runStore.updateRunState("run-resume-bad-provider", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-resume-bad-provider");
+      const body = await response.text();
+
+      expect(body).not.toContain("Copy resume command");
     } finally {
       test.cleanup();
     }

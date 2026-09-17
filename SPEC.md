@@ -3022,6 +3022,19 @@ is independent of the bounded provider-event tail, so a plan remains visible aft
 later progress markers. Runs and attempts without a usable plan omit the section rather than
 inventing an empty checklist (ADR 0096).
 
+For a `failed`, `blocked`, or `stale` Run whose terminal attempt recorded a `session_started` event,
+the Run-detail page also renders a human-facing resume command — `cd <workspace path> && <provider>
+--resume <session id>` (Codex: `codex resume <session id>`) — with a "Copy resume command" button, so
+an operator can reopen the preserved Workspace (issue Workspaces are never deleted automatically,
+ADR 0025/0040) in an ordinary interactive terminal session and continue by hand. This is unrelated to
+ADR-0088's daemon-owned shutdown resume, which re-enters the FSM automatically; here Symphonika never
+touches the session again. The command is derived entirely from already-persisted evidence — no new
+mutating route, and the copy button is client-side only (`navigator.clipboard`, falling back to
+selecting the text). The section is omitted whenever any of its preconditions is missing: the
+terminal attempt never recorded a `session_started` event, that event carries no usable session id,
+the Run's persisted workspace path is empty, or the Run's provider is not one of the three recognized
+resume providers (`claude`/`codex`/`omp`).
+
 For a waiting Run whose tracked PR has unresolved review feedback after the configured dispatch
 cap, `GET /api/runs/:id` also exposes a top-level `pullRequestFollowup` object with
 `attention = "cap_reached"`, `dispatchCount`, `maxDispatches`, `prNumber`, and `prUrl`; otherwise

@@ -27,7 +27,7 @@ const RESUME_PREFIX: Record<AgentProviderName, string> = {
   omp: "omp --resume"
 };
 
-function isAgentProviderName(value: string): value is AgentProviderName {
+export function isAgentProviderName(value: string): value is AgentProviderName {
   return Object.hasOwn(RESUME_PREFIX, value);
 }
 

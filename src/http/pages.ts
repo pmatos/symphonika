@@ -96,7 +96,10 @@ import {
   type WatchdogStatus
 } from "../watchdog-status.js";
 import type { ExpandedWorkflow } from "../workflow/types.js";
-import { buildHumanResumeCommand } from "../human-resume-command.js";
+import {
+  buildHumanResumeCommand,
+  isAgentProviderName
+} from "../human-resume-command.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
 // Shared by RegisterPagesOptions.getScheduled and buildProjectIssueRow's
@@ -650,7 +653,9 @@ export function registerPages(options: RegisterPagesOptions): void {
       terminalAttempt?.id
     );
     const sessionStartedEvent =
-      isFailure && detail.workspacePath.length > 0
+      isFailure &&
+      detail.workspacePath.length > 0 &&
+      isAgentProviderName(detail.provider)
         ? options.runStore.getLatestProviderEvent(
             id,
             "session_started",
@@ -7274,7 +7279,7 @@ function renderResumeCommand(
   detail: RunStatus,
   sessionEvent: ProviderEventRecord | undefined
 ): string {
-  if (sessionEvent === undefined || detail.workspacePath.length === 0) {
+  if (sessionEvent === undefined) {
     return "";
   }
   const sessionId = sessionEvent.normalized.sessionId;

@@ -9,26 +9,36 @@
 // a human resuming needs an interactive terminal session, not stream-json or
 // app-server JSON-RPC.
 
+import type { AgentProviderName } from "./provider.js";
+
 export type HumanResumeCommandInput = {
   provider: string;
   sessionId: string;
   workspacePath: string;
 };
 
-const RESUME_INVOCATION: Record<string, (sessionId: string) => string> = {
-  claude: (sessionId) => `claude --resume ${shellQuote(sessionId)}`,
-  codex: (sessionId) => `codex resume ${shellQuote(sessionId)}`,
-  omp: (sessionId) => `omp --resume ${shellQuote(sessionId)}`
+// Keyed by AgentProviderName so a future 4th provider fails to compile here
+// until its resume invocation is added. `input.provider` itself stays a bare
+// `string` (see HumanResumeCommandInput) because RunStatus.provider is a
+// durable, occasionally-empty DB column, not a validated union at read time.
+const RESUME_PREFIX: Record<AgentProviderName, string> = {
+  claude: "claude --resume",
+  codex: "codex resume",
+  omp: "omp --resume"
 };
+
+function isAgentProviderName(value: string): value is AgentProviderName {
+  return Object.hasOwn(RESUME_PREFIX, value);
+}
 
 export function buildHumanResumeCommand(
   input: HumanResumeCommandInput
 ): string | undefined {
-  const invocation = RESUME_INVOCATION[input.provider];
-  if (invocation === undefined) {
+  if (!isAgentProviderName(input.provider)) {
     return undefined;
   }
-  return `cd ${shellQuote(input.workspacePath)} && ${invocation(input.sessionId)}`;
+  const prefix = RESUME_PREFIX[input.provider];
+  return `cd ${shellQuote(input.workspacePath)} && ${prefix} ${shellQuote(input.sessionId)}`;
 }
 
 function shellQuote(value: string): string {

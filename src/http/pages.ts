@@ -96,6 +96,7 @@ import {
   type WatchdogStatus
 } from "../watchdog-status.js";
 import type { ExpandedWorkflow } from "../workflow/types.js";
+import { buildHumanResumeCommand } from "../human-resume-command.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 
 // Shared by RegisterPagesOptions.getScheduled and buildProjectIssueRow's
@@ -648,6 +649,13 @@ export function registerPages(options: RegisterPagesOptions): void {
       "plan_updated",
       terminalAttempt?.id
     );
+    const sessionStartedEvent = isFailure
+      ? options.runStore.getLatestProviderEvent(
+          id,
+          "session_started",
+          terminalAttempt?.id
+        )
+      : undefined;
     const failureEvent = isFailure
       ? options.runStore.getLastFailureEvent(id, terminalAttempt?.id)
       : undefined;
@@ -718,6 +726,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     const sections = [
       `<h1 class="page-title">Run <code>${escapeHtml(detail.id)}</code></h1>`,
       renderOutcomeBanner(detail, failureEvent, exitEvent),
+      renderResumeCommand(detail, sessionStartedEvent),
       renderPullRequestFollowupAttention(pullRequestFollowup),
       renderWorkflowProgressAttention(buildWorkflowProgressAttention(detail)),
       renderRunSummary(detail, capContext),
@@ -3112,6 +3121,7 @@ td code { color: var(--ink-2); }
   color: var(--ink);
 }
 .hint { color: var(--ink-muted); font-size: var(--fs-meta); margin: 0 0 var(--sp-3); }
+.resume-command pre { background:#f8fafc; border:1px solid #eef2f7; border-radius:6px; padding:.6rem .8rem; overflow:auto; margin:0 0 var(--sp-3); font-size:.85rem; }
 
 .editor {
   width: 100%;
@@ -3261,6 +3271,38 @@ const LOCAL_TIME_CLIENT_JS = `(function () {
   }).observe(document.body, { childList: true, subtree: true });
 })();`;
 
+// Falls back to selecting the command text (so Ctrl+C still works) when the
+// Clipboard API is unavailable or denied -- e.g. a non-HTTPS LAN origin, or a
+// browser permission prompt the operator dismissed.
+const RESUME_COPY_CLIENT_JS = `(function () {
+  function selectText(node) {
+    var range = document.createRange();
+    range.selectNodeContents(node);
+    var selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-copy-target]");
+    if (!button) { return; }
+    var target = document.getElementById(button.getAttribute("data-copy-target"));
+    if (!target) { return; }
+    var text = target.textContent;
+    var label = button.textContent;
+    function onCopied() {
+      button.textContent = "Copied!";
+      setTimeout(function () { button.textContent = label; }, 2000);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(onCopied, function () {
+        selectText(target);
+      });
+    } else {
+      selectText(target);
+    }
+  });
+})();`;
+
 function renderTimestamp(
   value: string | null | undefined,
   fallback = "-"
@@ -3291,6 +3333,7 @@ function layout(title: string, body: string): string {
 ${body}
 </main>
 <script data-local-time-client>${LOCAL_TIME_CLIENT_JS}</script>
+<script data-resume-copy-client>${RESUME_COPY_CLIENT_JS}</script>
 </body>
 </html>`;
 }
@@ -7217,6 +7260,32 @@ function renderOutcomeBanner(
 
   const bannerClass = isBlocked ? "banner banner--blocked" : "banner";
   return `<section class="${bannerClass}"><p class="banner-title">Run ${escapeHtml(detail.state)}</p>${reason}<p class="banner-context">${context.join(" &middot; ")}</p></section>`;
+}
+
+// Only offered for failed/blocked/stale runs (FAILURE_STATES/BLOCKED_STATES,
+// the same sets renderOutcomeBanner uses) with a recorded session_started
+// event — a run that never got as far as starting a provider session has
+// nothing to resume into.
+function renderResumeCommand(
+  detail: RunStatus,
+  sessionEvent: ProviderEventRecord | undefined
+): string {
+  if (sessionEvent === undefined || detail.workspacePath.length === 0) {
+    return "";
+  }
+  const sessionId = sessionEvent.normalized.sessionId;
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    return "";
+  }
+  const command = buildHumanResumeCommand({
+    provider: detail.provider,
+    sessionId,
+    workspacePath: detail.workspacePath
+  });
+  if (command === undefined) {
+    return "";
+  }
+  return `<section class="resume-command"><p class="hint">Resume this session in a shell:</p><pre><code id="resume-command-text">${escapeHtml(command)}</code></pre><button type="button" class="btn" data-copy-target="resume-command-text">Copy resume command</button></section>`;
 }
 
 // Exit code is reported only when abnormal: codex exits 0 even after refusing a

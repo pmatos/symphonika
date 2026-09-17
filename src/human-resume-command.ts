@@ -34,6 +34,9 @@ export function isAgentProviderName(value: string): value is AgentProviderName {
 export function buildHumanResumeCommand(
   input: HumanResumeCommandInput
 ): string | undefined {
+  if (input.workspacePath.length === 0) {
+    return undefined;
+  }
   if (!isAgentProviderName(input.provider)) {
     return undefined;
   }

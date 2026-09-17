@@ -38,4 +38,14 @@ describe("buildHumanResumeCommand", () => {
       })
     ).toBeUndefined();
   });
+
+  it("returns undefined for an empty workspace path", () => {
+    expect(
+      buildHumanResumeCommand({
+        provider: "claude",
+        sessionId: "session-1",
+        workspacePath: ""
+      })
+    ).toBeUndefined();
+  });
 });

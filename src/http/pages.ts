@@ -3297,7 +3297,8 @@ const RESUME_COPY_CLIENT_JS = `(function () {
     // Cache the true original label once per button, and clear any pending
     // revert from an earlier click -- otherwise a rapid second click reads
     // "Copied!" as its own "original" label and the button never reverts.
-    var label = button.dataset.copyLabel || (button.dataset.copyLabel = button.textContent);
+    if (button.dataset.copyLabel === undefined) { button.dataset.copyLabel = button.textContent; }
+    var label = button.dataset.copyLabel;
     if (button.copyRevertTimer) { clearTimeout(button.copyRevertTimer); }
     function onCopied() {
       button.textContent = "Copied!";

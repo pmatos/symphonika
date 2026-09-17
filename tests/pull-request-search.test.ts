@@ -168,6 +168,31 @@ describe("GET /prs (#309, ADR 0077)", () => {
     }
   });
 
+  it("omits a project retired from config from the project filter dropdown", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 },
+        { name: "retired", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/prs")).text();
+
+      expect(html).toContain('<option value="alpha">alpha</option>');
+      expect(html).not.toContain('<option value="retired">retired</option>');
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("treats an unrecognized ?tracking= as no filter, not a match-nothing filter", async () => {
     const test = await setup();
     try {

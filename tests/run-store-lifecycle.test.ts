@@ -182,7 +182,10 @@ describe("run-store lifecycle CRUD", () => {
       store.syncProjectStates([{ name: "alpha", weight: 5 }]);
       store.syncProjectStates([]);
 
-      expect(store.listProjectStates()[0]).toMatchObject({
+      expect(store.listProjectStates()).toEqual([]);
+      expect(
+        store.listProjectStates({ includeInactive: true })[0]
+      ).toMatchObject({
         active: false,
         projectName: "alpha",
         validationState: "inactive",

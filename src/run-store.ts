@@ -2580,7 +2580,10 @@ export class RunStore {
     apply();
   }
 
-  listProjectStates(): ProjectState[] {
+  listProjectStates(
+    filter: { includeInactive?: boolean } = {}
+  ): ProjectState[] {
+    const where = filter.includeInactive === true ? "" : "where active = 1";
     const rows = this.database
       .prepare(
         [
@@ -2589,8 +2592,12 @@ export class RunStore {
           "last_fetched_issues, last_candidate_issues, last_filtered_issues,",
           "scheduler_current_weight, last_dispatched_at, last_dispatched_issue_number,",
           "created_at, updated_at",
-          "from project_states order by project_name asc"
-        ].join(" ")
+          "from project_states",
+          where,
+          "order by project_name asc"
+        ]
+          .filter((part) => part.length > 0)
+          .join(" ")
       )
       .all() as ProjectStateRow[];
     return rows.map((row) => mapProjectStateRow(row));
@@ -4873,9 +4880,11 @@ export class RunStore {
     }));
   }
 
-  getProjectStatesByName(): Map<string, ProjectState> {
+  getProjectStatesByName(
+    filter: { includeInactive?: boolean } = {}
+  ): Map<string, ProjectState> {
     return new Map(
-      this.listProjectStates().map((state) => [state.projectName, state])
+      this.listProjectStates(filter).map((state) => [state.projectName, state])
     );
   }
 

@@ -3121,7 +3121,7 @@ td code { color: var(--ink-2); }
   color: var(--ink);
 }
 .hint { color: var(--ink-muted); font-size: var(--fs-meta); margin: 0 0 var(--sp-3); }
-.resume-command pre { background:#f8fafc; border:1px solid #eef2f7; border-radius:6px; padding:.6rem .8rem; overflow:auto; margin:0 0 var(--sp-3); font-size:.85rem; }
+.resume-command pre { background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:.6rem .8rem; overflow:auto; margin:0 0 var(--sp-3); font-size:.85rem; }
 
 .editor {
   width: 100%;

@@ -139,6 +139,31 @@ describe("buildStatusSnapshot", () => {
     }
   });
 
+  it("omits a project retired from config from projectStates by default", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    try {
+      runStore.syncProjectStates([
+        { name: "alpha", weight: 2 },
+        { name: "retired", weight: 1 }
+      ]);
+      runStore.syncProjectStates([{ name: "alpha", weight: 2 }]);
+
+      const snapshot = buildStatusSnapshot({
+        configPath: "/tmp/symphonika.yml",
+        issuePollStatus: emptyPollStatus(),
+        runStore,
+        stateRoot
+      });
+
+      expect(snapshot.projectStates).toEqual([
+        expect.objectContaining({ projectName: "alpha" })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("fills missing run branch and workspace fields from the deterministic path plan", async () => {
     const stateRoot = await makeTempRoot();
     const configDir = await makeTempRoot();

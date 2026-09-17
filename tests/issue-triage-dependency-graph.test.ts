@@ -194,6 +194,27 @@ describe("GET /issues/graph", () => {
     }
   });
 
+  it("omits a project retired from config from the project filter dropdown", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 },
+        { name: "retired", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+
+      const app = makeApp(test);
+      const html = await (await app.request("/issues/graph")).text();
+
+      expect(html).toContain('<option value="alpha">alpha</option>');
+      expect(html).not.toContain('<option value="retired">');
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("skips a project's issues when its owner/repo can't be resolved", async () => {
     const test = await setup();
     try {

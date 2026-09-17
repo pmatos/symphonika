@@ -2583,7 +2583,10 @@ export class RunStore {
   listProjectStates(
     filter: { includeInactive?: boolean } = {}
   ): ProjectState[] {
-    const where = filter.includeInactive === true ? "" : "where active = 1";
+    const conditions: string[] =
+      filter.includeInactive === true ? [] : ["active = 1"];
+    const where =
+      conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
     const rows = this.database
       .prepare(
         [

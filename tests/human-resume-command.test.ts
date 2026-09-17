@@ -3,34 +3,18 @@ import { describe, expect, it } from "vitest";
 import { buildHumanResumeCommand } from "../src/human-resume-command.js";
 
 describe("buildHumanResumeCommand", () => {
-  it("builds a claude resume command", () => {
+  it.each([
+    ["claude", "session-123", "claude --resume 'session-123'"],
+    ["codex", "thread-456", "codex resume 'thread-456'"],
+    ["omp", "session-789", "omp --resume 'session-789'"]
+  ])("builds a %s resume command", (provider, sessionId, expectedSuffix) => {
     expect(
       buildHumanResumeCommand({
-        provider: "claude",
-        sessionId: "session-123",
-        workspacePath: "/workspaces/issue-1"
+        provider,
+        sessionId,
+        workspacePath: "/workspaces/issue"
       })
-    ).toBe("cd '/workspaces/issue-1' && claude --resume 'session-123'");
-  });
-
-  it("builds a codex resume command", () => {
-    expect(
-      buildHumanResumeCommand({
-        provider: "codex",
-        sessionId: "thread-456",
-        workspacePath: "/workspaces/issue-2"
-      })
-    ).toBe("cd '/workspaces/issue-2' && codex resume 'thread-456'");
-  });
-
-  it("builds an omp resume command", () => {
-    expect(
-      buildHumanResumeCommand({
-        provider: "omp",
-        sessionId: "session-789",
-        workspacePath: "/workspaces/issue-3"
-      })
-    ).toBe("cd '/workspaces/issue-3' && omp --resume 'session-789'");
+    ).toBe(`cd '/workspaces/issue' && ${expectedSuffix}`);
   });
 
   it("single-quotes a workspace path containing spaces or quotes", () => {

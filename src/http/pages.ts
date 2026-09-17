@@ -793,11 +793,7 @@ export function registerPages(options: RegisterPagesOptions): void {
 
   options.app.get("/issues/graph", (context) => {
     const projectFilter = normalizeQueryParam(context.req.query("project"));
-    const projectNames = Array.from(
-      new Set(
-        options.runStore.listProjectStates().map((state) => state.projectName)
-      )
-    ).sort();
+    const projectNames = options.runStore.listActiveProjectNames();
     const targetProjects =
       projectFilter === undefined
         ? projectNames
@@ -1199,11 +1195,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       )
     };
     const nowMs = now();
-    const projectNames = Array.from(
-      new Set(
-        options.runStore.listProjectStates().map((state) => state.projectName)
-      )
-    ).sort();
+    const projectNames = options.runStore.listActiveProjectNames();
     const rows = searchPullRequestSnapshots({
       filters,
       nowMs,

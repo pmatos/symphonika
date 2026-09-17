@@ -220,6 +220,36 @@ describe("HTTP app", () => {
     }
   });
 
+  it("omits a project retired from config from status by default", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    try {
+      runStore.syncProjectStates([
+        { name: "alpha", weight: 2 },
+        { name: "retired", weight: 1 }
+      ]);
+      runStore.syncProjectStates([{ name: "alpha", weight: 2 }]);
+
+      const app = createHttpApp({
+        runStore,
+        stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/api/status");
+      const body = (await response.json()) as {
+        projectStates?: Array<Record<string, unknown>>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(body.projectStates).toEqual([
+        expect.objectContaining({ projectName: "alpha" })
+      ]);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("exposes watchdog idle timing on active runs in status", async () => {
     const stateRoot = await makeTempRoot();
     const runStore = openRunStore({ stateRoot });

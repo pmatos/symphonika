@@ -649,13 +649,14 @@ export function registerPages(options: RegisterPagesOptions): void {
       "plan_updated",
       terminalAttempt?.id
     );
-    const sessionStartedEvent = isFailure
-      ? options.runStore.getLatestProviderEvent(
-          id,
-          "session_started",
-          terminalAttempt?.id
-        )
-      : undefined;
+    const sessionStartedEvent =
+      isFailure && detail.workspacePath.length > 0
+        ? options.runStore.getLatestProviderEvent(
+            id,
+            "session_started",
+            terminalAttempt?.id
+          )
+        : undefined;
     const failureEvent = isFailure
       ? options.runStore.getLastFailureEvent(id, terminalAttempt?.id)
       : undefined;

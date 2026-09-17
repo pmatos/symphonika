@@ -118,6 +118,66 @@ function seedRunningAttempt(
   return attemptId;
 }
 
+// Like seedRunningAttempt, but also records run-level evidence (workspace
+// path, branch) via updateRunEvidence and lets the caller pick the provider
+// and terminal state — the resume-command tests need a real run-level
+// workspacePath (only updateRunEvidence sets it; seedRunningAttempt's
+// workspacePath argument only lands on the attempt row) and a provider other
+// than the hardcoded "codex".
+function seedTerminalAttempt(
+  runStore: RunStore,
+  runId: string,
+  options: {
+    issueNumber: number;
+    issueTitle?: string;
+    providerName: string;
+    state: RunState;
+    workspacePath: string;
+  }
+): string {
+  const providerName = options.providerName as unknown as "codex";
+  runStore.createRun({
+    id: runId,
+    issue: sampleIssue({
+      number: options.issueNumber,
+      ...(options.issueTitle === undefined ? {} : { title: options.issueTitle })
+    }),
+    projectName: "alpha",
+    providerCommand: "x",
+    providerName
+  });
+  runStore.updateRunEvidence(runId, {
+    branchName: `sym/${runId}`,
+    branchRef: `refs/heads/sym/${runId}`,
+    issueSnapshotPath: "",
+    metadataPath: "",
+    normalizedLogPath: "",
+    promptPath: "",
+    rawLogPath: "",
+    workflowGraphPath: "",
+    workspacePath: options.workspacePath
+  });
+  const attemptId = `${runId}-attempt-1`;
+  runStore.createAttempt({
+    attemptNumber: 1,
+    branchName: `sym/${runId}`,
+    branchRef: `refs/heads/sym/${runId}`,
+    id: attemptId,
+    issueSnapshotPath: "",
+    metadataPath: "",
+    normalizedLogPath: "",
+    promptPath: "",
+    providerCommand: "x",
+    providerName,
+    rawLogPath: "",
+    runId,
+    state: options.state,
+    workflowGraphPath: "",
+    workspacePath: options.workspacePath
+  });
+  return attemptId;
+}
+
 describe("HTTP app — runs API and pages", () => {
   it("shows each Run's current workflow state on /runs", async () => {
     const test = await setup();
@@ -1705,43 +1765,19 @@ describe("HTTP app — runs API and pages", () => {
   it("shows a copy-resume-command button for a failed run with a recorded session", async () => {
     const test = await setup();
     try {
-      test.runStore.createRun({
-        id: "run-resume-failed",
-        issue: sampleIssue({ number: 601, title: "Resume this" }),
-        projectName: "alpha",
-        providerCommand: "x",
-        providerName: "claude"
-      });
-      test.runStore.updateRunEvidence("run-resume-failed", {
-        branchName: "sym/run-resume-failed",
-        branchRef: "refs/heads/sym/run-resume-failed",
-        issueSnapshotPath: "",
-        metadataPath: "",
-        normalizedLogPath: "",
-        promptPath: "",
-        rawLogPath: "",
-        workflowGraphPath: "",
-        workspacePath: "/workspaces/601-resume-this"
-      });
-      test.runStore.createAttempt({
-        attemptNumber: 1,
-        branchName: "sym/run-resume-failed",
-        branchRef: "refs/heads/sym/run-resume-failed",
-        id: "run-resume-failed-attempt-1",
-        issueSnapshotPath: "",
-        metadataPath: "",
-        normalizedLogPath: "",
-        promptPath: "",
-        providerCommand: "x",
-        providerName: "claude",
-        rawLogPath: "",
-        runId: "run-resume-failed",
-        state: "failed",
-        workflowGraphPath: "",
-        workspacePath: "/workspaces/601-resume-this"
-      });
+      const attemptId = seedTerminalAttempt(
+        test.runStore,
+        "run-resume-failed",
+        {
+          issueNumber: 601,
+          issueTitle: "Resume this",
+          providerName: "claude",
+          state: "failed",
+          workspacePath: "/workspaces/601-resume-this"
+        }
+      );
       test.runStore.recordProviderEvent({
-        attemptId: "run-resume-failed-attempt-1",
+        attemptId,
         normalized: { sessionId: "session-abc", type: "session_started" },
         raw: { session_id: "session-abc" },
         receivedAt: new Date().toISOString(),
@@ -1771,45 +1807,22 @@ describe("HTTP app — runs API and pages", () => {
   it("shows the resume command for blocked and stale runs", async () => {
     const test = await setup();
     try {
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
       for (const state of ["blocked", "stale"] as const) {
         const runId = `run-resume-${state}`;
-        test.runStore.createRun({
-          id: runId,
-          issue: sampleIssue({ number: 602, title: "Resume this too" }),
-          projectName: "alpha",
-          providerCommand: "x",
-          providerName: "codex"
-        });
-        test.runStore.updateRunEvidence(runId, {
-          branchName: `sym/${runId}`,
-          branchRef: `refs/heads/sym/${runId}`,
-          issueSnapshotPath: "",
-          metadataPath: "",
-          normalizedLogPath: "",
-          promptPath: "",
-          rawLogPath: "",
-          workflowGraphPath: "",
-          workspacePath: `/workspaces/${runId}`
-        });
-        test.runStore.createAttempt({
-          attemptNumber: 1,
-          branchName: `sym/${runId}`,
-          branchRef: `refs/heads/sym/${runId}`,
-          id: `${runId}-attempt-1`,
-          issueSnapshotPath: "",
-          metadataPath: "",
-          normalizedLogPath: "",
-          promptPath: "",
-          providerCommand: "x",
+        const attemptId = seedTerminalAttempt(test.runStore, runId, {
+          issueNumber: 602,
+          issueTitle: "Resume this too",
           providerName: "codex",
-          rawLogPath: "",
-          runId,
           state,
-          workflowGraphPath: "",
           workspacePath: `/workspaces/${runId}`
         });
         test.runStore.recordProviderEvent({
-          attemptId: `${runId}-attempt-1`,
+          attemptId,
           normalized: { sessionId: "thread-1", type: "session_started" },
           raw: {},
           receivedAt: new Date().toISOString(),
@@ -1818,11 +1831,6 @@ describe("HTTP app — runs API and pages", () => {
         });
         test.runStore.updateRunState(runId, state);
 
-        const app = createHttpApp({
-          runStore: test.runStore,
-          stateRoot: test.stateRoot,
-          version: "0.1.0"
-        });
         const response = await app.request(`/runs/${runId}`);
         const body = await response.text();
 
@@ -1925,43 +1933,19 @@ describe("HTTP app — runs API and pages", () => {
   it("hides the resume command for an unrecognized provider name", async () => {
     const test = await setup();
     try {
-      test.runStore.createRun({
-        id: "run-resume-bad-provider",
-        issue: sampleIssue({ number: 603, title: "Unknown provider" }),
-        projectName: "alpha",
-        providerCommand: "x",
-        providerName: "unknown-provider" as unknown as "codex"
-      });
-      test.runStore.updateRunEvidence("run-resume-bad-provider", {
-        branchName: "sym/run-resume-bad-provider",
-        branchRef: "refs/heads/sym/run-resume-bad-provider",
-        issueSnapshotPath: "",
-        metadataPath: "",
-        normalizedLogPath: "",
-        promptPath: "",
-        rawLogPath: "",
-        workflowGraphPath: "",
-        workspacePath: "/workspaces/603-unknown-provider"
-      });
-      test.runStore.createAttempt({
-        attemptNumber: 1,
-        branchName: "sym/run-resume-bad-provider",
-        branchRef: "refs/heads/sym/run-resume-bad-provider",
-        id: "run-resume-bad-provider-attempt-1",
-        issueSnapshotPath: "",
-        metadataPath: "",
-        normalizedLogPath: "",
-        promptPath: "",
-        providerCommand: "x",
-        providerName: "unknown-provider" as unknown as "codex",
-        rawLogPath: "",
-        runId: "run-resume-bad-provider",
-        state: "failed",
-        workflowGraphPath: "",
-        workspacePath: "/workspaces/603-unknown-provider"
-      });
+      const attemptId = seedTerminalAttempt(
+        test.runStore,
+        "run-resume-bad-provider",
+        {
+          issueNumber: 603,
+          issueTitle: "Unknown provider",
+          providerName: "unknown-provider",
+          state: "failed",
+          workspacePath: "/workspaces/603-unknown-provider"
+        }
+      );
       test.runStore.recordProviderEvent({
-        attemptId: "run-resume-bad-provider-attempt-1",
+        attemptId,
         normalized: { sessionId: "session-1", type: "session_started" },
         raw: {},
         receivedAt: new Date().toISOString(),

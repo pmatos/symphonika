@@ -3030,7 +3030,10 @@ ADR 0025/0040) in an ordinary interactive terminal session and continue by hand.
 ADR-0088's daemon-owned shutdown resume, which re-enters the FSM automatically; here Symphonika never
 touches the session again. The command is derived entirely from already-persisted evidence — no new
 mutating route, and the copy button is client-side only (`navigator.clipboard`, falling back to
-selecting the text). A Run whose terminal attempt never recorded a session omits the section.
+selecting the text). The section is omitted whenever any of its preconditions is missing: the
+terminal attempt never recorded a `session_started` event, that event carries no usable session id,
+the Run's persisted workspace path is empty, or the Run's provider is not one of the three recognized
+resume providers (`claude`/`codex`/`omp`).
 
 For a waiting Run whose tracked PR has unresolved review feedback after the configured dispatch
 cap, `GET /api/runs/:id` also exposes a top-level `pullRequestFollowup` object with

@@ -3337,7 +3337,6 @@ function layout(title: string, body: string): string {
 ${body}
 </main>
 <script data-local-time-client>${LOCAL_TIME_CLIENT_JS}</script>
-<script data-resume-copy-client>${RESUME_COPY_CLIENT_JS}</script>
 </body>
 </html>`;
 }
@@ -7289,7 +7288,7 @@ function renderResumeCommand(
   if (command === undefined) {
     return "";
   }
-  return `<section class="resume-command"><p class="hint">Resume this session in a shell:</p><pre><code id="resume-command-text">${escapeHtml(command)}</code></pre><button type="button" class="btn" data-copy-target="resume-command-text">Copy resume command</button></section>`;
+  return `<section class="resume-command"><p class="hint">Resume this session in a shell:</p><pre><code id="resume-command-text">${escapeHtml(command)}</code></pre><button type="button" class="btn" data-copy-target="resume-command-text">Copy resume command</button></section><script>${RESUME_COPY_CLIENT_JS}</script>`;
 }
 
 // Exit code is reported only when abnormal: codex exits 0 even after refusing a

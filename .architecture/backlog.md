@@ -27,13 +27,23 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## editor-save-outcome-epilogue
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 22/25 (leverage 4, locality 4, blast radius 1, heat 5)
+- **PR**: #789
 - **Files**: ~5 estimated (`src/http/pages.ts`, one new module, three editor test files)
 - **Modules**: `src/http/pages.ts` — three `/edit/confirm` route epilogues: workflow contract (1734-1824), service config (1977-2065), routine declaration (2360-2457); the union they dispatch is `SavePipelineResult` (`src/http/save-pipeline.ts:44-52`)
 - **Summary**: One seam owning the editor save-response policy — the write-path `403` gate, the four-variant `SavePipelineResult` → `303`/`200`/`422`/`409`/`500` mapping, and the reload-gating rule — with the per-route `invalid` preview supplied by the caller rather than absorbed.
 - **First seen**: 2026-09-18
-- **Reason**: **Picked by the 2026-09-18 run.** Tied at 22/25 with `routine-editor-target-prologue` and the deterministic tiebreak chain (blast band → heat → recency) is exhausted, because both are seams in the same file. Broken on depth: `save-pipeline.ts` is already a deep module for the *write* half of a save; the *respond* half has no module and is written out longhand three times, with the load-bearing invariant restated verbatim as prose at `pages.ts:1762-1766`, `2003-2007` and `2386-2390`. The deepening completes a seam the codebase half-built rather than inventing one. ADR-0076 preserved exactly (two-phase POST shape; `/edit/confirm` remains the only `runSavePipeline` caller).
+- **Reason**: **Picked by the 2026-09-18 run.** Tied at 22/25 with `routine-editor-target-prologue` and the deterministic tiebreak chain (blast band → heat → recency) is exhausted, because both are seams in the same file. Broken on depth: `save-pipeline.ts` is already a deep module for the *write* half of a save; the *respond* half has no module and is written out longhand three times, with the load-bearing invariant restated verbatim as prose at `pages.ts:1762-1766`, `2003-2007` and `2386-2390`. The deepening completes a seam the codebase half-built rather than inventing one. ADR-0076 preserved exactly (two-phase POST shape; `/edit/confirm` remains the only `runSavePipeline` caller). Implemented via design-it-twice winner **Design C** (`createSaveConfirmer`, a factory bound once in `registerPages`, with the `invalid` branch crossing as a caller-supplied `renderInvalid` callback returning only the body). Runner-up **design** D (`saveEditableArtifact`, ports-and-adapters) lost on seam placement, on its own evidence: `editAction`/`savedRedirect` vary along URL topology and `renderInvalid` along no principled axis, so its port models an *editor target* while naming itself an artifact. Design A lost on requiring a behaviour change to routine-declaration 422 error text; Design B lost on its own measurement (~60% relabelling). Empirical refinement during implementation: a single `url.includes("?") ? "&" : "?"` join reproduces all three existing redirect sites byte-identically, so the module owns the `saved=1` composition rather than the caller. Added the `Save Confirmation` term to CONTEXT.md. PR #789 opened 2026-09-18.
+
+### Run 2026-09-18 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M2RSMHBW` (**adopted**; all four conditions held — non-default, 0 unique commits ahead of `origin/main`, no upstream, unpublished on origin). Not renamed per the adopted-branch rule; the slug is recorded here and in the report instead.
+- **Committed**: report + reconciled backlog (`3918928`), design section (`e2a360c`), implementation + tests (`b59a5f5`), CONTEXT.md term (`446ebca`), this in-flight update.
+- **Evidence**: PR #789. Quality gate green, each step a separate command: lint, typecheck, format:check, knip, test (2938 passed / 183 files), build. Diff 5 files (estimate ~5, exact): `src/http/pages.ts`, new `src/http/save-confirm.ts`, new `tests/save-confirm.test.ts`, `CONTEXT.md`, plus `.architecture/`. **The three existing editor test files were not touched — their passing unchanged is the behaviour-preservation evidence.** Test-first: `tests/save-confirm.test.ts` was seen to fail on the absent module before it was written. No published package, wire, or CLI interface changed. `origin/main` unchanged at push (0 behind); no rebase needed. Reconciled `resolve-scheduled-dispatch-context` #764 → merged/landed; no in-flight PR blocked this run.
+- **Next**: human review of #789. `routine-editor-target-prologue` (22/25, the tied runner-up **candidate**, deferred only to keep blast off the same 3,000-line function twice in one PR) is the natural next firing.
 
 ## routine-editor-target-prologue
 

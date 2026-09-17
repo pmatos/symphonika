@@ -448,4 +448,170 @@ on its own.
 
 ## Design
 
-Written at step 4 — see below.
+Four interfaces were designed in parallel by sub-agents, each briefed to a
+*radically different* mandate over the same friction. Every design was told the
+same hard fact — the `invalid` branch's per-route divergence is real — and asked
+to resolve it differently. All four are recorded, winner and losers, because the
+losing reasoning is the part a reviewer most needs in order to disagree.
+
+Shared facts verified against the tree before adjudication, because three of the
+four designs turn on them:
+
+- `escapeHtml` is defined **twice** with byte-identical bodies: `src/http/pages.ts:7738`
+  (module-private) and `src/notifications/message.ts:18` (exported). `pages.ts:39`
+  already imports `formatPullRequestReference` from that very file.
+- `csrfTokenFor` and `ensureSession` are exported from `src/http/csrf.js` and already
+  imported by `pages.ts`.
+- `renderStaleSaveNotice` (`pages.ts:6182`) and `renderReloadFailedNotice` (`:6203`)
+  have exactly six call sites, all inside the three spans being deepened.
+- `checkStaleRoutineDeclaration(context, input): Response | undefined` (`pages.ts:5960`)
+  is the existing in-file precedent for "helper takes the Hono context, returns a
+  `Response` the handler returns".
+
+### Design A — `runEditorSave`, minimal surface (`src/http/editor-save.ts`)
+
+One export, nine input fields, `context` as a leading positional parameter.
+Returns `Promise<Response | { errors: string[] }>`: a `Response` is finished, and
+`{ errors }` is a **compiler-enforced obligation** handed back to the route, which
+owes the 422 page. The `invalid` divergence is resolved by *returning* rather than
+by a callback — the union return is what tells the caller it still owns that page.
+
+- **Hides**: the write-path gate and its 403, the reload default, the
+  write-before-reload ordering and its status code, the stale/write-failed/reload-failed
+  pages, and the `?saved=1` / `&saved=1` join.
+- **Dependency strategy**: `layout` and `escapeHtml` gain `export` in `pages.ts` and
+  are imported back, creating a deliberate `pages.ts → editor-save.ts → pages.ts`
+  **import cycle** (argued safe: both are hoisted declarations, neither runs at module
+  evaluation, no `import/no-cycle` rule configured).
+- **Trade-offs it accepts**: the cycle; and — decisively — **one intentional behaviour
+  delta**. It always validates against the logical path, whereas the routine route
+  today passes no `validationPath` and so validates against the symlink-resolved path.
+  `parseRoutineDeclaration` interpolates that path into its error strings, so
+  rendered 422 HTML changes for a symlinked Routine Declaration.
+
+### Design B — `decideEditorSave`, pure decision, no rendering (`src/http/editor-save-outcome.ts`)
+
+Zero framework coupling: the module never touches `context`, never calls `layout`,
+never produces HTML. Returns a six-variant discriminated decision
+(`refused_write_path` / `invalid` / `stale` / `write_failed` / `saved_inactive` /
+`saved_active`), each carrying its status code; the routes `switch` and render.
+
+- **Hides**: the reload gate (as a *fork the compiler makes every caller take*), the
+  write-path gate, the reload default, and the status matrix.
+- **Self-assessed verdict, which the adjudication accepts**: *"~60% relabelling."*
+  Measured route shrinkage is only 15/17/21 lines, and roughly 60 lines enter the new
+  module — the tree gets slightly **bigger**. Strip `refused_write_path` and the
+  `saved_active`/`saved_inactive` split and what remains is `SavePipelineResult` with
+  a status field stapled on.
+- **Its own escape route** — returning rendered body HTML plus a title for the four
+  branches whose markup is byte-identical across all three routes — is precisely what
+  Design C does, and it says so.
+
+### Design C — `createSaveConfirmer`, optimised for the common caller (`src/http/save-confirm.ts`) — **WINNER**
+
+A factory bound **once** at the top of `registerPages`, closing over `csrfSecret`,
+`layout`, `resolveWritePath` and `triggerReload`, returning
+`confirmSave(context, save): Promise<Response>`. Each route passes one
+`SaveConfirmation` literal: `content`, `editAction`, `expectedContentHash`,
+`filePath`, `kind`, `name`, `renderInvalid`, `savedRedirect`, and the two
+pass-through optionals `validationPath` / `workflowFormat`. The `invalid`
+divergence is a caller-supplied `renderInvalid({ csrfToken, errors })` returning
+only the **body**; the module owns the title and the 422.
+
+- **Hides**: the write-path gate and its 403; `SavePipelineInput` assembly including
+  both `exactOptionalPropertyTypes` conditional spreads; the reload default; the
+  write-before-reload re-check; **both derived titles** (`Confirm changes to ${name}`
+  and `Saved but not active: ${name}`, verified byte-identical across all three routes);
+  `renderStaleSaveNotice` and `renderReloadFailedNotice`, which **move into** the module
+  so the markup sits with the policy deciding when to show it; the `saved=1` query
+  composition including the `?`/`&` choice; all six status codes; and lazy CSRF minting
+  — `ensureSession` can set a session cookie, so minting it outside the `invalid`
+  branch would attach `Set-Cookie` to 303s and 409s that carry none today.
+- **Dependency strategy — the discriminator.** `save-confirm.ts` imports **nothing**
+  from `pages.ts`. `escapeHtml` comes from `src/notifications/message.js` (verified
+  byte-identical, and a file `pages.ts` already imports from); `csrfTokenFor` and
+  `ensureSession` come from `./csrf.js`; `layout` is injected once at the factory
+  because it closes over `STYLES`, `FONT_FACES` and `LOCAL_TIME_CLIENT_JS` and moving
+  it is a ~600-line diff. The dependency is strictly one-directional,
+  `pages.ts → save-confirm.ts`. `renderEditorPreview` stays in `pages.ts` — it has
+  other callers and is the caller's vocabulary, not the module's.
+- **Measured**: 278 lines across three handlers → ~57, of which ~40 are the three
+  callbacks; new module ≈110 lines including the two moved renderers. Decisions per
+  caller drop from 7 to 1.
+- **Trade-offs it accepts**: a fourth editor must still write a `renderInvalid`
+  closure — the seam makes the 422 uniform, not free; `layout` injection means the
+  module's output is only fully determined at the call site; and `confirmSave` is a
+  `const` declared ~1600 lines above its first use.
+- **Behaviour preservation**: `validationPath` is deliberately **not** defaulted, so
+  the routine route's existing validate-against-the-resolved-path behaviour is
+  preserved rather than silently unified. This is the point on which it beats Design A.
+
+### Design D — `saveEditableArtifact`, ports and adapters (`src/http/editable-artifact-save.ts`)
+
+A six-member `EditableArtifact` port (`displayName`, `editAction`, `renderInvalid`,
+`savedRedirect`, `sourcePath`, `kind`, plus `workflowFormat` on the
+`workflow_contract` variant only), a four-member `EditorSaveDeps`, and a two-member
+structural `EditorSaveResponder` that a Hono `Context` satisfies without an adapter
+object. Three routes construct three adapters.
+
+- **Hides**: the same set as Design C, plus it makes a Service Config structurally
+  incapable of carrying a workflow format.
+- **Its own honest audit, which decided the adjudication**: of the six port members,
+  `editAction` and `savedRedirect` are *not* artifact facts — they vary along URL
+  topology and are 1:1 with `kind` only because each artifact type currently has
+  exactly one editor. And `renderInvalid` *"does not vary along the artifact axis at
+  all"*. So the port models an **editor target**, not an editable artifact: three
+  adapters clear the two-adapter bar, but the modelled axis is not the one that varies.
+- **Flagged typing risk**: assigning Hono's overloaded generic `html`/`redirect` to a
+  monomorphic two-member responder signature may not check, with a documented fallback
+  to `responder: Context`.
+
+### Adjudication
+
+Criteria, applied in this order: **(1) depth** — behaviour per unit of interface a
+caller must learn; **(2) locality** — where change, bugs and verification concentrate
+afterwards; **(3) seam placement** — is the seam where something actually varies;
+**(4) test surface** — can the behaviour be exercised through the interface without
+reaching past it; **(5) blast radius** — the smaller diff wins between otherwise-equal
+designs. The winner was picked by consulting the advisor against the four written
+designs above.
+
+**Winner: Design C (`createSaveConfirmer`).**
+
+1. **Depth.** C hides the most behaviour per unit of interface: nine fields (two of
+   them pass-through optionals) absorb the gate, six status codes, two derived titles,
+   two moved renderers, the redirect separator, lazy CSRF, and the reload re-check.
+   B hides materially less and says so. D hides the same as C but charges more for it
+   — a 6-member port *plus* a 4-member deps record *plus* a 2-member responder, versus
+   C's one literal and one factory binding.
+2. **Locality.** C and D tie; A and B are behind, B because the `switch` in each route
+   costs about what the `if` chain cost.
+3. **Seam placement.** The decisive axis, and it separates C from D. D's own analysis
+   establishes that its port models editor-target identity while calling it an
+   artifact — two of six members vary along URL topology, and `renderInvalid` varies
+   along no principled axis at all. C makes no such claim: it takes a `SaveConfirmation`
+   describing *this save*, which is exactly what varies.
+4. **Test surface.** A, B and D all admit a unit seam; C deliberately does not, keeping
+   `createSaveConfirmer` as its only export and pinning everything at the three HTTP
+   routes the existing tests already drive. Under this repo's `knip` scope (`src/**`),
+   an export that only a test names fails CI, so C's choice is the one that survives
+   the gate without an exception. This is the one criterion on which C is not the
+   strongest in the abstract, and it is ranked fourth for that reason — it does not
+   overturn seam placement.
+5. **Blast radius.** C is smallest in `src/` net terms and, unlike D, carries no
+   flagged typing risk.
+
+**Runner-up design: Design D (`saveEditableArtifact`).** It lost on criterion 3, on
+its own evidence: with three adapters it clears the "two adapters means a real seam"
+bar, but the axis the port models is not the axis that varies. Its discriminated
+`workflow_contract`-carries-`workflowFormat` union is genuinely better than C's two
+loose optionals, and is the thing worth revisiting if a fourth editor lands.
+
+**Design A** was eliminated on behaviour preservation rather than on the criteria: it
+requires an intentional change to routine-declaration 422 error text. A behaviour-
+preserving deepening is what was scored and picked; changing behaviour is a separate
+decision a human should take. Its import cycle is a second, lesser mark against it,
+and is avoidable — Design C's `escapeHtml`-from-`notifications/message.js` route was
+verified byte-identical, so the cycle is not forced by the problem.
+
+**Design B** was eliminated on criterion 1 by its own measurement.

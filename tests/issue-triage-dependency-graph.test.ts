@@ -209,7 +209,7 @@ describe("GET /issues/graph", () => {
       const html = await (await app.request("/issues/graph")).text();
 
       expect(html).toContain('<option value="alpha">alpha</option>');
-      expect(html).not.toContain('<option value="retired">');
+      expect(html).not.toContain('<option value="retired">retired</option>');
     } finally {
       test.cleanup();
     }

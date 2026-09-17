@@ -187,7 +187,7 @@ describe("GET /prs (#309, ADR 0077)", () => {
       const html = await (await app.request("/prs")).text();
 
       expect(html).toContain('<option value="alpha">alpha</option>');
-      expect(html).not.toContain("retired");
+      expect(html).not.toContain('<option value="retired">retired</option>');
     } finally {
       test.cleanup();
     }

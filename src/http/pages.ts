@@ -1481,7 +1481,9 @@ export function registerPages(options: RegisterPagesOptions): void {
 
   options.app.get("/projects/:name", (context) => {
     const name = context.req.param("name");
-    const projectState = options.runStore.getProjectStatesByName().get(name);
+    const projectState = options.runStore
+      .getProjectStatesByName({ includeInactive: true })
+      .get(name);
     if (projectState === undefined) {
       return context.html(
         layout(

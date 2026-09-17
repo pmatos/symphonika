@@ -2583,10 +2583,7 @@ export class RunStore {
   listProjectStates(
     filter: { includeInactive?: boolean } = {}
   ): ProjectState[] {
-    const conditions: string[] =
-      filter.includeInactive === true ? [] : ["active = 1"];
-    const where =
-      conditions.length === 0 ? "" : `where ${conditions.join(" and ")}`;
+    const where = filter.includeInactive === true ? "" : "where active = 1";
     const rows = this.database
       .prepare(
         [
@@ -4883,12 +4880,11 @@ export class RunStore {
     }));
   }
 
-  getProjectStatesByName(): Map<string, ProjectState> {
+  getProjectStatesByName(
+    filter: { includeInactive?: boolean } = {}
+  ): Map<string, ProjectState> {
     return new Map(
-      this.listProjectStates({ includeInactive: true }).map((state) => [
-        state.projectName,
-        state
-      ])
+      this.listProjectStates(filter).map((state) => [state.projectName, state])
     );
   }
 

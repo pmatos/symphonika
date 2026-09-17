@@ -541,7 +541,15 @@ only the **body**; the module owns the title and the 422.
 - **Trade-offs it accepts**: a fourth editor must still write a `renderInvalid`
   closure — the seam makes the 422 uniform, not free; `layout` injection means the
   module's output is only fully determined at the call site; and `confirmSave` is a
-  `const` declared ~1600 lines above its first use.
+  `const` declared ~1600 lines above its first use. Design C's own §6 additionally
+  claimed it would have "no unit-test seam by construction"; that claim was wrong and
+  was not followed — see the corrected criterion 4 below.
+- **One assumption it asserted rather than checked**, verified during implementation:
+  the factory captures `options.resolveWritePath` and `options.triggerReload` once at
+  `registerPages` time, where the old code read them off `options` per request.
+  Neither is ever reassigned anywhere in `src/`, and `src/http/app.ts:915-932` builds
+  the options object as a single literal at construction, so factory-time binding is
+  observationally identical.
 - **Behaviour preservation**: `validationPath` is deliberately **not** defaulted, so
   the routine route's existing validate-against-the-resolved-path behaviour is
   preserved rather than silently unified. This is the point on which it beats Design A.
@@ -591,13 +599,17 @@ designs above.
    artifact — two of six members vary along URL topology, and `renderInvalid` varies
    along no principled axis at all. C makes no such claim: it takes a `SaveConfirmation`
    describing *this save*, which is exactly what varies.
-4. **Test surface.** A, B and D all admit a unit seam; C deliberately does not, keeping
-   `createSaveConfirmer` as its only export and pinning everything at the three HTTP
-   routes the existing tests already drive. Under this repo's `knip` scope (`src/**`),
-   an export that only a test names fails CI, so C's choice is the one that survives
-   the gate without an exception. This is the one criterion on which C is not the
-   strongest in the abstract, and it is ranked fourth for that reason — it does not
-   overturn seam placement.
+4. **Test surface.** All four admit a unit seam, and C's survives this repo's `knip`
+   scope (`src/**`) without an exception: `createSaveConfirmer` is a legitimately-used
+   `src/**` export because `pages.ts` calls it, so a test importing it as well is
+   free; only the `SaveConfirmation` and deps types must stay unexported.
+   **Corrected after implementation**: this section originally claimed C
+   "deliberately does not" admit a unit seam, following Design C's own §6. That was
+   wrong, and the shipped `tests/save-confirm.test.ts` disproves it — six behaviours
+   are pinned through `createSaveConfirmer` with a temp dir and a bare Hono route, no
+   `createHttpApp`, no CSRF session, no Service Config. The correction strengthens the
+   adjudication rather than weakening it: C is not weakest on this criterion after
+   all, so criterion 4 no longer costs it anything.
 5. **Blast radius.** C is smallest in `src/` net terms and, unlike D, carries no
    flagged typing risk.
 

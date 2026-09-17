@@ -3288,10 +3288,14 @@ const RESUME_COPY_CLIENT_JS = `(function () {
     var target = document.getElementById(button.getAttribute("data-copy-target"));
     if (!target) { return; }
     var text = target.textContent;
-    var label = button.textContent;
+    // Cache the true original label once per button, and clear any pending
+    // revert from an earlier click -- otherwise a rapid second click reads
+    // "Copied!" as its own "original" label and the button never reverts.
+    var label = button.dataset.copyLabel || (button.dataset.copyLabel = button.textContent);
+    if (button.copyRevertTimer) { clearTimeout(button.copyRevertTimer); }
     function onCopied() {
       button.textContent = "Copied!";
-      setTimeout(function () { button.textContent = label; }, 2000);
+      button.copyRevertTimer = setTimeout(function () { button.textContent = label; }, 2000);
     }
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(onCopied, function () {

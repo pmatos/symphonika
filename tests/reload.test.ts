@@ -1880,6 +1880,65 @@ describe("RuntimeConfigReloader routine workspace retention", () => {
   });
 });
 
+describe("RuntimeConfigReloader issue workspace retention", () => {
+  it("defaults to immediate success reclamation and a short failure window", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md");
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    const snapshot = await reloader.reload();
+
+    expect(snapshot?.issueWorkspaceRetention).toEqual({
+      enabled: true,
+      failedDays: 3,
+      succeededDays: 0
+    });
+  });
+
+  it("loads a partial operator-tuned policy, defaulting the omitted fields", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["retention:", "  issue_workspaces:", "    failed_days: 10"]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    const snapshot = await reloader.reload();
+
+    expect(snapshot?.issueWorkspaceRetention).toEqual({
+      enabled: true,
+      failedDays: 10,
+      succeededDays: 0
+    });
+  });
+
+  it("rejects a retention window large enough to overflow Date math", async () => {
+    const root = await makeTempRoot();
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "retention:",
+        "  issue_workspaces:",
+        "    failed_days: 1000000000"
+      ]
+    });
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+    await reloader.reload();
+
+    expect(reloader.getStatus().ok).toBe(false);
+  });
+});
+
 describe("RuntimeConfigReloader progress guard config", () => {
   it("loads a Project edge-claim budget, including an explicit opt-out", async () => {
     const root = await makeTempRoot();

@@ -193,7 +193,7 @@ describe("issue workspace retention", () => {
     }
   });
 
-  it("applies failedDays (not succeededDays) to blocked, cancelled, and input_required terminal states", async () => {
+  it("applies failedDays (not succeededDays) to blocked, cancelled, and input_required terminal states, distinctly from succeeded", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);
     const stateRoot = path.join(root, "state");
@@ -202,7 +202,12 @@ describe("issue workspace retention", () => {
 
     const store = openRunStore({ stateRoot });
     try {
-      const states = ["blocked", "cancelled", "input_required"] as const;
+      const states = [
+        "blocked",
+        "cancelled",
+        "input_required",
+        "succeeded"
+      ] as const;
       const prepareds = [];
       for (const [index, state] of states.entries()) {
         const issueNumber = 800 + index;
@@ -220,15 +225,22 @@ describe("issue workspace retention", () => {
         });
       }
 
-      // succeededDays: 0 makes every succeeded run old enough; failedDays: 36500
-      // (MAX_ROUTINE_WORKSPACE_RETENTION_DAYS) keeps every non-succeeded
-      // terminal state withheld regardless of how far `now` is pushed.
+      // succeededDays: 0 makes the succeeded run old enough on its own
+      // bucket; failedDays: 36500 (MAX_ROUTINE_WORKSPACE_RETENTION_DAYS)
+      // keeps every non-succeeded terminal state withheld regardless of how
+      // far `now` is pushed. If succeeded ever routed through failedBefore
+      // instead of succeededBefore, it would be withheld here too. dryRun so
+      // this check does not itself reclaim run-succeeded before the next
+      // assertion needs it still present.
       const withheld = await pruneIssueWorkspaces({
+        dryRun: true,
         now: new Date("2100-01-01T00:00:00.000Z"),
         policy: { enabled: true, failedDays: 36_500, succeededDays: 0 },
         runStore: store
       });
-      expect(withheld.candidates).toEqual([]);
+      expect(withheld.candidates.map((entry) => entry.runId)).toEqual([
+        "run-succeeded"
+      ]);
 
       const released = await pruneIssueWorkspaces({
         now: new Date("2100-01-01T00:00:00.000Z"),
@@ -238,7 +250,8 @@ describe("issue workspace retention", () => {
       expect(released.pruned.map((entry) => entry.runId).sort()).toEqual([
         "run-blocked",
         "run-cancelled",
-        "run-input_required"
+        "run-input_required",
+        "run-succeeded"
       ]);
       for (const prepared of prepareds) {
         await expect(access(prepared.workspacePath)).rejects.toThrow();

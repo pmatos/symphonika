@@ -1,5 +1,29 @@
 # Changelog
 
+# [0.7.0](https://github.com/pmatos/symphonika/compare/v0.6.1...v0.7.0) (2026-09-18)
+
+
+### Bug Fixes
+
+* accept OMP prompt responses that omit agentInvoked ([#778](https://github.com/pmatos/symphonika/issues/778)) ([07e7dad](https://github.com/pmatos/symphonika/commit/07e7dad719aa3b91aa318c760a9f6ee89fd0a653))
+* defer pr follow-up merge while an fsm run is actively running ([#796](https://github.com/pmatos/symphonika/issues/796)) ([806db6c](https://github.com/pmatos/symphonika/commit/806db6c621c578c038214156fa0eeaa0434e1b47))
+* derive resume command executable from the attempt's providerCommand ([#795](https://github.com/pmatos/symphonika/issues/795)) ([41fdaca](https://github.com/pmatos/symphonika/commit/41fdacaf89fb113db1ad48b43fe5c28e9cd8cbea))
+* hide projects retired from config in dashboard and status listings ([#787](https://github.com/pmatos/symphonika/issues/787)) ([531c826](https://github.com/pmatos/symphonika/commit/531c826bb0f8d3005a0bae8af540203160ec9bd7))
+* keep active projects during a config-parse fallback tick ([#793](https://github.com/pmatos/symphonika/issues/793)) ([33d3970](https://github.com/pmatos/symphonika/commit/33d397042459e826742f2f67ebe413cfa10040f6))
+* route onCopied exceptions to the copy fallback ([#792](https://github.com/pmatos/symphonika/issues/792)) ([4977460](https://github.com/pmatos/symphonika/commit/49774600fcd982f7b8fc89adf1f5c014ad8525b7))
+* suppress PR discovery for a stage superseded by an active continuation ([#774](https://github.com/pmatos/symphonika/issues/774)) ([d224927](https://github.com/pmatos/symphonika/commit/d224927a66a2bc8c21fae3aa5c808d07de4e4741))
+* update pinned claude-code-action SHA in workflow test ([#770](https://github.com/pmatos/symphonika/issues/770)) ([94ab2a8](https://github.com/pmatos/symphonika/commit/94ab2a89f0dd4f2d04d4cf938b772c5282e9524f))
+* **workflow:** give the implement stage its own prompts/impl.md ([#768](https://github.com/pmatos/symphonika/issues/768)) ([37a7297](https://github.com/pmatos/symphonika/commit/37a729714762ecf090978d4080c276e077062cb5))
+
+
+### Features
+
+* add a copy-resume-command button for failed/blocked/stale runs ([#782](https://github.com/pmatos/symphonika/issues/782)) ([b2cb675](https://github.com/pmatos/symphonika/commit/b2cb6756733b347d35991052f27f7f04085e45ca))
+* map OMP agent_start to a progress normalized event ([#780](https://github.com/pmatos/symphonika/issues/780)) ([b3b55bb](https://github.com/pmatos/symphonika/commit/b3b55bbf8331048dcfa872fd879786e0aa54be37))
+* post a comment when sym:human-needed is added ([#773](https://github.com/pmatos/symphonika/issues/773)) ([1bef8fc](https://github.com/pmatos/symphonika/commit/1bef8fcb0704cc6dc281e79e3f456f5fc6397efa))
+* reclaim issue workspace disk space after terminal state ([#794](https://github.com/pmatos/symphonika/issues/794)) ([b9cbd00](https://github.com/pmatos/symphonika/commit/b9cbd0010529deea306c05eacfbef4a0ea5218ff))
+* **routines:** add a file-based routine outcome claim channel ([#775](https://github.com/pmatos/symphonika/issues/775)) ([710ec91](https://github.com/pmatos/symphonika/commit/710ec91ccb9a4d7b1a4f1070705d7debeea09e0d))
+
 ## [0.6.1](https://github.com/pmatos/symphonika/compare/v0.6.0...v0.6.1) (2026-09-13)
 
 

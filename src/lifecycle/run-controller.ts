@@ -1713,25 +1713,18 @@ export class RunController {
   // against a finished PR. Asking the general question is what makes that
   // unrepresentable rather than merely guarded against. See issue #616.
   //
-  // ADR 0090 answered "is a raw-FSM Run not parked?" with "terminated or
-  // blocked" and left a third case out: actively running an agent-kind state
-  // (`code_review_fix`, `simplify`, ...). None of those states merge or
-  // release the claim themselves, so a Run mid-turn there was as unowned as a
-  // finished one, and the global loop's merge call — never raw_fsm-gated the
-  // way `dispatchReviewFollowup` already is — could land on the very PR that
-  // Run was still working. The in-flight slot `activeRuns` reserves for the
-  // whole turn is exactly the signal `reEvaluateWaitingRun`'s wait-park loop
-  // lacks between ticks, so it is checked first here, before the waiting-row
-  // lookup. See docs/adr/2026-09-18-0849-pr-followup-defers-to-a-running-fsm-turn-too.md.
+  // ADR 0090 named the alternative to "parked" as "terminated or blocked" and
+  // missed a third case, actively running an agent-kind state (`code_review_fix`,
+  // `simplify`, ...); ADR-2026-09-18-0849 corrects that and covers the
+  // reasoning. The reservation check is checked first here, before the
+  // waiting-row lookup, because it is the signal `reEvaluateWaitingRun`'s
+  // wait-park loop lacks between ticks.
   //
   // Scoped to raw_fsm because only a raw FSM has a position to be parked at,
   // and this method's reservation check is gated on that same raw_fsm load
-  // rather than asked independently. A markdown compatibility-graph workflow
-  // has no state machine to park at, and can still have an actively-reserved
-  // Run that this method never checks for — so the global loop remains its
-  // only follow-up path for a markdown project regardless of whether a Run is
-  // mid-turn on the same issue (tryMergePullRequest has no reservation gate
-  // of its own either).
+  // rather than asked independently — a markdown compatibility-graph project's
+  // actively-reserved Run is never checked, so the global loop stays its sole
+  // follow-up path there regardless.
   //
   // Takes the caller's already-resolved project rather than re-reading it: the
   // follow-up loop holds it, and the daemon's loader rebuilds a Map of every
@@ -1748,15 +1741,13 @@ export class RunController {
     if (loaded === undefined || loaded === "load_failed") {
       return false;
     }
-    if (
-      this.activeRuns.isIssueReserved(input.project.name, input.issueNumber)
-    ) {
-      return true;
-    }
-    return this.isIssueParkedAtRawFsmState(loaded, {
-      issueNumber: input.issueNumber,
-      projectName: input.project.name
-    });
+    return (
+      this.activeRuns.isIssueReserved(input.project.name, input.issueNumber) ||
+      this.isIssueParkedAtRawFsmState(loaded, {
+        issueNumber: input.issueNumber,
+        projectName: input.project.name
+      })
+    );
   }
 
   // Shared by isIssueOwnedByWorkflow and pickProjectCandidate's wait-park

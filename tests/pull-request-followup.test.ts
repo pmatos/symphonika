@@ -292,12 +292,12 @@ describe("pull request follow-up", () => {
   });
 
   it("defers a ready-to-merge PR while its issue's raw_fsm run is actively running, not parked", async () => {
-    // docs/adr/2026-09-18-0849-pr-followup-defers-to-a-running-fsm-turn-too.md.
-    // ADR 0090 only taught isIssueOwnedByWorkflow to recognize a Run parked
-    // at a wait/merge_pr state. A Run mid-turn in an agent-kind state (e.g.
-    // code_review_fix) is neither parked nor terminated, so it was invisible
-    // to that check -- and this loop merged the tracked PR out from under a
-    // still-running review-fix turn on 5 symphonika issues (#783-790).
+    // ADR-2026-09-18-0849. ADR 0090 only taught isIssueOwnedByWorkflow to
+    // recognize a Run parked at a wait/merge_pr state. A Run mid-turn in an
+    // agent-kind state (e.g. code_review_fix) is neither parked nor
+    // terminated, so it was invisible to that check -- and this loop merged
+    // the tracked PR out from under a still-running review-fix turn on 5
+    // symphonika issues (#783-790).
     const root = await makeTempRoot();
     await writeRawFsmReviewFollowupProject(root);
     const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
@@ -313,13 +313,15 @@ describe("pull request follow-up", () => {
       );
       await createGitWorkspaceAhead({ branchName, workspacePath });
 
-      seedRunningParentRun(store, {
+      seedWaitingParentRun(store, {
         branchName,
-        // An agent-kind state (the fixture's only one), not a wait-kind
-        // state -- this row must not resemble a parked run, so the test
-        // isolates the new isIssueReserved check from isIssueParkedAtRawFsmState.
+        // The fixture's only agent-kind state. What isolates this row from
+        // isIssueParkedAtRawFsmState is `state: "running"` below, not this
+        // state id -- findWaitingRunByIssue filters on state = 'waiting'
+        // regardless of which state a row names.
         currentStateId: "implement",
         runId: "parent-run",
+        state: "running",
         workspacePath
       });
       store.trackPullRequest({
@@ -2457,6 +2459,12 @@ function seedWaitingParentRun(
     branchName: string;
     currentStateId: string;
     runId: string;
+    // "running" models a Run actively executing an agent-kind state's turn
+    // (e.g. code_review_fix) rather than parked at a wait-kind one. The
+    // caller must also reserve the issue in the same ActiveRunRegistry
+    // passed to runController: only that in-flight reservation, not this
+    // row's state, is what isIssueOwnedByWorkflow checks for a running Run.
+    state?: "running" | "waiting";
     workspacePath: string;
   }
 ): void {
@@ -2479,43 +2487,7 @@ function seedWaitingParentRun(
     workspacePath: input.workspacePath
   });
   store.setRunCurrentState(input.runId, input.currentStateId);
-  store.updateRunState(input.runId, "waiting");
-}
-
-// Unlike seedWaitingParentRun, this models a Run actively executing an
-// agent-kind state's turn (e.g. code_review_fix) -- `state = "running"`, not
-// "waiting". The caller must also reserve the issue in the same ActiveRunRegistry
-// passed to runController: only that in-flight reservation, not this row,
-// is what isIssueOwnedByWorkflow now checks for a running Run.
-function seedRunningParentRun(
-  store: RunStore,
-  input: {
-    branchName: string;
-    currentStateId: string;
-    runId: string;
-    workspacePath: string;
-  }
-): void {
-  store.createRun({
-    id: input.runId,
-    issue: normalizedIssue(),
-    projectName: "symphonika",
-    providerCommand: DEFAULT_CODEX_COMMAND,
-    providerName: "codex"
-  });
-  store.updateRunEvidence(input.runId, {
-    branchName: input.branchName,
-    branchRef: `refs/heads/${input.branchName}`,
-    issueSnapshotPath: "/tmp/issue-snapshot.json",
-    metadataPath: "/tmp/prompt-metadata.json",
-    normalizedLogPath: "/tmp/provider.normalized.jsonl",
-    promptPath: "/tmp/prompt.md",
-    rawLogPath: "/tmp/provider.raw.jsonl",
-    workflowGraphPath: "/tmp/workflow-graph.json",
-    workspacePath: input.workspacePath
-  });
-  store.setRunCurrentState(input.runId, input.currentStateId);
-  store.updateRunState(input.runId, "running");
+  store.updateRunState(input.runId, input.state ?? "waiting");
 }
 
 async function writeRawFsmReviewFollowupProject(root: string): Promise<void> {

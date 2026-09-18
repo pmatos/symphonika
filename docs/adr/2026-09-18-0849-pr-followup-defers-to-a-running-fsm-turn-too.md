@@ -35,8 +35,11 @@ true — the same in-flight reservation `pickProjectCandidate`'s claim guard alr
 `:3865-3871`). This corrects ADR 0090's enumeration rather than reversing its rule: the parked
 position still decides once a Run reaches one; the fix only widens what counts as "not yet handed
 this back to the global loop" to include a Run still in the middle of getting there. The raw_fsm gate
-stays first — a markdown compatibility-graph workflow has no reservation-worthy position and the
-global loop remains its sole follow-up path, unchanged.
+stays first — `isIssueOwnedByWorkflow` only asks `isIssueReserved` once a raw_fsm workflow is
+confirmed loaded, so a markdown compatibility-graph workflow never reaches that question and the
+global loop remains its sole follow-up path, unchanged, even though a markdown Run genuinely does
+hold an `activeRuns` reservation of its own while running (`reserveSlot` is unconditional on
+workflow kind).
 
 This is a defer-more, not act-more change: the follow-up loop only ever gained a new reason to
 `continue` earlier. ADR 0090's own incident (a second dispatcher starting a duplicate chain,
@@ -49,13 +52,28 @@ caller, the follow-up loop.
 ## Consequences
 
 - A raw-FSM issue's PR cannot be merged, review-dispatched, or claim-released by the global follow-up
-  loop for as long as *any* Run for that issue — parked or actively running — holds it. The window
-  where the loop could act on a PR the FSM was still mid-turn on is closed.
+  loop for as long as `activeRuns` holds an in-flight or scheduled reservation for that issue, or a
+  Run is parked there. This narrows the window from this ADR's incident (the loop could act on a PR
+  the FSM was still mid-turn on) rather than closing it outright: `runAttemptLifecycle`'s own
+  `activeRuns.unregister` releases the reservation in its `finally` block before the next state's
+  waiting row or reservation is re-established, so a brief teardown-to-reschedule gap remains where
+  neither signal is true yet.
 - `releaseClaimIfNotOwned` (`pull-request-followup.ts:372-381`) now also no-ops while a Run is merely
-  running, not just while parked. This does not strand `sym:claimed`: `runAttemptLifecycle`'s own
-  finally block calls `classifyFailure` → `claimLabels.applyTerminal` independently of the follow-up
-  loop on every Run's own cancellation or completion, which is the same mechanism that already
-  released labels correctly for the five cancelled/blocked Runs above.
+  running, not just while parked. For a Run's own `cancelled`/`blocked` terminal outcomes this does
+  not strand `sym:claimed`: `runAttemptLifecycle`'s own finally block calls `classifyFailure` →
+  `claimLabels.applyTerminal` independently of the follow-up loop, which is the same mechanism that
+  already released labels correctly for the five cancelled/blocked Runs above. A deferred `success`
+  outcome (`claim-label-writer.ts`'s `deferReleaseToScheduler`) is not covered by that argument: a
+  *parked* run's own terminal reach releases immediately from `reEvaluateWaitingRun`'s `wait-terminal`
+  phase without ever depending on the follow-up loop, but an actively-running (non-parked) turn has no
+  such self-release path and relies entirely on the follow-up loop noticing the tracked PR resolve.
+  If that PR resolves externally while this change makes the loop defer (Run running, not parked),
+  `recordPullRequestObservation` still flips the tracked row out of `state = 'open'`, and
+  `RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION` (`run-store.ts:1169-1178`) then excludes that Run's
+  chain from `discoverPullRequests`'s fallback too — leaving no remaining path back to
+  `claimLabels.applyTerminal`'s deferred release once the Run's own walk reaches `terminal:success`
+  directly (no wait/merge_pr park). This is a new, unclaimed gap this ADR's change opens, not one it
+  closes.
 - `reviewFollowupCapReached` (`pull-request-followup.ts:413-417`) now records `false` in more cases —
   an issue a Run is actively running on was never going to reach the global loop's own dispatch cap
   regardless, since the loop was not going to dispatch for it. This is the intended effect, not a new

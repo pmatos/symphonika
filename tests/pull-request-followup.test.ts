@@ -315,7 +315,10 @@ describe("pull request follow-up", () => {
 
       seedRunningParentRun(store, {
         branchName,
-        currentStateId: "wait_for_pr",
+        // An agent-kind state (the fixture's only one), not a wait-kind
+        // state -- this row must not resemble a parked run, so the test
+        // isolates the new isIssueReserved check from isIssueParkedAtRawFsmState.
+        currentStateId: "implement",
         runId: "parent-run",
         workspacePath
       });

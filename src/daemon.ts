@@ -127,6 +127,10 @@ import {
   pruneRoutineWorkspaces as pruneRoutineWorkspacesReal,
   type RoutineWorkspaceRetentionPolicy
 } from "./routines/workspace-retention.js";
+import {
+  pruneIssueWorkspaces as pruneIssueWorkspacesReal,
+  type IssueWorkspaceRetentionPolicy
+} from "./issue-workspace-retention.js";
 import { defaultScriptPath } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import { buildStatusSnapshot } from "./status.js";
@@ -180,6 +184,7 @@ export type StartDaemonOptions = {
     input: PrepareRoutineWorkspaceInput
   ) => Promise<PreparedRoutineWorkspace>;
   pruneRoutineWorkspaces?: typeof pruneRoutineWorkspacesReal;
+  pruneIssueWorkspaces?: typeof pruneIssueWorkspacesReal;
 };
 
 export type DaemonHandle = {
@@ -202,6 +207,8 @@ export async function startDaemon(
   const requestedPort = options.port ?? 3000;
   const pruneRoutineWorkspaces =
     options.pruneRoutineWorkspaces ?? pruneRoutineWorkspacesReal;
+  const pruneIssueWorkspaces =
+    options.pruneIssueWorkspaces ?? pruneIssueWorkspacesReal;
   const stateRootOptions: Parameters<typeof resolveStateRoot>[0] = {};
   if (options.configPath !== undefined) {
     stateRootOptions.configPath = options.configPath;
@@ -514,6 +521,10 @@ export async function startDaemon(
   // Narrow skip-if-in-flight guard, consistent with ADR 0052's per-operation
   // (not whole-tick) locking scope.
   const retentionMutex = createAsyncMutex();
+  // Separate from retentionMutex: Issue Workspace and Routine Firing
+  // retention touch disjoint `runs`/`routine_firings` rows and worktree
+  // registrations, so one running long must not skip the other's tick.
+  const issueRetentionMutex = createAsyncMutex();
   // After Slice 1 narrowing, dispatchMutex is held only during the brief
   // claim section, so consumers that want "is a provider run active" should
   // read inFlight instead. The legacy dispatching boolean is preserved as a
@@ -1225,6 +1236,21 @@ export async function startDaemon(
             });
           } finally {
             retentionMutex.release();
+          }
+        }
+        if (
+          retentionSnapshot?.issueWorkspaceRetention.enabled === true &&
+          issueRetentionMutex.tryAcquire()
+        ) {
+          try {
+            await runAutomaticIssueWorkspaceRetention({
+              logger,
+              policy: retentionSnapshot.issueWorkspaceRetention,
+              pruneIssueWorkspaces,
+              runStore
+            });
+          } finally {
+            issueRetentionMutex.release();
           }
         }
         const dispatchRoutines = async (): Promise<
@@ -3061,6 +3087,41 @@ async function runAutomaticRoutineWorkspaceRetention(input: {
     input.logger.error(
       { err: error },
       "symphonika Routine Firing workspace retention failed"
+    );
+  }
+}
+
+async function runAutomaticIssueWorkspaceRetention(input: {
+  logger: Logger;
+  policy: IssueWorkspaceRetentionPolicy;
+  pruneIssueWorkspaces: typeof pruneIssueWorkspacesReal;
+  runStore: ReturnType<typeof openRunStore>;
+}): Promise<void> {
+  try {
+    const report = await input.pruneIssueWorkspaces({
+      policy: input.policy,
+      runStore: input.runStore
+    });
+    if (report.pruned.length > 0) {
+      input.logger.info(
+        { runIds: report.pruned.map((entry) => entry.runId) },
+        "symphonika pruned Issue Workspaces"
+      );
+    }
+    for (const failure of report.failures) {
+      input.logger.warn(
+        {
+          err: failure.error,
+          runId: failure.runId,
+          workspacePath: failure.workspacePath
+        },
+        "symphonika failed to prune Issue Workspace"
+      );
+    }
+  } catch (error) {
+    input.logger.error(
+      { err: error },
+      "symphonika Issue Workspace retention failed"
     );
   }
 }

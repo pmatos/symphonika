@@ -359,6 +359,14 @@ verified zero-commits inspection permits age-based reclamation; an inspection fa
 conservatively.
 _Avoid_: evidence retention, issue Workspace cleanup
 
+**Issue Workspace Retention**:
+The Service Config policy that reclaims terminal Issue Workspace worktrees after outcome-specific
+age windows while preserving their Run Store rows and state-root evidence. Unlike Routine Workspace
+Retention, it never deletes the issue branch ref: an Issue Workspace's Issue Branch is deliberately
+reused across retries and continuations until explicit cleanup, and Symphonika does not yet verify a
+succeeded run's commits reached durable remote state before reclaiming its worktree.
+_Avoid_: Routine Workspace Retention, evidence retention
+
 **Routine Firing Deadline**:
 An optional declared absolute wall-clock bound for one Routine Firing. It expires regardless of
 continued progress, cancels active workspace preparation or provider work, and fails the firing with
@@ -665,6 +673,8 @@ _Avoid_: chat session
 - A manual **Routine Firing** leaves the Routine's next scheduled clock event unchanged
 - **Routine Workspace Retention** may reclaim only terminal **Routine Firing** worktrees without
   persisted commits-ahead evidence
+- **Issue Workspace Retention** may reclaim only terminal issue **Run** worktrees, and only when no
+  **Run** sharing that worktree's path is still non-terminal; it never deletes the **Issue Branch**
 - A **Routine Firing Deadline** terminates an over-time **Routine Firing** independently of the
   **Watchdog**'s progress-liveness decision
 - A **Run Slot Deadline** bounds an issue **Run** while it owns in-flight capacity, including before

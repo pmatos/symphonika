@@ -52,6 +52,10 @@ import {
   type RoutineWorkspaceRetentionPolicy
 } from "./routines/workspace-retention.js";
 import {
+  DEFAULT_ISSUE_WORKSPACE_RETENTION,
+  type IssueWorkspaceRetentionPolicy
+} from "./issue-workspace-retention.js";
+import {
   DEFAULT_HOST_PRESSURE_POLICY,
   type HostPressurePolicy
 } from "./lifecycle/host-pressure.js";
@@ -77,6 +81,7 @@ export type RuntimeConfigSnapshot = {
     path: string;
     projectName: string;
   }>;
+  issueWorkspaceRetention: IssueWorkspaceRetentionPolicy;
   loadedAt: string;
   polling: PollingServiceConfig;
   pollingIntervalMs: number;
@@ -259,6 +264,27 @@ const routineWorkspaceRetentionSchema = z
   })
   .passthrough();
 
+// Reuses MAX_ROUTINE_WORKSPACE_RETENTION_DAYS rather than a same-valued
+// issue-workspace constant: both bound the same "keep well under the
+// ~100,000,000-day Date range" concern, not two independently chosen limits.
+const issueWorkspaceRetentionSchema = z
+  .object({
+    enabled: z.boolean().default(DEFAULT_ISSUE_WORKSPACE_RETENTION.enabled),
+    succeeded_days: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(MAX_ROUTINE_WORKSPACE_RETENTION_DAYS)
+      .default(DEFAULT_ISSUE_WORKSPACE_RETENTION.succeededDays),
+    failed_days: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(MAX_ROUTINE_WORKSPACE_RETENTION_DAYS)
+      .default(DEFAULT_ISSUE_WORKSPACE_RETENTION.failedDays)
+  })
+  .passthrough();
+
 const trackerSchema = z
   .object({
     kind: z.literal("github"),
@@ -423,7 +449,8 @@ const serviceConfigSchema = z
     watchdog: watchdogConfigSchema.optional(),
     retention: z
       .object({
-        routine_workspaces: routineWorkspaceRetentionSchema.optional()
+        routine_workspaces: routineWorkspaceRetentionSchema.optional(),
+        issue_workspaces: issueWorkspaceRetentionSchema.optional()
       })
       .passthrough()
       .optional(),
@@ -965,6 +992,9 @@ async function loadRuntimeConfigSnapshot(input: {
       },
       hostPressure: normalizeHostPressurePolicy(parsed.data.global?.pressure),
       invalidRoutines,
+      issueWorkspaceRetention: normalizeIssueWorkspaceRetention(
+        parsed.data.retention?.issue_workspaces
+      ),
       loadedAt: input.attemptedAt,
       polling,
       pollingIntervalMs:
@@ -999,6 +1029,19 @@ function normalizeRoutineWorkspaceRetention(
   }
   return {
     cancelledDays: config.cancelled_days,
+    enabled: config.enabled,
+    failedDays: config.failed_days,
+    succeededDays: config.succeeded_days
+  };
+}
+
+function normalizeIssueWorkspaceRetention(
+  config: z.infer<typeof issueWorkspaceRetentionSchema> | undefined
+): IssueWorkspaceRetentionPolicy {
+  if (config === undefined) {
+    return { ...DEFAULT_ISSUE_WORKSPACE_RETENTION };
+  }
+  return {
     enabled: config.enabled,
     failedDays: config.failed_days,
     succeededDays: config.succeeded_days

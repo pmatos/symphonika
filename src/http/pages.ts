@@ -3080,7 +3080,7 @@ const LOCAL_TIME_CLIENT_JS = `(function () {
 // Falls back to selecting the command text (so Ctrl+C still works) when the
 // Clipboard API is unavailable or denied -- e.g. a non-HTTPS LAN origin, or a
 // browser permission prompt the operator dismissed.
-const RESUME_COPY_CLIENT_JS = `(function () {
+export const RESUME_COPY_CLIENT_JS = `(function () {
   function selectText(node) {
     var range = document.createRange();
     range.selectNodeContents(node);
@@ -3105,7 +3105,7 @@ const RESUME_COPY_CLIENT_JS = `(function () {
       button.copyRevertTimer = setTimeout(function () { button.textContent = label; }, 2000);
     }
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(onCopied, function () {
+      navigator.clipboard.writeText(text).then(onCopied).catch(function () {
         selectText(target);
       });
     } else {

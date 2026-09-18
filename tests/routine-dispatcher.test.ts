@@ -925,7 +925,7 @@ describe("RoutineFiringDispatcher", () => {
     const providerWait = new Promise<void>((resolve) => {
       releaseProvider = resolve;
     });
-    const fallback = setTimeout(releaseProvider, 500);
+    const fallback = setTimeout(releaseProvider, 5000);
     const provider = {
       // A real Watchdog pass would also call activeRuns.requestCancel, which
       // re-invokes this same closure through the active-run registry — that
@@ -962,7 +962,17 @@ describe("RoutineFiringDispatcher", () => {
     project.routines = [
       {
         ...project.routines![0]!,
-        timeoutMinutes: 0.001
+        // routineFiringDeadline arms this real timer before the firing row
+        // is ever written to state='running' (dispatcher.ts's preamble does
+        // real workspace/evidence/validate I/O first) -- markRoutineFiring-
+        // WatchdogNoProgress below requires state='running' to latch, so too
+        // tight a margin here races that unbounded-duration real I/O rather
+        // than exercising the "timeout while running" scenario this test
+        // means to cover. 600ms gives that preamble generous real headroom
+        // while staying well under the 5s fallback below, so a firing that
+        // doesn't actually reach 'running' fast enough fails loudly via the
+        // markRoutineFiringWatchdogNoProgress assertion rather than flaking.
+        timeoutMinutes: 0.01
       }
     ];
 
@@ -991,6 +1001,10 @@ describe("RoutineFiringDispatcher", () => {
         stateRoot
       });
 
+      // Proves the deadline path (not the 5s fallback) drove providerWait's
+      // release: if the deadline/fallback margin above ever inverts, cancel()
+      // never fires and this assertion catches it loudly instead of the test
+      // passing vacuously on the fallback's own generic exit.
       expect(provider.cancel).toHaveBeenCalledOnce();
       expect(runStore.getRoutineFiring("fire-timeout-latched")).toMatchObject({
         cancelReason: "no_progress",

@@ -1804,6 +1804,48 @@ describe("HTTP app — runs API and pages", () => {
     }
   });
 
+  it('HTML-escapes < > " in the rendered resume command', async () => {
+    const test = await setup();
+    try {
+      const attemptId = seedTerminalAttempt(
+        test.runStore,
+        "run-resume-html-escape",
+        {
+          issueNumber: 604,
+          issueTitle: "Escape this",
+          providerName: "claude",
+          state: "failed",
+          workspacePath: '/workspaces/<script>"work"</script>'
+        }
+      );
+      test.runStore.recordProviderEvent({
+        attemptId,
+        normalized: { sessionId: 'session<1>"id"', type: "session_started" },
+        raw: {},
+        receivedAt: new Date().toISOString(),
+        runId: "run-resume-html-escape",
+        sequence: 1
+      });
+      test.runStore.updateRunState("run-resume-html-escape", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-resume-html-escape");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain(
+        "cd &#39;/workspaces/&lt;script&gt;&quot;work&quot;&lt;/script&gt;&#39;" +
+          " &amp;&amp; claude --resume &#39;session&lt;1&gt;&quot;id&quot;&#39;"
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("shows the resume command for blocked and stale runs", async () => {
     const test = await setup();
     try {

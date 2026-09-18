@@ -130,12 +130,14 @@ function seedTerminalAttempt(
   options: {
     issueNumber: number;
     issueTitle?: string;
+    providerCommand?: string;
     providerName: string;
     state: RunState;
     workspacePath: string;
   }
 ): string {
   const providerName = options.providerName as unknown as "codex";
+  const providerCommand = options.providerCommand ?? "x";
   runStore.createRun({
     id: runId,
     issue: sampleIssue({
@@ -143,7 +145,7 @@ function seedTerminalAttempt(
       ...(options.issueTitle === undefined ? {} : { title: options.issueTitle })
     }),
     projectName: "alpha",
-    providerCommand: "x",
+    providerCommand,
     providerName
   });
   runStore.updateRunEvidence(runId, {
@@ -167,7 +169,7 @@ function seedTerminalAttempt(
     metadataPath: "",
     normalizedLogPath: "",
     promptPath: "",
-    providerCommand: "x",
+    providerCommand,
     providerName,
     rawLogPath: "",
     runId,
@@ -1840,6 +1842,49 @@ describe("HTTP app — runs API and pages", () => {
       expect(body).toContain(
         "cd &#39;/workspaces/&lt;script&gt;&quot;work&quot;&lt;/script&gt;&#39;" +
           " &amp;&amp; claude --resume &#39;session&lt;1&gt;&quot;id&quot;&#39;"
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("derives the resume command's executable from the attempt's configured providerCommand", async () => {
+    const test = await setup();
+    try {
+      const attemptId = seedTerminalAttempt(
+        test.runStore,
+        "run-resume-custom-path",
+        {
+          issueNumber: 605,
+          issueTitle: "Resume via a version-pinned path",
+          providerCommand:
+            "/opt/claude-2.1/bin/claude --dangerously-skip-permissions",
+          providerName: "claude",
+          state: "failed",
+          workspacePath: "/workspaces/604-resume-via-a-version-pinned-path"
+        }
+      );
+      test.runStore.recordProviderEvent({
+        attemptId,
+        normalized: { sessionId: "session-xyz", type: "session_started" },
+        raw: { session_id: "session-xyz" },
+        receivedAt: new Date().toISOString(),
+        runId: "run-resume-custom-path",
+        sequence: 1
+      });
+      test.runStore.updateRunState("run-resume-custom-path", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/runs/run-resume-custom-path");
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(body).toContain(
+        "&amp;&amp; /opt/claude-2.1/bin/claude --resume &#39;session-xyz&#39;"
       );
     } finally {
       test.cleanup();

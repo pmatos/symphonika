@@ -6,7 +6,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## resolve-scheduled-dispatch-context
 
-- **Status**: in-flight
+- **Status**: landed
 - **Score**: 21/25 (leverage 4, locality 4, blast radius 2, heat 5)
 - **PR**: #764
 - **Files**: ~3 estimated; 4 actual (new `src/lifecycle/scheduled-dispatch-context.ts`, `run-controller.ts`, new test, `CONTEXT.md` term — within tolerance)
@@ -23,6 +23,122 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Committed**: report + backlog (`f9b993d`), design section (`4df7d90`), implementation + CONTEXT.md term (`6d8f685`), this in-flight update.
 - **Evidence**: PR #764; quality gate green (lint, typecheck, format:check, knip, build; test 2867 passed — no flakes this run). Diff 4 files (est. ~3; the 4th is the `CONTEXT.md` term add, within tolerance). No published/exported package/CLI/wire interface changed. `origin/main` unchanged at push (0 behind); no rebase needed. Reconciled `tracked-pull-request-lookup` #747 → merged (docs, superseded); no in-flight PR blocked this run.
 - **Next**: human review of #764; `run-chain-tree-walk-cte` (20/25, runner-up candidate) is the natural next firing, with `handle-scheduled-dispatch-error` (20/25) as its adjacent follow-up on the same methods.
+- **Reconciled 2026-09-18**: PR #764 merged 2026-09-14 (`68b0527`); status moved `in-flight` → `landed`. Both named follow-ups re-verified present at HEAD and re-scored below; neither was picked this run.
+
+## editor-save-outcome-epilogue
+
+- **Status**: in-flight
+- **Score**: 22/25 (leverage 4, locality 4, blast radius 1, heat 5)
+- **PR**: #789
+- **Files**: ~5 estimated (`src/http/pages.ts`, one new module, three editor test files)
+- **Modules**: `src/http/pages.ts` — three `/edit/confirm` route epilogues: workflow contract (1734-1824), service config (1977-2065), routine declaration (2360-2457); the union they dispatch is `SavePipelineResult` (`src/http/save-pipeline.ts:44-52`)
+- **Summary**: One seam owning the editor save-response policy — the write-path `403` gate, the four-variant `SavePipelineResult` → `303`/`200`/`422`/`409`/`500` mapping, and the reload-gating rule — with the per-route `invalid` preview supplied by the caller rather than absorbed.
+- **First seen**: 2026-09-18
+- **Reason**: **Picked by the 2026-09-18 run.** Tied at 22/25 with `routine-editor-target-prologue` and the deterministic tiebreak chain (blast band → heat → recency) is exhausted, because both are seams in the same file. Broken on depth: `save-pipeline.ts` is already a deep module for the *write* half of a save; the *respond* half has no module and is written out longhand three times, with the load-bearing invariant restated verbatim as prose at `pages.ts:1762-1766`, `2003-2007` and `2386-2390`. The deepening completes a seam the codebase half-built rather than inventing one. ADR-0076 preserved exactly (two-phase POST shape; `/edit/confirm` remains the only `runSavePipeline` caller). Implemented via design-it-twice winner **Design C** (`createSaveConfirmer`, a factory bound once in `registerPages`, with the `invalid` branch crossing as a caller-supplied `renderInvalid` callback returning only the body). Runner-up **design** D (`saveEditableArtifact`, ports-and-adapters) lost on seam placement, on its own evidence: `editAction`/`savedRedirect` vary along URL topology and `renderInvalid` along no principled axis, so its port models an *editor target* while naming itself an artifact. Design A lost on requiring a behaviour change to routine-declaration 422 error text; Design B lost on its own measurement (~60% relabelling). Empirical refinement during implementation: a single `url.includes("?") ? "&" : "?"` join reproduces all three existing redirect sites byte-identically, so the module owns the `saved=1` composition rather than the caller. Added the `Save Confirmation` term to CONTEXT.md. PR #789 opened 2026-09-18.
+
+### Run 2026-09-18 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M2RSMHBW` (**adopted**; all four conditions held — non-default, 0 unique commits ahead of `origin/main`, no upstream, unpublished on origin). Not renamed per the adopted-branch rule; the slug is recorded here and in the report instead.
+- **Committed**: report + reconciled backlog (`3918928`), design section (`e2a360c`), implementation + tests (`b59a5f5`), CONTEXT.md term (`446ebca`), this in-flight update.
+- **Evidence**: PR #789. Quality gate green, each step a separate command: lint, typecheck, format:check, knip, test (2938 passed / 183 files), build. Diff 5 files (estimate ~5, exact): `src/http/pages.ts`, new `src/http/save-confirm.ts`, new `tests/save-confirm.test.ts`, `CONTEXT.md`, plus `.architecture/`. **The three existing editor test files were not touched — their passing unchanged is the behaviour-preservation evidence.** Test-first: `tests/save-confirm.test.ts` was seen to fail on the absent module before it was written. No published package, wire, or CLI interface changed. `origin/main` unchanged at push (0 behind); no rebase needed. Reconciled `resolve-scheduled-dispatch-context` #764 → merged/landed; no in-flight PR blocked this run.
+- **Next**: human review of #789. `routine-editor-target-prologue` (22/25, the tied runner-up **candidate**, deferred only to keep blast off the same 3,000-line function twice in one PR) is the natural next firing.
+
+## routine-editor-target-prologue
+
+- **Status**: proposed
+- **Score**: 22/25 (leverage 4, locality 4, blast radius 1, heat 5)
+- **Files**: ~3 estimated
+- **Modules**: `src/http/pages.ts` — 33 lines identical modulo indentation at `POST /routines/:name/edit/preview` (2244-2276), `POST /routines/:name/edit/confirm` (2321-2353), `renderRoutineDisabledTogglePreview` (2473-2505, serving `/disable` and `/enable`)
+- **Summary**: A `resolveRoutineEditTarget(...)` returning `{kind:"ok", …} | {kind:"refused", response}` — the discriminated-result house pattern PR #764 landed — owning the 404-vs-200 refusal policy and the ADR-0076 stale-declaration guard.
+- **First seen**: 2026-09-18
+- **Reason**: Runner-up **candidate** to `editor-save-outcome-epilogue` this run at an exact 22/25 tie. Deliberately deferred, not dropped: both live in the same 3,000-line `registerPages` function in the tree's highest-churn file, so taking both in one PR would double the blast — the same split applied to `resolve-scheduled-dispatch-context` / `handle-scheduled-dispatch-error` on 2026-09-14. **The natural next firing.** Only real divergence is a parameter: the toggle's `editAction` omits the `/edit` segment (`:2499` vs `:2270`/`:2347`).
+
+## routine-firing-terminal-write
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
+- **Files**: ~2 estimated
+- **Modules**: `src/routines/dispatcher.ts` — the terminal `completeRoutineFiring` + `reconcileRoutineOutcome` assembly on the success path (1800-1828) and its failure/cancel twin (2001-2030), both inside `runRoutineFiring`
+- **Summary**: A `settleRoutineFiringTerminal(runStore, {...})` owning the ADR-0068 12-field Routine Outcome assembly and its agreement with the persisted terminal row's `state`/`terminalReason`/`cancelReason`.
+- **First seen**: 2026-09-18
+- **Reason**: Has **already drifted** — the failure path passes `observedAction: githubObservation.action` where the success path passes `claimUrlVerification ?? githubObservation.action`, and a comment at `:2025-2027` admits the failure path's `pullRequestObserved` is inert by accident. Scored leverage 3 (two call sites) despite the strong drift evidence. On the hot routine outcome-claim surface (#751/#754/#760/#761/#762/#775). The *wider* settlement mirror (1606-1828 vs 1877-2030) was examined and dropped — see `routine-firing-settlement-sequence`.
+
+## omp-frame-read-loop
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 3, locality 5, blast radius 1, heat 4)
+- **Files**: ~2 estimated
+- **Modules**: `src/providers/omp.ts` — `readUntilFrame` (517-556) and `readUntilResponse` (558-600); a `diff` of the two spans yields only three hunks (signature, event construction, match condition)
+- **Summary**: One `readUntilMatch(queue, activeRun, {match, mapMatched})` generator owning the OMP terminal-event contract (`process_exit` → `missingTerminalAgentEndEvent`; `isTerminalAgentEnd` → `markTerminalAgentEnd` + `drainUntilExit`; `isTerminalFailure` latch); the two existing functions become thin adapters.
+- **First seen**: 2026-09-18
+- **Reason**: Locality 5 — the duplicated block *is* the ADR-0066 wire protocol's terminal contract, and the two functions' call sites interleave in one turn generator, so a protocol fix lands twice today. Not covered by the landed `provider-run-harness` (`runAttempt`) or the proposed `provider-validate-harness-seam` (`validate`). `drainUntilExit` (602-612) deliberately stays out: no match predicate, no terminal handling.
+
+## routine-dispatch-refusal-ledger
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
+- **Files**: ~2 estimated
+- **Modules**: `src/routines/dispatcher.ts` — seven store-write/log/report refusal sites in `dispatchDueRoutines`: 832-852, 869-893, 902-923, 930-952, 953-975, 993-1019, 1020-1044
+- **Summary**: A per-call `RoutineRefusalLedger` closing over `runStore`, `logger`, `now` and the four result arrays, exposing `.skip`/`.miss`/`.defer`/`.hold`, so the store-write / log / result-report triple is atomic by construction.
+- **First seen**: 2026-09-18
+- **Reason**: Leverage held at **3 despite seven call sites** — the sites are numerous but not alike (four different Run Store methods, three different log shapes), so a four-member ledger would itself be shallow, interface ≈ implementation. Real asymmetry it would name: the four `record*`-backed sites gate log+push on the store's return value, the two hold sites push unconditionally at `warn`. Drift risk: `:912-916` re-derives `scheduledAt` where `:841-845` uses the bound value. Excluded from scope: the inline catch-up skip at 742-762 and the four bare pushes at 1052/1068/1080/1114.
+
+## init-project-prompt-session
+
+- **Status**: proposed
+- **Score**: 18/25 (leverage 3, locality 4, blast radius 1, heat 3)
+- **Files**: ~2 estimated
+- **Modules**: `src/doctor.ts` — `confirmOperationalLabelCreation` (2611-2638), `confirmEligibilityLabelCreation` (2640-2667), and the lifecycle wrapper only in `collectProjectSettings` (2141-2261)
+- **Summary**: A `withInitProjectPrompt(prompt, yes, (ask) => …)` owning the `createInitProjectPromptController` create/close lifecycle, plus an `askYesNo(ask, {key, message, refusalNoun})` built on it.
+- **First seen**: 2026-09-18
+- **Reason**: Two real invariants, not shared strings — the readline interface is closed on every exit path (a leaked handle hangs `symphonika init project` after a thrown validation error), and anything other than `yes`/`y`/`no`/`n` throws rather than silently defaulting to consent for a live GitHub label write. Heat 3: `doctor.ts` is hot overall (53 touches/120 commits) but the init-prompt cluster is a cold corner of it.
+
+## routine-firing-settlement-sequence
+
+- **Status**: dropped
+- **Score**: n/a (leverage 1 — deletion test moves)
+- **Modules**: `src/routines/dispatcher.ts` 1606-1828 (success) vs 1877-2030 (failure/cancel)
+- **Summary**: The *whole* firing settlement sequence — githubAfter capture, cancel re-checks, `routineGithubObservation`, `inspectRoutineCommitsAhead`, redaction, claim read — mirrored across the try and catch paths.
+- **First seen**: 2026-09-18
+- **Reason**: Hard filter **leverage 1**. The prose admits the mirror (`:1991-1993`, `:1944-1946`), but eight genuine divergences — claim read before vs. after classification, deadline fail-soft `.catch()` on the failure side only, `withProviderStderrTail`, PR discovery and claim-URL verification on the success side only, `state` from `outcome.kind` vs. a ternary — would land as per-path hooks. Complexity **moves**, same verdict class as `leaked-subject-sweep` and `wait-terminal-contract`. Superseded by the narrower `routine-firing-terminal-write`, which takes only the terminal write itself.
+
+## daemon-project-snapshot-persist
+
+- **Status**: dropped
+- **Score**: n/a (leverage 1 — deletion test moves)
+- **Modules**: `src/daemon.ts` `persistProjectPollState` (2579-2626) vs `persistProjectPullRequestPollState` (2700-2738)
+- **Summary**: A shared per-project wholesale-replace port for the two poll-state persisters.
+- **First seen**: 2026-09-18
+- **Reason**: Hard filter **leverage 1**, despite an admitting comment at `:2696-2699` ("mirrors persistProjectPollState's per-project wholesale-replace rule (ADR 0073)"). The shared policy is only ~6 lines; the row mappers (`projectIssueSnapshotRows` 2628-2694 vs the inline PR mapper 2716-2736) share **no columns**, and the issue side additionally owns `recordProjectPollOutcome` and the `selectedProjectKeysByName` identity gate. A shared port pushes the difference into adapters. Distinct from `daemon-project-state-projection`, which covers 2798-2952.
+
+## daemon-inflight-promise-registration
+
+- **Status**: dropped
+- **Score**: n/a (leverage 1 — interface ≈ implementation)
+- **Modules**: `src/daemon.ts` 636-639, 1422-1430, 1447-1450, 1987-1990
+- **Summary**: A helper registering an in-flight promise for the shutdown drain.
+- **First seen**: 2026-09-18
+- **Reason**: Hard filter **leverage 1**. A real shutdown-drain invariant, but a 3-line helper — the interface would be as complex as the implementation. Same class as the already-dropped `mutate-and-publish`.
+
+## daemon-poll-pipeline-pair
+
+- **Status**: dropped
+- **Score**: n/a (leverage 1 — deletion test moves)
+- **Modules**: `src/daemon.ts` `refreshIssuePollStatus` (798-1007) and the PR-poll pipeline
+- **Summary**: A shared `partitionProjectsForPolling → poll → engageGithubBackoff → persist` pipeline.
+- **First seen**: 2026-09-18
+- **Reason**: Hard filter **leverage 1**. The issue-poll side additionally owns merge/carry-forward, suppression, and `projectModes`; extraction **moves** those into per-side hooks.
+
+## doctor-winning-assignment-family
+
+- **Status**: dropped
+- **Score**: n/a (not behaviour-preserving)
+- **Modules**: `src/doctor.ts` `winningServiceAssignment` (797-826), `winningSliceAssignment` (950-966), `winningByteSizeAssignment` (1017-1063), `winningAssignment` (1399-1417)
+- **Summary**: Unify the four systemd last-assignment-wins readers.
+- **First seen**: 2026-09-18
+- **Reason**: Hard filter — **not behaviour-preserving**, so it cannot be pinned by a test before changing it. The four are *deliberately* different: `winningByteSizeAssignment` skips past assignments systemd itself rejects and is lowercase-exact; `winningAssignment` reports the literal last value case-insensitively for drift auditing. Prose at 968-981 and 1391-1398 documents why. Unifying is a behaviour change, not an extraction — same reason `probe-shutdown-drift` was dropped.
 
 ## run-chain-tree-walk-cte
 

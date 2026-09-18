@@ -39,6 +39,15 @@ first-load failure has no effective snapshot, so snapshot-derived policy is unav
 partially salvaged or replaced with defaults (ADR 0092).
 _Avoid_: parsed config when referring to rejected candidate fields
 
+**Save Confirmation**:
+What one editor's `POST .../edit/confirm` states about the artifact it is saving: the logical path,
+the content kind, its editor URLs and display name, and how it re-renders its own invalid preview.
+The save-response policy it does *not* state — the write-path gate, the status each save outcome
+maps to, and the rule that a write which lands under a rejected reload answers "Saved, but not
+active" rather than redirecting as success — belongs to `createSaveConfirmer`
+(`src/http/save-confirm.ts`), the respond half of the save pipeline (ADR 0075, ADR 0076).
+_Avoid_: save request when referring to the editor's description of its own artifact
+
 **Workflow Contract**:
 The reloadable canonical repository-owned instructions and runtime policy used to execute one issue.
 _Avoid_: service config when referring to repo-owned agent policy

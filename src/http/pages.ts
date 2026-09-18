@@ -37,7 +37,8 @@ import {
 } from "../routines/declaration-loader.js";
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
 import { formatPullRequestReference } from "../notifications/message.js";
-import { runSavePipeline, type ReloadOutcome } from "./save-pipeline.js";
+import { createSaveConfirmer } from "./save-confirm.js";
+import type { ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
   type FilteredProjectIssueSnapshot,
@@ -360,6 +361,16 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
     await next();
   };
+
+  // The respond half of every #307 editor save (src/http/save-confirm.ts):
+  // the write-path gate, the status each pipeline outcome maps to, and the
+  // write-before-reload rule that decides whether "saved" may redirect.
+  const confirmSave = createSaveConfirmer({
+    csrfSecret: options.csrfSecret,
+    layout,
+    resolveWritePath: options.resolveWritePath,
+    triggerReload: options.triggerReload
+  });
 
   // GET /config/edit returns the raw service config, including
   // providers.*.command secrets — a DNS-rebound attacker origin could read
@@ -1731,97 +1742,30 @@ export function registerPages(options: RegisterPagesOptions): void {
         body,
         "expected_content_hash"
       );
-      const resolvedPath =
-        options.resolveWritePath === undefined
-          ? workflow.path
-          : await options.resolveWritePath(workflow.path);
-      if (resolvedPath === undefined) {
-        return context.html(
-          layout(
-            "Save refused",
-            `<h1 class="page-title">Save refused</h1><p class="lede">${escapeHtml(workflow.path)} is not a path the current configuration references.</p>`
-          ),
-          403
-        );
-      }
-
-      const result = await runSavePipeline({
+      return await confirmSave(context, {
         content,
+        editAction: `/projects/${encodeURIComponent(name)}/workflow/edit`,
         expectedContentHash,
-        filePath: resolvedPath,
+        filePath: workflow.path,
         kind: "workflow_contract",
-        reload:
-          options.triggerReload ??
-          (() => Promise.resolve({ errors: [], ok: true })),
+        name: `${name} workflow`,
+        renderInvalid: async ({ csrfToken, errors }) =>
+          renderEditorPreview({
+            confirmAction: `/projects/${encodeURIComponent(name)}/workflow/edit/confirm`,
+            content,
+            csrfToken,
+            errors,
+            expectedContentHash,
+            name: `${name} workflow`,
+            onDisk: await readFile(workflow.path, "utf8").catch(() => null),
+            previewAction: `/projects/${encodeURIComponent(name)}/workflow/edit/preview`,
+            projectParam: undefined,
+            reviewAction: `/projects/${encodeURIComponent(name)}/workflow/edit`
+          }),
+        savedRedirect: `/projects/${encodeURIComponent(name)}`,
         validationPath: workflow.path,
         workflowFormat: workflow.format
       });
-
-      const projectPath = `/projects/${encodeURIComponent(name)}`;
-      if (result.kind === "saved") {
-        // The pipeline writes before reload runs, so "saved" alone doesn't
-        // mean the new contract took effect — redirecting to the project
-        // page here regardless would read as success even when reload
-        // rejected it and the last-known-good workflow is still live.
-        if (!result.reload.ok) {
-          return context.html(
-            layout(
-              `Saved but not active: ${name} workflow`,
-              renderReloadFailedNotice({
-                editAction: `/projects/${encodeURIComponent(name)}/workflow/edit`,
-                errors: result.reload.errors,
-                filePath: workflow.path
-              })
-            ),
-            200
-          );
-        }
-        return context.redirect(`${projectPath}?saved=1`, 303);
-      }
-      if (result.kind === "invalid") {
-        const csrfToken = csrfTokenFor(
-          options.csrfSecret,
-          ensureSession(context)
-        );
-        return context.html(
-          layout(
-            `Confirm changes to ${name} workflow`,
-            renderEditorPreview({
-              confirmAction: `/projects/${encodeURIComponent(name)}/workflow/edit/confirm`,
-              content,
-              csrfToken,
-              errors: result.errors,
-              expectedContentHash,
-              name: `${name} workflow`,
-              onDisk: await readFile(workflow.path, "utf8").catch(() => null),
-              previewAction: `/projects/${encodeURIComponent(name)}/workflow/edit/preview`,
-              projectParam: undefined,
-              reviewAction: `/projects/${encodeURIComponent(name)}/workflow/edit`
-            })
-          ),
-          422
-        );
-      }
-      if (result.kind === "stale") {
-        return context.html(
-          layout(
-            "Save refused: changed on disk",
-            renderStaleSaveNotice({
-              currentContent: result.currentContent,
-              editAction: `/projects/${encodeURIComponent(name)}/workflow/edit`,
-              filePath: workflow.path
-            })
-          ),
-          409
-        );
-      }
-      return context.html(
-        layout(
-          "Save failed",
-          `<h1 class="page-title">Save failed</h1><p class="lede">${escapeHtml(result.error)}</p>`
-        ),
-        500
-      );
     }
   );
 
@@ -1974,95 +1918,29 @@ export function registerPages(options: RegisterPagesOptions): void {
         );
       }
 
-      const resolvedPath =
-        options.resolveWritePath === undefined
-          ? configPath
-          : await options.resolveWritePath(configPath);
-      if (resolvedPath === undefined) {
-        return context.html(
-          layout(
-            "Save refused",
-            `<h1 class="page-title">Save refused</h1><p class="lede">${escapeHtml(configPath)} is not a path the current configuration references.</p>`
-          ),
-          403
-        );
-      }
-
-      const result = await runSavePipeline({
+      return await confirmSave(context, {
         content,
+        editAction: "/config/edit",
         expectedContentHash,
-        filePath: resolvedPath,
+        filePath: configPath,
         kind: "service_config",
-        reload:
-          options.triggerReload ??
-          (() => Promise.resolve({ errors: [], ok: true })),
+        name: "service config",
+        renderInvalid: ({ csrfToken, errors }) =>
+          renderEditorPreview({
+            confirmAction: "/config/edit/confirm",
+            content,
+            csrfToken,
+            errors,
+            expectedContentHash,
+            name: "service config",
+            onDisk,
+            previewAction: "/config/edit/preview",
+            projectParam: undefined,
+            reviewAction: "/config/edit"
+          }),
+        savedRedirect: "/",
         validationPath: configPath
       });
-
-      if (result.kind === "saved") {
-        // The pipeline writes before reload runs, so "saved" alone doesn't
-        // mean the new config took effect — redirecting to the dashboard
-        // here regardless would read as success even when reload rejected
-        // it and the last-known-good config is still live.
-        if (!result.reload.ok) {
-          return context.html(
-            layout(
-              "Saved but not active: service config",
-              renderReloadFailedNotice({
-                editAction: "/config/edit",
-                errors: result.reload.errors,
-                filePath: configPath
-              })
-            ),
-            200
-          );
-        }
-        return context.redirect("/?saved=1", 303);
-      }
-      if (result.kind === "invalid") {
-        const csrfToken = csrfTokenFor(
-          options.csrfSecret,
-          ensureSession(context)
-        );
-        return context.html(
-          layout(
-            "Confirm changes to service config",
-            renderEditorPreview({
-              confirmAction: "/config/edit/confirm",
-              content,
-              csrfToken,
-              errors: result.errors,
-              expectedContentHash,
-              name: "service config",
-              onDisk,
-              previewAction: "/config/edit/preview",
-              projectParam: undefined,
-              reviewAction: "/config/edit"
-            })
-          ),
-          422
-        );
-      }
-      if (result.kind === "stale") {
-        return context.html(
-          layout(
-            "Save refused: changed on disk",
-            renderStaleSaveNotice({
-              currentContent: result.currentContent,
-              editAction: "/config/edit",
-              filePath: configPath
-            })
-          ),
-          409
-        );
-      }
-      return context.html(
-        layout(
-          "Save failed",
-          `<h1 class="page-title">Save failed</h1><p class="lede">${escapeHtml(result.error)}</p>`
-        ),
-        500
-      );
     }
   );
 
@@ -2357,104 +2235,32 @@ export function registerPages(options: RegisterPagesOptions): void {
         body,
         "expected_content_hash"
       );
-      const resolvedPath =
-        options.resolveWritePath === undefined
-          ? declaration.sourcePath
-          : await options.resolveWritePath(declaration.sourcePath);
-      if (resolvedPath === undefined) {
-        return context.html(
-          layout(
-            "Save refused",
-            `<h1 class="page-title">Save refused</h1><p class="lede">${escapeHtml(declaration.sourcePath)} is not a path the current configuration references.</p>`
-          ),
-          403
-        );
-      }
-
-      const result = await runSavePipeline({
+      return await confirmSave(context, {
         content,
+        editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
         expectedContentHash,
-        filePath: resolvedPath,
+        filePath: declaration.sourcePath,
         kind: "routine_declaration",
-        reload:
-          options.triggerReload ??
-          (() => Promise.resolve({ errors: [], ok: true }))
-      });
-
-      const routinePath = `/routines/${encodeURIComponent(name)}${routineQuerySuffix(projectParam, includeInactive)}`;
-      if (result.kind === "saved") {
-        // The pipeline writes before reload runs, so "saved" alone doesn't
-        // mean the new declaration took effect — redirecting to the detail
-        // page here regardless would read as success even when reload
-        // rejected it and the last-known-good declaration is still live.
-        if (!result.reload.ok) {
-          return context.html(
-            layout(
-              `Saved but not active: ${name}`,
-              renderReloadFailedNotice({
-                editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
-                errors: result.reload.errors,
-                filePath: declaration.sourcePath
-              })
+        name,
+        renderInvalid: async ({ csrfToken, errors }) =>
+          renderEditorPreview({
+            confirmAction: `/routines/${encodeURIComponent(name)}/edit/confirm`,
+            content,
+            csrfToken,
+            errors,
+            expectedContentHash,
+            ...(expectedSourcePath === undefined ? {} : { expectedSourcePath }),
+            includeInactive,
+            name,
+            onDisk: await readFile(declaration.sourcePath, "utf8").catch(
+              () => null
             ),
-            200
-          );
-        }
-        return context.redirect(
-          `${routinePath}${routinePath.includes("?") ? "&" : "?"}saved=1`,
-          303
-        );
-      }
-      if (result.kind === "invalid") {
-        const csrfToken = csrfTokenFor(
-          options.csrfSecret,
-          ensureSession(context)
-        );
-        return context.html(
-          layout(
-            `Confirm changes to ${name}`,
-            renderEditorPreview({
-              confirmAction: `/routines/${encodeURIComponent(name)}/edit/confirm`,
-              content,
-              csrfToken,
-              errors: result.errors,
-              expectedContentHash,
-              ...(expectedSourcePath === undefined
-                ? {}
-                : { expectedSourcePath }),
-              includeInactive,
-              name,
-              onDisk: await readFile(declaration.sourcePath, "utf8").catch(
-                () => null
-              ),
-              previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
-              projectParam,
-              reviewAction: `/routines/${encodeURIComponent(name)}/edit`
-            })
-          ),
-          422
-        );
-      }
-      if (result.kind === "stale") {
-        return context.html(
-          layout(
-            "Save refused: changed on disk",
-            renderStaleSaveNotice({
-              currentContent: result.currentContent,
-              editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
-              filePath: declaration.sourcePath
-            })
-          ),
-          409
-        );
-      }
-      return context.html(
-        layout(
-          "Save failed",
-          `<h1 class="page-title">Save failed</h1><p class="lede">${escapeHtml(result.error)}</p>`
-        ),
-        500
-      );
+            previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
+            projectParam,
+            reviewAction: `/routines/${encodeURIComponent(name)}/edit`
+          }),
+        savedRedirect: `/routines/${encodeURIComponent(name)}${routineQuerySuffix(projectParam, includeInactive)}`
+      });
     }
   );
 
@@ -6179,18 +5985,6 @@ function renderEditorPreview(input: {
 </form><p class="note"><a href="${escapeHtml(`${input.reviewAction}${navigationSuffix}`)}">← Back to editor</a></p>`;
 }
 
-function renderStaleSaveNotice(input: {
-  currentContent: string | null;
-  editAction: string;
-  filePath: string;
-}): string {
-  const body =
-    input.currentContent === null
-      ? "<p>The file was deleted since you opened the editor.</p>"
-      : `<pre class="diff">${escapeHtml(input.currentContent)}</pre>`;
-  return `<h1 class="page-title">Save refused: changed on disk</h1><div class="alert" role="alert"><strong>${escapeHtml(input.filePath)} was changed since you opened the editor</strong>Your edit was not written. Reopen the editor to start from the current content.</div>${body}<p class="note"><a href="${escapeHtml(input.editAction)}">← Reopen editor</a></p>`;
-}
-
 function renderRoutineDeclarationChangedNotice(input: {
   actualSourcePath: string;
   editAction: string;
@@ -6198,14 +5992,6 @@ function renderRoutineDeclarationChangedNotice(input: {
   name: string;
 }): string {
   return `<h1 class="page-title">Save refused: Routine declaration changed</h1><div class="alert" role="alert"><strong>${escapeHtml(input.name)} now resolves to a different declaration</strong>The editor was opened for <code>${escapeHtml(input.expectedSourcePath)}</code>, but this request resolves to <code>${escapeHtml(input.actualSourcePath)}</code>. Nothing was written.</div><p class="note"><a href="${escapeHtml(input.editAction)}">← Reopen editor</a></p>`;
-}
-
-function renderReloadFailedNotice(input: {
-  editAction: string;
-  errors: string[];
-  filePath: string;
-}): string {
-  return `<h1 class="page-title">Saved, but not active</h1><div class="alert" role="alert"><strong>${escapeHtml(input.filePath)} was written to disk, but reload failed</strong><ul>${input.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul></div><p class="note">The previous, last-known-good configuration is still what's running. Fix the issue above and save again.</p><p class="note"><a href="${escapeHtml(input.editAction)}">← Back to editor</a></p>`;
 }
 
 // A small line-based LCS diff — not a general utility, just enough to

@@ -2918,6 +2918,24 @@ function fallbackProjectStateInputs(
     );
   }
 
+  // A Project can be active in project_states without ever reaching
+  // effectiveProjects -- that list is the last successfully *validated*
+  // config (RunControllerProjectConfig), which excludes a Project that
+  // fails schema validation (e.g. a missing token, validation_state =
+  // 'invalid') but also, on a first load with no prior snapshot, a Project
+  // that fails only its dispatch-detail schema (e.g. malformed workspace/
+  // workflow) while still being polled for issues. Either way,
+  // priorProjectStates only contains rows that are currently active
+  // (getProjectStatesByName has no includeInactive filter here), so a
+  // broken edit is not evidence any of them was removed from config --
+  // carry every one forward unchanged so syncProjectStates doesn't read its
+  // absence from `inputs` as "removed" and flip it to inactive (#788).
+  for (const prior of options.priorProjectStates.values()) {
+    if (!inputsByName.has(prior.projectName)) {
+      inputsByName.set(prior.projectName, projectStateInputFromPrior(prior));
+    }
+  }
+
   return { inputs: Array.from(inputsByName.values()), modes };
 }
 

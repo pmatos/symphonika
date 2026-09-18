@@ -578,6 +578,62 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("keeps a schema-invalid project active when an unparseable config edit falls back to the last-known-good snapshot (#788)", async () => {
+    const root = await makeTempRoot();
+    await writeConfigWithInvalidAndValidProjects(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+
+    try {
+      type StatusBody = {
+        projectStates: Array<{
+          active: boolean;
+          projectName: string;
+          validationState: string;
+        }>;
+        reload: { usingLastKnownGood: boolean };
+      };
+      const initialResponse = await fetch(`${daemon.url}/api/status`);
+      const initialBody = (await initialResponse.json()) as StatusBody;
+      expect(
+        initialBody.projectStates.find(
+          (project) => project.projectName === "malformed"
+        )
+      ).toMatchObject({ active: true, validationState: "invalid" });
+
+      await writeFile(path.join(root, "symphonika.yml"), "projects: [\n");
+      const pollResponse = await fetch(`${daemon.url}/api/poll-now`, {
+        method: "POST"
+      });
+      expect(pollResponse.status).toBe(200);
+
+      const fallbackResponse = await fetch(`${daemon.url}/api/status`);
+      const fallbackBody = (await fallbackResponse.json()) as StatusBody;
+      expect(fallbackBody.reload.usingLastKnownGood).toBe(true);
+      expect(
+        fallbackBody.projectStates.find(
+          (project) => project.projectName === "malformed"
+        )
+      ).toMatchObject({ active: true, validationState: "invalid" });
+      expect(
+        fallbackBody.projectStates.find(
+          (project) => project.projectName === "symphonika"
+        )
+      ).toMatchObject({ active: true, validationState: "valid" });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("preserves a same-token project's prior status when an earlier project rate-limits", async () => {
     const root = await makeTempRoot();
     await writeTwoProjectsWithDifferentTokens(root, { pollingIntervalMs: 10 });

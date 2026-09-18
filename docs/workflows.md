@@ -445,7 +445,8 @@ unknown.
 
 Name the unresolved-review case explicitly, as above. Nothing outside the state machine will pick it
 up: the orchestrator-wide PR follow-up loop defers entirely to a raw FSM parked at a state of its
-own (ADR 0090), so a wait state that gates `merge` on `unresolved_review_threads: 0` and routes
+own, or still actively running an earlier state's turn (ADR 0090, corrected by ADR-2026-09-18-0849),
+so a wait state that gates `merge` on `unresolved_review_threads: 0` and routes
 `repair` only on `checks: failure` parks forever on the commonest shape there is — green checks with
 one open thread. Order it after `merge`, so a clean and fully resolved PR still merges.
 

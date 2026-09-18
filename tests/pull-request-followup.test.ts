@@ -291,6 +291,111 @@ describe("pull request follow-up", () => {
     }
   });
 
+  it("defers a ready-to-merge PR while its issue's raw_fsm run is actively running, not parked", async () => {
+    // ADR-2026-09-18-0849. ADR 0090 only taught isIssueOwnedByWorkflow to
+    // recognize a Run parked at a wait/merge_pr state. A Run mid-turn in an
+    // agent-kind state (e.g. code_review_fix) is neither parked nor
+    // terminated, so it was invisible to that check -- and this loop merged
+    // the tracked PR out from under a still-running review-fix turn on 5
+    // symphonika issues (#783-790).
+    const root = await makeTempRoot();
+    await writeRawFsmReviewFollowupProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const branchName = "sym/symphonika/54-review-followup";
+      const workspacePath = path.join(
+        root,
+        ".symphonika",
+        "workspaces",
+        "symphonika",
+        "issues",
+        "54-review-followup"
+      );
+      await createGitWorkspaceAhead({ branchName, workspacePath });
+
+      seedWaitingParentRun(store, {
+        branchName,
+        // The fixture's only agent-kind state. What isolates this row from
+        // isIssueParkedAtRawFsmState is `state: "running"` below, not this
+        // state id -- findWaitingRunByIssue filters on state = 'waiting'
+        // regardless of which state a row names.
+        currentStateId: "implement",
+        runId: "parent-run",
+        state: "running",
+        workspacePath
+      });
+      store.trackPullRequest({
+        branchName,
+        headSha: "abc123",
+        issueNumber: 54,
+        prNumber: 81,
+        prUrl: "https://example.test/pr/81",
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const activeRuns = new ActiveRunRegistry();
+      activeRuns.reserveSlot({
+        issueNumber: 54,
+        projectName: "symphonika",
+        runId: "parent-run"
+      });
+
+      const providerInputs: ProviderRunInput[] = [];
+      const provider = fakeProvider(providerInputs);
+      const project = rawFsmReviewFollowupProjectConfig();
+      // Ready to merge in every dimension pullRequestReadyToMerge checks --
+      // proving deference here is about the running Run, not an unready PR.
+      const githubIssuesApi: GitHubIssuesApi = {
+        getPullRequestFollowupState: vi.fn().mockResolvedValue(prState()),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+        mergePullRequest: vi.fn().mockResolvedValue(undefined),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = runController({
+        activeRuns,
+        githubIssuesApi,
+        project,
+        provider,
+        root,
+        runStore: store,
+        workspacePath
+      });
+
+      const result = await runPullRequestFollowup({
+        configPath: path.join(root, "symphonika.yml"),
+        env: { GITHUB_TOKEN: "secret-token" },
+        githubIssuesApi,
+        logger: pino({ enabled: false }),
+        projectsLoader: () =>
+          Promise.resolve(new Map([[project.name, project]])),
+        runController: controller,
+        runStore: store
+      });
+
+      // Without the fix this loop merges the PR (mergePullRequest gets
+      // called and result is { action: "merged", prNumber: 81 }) -- exactly
+      // what happened to symphonika issues #783-790.
+      expect(result).toEqual({
+        action: "none",
+        reason: "no pull request follow-up action"
+      });
+      expect(providerInputs).toHaveLength(0);
+      expect(githubIssuesApi.mergePullRequest).not.toHaveBeenCalled();
+      expect(githubIssuesApi.removeLabelsFromIssue).not.toHaveBeenCalled();
+
+      // The running Run is untouched, and the tracked PR stays open for its
+      // own eventual wait_for_pr -> merge advance to claim.
+      expect(store.getRun("parent-run")).toMatchObject({ state: "running" });
+      expect(store.listOpenTrackedPullRequests()[0]).toMatchObject({
+        reviewDispatchCount: 0
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("defers to the workflow regardless of what provider its initial state declares", async () => {
     // The deference is a property of the Issue being workflow-owned, not of
     // the workflow's shape. This fixture's initial state declares `claude`
@@ -2354,6 +2459,12 @@ function seedWaitingParentRun(
     branchName: string;
     currentStateId: string;
     runId: string;
+    // "running" models a Run actively executing an agent-kind state's turn
+    // (e.g. code_review_fix) rather than parked at a wait-kind one. The
+    // caller must also reserve the issue in the same ActiveRunRegistry
+    // passed to runController: only that in-flight reservation, not this
+    // row's state, is what isIssueOwnedByWorkflow checks for a running Run.
+    state?: "running" | "waiting";
     workspacePath: string;
   }
 ): void {
@@ -2376,7 +2487,7 @@ function seedWaitingParentRun(
     workspacePath: input.workspacePath
   });
   store.setRunCurrentState(input.runId, input.currentStateId);
-  store.updateRunState(input.runId, "waiting");
+  store.updateRunState(input.runId, input.state ?? "waiting");
 }
 
 async function writeRawFsmReviewFollowupProject(root: string): Promise<void> {

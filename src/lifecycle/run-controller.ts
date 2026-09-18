@@ -1698,9 +1698,11 @@ export class RunController {
   }
 
   // Tells the global PR follow-up loop whether a raw-FSM workflow already owns
-  // this Issue — that is, whether it is parked at a state of its own and will
-  // decide what happens next on its own tick. When true, the global loop must
-  // act on neither the merge nor the review feedback.
+  // this Issue — that is, whether it is parked at a state of its own, or has
+  // in-flight or scheduled work reserved for it (an agent-kind state's Run
+  // actively executing a turn, or one sitting on a queued retry/continuation)
+  // — and will decide what happens next on its own. When true, the global
+  // loop must act on neither the merge nor the review feedback.
   //
   // This started life as `isIssueParkedInMergePrState`, asking only about the
   // merge (ADR 0048): without it, discovery and the global merge happen in the
@@ -1711,16 +1713,26 @@ export class RunController {
   // against a finished PR. Asking the general question is what makes that
   // unrepresentable rather than merely guarded against. See issue #616.
   //
-  // Scoped to raw_fsm because only a raw FSM has a position to be parked at.
-  // A markdown compatibility-graph workflow has no state machine, so the
-  // global loop remains its only follow-up path.
+  // ADR 0090 named the alternative to "parked" as "terminated or blocked" and
+  // missed a third case, actively running an agent-kind state (`code_review_fix`,
+  // `simplify`, ...); ADR-2026-09-18-0849 corrects that and covers the
+  // reasoning. The reservation check is checked first here, before the
+  // waiting-row lookup, because it is the signal `reEvaluateWaitingRun`'s
+  // wait-park loop lacks between ticks.
+  //
+  // Scoped to raw_fsm because only a raw FSM has a position to be parked at,
+  // and this method's reservation check is gated on that same raw_fsm load
+  // rather than asked independently — a markdown compatibility-graph project's
+  // actively-reserved Run is never checked, so the global loop stays its sole
+  // follow-up path there regardless.
   //
   // Takes the caller's already-resolved project rather than re-reading it: the
   // follow-up loop holds it, and the daemon's loader rebuilds a Map of every
-  // project on each call. The workflow-kind test comes before the waiting-row
-  // lookup for the same reason — it is one in-memory field read that rejects
-  // every markdown project outright, while the lookup is an unindexed scan of
-  // a table that grows with every Run ever recorded.
+  // project on each call. The workflow-kind test comes before the reserved-slot
+  // and waiting-row lookups for the same reason — it is one in-memory field
+  // read that rejects every markdown project outright, while they cost an
+  // in-memory map lookup and an indexed lookup (runs_project_issue_idx)
+  // respectively.
   async isIssueOwnedByWorkflow(input: {
     issueNumber: number;
     project: RunControllerProjectConfig;
@@ -1729,10 +1741,13 @@ export class RunController {
     if (loaded === undefined || loaded === "load_failed") {
       return false;
     }
-    return this.isIssueParkedAtRawFsmState(loaded, {
-      issueNumber: input.issueNumber,
-      projectName: input.project.name
-    });
+    return (
+      this.activeRuns.isIssueReserved(input.project.name, input.issueNumber) ||
+      this.isIssueParkedAtRawFsmState(loaded, {
+        issueNumber: input.issueNumber,
+        projectName: input.project.name
+      })
+    );
   }
 
   // Shared by isIssueOwnedByWorkflow and pickProjectCandidate's wait-park

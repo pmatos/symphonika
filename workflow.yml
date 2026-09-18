@@ -84,9 +84,11 @@ workflow:
     # The FSM owns every outcome here, unresolved reviews included: failing
     # checks -> autofix, merge conflicts -> resolve, reviewer feedback ->
     # autofix, clean -> merge. The orchestrator-wide review_followup loop
-    # defers to a parked raw-FSM run rather than dispatching alongside it
-    # (issue #616), so a case this state does not name is a case nothing
-    # handles -- the run parks and raises manual attention.
+    # defers to a parked raw-FSM run, or one whose Run is still actively
+    # executing an earlier state's turn, rather than dispatching alongside it
+    # (issue #616; ADR-2026-09-18-0849), so a case this state does not name is
+    # a case nothing handles -- the run
+    # parks and raises manual attention.
     wait_for_pr:
       action:
         kind: wait

@@ -26,6 +26,14 @@ retention:
     succeeded_days: 1
     failed_days: 14
     cancelled_days: 14
+  # Automatic Issue Workspace reclamation (ADR 2026-09-18-0702). Succeeded
+  # runs have nothing left to resume; failed/blocked/stale/cancelled/
+  # input_required runs keep a short resume-command window (see PR #782).
+  # The issue branch ref itself is never deleted, unlike a Routine Firing's.
+  issue_workspaces:
+    enabled: true
+    succeeded_days: 0
+    failed_days: 3
 
 # Optional global cap on the total number of concurrent provider runs across
 # all projects. Omit (or comment out) for unbounded. See ADR 0053.

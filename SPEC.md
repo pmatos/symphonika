@@ -514,6 +514,17 @@ failed and cancelled firing workspaces are retained for `14` days. Each day valu
 integer. Operators may tune the windows or set `enabled: false`; the manual cleanup command still
 uses the configured windows when automatic reclamation is disabled. See ADR 0067.
 
+Issue Workspace Retention is a service-level policy under `retention.issue_workspaces`, independent
+of Routine Workspace Retention. Automatic reclamation defaults to enabled. Successful run workspaces
+are retained for `0` days (reclaimed as soon as they are a candidate — nothing is left to resume once
+a run has succeeded); failed, blocked, stale, cancelled, and input-required run workspaces are all
+retained for `3` days, matching the `failed`/`blocked`/`stale` resume-command eligibility PR #782
+introduced, with `cancelled` and `input_required` folded into the same window by this policy rather
+than treated as a separate case. Each day value is a non-negative integer. Operators may tune the
+windows or set `enabled: false`; the manual cleanup command still uses the configured windows when
+automatic reclamation is disabled. Unlike Routine Firing retention, reclamation never deletes the
+issue branch ref — only the worktree checkout is reclaimed. See ADR 2026-09-18-0702.
+
 `self_update` is a service-level boolean, defaulting to `false`. When `true`, the daemon
 periodically checks GitHub Releases for a newer Symphonika version, stages and smoke-checks it in
 an isolated location, drains in-flight work without cancelling it, and cuts over with a
@@ -1545,6 +1556,23 @@ tick. The Run Store preserves `workspace_path` and writes
 The manual `symphonika prune-workspaces [--dry-run]` command evaluates the same policy even when
 automatic retention is disabled. See ADR 0067.
 
+On every daemon tick, enabled Issue Workspace Retention independently selects candidates from `runs`.
+Continuations and retries reuse the parent's `workspace_path` (ADR 0040), so several `runs` rows can
+share one path; only the newest row per path decides eligibility, and a path is withheld entirely
+while any row sharing it — including a just-created continuation — is still non-terminal. A
+`succeeded` newest row is a candidate once its `updated_at` crosses `succeeded_days`; every other
+terminal state (`failed`, `stale`, `blocked`, `cancelled`, `input_required`) shares the `failed_days`
+window. Reclamation runs the path-scoped `git worktree remove --force <path>`, which removes both the
+candidate checkout and its registration without cache-wide `git worktree prune`, and — unlike Routine
+Firing retention — never deletes the issue branch ref: ADR 0040 makes branch/worktree reuse the
+Issue's ongoing identity across attempts, and Symphonika does not yet verify a succeeded run's commits
+reached durable remote state before reclaiming its worktree. A locked candidate remains an error and
+is retried on a later tick. The Run Store preserves `workspace_path` and writes
+`workspace_pruned_at` on `runs`; no state-root provider log, normalized event, or prompt artifact is
+removed. The manual `symphonika prune-workspaces [--dry-run]` command evaluates the same policy even
+when automatic retention is disabled, in the same pass as Routine Workspace Retention. See
+ADR 2026-09-18-0702.
+
 ## 9. GitHub Tracker Behavior
 
 ### 9.1 Required Operations
@@ -1719,8 +1747,11 @@ Retry or continuation:
 
 Workspace conflicts are deterministic failures unless explicitly resolved by an operator.
 
-Issue Workspaces are not deleted automatically. Terminal Routine Firing workspaces are the narrow
-exception governed by Routine Workspace Retention in §8.5 and ADR 0067.
+Issue Workspaces are not deleted immediately on any terminal state. Terminal Routine Firing
+workspaces and terminal Issue Workspaces are each reclaimed automatically after their own
+service-configured retention window, governed by Routine Workspace Retention and Issue Workspace
+Retention in §8.5, ADR 0067, and ADR 2026-09-18-0702 respectively. A non-terminal or still-active
+workspace is never a candidate.
 
 A second narrow exception applies when a Run Slot Deadline aborts `git worktree add` while preparing
 a new Issue Workspace: cleanup removes only the worktree proved absent before this preparation
@@ -3210,6 +3241,8 @@ The bootstrap slice is accepted when:
   and exposes its next clock event
 - automatic and manual Routine Workspace Retention reclaim registered terminal worktrees without
   deleting state-root evidence
+- automatic and manual Issue Workspace Retention reclaim registered terminal worktrees, preserving
+  the issue branch ref and state-root evidence
 - CLI and local status page show Projects, runs, failures, input-required events, stale state, and
   log links
 

@@ -261,6 +261,11 @@ export type ProjectState = {
   weight: number;
 };
 
+export type IssueWorkspacePruneCandidate = {
+  runId: string;
+  workspacePath: string;
+};
+
 export type RoutineFiringStatus = {
   branchName: string;
   branchRef: string;
@@ -5330,6 +5335,68 @@ export class RunStore {
     return row?.created_at;
   }
 
+  // Continuations and retries reuse the parent's workspace_path (ADR 0040),
+  // so several `runs` rows can share one path. Only the latest row per path
+  // (by updated_at) decides eligibility: a terminal row past its cutoff is a
+  // candidate only when no row sharing that path -- including a just-created
+  // continuation the ranking window has not yet observed as newest -- is
+  // still non-terminal. `state <> 'succeeded'` on the second branch keeps the
+  // two cutoffs mutually exclusive so a bucket can't silently absorb the
+  // other's rows if TERMINAL_RUN_STATES ever gains a member.
+  listIssueWorkspacePruneCandidates(input: {
+    failedBefore: string;
+    succeededBefore: string;
+  }): IssueWorkspacePruneCandidate[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id as run_id, workspace_path from (",
+          "select id, workspace_path, state, updated_at, workspace_pruned_at,",
+          "row_number() over (",
+          "partition by workspace_path order by updated_at desc, id desc",
+          ") as rn",
+          "from runs",
+          "where workspace_path is not null and workspace_path <> ''",
+          ") as ranked",
+          "where rn = 1",
+          "and workspace_pruned_at is null",
+          "and (",
+          "(state = 'succeeded' and updated_at <= @succeeded_before)",
+          "or (state <> 'succeeded'",
+          `and state in (${TERMINAL_RUN_STATES_SQL_LIST})`,
+          "and updated_at <= @failed_before)",
+          ")",
+          "and not exists (",
+          "select 1 from runs live",
+          "where live.workspace_path = ranked.workspace_path",
+          `and live.state not in (${TERMINAL_RUN_STATES_SQL_LIST})`,
+          ")",
+          "order by updated_at asc, id asc"
+        ].join(" ")
+      )
+      .all({
+        failed_before: input.failedBefore,
+        succeeded_before: input.succeededBefore
+      }) as Array<{ run_id: string; workspace_path: string }>;
+    return rows.map((row) => ({
+      runId: row.run_id,
+      workspacePath: row.workspace_path
+    }));
+  }
+
+  markIssueWorkspacePruned(input: { id: string; prunedAt: string }): boolean {
+    const result = this.database
+      .prepare(
+        [
+          "update runs set workspace_pruned_at = @pruned_at",
+          "where id = @id and workspace_pruned_at is null",
+          `and state in (${TERMINAL_RUN_STATES_SQL_LIST})`
+        ].join(" ")
+      )
+      .run({ id: input.id, pruned_at: input.prunedAt });
+    return result.changes > 0;
+  }
+
   getRun(id: string): RunDetail | undefined {
     const row = this.database
       .prepare(
@@ -6692,6 +6759,7 @@ export class RunStore {
         provider_name text,
         provider_command text,
         workspace_path text,
+        workspace_pruned_at text,
         branch_name text,
         branch_ref text,
         prompt_path text,
@@ -7124,6 +7192,14 @@ export class RunStore {
       ["runs", "issue_owner", "text"],
       ["runs", "issue_repo", "text"],
       ["runs", "provider_scope_cleanup_pending", "integer not null default 0"],
+      ["runs", "workspace_pruned_at", "text"],
+      // Defensive: workspace_path has been in the base `create table` since
+      // this table's first version, so no real database should ever reach
+      // this line missing it. It is here only so the new
+      // runs_workspace_path_idx index below cannot fail against a
+      // synthetic/partial `runs` table (see the schema-migration tests that
+      // hand-construct a minimal legacy table for one specific backfill).
+      ["runs", "workspace_path", "text"],
       [
         "tracked_pull_requests",
         "review_followup_cap_reached",
@@ -7437,6 +7513,15 @@ export class RunStore {
     this.database.exec(`
       create index if not exists runs_continuation_parent_run_id_idx
       on runs(continuation_parent_run_id);
+    `);
+
+    // listIssueWorkspacePruneCandidates partitions every row by workspace_path
+    // on each daemon tick; without an index that windowed scan degrades to a
+    // full table scan plus a temp b-tree sort as `runs` grows with every Run
+    // ever recorded.
+    this.database.exec(`
+      create index if not exists runs_workspace_path_idx
+      on runs(workspace_path, updated_at);
     `);
 
     // Runs after the ensureColumn additions above so databases created before

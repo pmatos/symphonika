@@ -94,7 +94,8 @@ while a historical firing whose kind is unknown remains conservatively protected
   except for firings whose commits-ahead evidence requires indefinite protection.
 - Failed and cancelled workspaces remain available much longer than successful workspaces.
 - Dirty terminal worktrees are reclaimed without leaving stale bare-repository registrations.
-- ADR 0025 continues to govern issue Workspaces and immediate lifecycle behavior. This ADR narrows
-  it only for terminal Routine Firing workspaces after their configured retention window.
+- ADR 0025 continues to govern immediate lifecycle behavior. This ADR narrows it only for terminal
+  Routine Firing workspaces after their configured retention window; ADR 2026-09-18-0702 separately
+  narrows it for terminal Issue Workspaces.
 - Operators who disable automatic retention accept unbounded workspace growth and must run the
   manual command themselves.

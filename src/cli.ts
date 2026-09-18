@@ -38,6 +38,7 @@ import {
 import { formatRoutineOutcomeLine } from "./routines/outcome.js";
 import type { RoutineKind, RoutineStatus } from "./routines/types.js";
 import { pruneRoutineWorkspaces } from "./routines/workspace-retention.js";
+import { pruneIssueWorkspaces } from "./issue-workspace-retention.js";
 import {
   resolveWatchdogConfig,
   RuntimeConfigReloader,
@@ -1358,7 +1359,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   program
     .command("prune-workspaces")
     .description(
-      "reclaim terminal Routine Firing workspaces eligible under the retention policy"
+      "reclaim terminal Routine Firing and Issue Workspaces eligible under the retention policy"
     )
     .option("--config <path>", "service config path")
     .option("--dry-run", "list eligible workspaces without reclaiming them")
@@ -1403,6 +1404,32 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           writeOut(program, "(no eligible Routine Firing workspaces)\n");
         }
         if (report.failures.length > 0) {
+          process.exitCode = 1;
+        }
+
+        const issueReport = await pruneIssueWorkspaces({
+          dryRun: options.dryRun === true,
+          policy: snapshot.issueWorkspaceRetention,
+          runStore: store
+        });
+        const issueEntries =
+          options.dryRun === true ? issueReport.candidates : issueReport.pruned;
+        for (const entry of issueEntries) {
+          writeOut(
+            program,
+            `${options.dryRun === true ? "would prune" : "pruned"}: ${entry.runId}  ${entry.workspacePath}\n`
+          );
+        }
+        for (const failure of issueReport.failures) {
+          writeErr(
+            program,
+            `failed: ${failure.runId}  ${failure.workspacePath}: ${failure.error}\n`
+          );
+        }
+        if (issueReport.candidates.length === 0) {
+          writeOut(program, "(no eligible Issue Workspaces)\n");
+        }
+        if (issueReport.failures.length > 0) {
           process.exitCode = 1;
         }
       } finally {

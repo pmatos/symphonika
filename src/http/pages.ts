@@ -55,6 +55,7 @@ import {
   type WatchdogConfig
 } from "../reload.js";
 import type {
+  AttemptStatus,
   ListRunsFilter,
   ProjectIssueSnapshotRow,
   ProjectLastRunStatus,
@@ -743,7 +744,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     const sections = [
       `<h1 class="page-title">Run <code>${escapeHtml(detail.id)}</code></h1>`,
       renderOutcomeBanner(detail, failureEvent, exitEvent),
-      renderResumeCommand(detail, sessionStartedEvent),
+      renderResumeCommand(detail, sessionStartedEvent, terminalAttempt),
       renderPullRequestFollowupAttention(pullRequestFollowup),
       renderWorkflowProgressAttention(buildWorkflowProgressAttention(detail)),
       renderRunSummary(detail, capContext),
@@ -7058,7 +7059,8 @@ function renderOutcomeBanner(
 // nothing to resume into.
 function renderResumeCommand(
   detail: RunStatus,
-  sessionEvent: ProviderEventRecord | undefined
+  sessionEvent: ProviderEventRecord | undefined,
+  terminalAttempt: AttemptStatus | undefined
 ): string {
   if (sessionEvent === undefined) {
     return "";
@@ -7069,6 +7071,7 @@ function renderResumeCommand(
   }
   const command = buildHumanResumeCommand({
     provider: detail.provider,
+    providerCommand: terminalAttempt?.providerCommand ?? "",
     sessionId,
     workspacePath: detail.workspacePath
   });

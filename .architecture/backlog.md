@@ -27,7 +27,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## editor-save-outcome-epilogue
 
-- **Status**: in-flight
+- **Status**: landed
 - **Score**: 22/25 (leverage 4, locality 4, blast radius 1, heat 5)
 - **PR**: #789
 - **Files**: ~5 estimated (`src/http/pages.ts`, one new module, three editor test files)
@@ -44,6 +44,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Committed**: report + reconciled backlog (`3918928`), design section (`e2a360c`), implementation + tests (`b59a5f5`), CONTEXT.md term (`446ebca`), this in-flight update.
 - **Evidence**: PR #789. Quality gate green, each step a separate command: lint, typecheck, format:check, knip, test (2938 passed / 183 files), build. Diff 5 files (estimate ~5, exact): `src/http/pages.ts`, new `src/http/save-confirm.ts`, new `tests/save-confirm.test.ts`, `CONTEXT.md`, plus `.architecture/`. **The three existing editor test files were not touched — their passing unchanged is the behaviour-preservation evidence.** Test-first: `tests/save-confirm.test.ts` was seen to fail on the absent module before it was written. No published package, wire, or CLI interface changed. `origin/main` unchanged at push (0 behind); no rebase needed. Reconciled `resolve-scheduled-dispatch-context` #764 → merged/landed; no in-flight PR blocked this run.
 - **Next**: human review of #789. `routine-editor-target-prologue` (22/25, the tied runner-up **candidate**, deferred only to keep blast off the same 3,000-line function twice in one PR) is the natural next firing.
+- **Reconciled 2026-09-21**: PR #789 merged 2026-09-18 (`2ceebe4`); status moved `in-flight` → `landed`. `src/http/save-confirm.ts` and the `Save Confirmation` CONTEXT.md term are on `main`. The named follow-up `routine-editor-target-prologue` was re-verified present at HEAD and **picked by the 2026-09-21 run**.
 
 ## routine-editor-target-prologue
 
@@ -53,7 +54,137 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Modules**: `src/http/pages.ts` — 33 lines identical modulo indentation at `POST /routines/:name/edit/preview` (2244-2276), `POST /routines/:name/edit/confirm` (2321-2353), `renderRoutineDisabledTogglePreview` (2473-2505, serving `/disable` and `/enable`)
 - **Summary**: A `resolveRoutineEditTarget(...)` returning `{kind:"ok", …} | {kind:"refused", response}` — the discriminated-result house pattern PR #764 landed — owning the 404-vs-200 refusal policy and the ADR-0076 stale-declaration guard.
 - **First seen**: 2026-09-18
-- **Reason**: Runner-up **candidate** to `editor-save-outcome-epilogue` this run at an exact 22/25 tie. Deliberately deferred, not dropped: both live in the same 3,000-line `registerPages` function in the tree's highest-churn file, so taking both in one PR would double the blast — the same split applied to `resolve-scheduled-dispatch-context` / `handle-scheduled-dispatch-error` on 2026-09-14. **The natural next firing.** Only real divergence is a parameter: the toggle's `editAction` omits the `/edit` segment (`:2499` vs `:2270`/`:2347`).
+- **Reason**: **Picked by the 2026-09-21 run** (top surviving candidate at 22/25; tied with the fresh candidate `github-backoff-ledger`, also 22/25 — within 1 point — and won the rubric's first tie-break, lower blast radius 1 vs 2). The 2026-09-18 deferral reason is discharged: PR #789 merged 2026-09-18, so taking this no longer doubles blast on `registerPages` in one PR. Friction re-verified at HEAD — the 33-line prologue is still present at `pages.ts:2119-2155`, `:2196-2232`, `:2275-2312`, identical modulo the `editAction` `/edit` segment (`:2306` vs `:2150`/`:2227`). Scope fenced: the seven `renderEditorPreview` URL-triplet sites stay out (would double the diff), and `editAction` crosses as a caller-supplied parameter rather than being normalized inside the seam — the toggle posts from the routine detail page, the text editor from the edit page, and that variance is real. Original 2026-09-18 note follows. — Runner-up **candidate** to `editor-save-outcome-epilogue` that run at an exact 22/25 tie. Deliberately deferred, not dropped: both live in the same 3,000-line `registerPages` function in the tree's highest-churn file, so taking both in one PR would double the blast — the same split applied to `resolve-scheduled-dispatch-context` / `handle-scheduled-dispatch-error` on 2026-09-14. **The natural next firing.** Only real divergence is a parameter: the toggle's `editAction` omits the `/edit` segment (`:2499` vs `:2270`/`:2347`).
+
+## github-backoff-ledger
+
+- **Status**: proposed
+- **Score**: 22/25 (leverage 4, locality 5, blast radius 2, heat 5)
+- **Files**: ~3 estimated
+- **Modules**: `src/daemon.ts` — `githubBackoffUntilByToken` (563, a `Map` declared inside the ~1,500-line `startDaemon`), `isGithubBackoffActive` (736-755), `engageGithubBackoff` (757-781), `isProjectPollable` (785-797), `partitionProjectsForPolling` (799-807); eight call sites at 835, 854, 959, 974, 1358, 1379, 1408, 1433; already-extracted pure half `src/issue-polling.ts` `backoffUntil` (1781) / `rateLimitedTokens` (1800)
+- **Summary**: A `createGithubBackoffLedger({logger, now})` returning `{isActive, engage, isPollable}` owning the ADR-0083 window lifetime, the transition-only logging rule and the unresolvable-token exemption.
+- **First seen**: 2026-09-21
+- **Reason**: **Runner-up candidate** to `routine-editor-target-prologue` this run at an exact 22/25 tie, lost on the rubric's first tie-break (blast radius 2 vs 1). Blast 2 is load-bearing and justified: the pure policy half already lives in `issue-polling.ts`, so a clean extraction spans `daemon.ts` + a new module + its test — "a module and its direct callers". Largest test-surface gain of any candidate this run: the transition-only logging rule and the `nowMs === until` boundary are currently unreachable without booting a daemon and faking GitHub. `partitionProjectsForPolling` is additionally a one-line `filter` wrapper, interface ≈ implementation. **The natural next firing.**
+
+## dispatch-provider-resolution
+
+- **Status**: proposed
+- **Score**: 21/25 (leverage 4, locality 4, blast radius 2, heat 5)
+- **Files**: ~3 estimated
+- **Modules**: `src/lifecycle/run-controller.ts` 1143-1190 (honours the state override), 3040-3080 (honours it), 3480-3510 (`executeContinuation`, omits it), 3653-3670 (`dispatchReviewFollowup`, omits it); rule restated at `src/doctor.ts:1750-1756` and as prose on `RetryPayload` at `run-controller.ts:428-440`
+- **Summary**: A `resolveDispatchProvider(providersConfig, project, state?)` returning `{provider, providerCommand, providerName} | {failure}` owning the "target state's `action.provider` else Project default" rule, the `Partial<>` command cast, and both `provider_command_missing` / `provider_not_registered` reasons.
+- **First seen**: 2026-09-21
+- **Reason**: The override rule is written out twice, deliberately omitted twice, and documented a third time as a comment — and `ContinuationPayload` carries no provider at all, so the hazard the `RetryPayload` comment names (a state declaring `action.provider: claude` in a codex project) is unguarded on the continuation path. `dispatchReviewFollowup` is safe only by an out-of-band raw-FSM refusal 25 lines earlier (3628-3638), invisible at the resolution site. Pinning tests exist for the honouring half only (`tests/daemon-dispatch.test.ts:2727`, `:3195`); the continuation path needs a characterization test first.
+
+## worktree-registration-probe
+
+- **Status**: proposed
+- **Score**: 21/25 (leverage 4, locality 5, blast radius 2, heat 4)
+- **Files**: ~5 estimated
+- **Modules**: `src/workspace.ts` 584-615 (`worktreeListLines`, `parseWorktreeEntries`), 694-709 (`isWorktreeRegistered`), 711-733 (`canonicalizePath` + its rationale comment), 959 (the already-exported `git`); `src/routines/workspace.ts` 274-292; `src/routines/workspace-retention.ts` 215-242, 256-259; `src/issue-workspace-retention.ts` 161-178, 192-195
+- **Summary**: A `worktreeRegistry(cachePath)` owning the `git worktree list --porcelain` grammar, the canonicalize-both-sides path-comparison rule, and the branch-ref association; the four hand-rolled parsers become callers.
+- **First seen**: 2026-09-21
+- **Reason**: Four hand-rolled porcelain parsers; the path-comparison rule is spelled out in prose at `workspace.ts:711-716` and obeyed by exactly one of them, the other three using bare `path.resolve`. `workspace.ts:959` already **exports** `git`, yet both retention modules define their own private four-line copy. `src/issue-workspace-retention.ts` was created 2026-09-18 (#794) by cloning `src/routines/workspace-retention.ts`, so the duplication is actively reproducing. Not picked: 21/25, and it loses the 22-tie-break at blast 2 even under a charitable heat 5.
+- **Correctness finding, recorded not fixed**: on a host whose workspace root is reached through a symlink — a case `workspace.ts` explicitly handles — the three `path.resolve` sites conclude "not registered" for a worktree git still has registered, and `reclaimRegisteredWorktree` then reports success and marks the row pruned while the worktree survives. This is a **correctness item, not a deepening candidate** (same class as `probe-shutdown-drift`); a human should schedule it. The deepening above would incidentally close it, which is *why* it is called out rather than folded in silently.
+
+## service-config-schema-twin
+
+- **Status**: proposed
+- **Score**: 21/25 (leverage 4, locality 5, blast radius 2, heat 4)
+- **Files**: ~3 estimated
+- **Modules**: `src/doctor.ts` 286-462 (+ `rejectPerProjectRoutines` 325-341, `serviceRoutineSchema` 381-419), `src/reload.ts` 174-474 (+ 1117-1133, 382-420), `src/config-schemas.ts` 1-125
+- **Summary**: Finish the migration `src/config-schemas.ts` already started — move `providerNameSchema`/`trackerSchema`/`issueFiltersSchema`/`prioritySchema`/`agentSchema`/`serviceRoutineSchema`/`rejectPerProjectRoutines` into the one designated owner so doctor and the reloader answer the same question.
+- **First seen**: 2026-09-21
+- **Reason**: The grammar is defined twice, same names, same order; `serviceRoutineSchema` (39 lines, two custom ADR-0069 error messages) and `rejectPerProjectRoutines` are byte-identical. Already drifted: `reload.ts:426-429` types `state.root` as `z.string().min(1)` with no `.passthrough()` where `doctor.ts:435-441` uses `pathStringSchema` with `.passthrough()`; `reload.ts:441-448` knows `global.pressure` (ADR 0088) and `doctor.ts` does not — so `symphonika doctor` answers a different question from the reloader, exactly what doctor exists to pre-empt. Three dedicated test files stand by (`tests/config-schemas.test.ts`, `tests/reload.test.ts`, `tests/doctor.test.ts`); a table of malformed configs asserted to produce the same verdict from both entry points is the red test and will fail on the two gaps before any refactor.
+
+## firing-lifecycle-window
+
+- **Status**: proposed
+- **Score**: 21/25 (leverage 4, locality 5, blast radius 3, heat 5)
+- **Files**: ~5 estimated
+- **Modules**: terminal-set restatements at `src/http/pages.ts` 306-310, `src/http/app.ts` 1166-1170, `src/daemon.ts` 1596-1608, inline arrays at `src/cli.ts` 1492 / 1695 / 3073; window derivations at `src/http/pages.ts` 6369-6376, `src/cli.ts` 1486-1493 / 1689-1696; precedent at `src/run-store.ts` 55-72
+- **Summary**: Export `TERMINAL_FIRING_STATES` (and a derived SQL list) beside the existing `TERMINAL_RUN_STATES`, plus a `firingLifecycleWindow(transitions)` for the started-at-first-`queued` / ended-at-last-terminal derivation.
+- **First seen**: 2026-09-21
+- **Reason**: `TERMINAL_RUN_STATES` is exported *with* a comment warning that "a copy that drifts would have each of them disagree about whether a Run is still moving", and with `TERMINAL_RUN_STATES_SQL_LIST` derived so the SQL cannot drift. The Routine-Firing side of the same vocabulary has no home: six copies of the terminal set, three copies of the window derivation, and `daemon.ts:1596-1602` hand-rolls its own set instead of importing one. `pages.ts` uses a named set while `cli.ts` uses a string array in the same expression — they would silently disagree the moment a fourth terminal state is added. Held below the pick by blast radius 3 (one set used across five files spanning store, daemon, HTTP and CLI).
+
+## pre-provider-terminal-write-trio
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
+- **Files**: ~3 estimated
+- **Modules**: `src/lifecycle/run-controller.ts` — `failFreshDispatchBeforeProvider` (1258-1391), `failScheduledRunBeforeProvider` (3203-3308), `recordStateAdvanceTerminalTarget` (3310-3414)
+- **Summary**: One owner for the *tail* of a pre-provider terminal write — create the row, `recordTerminalReason`, `updateRunState`, log, and the paired `claimLabels.applyTerminal({fsmContinuing:false, willRetry:false})` — leaving each caller its own head.
+- **First seen**: 2026-09-21
+- **Reason**: **Leverage held at 3 despite three siblings on the hottest file at the lowest blast radius**, which is what keeps it below the pick. The shared stretch is genuinely the tail; the heads diverge on real policy — claim guard and suppression check in one, `dispatchMutex` in two of three (1282, 3340, each with a comment saying it mirrors the other, while `failScheduledRunBeforeProvider` holds no mutex at all), and three different shutdown reactions (throw-and-roll-back / cancel-parent-and-log / cancel-parent-silently). A seam around the whole sequence pushes three of seven beats into per-caller hooks — the `routine-firing-settlement-sequence` failure mode. Strong pinning coverage already exists (`tests/wait-state.test.ts:2202`, `:2456`; `tests/dispatch-fresh-batch.test.ts:802`, `:880`; `tests/dispatch-fresh-fail-suppression-race.test.ts:135-146`). **Note the missing-mutex asymmetry is worth a separate correctness look regardless of whether this deepening lands.**
+
+## workflow-reload-degradation-policy
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
+- **Files**: ~2 estimated
+- **Modules**: `src/lifecycle/run-controller.ts` 2911-2958 (reload threw), 2959-2992 (reload returned errors), 4611-4638 (`runAttemptLifecycle` silently skips the FSM overlay), duplicated `LoadedWorkflow` literal at 5384-5399 / 5440-5451
+- **Summary**: A `loadWorkflowOrLastKnownGood(workflowRef): {workflow} | {reason}` owning SPEC §5.2's "a transient malformed edit must not fail an otherwise valid mid-walk run", which today has three different answers in one file.
+- **First seen**: 2026-09-21
+- **Reason**: The two `executeStateAdvance` blocks are structurally identical, differing only in how the reason string is built and one word in the log message ("reload failed" at 2953 vs "reload invalid" at 2989); `runAttemptLifecycle` answers by doing nothing. **Sequence after `dispatch-provider-resolution`**, which deletes the provider-identity re-derivation at 2926-2930 and 2963-2967 outright. `tests/daemon-dispatch.test.ts:2873` covers the 2959 branch; the throw branch and the silent-skip are uncovered — characterize both first.
+
+## agent-state-prompt-reference
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 4, locality 5, blast radius 2, heat 3)
+- **Files**: ~3 estimated
+- **Modules**: `src/workflow/fsm-expansion.ts` `validateExpandedWorkflowReferences` (152-175), `collectWorkflowPromptConventionWarnings` (189-215); `src/lifecycle/run-controller.ts` 4709-4732
+- **Summary**: An `agentPromptReferences(workflow, workflowPath)` enumerating `{stateId, authoredPath, promptPath}` once; the validator maps it to errors, the doctor to warnings, `runAttemptLifecycle` looks up its own state.
+- **First seen**: 2026-09-21
+- **Reason**: Three independent enumerations of where an agent state's prompt lives, each re-deriving `path.dirname(workflowPath)` and resolving against it; the "prompt not found" message is duplicated verbatim (`fsm-expansion.ts:171`, `run-controller.ts:4728`). Already drifted on the guard: `fsm-expansion` tests `typeof action.prompt !== "string"`, `run-controller` tests `!== undefined`. A change to prompt resolution desynchronizes validation from execution — the validator passes and the run fails at attempt time. Held at heat 3 (`fsm-expansion.ts` took 6 of the last 120 commits).
+
+## tracked-pull-request-column-projection
+
+- **Status**: proposed
+- **Score**: 19/25 (leverage 2, locality 5, blast radius 1, heat 5)
+- **Files**: ~1 estimated
+- **Modules**: `src/run-store.ts` 6136-6147, 6201-6209 (alias-prefixed), 6230-6240, 6256-6266; row type 931-950; mapper `mapTrackedPullRequestRow` 8335-8350
+- **Summary**: A `trackedPullRequestColumns(alias?)` helper next to the row type, removing four hand-restatements of the 17-column projection that must feed the mapper.
+- **First seen**: 2026-09-21
+- **Reason**: **Leverage 2** — callers do the same work afterwards; this is a shared SQL string, closer to DRY than to depth, and the 2026-09-11 run already deliberately deferred exactly this ("a shared column constant is a pure DRY cleanup"). Recorded because it is the cheapest item on the list and the table is actively growing (four commits in the last twenty on this file), not because it is the most valuable. A missed column throws only at runtime.
+
+## routine-name-uniqueness-ledger
+
+- **Status**: proposed
+- **Score**: 18/25 (leverage 3, locality 4, blast radius 2, heat 4)
+- **Files**: ~3 estimated
+- **Modules**: `src/doctor.ts` `validateServiceRoutines` (1563-1708; `seenNames` 1572, partial-name reservation 1621-1634), `src/reload.ts` `readRoutineDeclarations` (1517-1629; `seenNames` 1533, carry-forward reservation 1557-1575, partial-name 1576-1595); natural home `src/routines/declaration-loader.ts`
+- **Summary**: A `RoutineNameLedger` (reserve / reserveRecovered / duplicateMessage) owning ADR-0069's "a routine name is globally unique across the service, and a broken declaration still reserves the name it recovered".
+- **First seen**: 2026-09-21
+- **Reason**: Implemented twice, with the same six-line explanatory comment pasted into both and an admission comment at `doctor.ts:1579-1583`. Already diverged on *which* name an invalid file reserves: `reload.ts` reserves the carried-forward previous name when one exists and falls back to `partialName` only otherwise; `doctor.ts` has no carry-forward concept and always reserves `partialName`. For a config with one broken file whose name changed in the broken edit, doctor and the reloader emit different duplicate-name verdicts. Same two-entry-point drift class as `service-config-schema-twin`, and worth sequencing with it.
+
+## workspace-retention-prune-twin
+
+- **Status**: proposed
+- **Score**: 17/25 (leverage 3, locality 4, blast radius 3, heat 4)
+- **Files**: ~5 estimated (both modules, a new shared driver, plus `src/daemon.ts` / `src/cli.ts` report-type touch-ups)
+- **Modules**: `src/routines/workspace-retention.ts` 36-96, 244-274; `src/issue-workspace-retention.ts` 24-91, 180-212; admission comment at `src/issue-workspace-retention.ts:134-138`
+- **Summary**: One driver parameterized by `{listCandidates, plan, reclaim, markPruned, idKey}` owning the never-abort-the-pass rule and the `{candidates, pruned, failures}` report shape.
+- **First seen**: 2026-09-21
+- **Reason**: `exists`, `git`, `cutoff` and `isNodeError` are byte-identical in both files, and the concurrency comment is the same paragraph typed twice; the prune loops differ only in the id field name (`firingId` vs `runId`) and the store method. Held below the pick by blast radius 3 — the report types reach `daemon.ts` and `cli.ts` (`prune-workspaces`, `cli.ts:1360-1440`). **Sequence after `worktree-registration-probe`**, which makes this nearly free. Distinct from that candidate: this is the candidate-loop/report shape, that one is the git-registry probe.
+
+## daemon-retention-pass-epilogue
+
+- **Status**: proposed
+- **Score**: 17/25 (leverage 2, locality 4, blast radius 1, heat 5)
+- **Files**: ~1 estimated
+- **Modules**: `src/daemon.ts` 1224-1254 (the two back-to-back `enabled && mutex.tryAcquire() → try/finally release` gates), `runAutomaticRoutineWorkspaceRetention` 3077-3110, `runAutomaticIssueWorkspaceRetention` 3112-3145
+- **Summary**: One `runAutomaticRetentionPass` owning the swallow-and-log discipline — pruned ids at `info`, each failure at `warn` with `{err, <id>, workspacePath}`, a whole-pass throw at `error`, never escaping into the tick.
+- **First seen**: 2026-09-21
+- **Reason**: **Leverage 2** — two 33-line functions differing only in the prune fn, the report id field and three log strings, but only two call sites, so the interface would shrink while callers do the same work. Near-zero risk and directly pinnable (the daemon injects both prune fns, so a throwing fake pins the swallow behaviour), but modest payoff. Naturally lands with `workspace-retention-prune-twin`, not alone.
+
+## watchdog-sample-subject-store
+
+- **Status**: dropped
+- **Score**: n/a (leverage 2 — the per-subject guard would move, not concentrate)
+- **Modules**: `src/run-store.ts` `getWatchdogSample`/`getRoutineWatchdogSample` (1918-1932), `upsertWatchdogSample`/`upsertRoutineWatchdogSample` (1934-2000), `rememberWatchdogTurnIds`/`rememberRoutineWatchdogTurnIds` (2043-2088), `isCurrentWatchdogGeneration` vs `isRoutineWatchdogCandidate` (2090-2098)
+- **Summary**: A private `persistWatchdogSample({table, historyTable, keyColumn, keyValue, sample, guard})` unifying the store half of the Watchdog Subject pair.
+- **First seen**: 2026-09-21
+- **Reason**: Hard filter — **leverage 2**, and the liveness guard genuinely differs per subject: the Run path fences on `watchdog_generation` alone (accepting a sample for a row that is cancel-requested or no longer `running`), the Routine path checks `state='running' and cancel_requested=0` with no generation fence. Threading that through as a closure parameter moves the asymmetry into the call sites rather than concentrating it — the SQL is *already* shared via `watchdogSampleSelectSql/UpsertSql/HistorySql(table, keyColumn)`, and `src/lifecycle/watchdog-subject.ts` already owns the run-vs-firing variance above the store. **Separately worth a human's look**: neither file states which guard is the intended contract, so "when may a watchdog sample be persisted?" has two answers today. That is a correctness question, not a deepening one.
 
 ## routine-firing-terminal-write
 
@@ -375,12 +506,12 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 ## snapshot-search
 
 - **Status**: proposed
-- **Score**: 15/25 (leverage 2, locality 3, blast radius 2, heat 4)
+- **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5) — **re-scored 2026-09-21 from 15/25 (leverage 2, locality 3, blast radius 2, heat 4)**
 - **Files**: ~2 estimated
-- **Modules**: `src/http/pages.ts` (`searchIssueSnapshots` at 4058-4127, `searchPullRequestSnapshots` at 5078)
-- **Summary**: Snapshot filter/query/sort logic sits in the HTTP layer and reaches past the store seam (iterating `listProjectIssueSnapshots`, re-fetching per row, calling `resolveClaimedRunId` inline).
+- **Modules**: `src/http/pages.ts` — `searchIssueSnapshots` (4024-4093) vs `searchPullRequestSnapshots` (5044-5103); filter-form renderers 4120-4139 vs 5105-5126; page renderers 4179-… vs 5128-…
+- **Summary**: A shared browse *shell* owning the four cross-cutting rules the two polled-snapshot surfaces both restate — narrow `projectNames` by `filters.project`, lowercase-`q` substring match on `title`, stamp `preRestart`, sort by `projectName.localeCompare` then descending number — plus the filter-form shell; the domain predicates stay per-surface.
 - **First seen**: 2026-08-31
-- **Reason**: Borderline deletion test — much is genuinely presentation-shaped, so extraction risks moving complexity to route handlers rather than concentrating it. Couples into `live-run-ownership-registry`; revisit after that lands.
+- **Reason**: The 2026-08-31 entry scored this 15/25 on a borderline deletion test — correctly, for the *wide* seam it described (pushing verdict/label vs origin/tracking predicates into a shared driver as six callbacks only moves complexity). **Narrowing the seam to the shell and the four shared rules is what lifts it to 20/25**, and heat rose because `pages.ts` took 30 of the last 120 commits. Evidence the shape was cloned rather than designed: both input types declare `nowMs: number` and neither body ever reads it (4027, 5047). Still not picked — 2 points behind.
 
 ## watchdog-subject-port
 

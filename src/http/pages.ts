@@ -92,7 +92,6 @@ import {
 } from "../routines/evidence.js";
 import type {
   RoutineFiringState,
-  RoutineKind,
   RoutinePullRequestStatus,
   RoutineState,
   RoutineStatus

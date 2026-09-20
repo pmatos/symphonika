@@ -883,3 +883,77 @@ the import, and watching the four named behaviours fail — not an import error.
 
 ### Adjudication
 
+Adjudicated against the five criteria in order. The criteria were stated in-transcript before the
+advisor was consulted, and the three designs were committed (`70c0416`) before adjudication began.
+
+**1. Depth** — near-tie between B and C; **A is out here.** B's call site is narrowest (two fields
+plus bound deps); C's is four fields, `reopenAt`'s two values, and one `refuseRoutineEdit` line. A is
+clearly widest: the caller constructs a six-member port table, and A concedes "~55 lines of types for
+~35 lines of body" — the shallow-module signature this whole exercise exists to remove. B and C do
+not separate.
+
+**2. Locality** — **C.** B moves the stale guard in; C moves the whole name→group→declaration→URL
+stack. The *Problem* section above is that the collaborators are individually deep and the
+**composition** has no owner. C gives the composition an owner; B gives it a caller.
+
+**3. Seam placement** — **C, decisively.** This is the criterion that settles it. A's six ports and
+B's five deps each have exactly one implementation, forever — both designs say so in their own words
+("indirection, not polymorphism"). Against the `codebase-design` rule *one adapter is a hypothetical
+seam, two is a real one*, A creates six hypothetical seams and B five. C has one dependency,
+satisfied structurally with no adapter and no cast, and the one thing that genuinely varies
+(`reopenAt` — two values, two real call shapes) is the one thing its interface exposes.
+
+**4. Test surface** — **C, decisively.** **B disqualifies itself**: its own design says its first
+test is "a characterization test that runs green against HEAD… not red-by-construction", which is
+not what test-first requires. A's test asserts `editAction` against a stub that **re-implements
+`routineQuerySuffix` inside the test file** — it would pass whether or not the real rule survived the
+move. C's cases exercise the real suffix rule through the real interface.
+
+**5. Blast radius** — never fired. C is not "otherwise equal"; it is ahead on 2, 3 and 4.
+
+**Winner: Design C.** Runner-up **design**: **B**, which lost on seam placement (five deps with one
+implementation each) and on its own admission that its first test cannot be red. Design A placed
+third, losing at criterion 1.
+
+**Two amendments applied to C before implementation:**
+
+1. **`src/http/form-fields.ts` was dropped.** C's own trade-off section calls the third module the
+   cheapest of three bad options; a private, non-exported four-line `readOptionalFormField` narrowing
+   inside `routine-resolution.ts` — B's answer — is cheaper still, and knip is indifferent to a
+   non-exported symbol. This is what holds the diff at **3 files, exactly the scored estimate**.
+2. **The relocation was verified verbatim before being committed to**, because a cascade would have
+   blown the estimate. Grep confirmed `RoutineGroup` and `RoutineDeclarationView` depend only on
+   `RoutineKind`/`RoutineStatus` from `src/routines/types.js`, so nothing else had to move;
+   `routineQuerySuffix`'s five other callers in `pages.ts` are plain calls, and `groupRoutinesByName`'s
+   three are too. Had it dragged more than the six named symbols, the fallback was B's shape.
+
+### Implementation notes
+
+**Test-first, and the red was behavioural.** `src/http/routine-resolution.ts` was created with the
+real signature and a `throw new Error("not implemented")` body and the import wired into `pages.ts`
+*before* the test was written, so the red is the ten named behaviours failing, not a module-resolution
+error: `Tests 10 failed (10)`, each at `routine-resolution.ts:224` — the `throw`.
+
+**The test was mutation-checked**, because a passing test is not evidence it discriminates:
+
+| Mutation | Result |
+|---|---|
+| Collapse both refusals to `{kind:"not_found", status:404}` | **1 failure**, exactly `refuses an ambiguous name with the disambiguation page at 200, not 404` |
+| Normalize `editAction` to always carry `/edit` | **2 failures**, exactly `reopens the disable/enable toggle at /routines/:name, without /edit` and `refuses at 409 when the name now resolves to a different declaration` |
+
+Both mutations were reverted and the suite re-run green. The two named mutations are the
+wrong-but-plausible implementations this seam invites.
+
+**Behaviour preservation.** The four existing routine-editor test files
+(`routine-declaration-editor`, `routine-declaration-editor-toggle`, `routine-lifecycle-controls`,
+`routine-config-editor`) and `save-confirm` were **not touched** — their passing unchanged is the
+evidence. All three handler tails are byte-identical.
+
+**Empirical refinement during implementation.** The confirm route restated the *same* `editAction`
+template **twice** in one handler (the stale check and the `confirmSave` call), and composed
+`savedRedirect` from a third `routineQuerySuffix(...)`. Returning `editAction` and `querySuffix` from
+the seam collapses all three; the design predicted two.
+
+**Diff**: 3 files — new `src/http/routine-resolution.ts`, new `tests/routine-resolution.test.ts`,
+and `src/http/pages.ts` at **+74 / −251**. No published package, wire, or CLI interface changed.
+

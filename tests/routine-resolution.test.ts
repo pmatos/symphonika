@@ -83,9 +83,7 @@ describe("resolveRoutineEditTarget", () => {
     const refusal = (result as { refusal: RoutineEditRefusal }).refusal;
     expect(refusal.kind).toBe("ambiguous");
     expect(refusal.status).toBe(200);
-    expect(
-      refusal.kind === "ambiguous" ? refusal.groups.length : 0
-    ).toBe(2);
+    expect(refusal.kind === "ambiguous" ? refusal.groups.length : 0).toBe(2);
   });
 
   it("refuses a name that resolves to nothing at 404", () => {

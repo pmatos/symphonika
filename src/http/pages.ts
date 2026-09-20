@@ -38,6 +38,16 @@ import {
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
 import { formatPullRequestReference } from "../notifications/message.js";
 import { createSaveConfirmer } from "./save-confirm.js";
+import {
+  groupRoutinesByName,
+  resolveNamedRoutineGroup,
+  resolveRoutineDeclaration,
+  resolveRoutineEditTarget,
+  routineQuerySuffix,
+  type RoutineDeclarationView,
+  type RoutineEditRefusal,
+  type RoutineGroup
+} from "./routine-resolution.js";
 import type { ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
@@ -2121,38 +2131,17 @@ export function registerPages(options: RegisterPagesOptions): void {
     async (context) => {
       const name = context.req.param("name");
       const body = await context.req.parseBody();
-      const projectParam = readOptionalFormField(body, "project_param");
-      const expectedSourcePath = readOptionalFormField(
+      const target = resolveRoutineEditTarget({
         body,
-        "expected_source_path"
-      );
-      const includeInactive =
-        readOptionalFormField(body, "include_inactive") === "true";
-      const resolved = resolveNamedRoutineGroup(
-        options.runStore,
         name,
-        projectParam,
-        includeInactive
-      );
-      if (resolved.kind !== "ok") {
-        return context.html(
-          renderUneditableRoutine(name, resolved),
-          resolved.kind === "ambiguous" ? 200 : 404
-        );
-      }
-      const declaration = resolveRoutineDeclaration(
-        options.runStore,
-        resolved.group
-      );
-      const staleDeclarationResponse = checkStaleRoutineDeclaration(context, {
-        declaration,
-        editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
-        expectedSourcePath,
-        name
+        reopenAt: "editor",
+        runStore: options.runStore
       });
-      if (staleDeclarationResponse !== undefined) {
-        return staleDeclarationResponse;
+      if (target.kind === "refused") {
+        return refuseRoutineEdit(context, name, target.refusal);
       }
+      const { declaration, expectedSourcePath, includeInactive, projectParam } =
+        target;
 
       const content = readRequiredFormField(body, "content");
       const expectedContentHash = readRequiredFormField(
@@ -2198,38 +2187,23 @@ export function registerPages(options: RegisterPagesOptions): void {
     async (context) => {
       const name = context.req.param("name");
       const body = await context.req.parseBody();
-      const projectParam = readOptionalFormField(body, "project_param");
-      const expectedSourcePath = readOptionalFormField(
+      const target = resolveRoutineEditTarget({
         body,
-        "expected_source_path"
-      );
-      const includeInactive =
-        readOptionalFormField(body, "include_inactive") === "true";
-      const resolved = resolveNamedRoutineGroup(
-        options.runStore,
         name,
-        projectParam,
-        includeInactive
-      );
-      if (resolved.kind !== "ok") {
-        return context.html(
-          renderUneditableRoutine(name, resolved),
-          resolved.kind === "ambiguous" ? 200 : 404
-        );
-      }
-      const declaration = resolveRoutineDeclaration(
-        options.runStore,
-        resolved.group
-      );
-      const staleDeclarationResponse = checkStaleRoutineDeclaration(context, {
-        declaration,
-        editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
-        expectedSourcePath,
-        name
+        reopenAt: "editor",
+        runStore: options.runStore
       });
-      if (staleDeclarationResponse !== undefined) {
-        return staleDeclarationResponse;
+      if (target.kind === "refused") {
+        return refuseRoutineEdit(context, name, target.refusal);
       }
+      const {
+        declaration,
+        editAction,
+        expectedSourcePath,
+        includeInactive,
+        projectParam,
+        querySuffix
+      } = target;
 
       const content = readRequiredFormField(body, "content");
       const expectedContentHash = readRequiredFormField(
@@ -2238,7 +2212,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
       return await confirmSave(context, {
         content,
-        editAction: `/routines/${encodeURIComponent(name)}/edit${routineQuerySuffix(projectParam, includeInactive)}`,
+        editAction,
         expectedContentHash,
         filePath: declaration.sourcePath,
         kind: "routine_declaration",
@@ -2260,7 +2234,7 @@ export function registerPages(options: RegisterPagesOptions): void {
             projectParam,
             reviewAction: `/routines/${encodeURIComponent(name)}/edit`
           }),
-        savedRedirect: `/routines/${encodeURIComponent(name)}${routineQuerySuffix(projectParam, includeInactive)}`
+        savedRedirect: `/routines/${encodeURIComponent(name)}${querySuffix}`
       });
     }
   );
@@ -2278,38 +2252,18 @@ export function registerPages(options: RegisterPagesOptions): void {
     disabled: boolean
   ): Promise<Response> {
     const body = await context.req.parseBody();
-    const projectParam = readOptionalFormField(body, "project_param");
-    const expectedSourcePath = readOptionalFormField(
+    const target = resolveRoutineEditTarget({
       body,
-      "expected_source_path"
-    );
-    const includeInactive =
-      readOptionalFormField(body, "include_inactive") === "true";
-    const resolved = resolveNamedRoutineGroup(
-      options.runStore,
       name,
-      projectParam,
-      includeInactive
-    );
-    if (resolved.kind !== "ok") {
-      return context.html(
-        renderUneditableRoutine(name, resolved),
-        resolved.kind === "ambiguous" ? 200 : 404
-      );
-    }
-    const declaration = resolveRoutineDeclaration(
-      options.runStore,
-      resolved.group
-    );
-    const staleDeclarationResponse = checkStaleRoutineDeclaration(context, {
-      declaration,
-      editAction: `/routines/${encodeURIComponent(name)}${routineQuerySuffix(projectParam, includeInactive)}`,
-      expectedSourcePath,
-      name
+      // Not "editor": this form posts from the routine detail page, so a
+      // refusal reopens that, not the raw-text editor.
+      reopenAt: "routine",
+      runStore: options.runStore
     });
-    if (staleDeclarationResponse !== undefined) {
-      return staleDeclarationResponse;
+    if (target.kind === "refused") {
+      return refuseRoutineEdit(context, name, target.refusal);
     }
+    const { declaration, includeInactive, projectParam } = target;
     const onDisk = await readFile(declaration.sourcePath, "utf8").catch(
       () => null
     );
@@ -5431,36 +5385,6 @@ function renderPullRequestDetailPage(input: {
 // (skip counters, firing history, latest outcome) moves to /routines/:name
 // (#304); this row only needs enough to answer "is it scheduled, and when
 // does it next run."
-type RoutineGroup = {
-  kind: RoutineKind;
-  name: string;
-  scheduleAt: string | null;
-  scheduleCron: string | null;
-  scheduleTz: string | null;
-  targets: RoutineStatus[];
-};
-
-function groupRoutinesByName(routines: RoutineStatus[]): RoutineGroup[] {
-  const byKey = new Map<string, RoutineGroup>();
-  for (const routine of routines) {
-    const key = `${routine.name} ${routine.sourcePath}`;
-    let group = byKey.get(key);
-    if (group === undefined) {
-      group = {
-        kind: routine.kind,
-        name: routine.name,
-        scheduleAt: routine.scheduleAt,
-        scheduleCron: routine.scheduleCron,
-        scheduleTz: routine.scheduleTz,
-        targets: []
-      };
-      byKey.set(key, group);
-    }
-    group.targets.push(routine);
-  }
-  return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
 // Widened past RoutineGroup so #304's declaration card can format a
 // specific resolved target's schedule (see resolveRoutineDeclaration)
 // without a duplicate copy of this two-line rule.
@@ -5562,36 +5486,6 @@ function renderRoutineDisambiguation(
 // POST .../edit/preview, POST .../edit/confirm) so the same name+project
 // disambiguation rules apply everywhere a routine is looked up by name —
 // previously duplicated inline in /routines/:name alone.
-function resolveNamedRoutineGroup(
-  runStore: RunStore,
-  name: string,
-  projectParam: string | undefined,
-  includeInactive: boolean
-):
-  | { kind: "not_found" }
-  | { groups: RoutineGroup[]; kind: "ambiguous" }
-  | { group: RoutineGroup; kind: "ok" } {
-  const groups = groupRoutinesByName(
-    runStore.listRoutines({ includeInactive })
-  ).filter((group) => group.name === name);
-
-  if (groups.length === 0) {
-    return { kind: "not_found" };
-  }
-  if (projectParam !== undefined) {
-    const group = groups.find((candidate) =>
-      candidate.targets.some(
-        (target: RoutineStatus) => target.projectName === projectParam
-      )
-    );
-    return group === undefined ? { kind: "not_found" } : { group, kind: "ok" };
-  }
-  if (groups.length === 1) {
-    return { group: groups[0]!, kind: "ok" };
-  }
-  return { groups, kind: "ambiguous" };
-}
-
 function routineSelectionRequiresInactive(
   group: RoutineGroup,
   projectParam: string | undefined
@@ -5645,70 +5539,43 @@ function renderUneditableRoutine(
   );
 }
 
-type RoutineDeclarationView = {
-  allowOverlap: boolean;
-  catchUp: string;
-  invalid: boolean;
-  kind: RoutineKind;
-  prompt: string | null;
-  provider: string | null;
-  scheduleAt: string | null;
-  scheduleCron: string | null;
-  scheduleTz: string | null;
-  sourcePath: string;
-};
-
-// The declaration (prompt, kind, provider, schedule, allowOverlap,
-// catchUp, sourcePath) is materialized identically on every target row for
-// the same (name, sourcePath) group (ADR 0069), so any one *valid* target
-// carries the full declaration. 'invalid' targets are placeholder stubs
-// (upsertInvalidRoutineStub writes prompt_body/schedule_at as '') and are
-// tried last, so one target's reload failure doesn't blank out a sibling
-// target's real schedule/prompt — the #304 AC: "an invalid declaration
-// shows the reload error without losing sibling schedule state." Only when
-// every target is invalid or inactive does this fall back to the group's
-// own bare fields, with prompt unavailable.
-function resolveRoutineDeclaration(
-  runStore: RunStore,
-  group: RoutineGroup
-): RoutineDeclarationView {
-  const ordered = [
-    ...group.targets.filter((target) => target.state !== "invalid"),
-    ...group.targets.filter((target) => target.state === "invalid")
-  ];
-  for (const target of ordered) {
-    const detail = runStore.getRoutine({
-      name: target.name,
-      projectName: target.projectName
-    });
-    if (detail !== undefined) {
-      return {
-        allowOverlap: detail.allowOverlap,
-        catchUp: detail.catchUp,
-        invalid: target.state === "invalid",
-        kind: detail.kind,
-        prompt: detail.prompt === "" ? null : detail.prompt,
-        provider: detail.provider,
-        scheduleAt: detail.scheduleAt,
-        scheduleCron: detail.scheduleCron,
-        scheduleTz: detail.scheduleTz,
-        sourcePath: detail.sourcePath
-      };
+// The one point where the routine-editor prologue re-enters HTTP.
+// RoutineEditRefusal already decided which page and which status
+// (src/http/routine-resolution.ts); this only picks the renderer. It lives
+// here rather than behind that seam because renderUneditableRoutine reaches
+// renderRoutineDisambiguation, a page shared with GET /routines/:name.
+// The `never` default is load-bearing: a fourth refusal reason added to the
+// union is a compile error here, not a silently unhandled branch.
+function refuseRoutineEdit(
+  context: Context,
+  name: string,
+  refusal: RoutineEditRefusal
+): Response {
+  switch (refusal.kind) {
+    case "declaration_changed":
+      return context.html(
+        layout(
+          "Save refused: Routine declaration changed",
+          renderRoutineDeclarationChangedNotice({
+            actualSourcePath: refusal.actualSourcePath,
+            editAction: refusal.editAction,
+            expectedSourcePath: refusal.expectedSourcePath,
+            name
+          })
+        ),
+        refusal.status
+      );
+    case "ambiguous":
+    case "not_found":
+      return context.html(
+        renderUneditableRoutine(name, refusal),
+        refusal.status
+      );
+    default: {
+      const unreachable: never = refusal;
+      return unreachable;
     }
   }
-  const [representative] = group.targets;
-  return {
-    allowOverlap: representative?.allowOverlap ?? false,
-    catchUp: representative?.catchUp ?? "skip",
-    invalid: representative?.state === "invalid",
-    kind: group.kind,
-    prompt: null,
-    provider: representative?.provider ?? null,
-    scheduleAt: representative?.scheduleAt ?? null,
-    scheduleCron: representative?.scheduleCron ?? null,
-    scheduleTz: representative?.scheduleTz ?? null,
-    sourcePath: representative?.sourcePath ?? "-"
-  };
 }
 
 function errorMessage(error: unknown): string {
@@ -5764,50 +5631,6 @@ function readRequiredFormField(
 // resolves to a different declaration file than the one the form was
 // opened for (e.g. the on-disk declaration was replaced between GET and
 // POST), rather than silently writing to whatever it resolves to now.
-function checkStaleRoutineDeclaration(
-  context: Context,
-  input: {
-    declaration: RoutineDeclarationView;
-    editAction: string;
-    expectedSourcePath: string | undefined;
-    name: string;
-  }
-): Response | undefined {
-  if (
-    input.expectedSourcePath === undefined ||
-    input.declaration.sourcePath === input.expectedSourcePath
-  ) {
-    return undefined;
-  }
-  return context.html(
-    layout(
-      "Save refused: Routine declaration changed",
-      renderRoutineDeclarationChangedNotice({
-        actualSourcePath: input.declaration.sourcePath,
-        editAction: input.editAction,
-        expectedSourcePath: input.expectedSourcePath,
-        name: input.name
-      })
-    ),
-    409
-  );
-}
-
-function routineQuerySuffix(
-  projectParam: string | undefined,
-  includeInactive: boolean
-): string {
-  const params = new URLSearchParams();
-  if (projectParam !== undefined) {
-    params.set("project", projectParam);
-  }
-  if (includeInactive) {
-    params.set("include_inactive", "true");
-  }
-  const query = params.toString();
-  return query === "" ? "" : `?${query}`;
-}
-
 // Shared by every #307 editor (routine declaration, workflow contract,
 // service config): the raw-text-with-hidden-hash form each GET .../edit
 // route renders. blastRadiusHtml is caller-rendered rather than a fixed

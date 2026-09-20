@@ -761,4 +761,125 @@ Two further reasons the pick is the right one to take now, neither of which ente
 
 ## Design
 
-Written at step 4 — see below.
+Three interfaces were produced in parallel by sub-agents, each briefed to be *radically* different:
+ports-and-adapters free function (A), factory bound once in `registerPages` (B), and minimal pure
+surface with HTTP kept out (C). All three were written down here before adjudication.
+
+Common to all three: the seam returns a discriminated result (the `{kind:"ok"} | {kind:"refused"}`
+house pattern from #764/#789), `editAction` is caller-supplied rather than normalized, and the
+`ambiguous → 200` / `not_found → 404` rule moves inside.
+
+### Design A — ports-and-adapters, exported free function
+
+`src/http/routine-edit-target.ts` exporting
+`resolveRoutineEditTarget<Declaration, Group>(context, {editActionPath, name, ports, runStore})`,
+`async`, returning `{kind:"refused", response} | {kind:"ok", body, declaration, expectedSourcePath,
+includeInactive, projectParam}`.
+
+**Interface.** Six collaborators cross as a named `RoutineEditTargetPorts` table — `checkStale`,
+`querySuffix`, `readField`, `renderRefusal`, `resolveDeclaration`, `resolveGroup` — declared once in
+`pages.ts` as a module-scope `const` whose every value is a bare identifier (no wrapper lambdas).
+Generic in `Group`/`Declaration` so `RoutineGroup` and `RoutineDeclarationView` stay unexported.
+`runStore` is deliberately *outside* `ports` so the table can be a `const` rather than a closure.
+`editAction` is an input-derived internal: the caller supplies the stem (`/routines/:name/edit` or
+`/routines/:name`), the module appends `querySuffix(...)` because only it has read the body.
+
+**Usage.** Each site: 33 lines → 12, five call arguments plus the shared port table. All three
+handler tails stay byte-identical. `pages.ts` −63 lines; total `src/**` lines rise (~100-line module).
+
+**Hides.** The three form-field names, the beat ordering, the 200/404 policy, the `editAction`
+assembly, and that a stale refusal is a short-circuit.
+
+**Caller must learn.** Context + name + runStore + refusal stem; the six-member port table; the
+`refused`/`ok` contract; the five carried values; that only three body fields are consumed.
+
+**Dependency strategy.** Everything crosses as an explicit port; nothing is closed over. No HTML in
+the new module — `renderRefusal` returns a `string`, `checkStale` returns its own 409 `Response`.
+
+**Trade-offs (its own words).** "Two of six ports are pure functions with no environment… a reviewer
+is entitled to call it noise." "The interface is nearly as large as the implementation — ~55 lines of
+types for ~35 lines of body." Its unit test stubs `querySuffix`/`readField`/`renderRefusal`, so the
+`editAction` assertion is made against the test's own re-implementation of `routineQuerySuffix`
+rather than the real rule. **Blast radius: 3 files.**
+
+### Design B — factory bound once in `registerPages`
+
+`createRoutineEditTargetResolver<Group, Declaration>(deps)` in `src/http/routine-edit-target.ts`,
+returning `(context, {editAction, name}) => Promise<{kind:"refused", response} | {kind:"ok", target}>`.
+Deliberately a sibling of `createSaveConfirmer` (`src/http/save-confirm.ts`), bound one line below it.
+
+**Interface.** Five deps bound once — `layout`, `renderUneditable`, `resolveDeclaration`,
+`resolveGroup`, `runStore` — all passed by reference, unchanged. Per-request payload is two fields.
+`editAction` crosses as a **callback** `({includeInactive, projectParam}) => string`, the direct
+sibling of `SaveConfirmation.renderInvalid`, because the query suffix depends on form fields only
+the module has read. `checkStaleRoutineDeclaration` and `renderRoutineDeclarationChangedNotice` are
+**moved into** the module, so it owns the ADR-0076 guard outright rather than calling it.
+
+**Usage.** One 8-line binding in `registerPages`; each site 33 lines → 10. `pages.ts` ≈ −97 lines.
+The confirm site additionally drops its third restatement of the `editAction` template.
+
+**Hides.** The wire contract, the 200/404 rule, the beat ordering, the *whole* stale guard (its 409,
+its title, its notice body, and that `expectedSourcePath === undefined` means "no guard"), and the
+run-store plumbing.
+
+**Caller must learn.** Four things: call it with `(context, {editAction, name})`; `editAction` is a
+function of the body-derived values; on `!== "ok"` return `response` unexamined; on `"ok"` the target
+carries `body`, `declaration`, `editAction`, and the three form-derived values.
+
+**Trade-offs (its own words).** "Four of the five deps have exactly one implementation, forever. That
+is indirection, not polymorphism." The binding "converts a unit-testable function into one reachable
+only through `createHttpApp`" — and because four deps are unexported functions inside `pages.ts`, a
+module-level test cannot construct them at all. Consequently its **first test is route-level and
+explicitly a characterization test that runs green against HEAD**: "It is not red-by-construction."
+The generics also break the `Parameters<Confirmer>[1]` trick the `save-confirm` precedent uses.
+**Blast radius: 3 files.**
+
+### Design C — minimal pure surface, HTTP kept out
+
+`src/http/routine-resolution.ts` exporting a **synchronous, Hono-free**
+`resolveRoutineEditTarget({body, name, reopenAt, runStore})` returning
+`{kind:"ok", declaration, editAction, expectedSourcePath, includeInactive, projectParam, querySuffix}`
+| `{kind:"refused", refusal}`, where `RoutineEditRefusal` is a **data** union carrying its own status:
+`{kind:"ambiguous", groups, status:200}` | `{kind:"not_found", status:404}` |
+`{kind:"declaration_changed", actualSourcePath, editAction, expectedSourcePath, status:409}`.
+
+**Interface.** One dependency: `runStore`, narrowed to a two-method `RoutineDeclarationReader`
+(`getRoutine`, `listRoutines`) that the real `RunStore` satisfies structurally with no adapter and no
+cast. `editAction` crosses as `reopenAt: "editor" | "routine"` — two self-describing values rather
+than a string, a path fragment, or a callback. HTTP re-enters at exactly one place: a 21-line private
+`refuseRoutineEdit(context, name, refusal)` adapter left in `pages.ts`, because
+`renderUneditableRoutine` reaches `renderRoutineDisambiguation`, a page shared with
+`GET /routines/:name`.
+
+**Usage.** Sites: 34 → 12, 34 → 19, 33 → 11. The caller writes `await context.req.parseBody()` itself
+and one `return refuseRoutineEdit(...)` line. `pages.ts` ≈ −250 lines net.
+
+**Relocations.** Six symbols move verbatim into the new module because the pure seam cannot call them
+across a cycle: `RoutineGroup`, `groupRoutinesByName`, `resolveNamedRoutineGroup`,
+`RoutineDeclarationView`, `resolveRoutineDeclaration`, `routineQuerySuffix`. All are re-imported by
+`pages.ts`, which still names every one. `checkStaleRoutineDeclaration` is **deleted**, becoming the
+`declaration_changed` arm. A second new module `src/http/form-fields.ts` holds
+`readOptionalFormField`/`readRequiredFormField` verbatim, to avoid a cycle.
+
+**Hides.** Everything A and B hide, plus `resolveRoutineDeclaration`'s valid-targets-first ordering,
+`routineQuerySuffix`'s rules, and `encodeURIComponent` on every URL.
+
+**Caller must learn.** Four fields in, `reopenAt`'s two values, one refusal line, six ordinary values
+out. No status code, no URL template, no form-field name appears at a call site.
+
+**Trade-offs (its own words).** Costs **+24 lines in `pages.ts` versus a `Response`-returning design**
+— +3 across the call sites and the 21-line adapter. "Two places to change, not one": a fourth refusal
+reason touches both the union and the adapter (though a `switch` + `never` default makes that a
+compile error rather than a silent gap). The adapter itself is untested by the pure test. A third
+file exists only for the form-field helpers. Its export list reads as nine symbols, six of which are
+relocations — the *new* surface is one function and one type. **Blast radius: 4 files.**
+
+**Test surface.** A table-driven `it.each` with four independently-failing cases, zero I/O — no
+`mkdtemp`, no `new Hono()`, no `await`, no `response.text()`. Cases 3 and 4 are identical but for
+`reopenAt`, so the only thing that can explain the differing `editAction` is the caller-variance
+parameter; cases 1 and 2 together pin the *conditional*, which neither alone does. Red is produced by
+creating the module with the real signature and a `throw new Error("not implemented")` body, wiring
+the import, and watching the four named behaviours fail — not an import error.
+
+### Adjudication
+

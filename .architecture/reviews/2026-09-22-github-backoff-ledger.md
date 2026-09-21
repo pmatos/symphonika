@@ -623,3 +623,43 @@ A and B were eliminated on their own admissions:
   evidence.
 - The CLAUDE.md workflow-docs rule does not bind: no action kind, predicate, provider, template,
   templating variable or terminal-state behaviour changes.
+
+### Implementation notes
+
+**Test-first, with a behavioural red.** `src/github-backoff-ledger.ts` was first created with the
+adjudicated signature and bodies that throw `not implemented`. The 11 tests in
+`tests/github-backoff-ledger.test.ts` therefore failed on 11 named behaviours rather than on a
+module-resolution error. The closures were then moved out of `startDaemon` verbatim, including their
+ADR-0083 comments. The logger is a real pino writing to an in-memory sink, so levels 30/40 and the
+exact messages are pinned. No test anywhere pinned them before; the daemon tests use
+`pino({ enabled: false })`.
+
+**Mutation-checked.** Each mutation below was reverted afterwards, and the suite went back to
+11/11 green.
+
+| Mutation | Result |
+|---|---|
+| Remove the `!wasActive` guard | Exactly 1 named failure: "warns once…" |
+| Disable the lapse `delete` | Exactly 1: "lapses a window exactly at its deadline and logs the lapse once" |
+| Read the clock per project inside `pollable` | Exactly 1: "partitions a batch at one instant…" |
+
+**Diff: 6 files against the ~3 estimate. That is exactly 2x, so inside the contract's tolerance.**
+
+- `src/daemon.ts`: +17/−131.
+- The new module and its test.
+- `CONTEXT.md`: the term add.
+- Two **one-line comment** fixes, in `src/pull-request-polling.ts:235` and
+  `tests/pull-request-polling.test.ts:137`. Both named the deleted `engageGithubBackoff`.
+
+`tests/daemon-issue-polling.test.ts`, the ten daemon-level rate-limit tests, was **not touched**.
+Those tests passing unchanged is the behaviour-preservation evidence. `isClaimAllowed:
+githubBackoff.isPollable` typechecks against `run-controller.ts:344` unchanged.
+
+**Behavioural equivalence notes.**
+
+- `env` is bound once at construction. `startDaemon` has exactly two `env` bindings, `:198` and
+  `:742`, and both evaluate `options.env ?? process.env`, so they are the same object.
+- The clock defaults to `() => Date.now()`, late-bound, so the existing `vi.spyOn(Date, "now")`
+  tests keep working.
+- The overwrite (not `Math.max`) and the info-before-warn order on re-engaging an expired window
+  are preserved.

@@ -48,6 +48,18 @@ active" rather than redirecting as success — belongs to `createSaveConfirmer`
 (`src/http/save-confirm.ts`), the respond half of the save pipeline (ADR 0075, ADR 0076).
 _Avoid_: save request when referring to the editor's description of its own artifact
 
+**Routine Edit Target**:
+The single Routine Declaration a routine-editor POST is entitled to act on, resolved from the name in
+the URL plus the fields the two-phase POST carries (`project_param`, `expected_source_path`,
+`include_inactive`). `resolveRoutineEditTarget` (`src/http/routine-resolution.ts`) is the resolve half
+of that editor, as `createSaveConfirmer` is the respond half: it owns the refusal policy — a name
+matching more than one declaration is answered 200 with the disambiguation page rather than 404,
+because the Routine exists and is merely not unique by name, and ADR 0076's stale-declaration guard
+refuses at 409 when the name now resolves to a different file than the form was opened against. It
+answers with a decision, never a response; the page that carries a refusal is the caller's.
+_Avoid_: Routine Target when referring to the declaration an editor resolves; a Routine Target is the
+per-Project materialized row, and one declaration has several
+
 **Workflow Contract**:
 The reloadable canonical repository-owned instructions and runtime policy used to execute one issue.
 _Avoid_: service config when referring to repo-owned agent policy

@@ -69,13 +69,23 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## github-backoff-ledger
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 22/25 (leverage 4, locality 5, blast radius 2, heat 5)
-- **Files**: ~3 estimated
+- **PR**: #805
+- **Files**: ~3 estimated; 6 actual (`src/daemon.ts` +17/−131, new `src/github-backoff-ledger.ts`, new `tests/github-backoff-ledger.test.ts`, `CONTEXT.md` term, two one-line stale-comment fixes in `src/pull-request-polling.ts` / `tests/pull-request-polling.test.ts`) — exactly 2x, inside tolerance
 - **Modules**: `src/daemon.ts` — `githubBackoffUntilByToken` (563, a `Map` declared inside the ~1,500-line `startDaemon`), `isGithubBackoffActive` (733-755), `engageGithubBackoff` (757-781), `isProjectPollable` (783-797), `partitionProjectsForPolling` (799-807); eight call sites at 835, 854, 959, 974, 1358, 1379, 1408, 1433; already-extracted pure half `src/issue-polling.ts` `backoffUntil` (1781) / `rateLimitedTokens` (1800)
 - **Summary**: A `createGithubBackoffLedger({logger, now})` returning `{isActive, engage, isPollable}` owning the ADR-0083 window lifetime, the transition-only logging rule and the unresolvable-token exemption.
 - **First seen**: 2026-09-21
 - **Reason**: **Runner-up candidate** to `routine-editor-target-prologue` this run at an exact 22/25 tie, lost on the rubric's first tie-break (blast radius 2 vs 1). Blast 2 is load-bearing and justified: the pure policy half already lives in `issue-polling.ts`, so a clean extraction spans `daemon.ts` + a new module + its test — "a module and its direct callers". Largest test-surface gain of any candidate this run: the transition-only logging rule and the `nowMs === until` boundary are currently unreachable without booting a daemon and faking GitHub. `partitionProjectsForPolling` is additionally a one-line `filter` wrapper, interface ≈ implementation. **The natural next firing.** — **Picked by the 2026-09-22 run** (top surviving candidate at 22/25; tied with the new `omp-event-reducer`, also 22/25 — within 1 point — and won the rubric's second tie-break, higher heat 5 vs 4, after blast radius tied at 2). Friction re-verified at HEAD `604d0b4`: `daemon.ts` unchanged since 2026-09-18, all eight call sites present. Scope fenced: `backoffUntil`/`rateLimitedTokens` stay in `issue-polling.ts`; ADR 0083's decisions preserved exactly and its text not edited (it names the four closures by symbol — amendment proposed in the PR body instead).
+
+### Run 2026-09-22 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M33370QG` (**adopted**; all four conditions held — non-default, 0 unique commits ahead of `origin/main`, no upstream, unpublished on origin). Not renamed, per the adopted-branch rule; the slug is recorded here and in the report instead.
+- **Committed**: report + reconciled backlog (`f91f349`), four design proposals (`13dcfcb`), adjudication (`8d725fa`), implementation + tests (`20e317a`), CONTEXT.md term (`e2a5746`), implementation evidence (`a1bd8d8`), this in-flight update.
+- **Evidence**: PR #805. Design-it-twice winner **D** (`engage`/`isPollable`/`pollable`) amended with C's optional late-bound `now` (house idiom `createHostPressureGate`); runner-up **design** C lost on depth (`observe` hides that it writes). Test-first with a behavioural red (11 named failures on a throwing stub); mutation-checked (`!wasActive` removal, lapse-`delete` removal, per-project clock read — each exactly 1 named failure, all reverted). `tests/daemon-issue-polling.test.ts` untouched. Gate, each a separate command: lint ✅, typecheck ✅, format:check ✅, knip ✅, build ✅, test 2978 passed / **2 failed — both pre-existing on untouched `origin/main` `604d0b4`** (verified in a clean worktree): `claude-review-workflow.test.ts` › "reports advisory reviewer failures…" (also red in main's CI run 35575494322 after #803) and `daemon-issue-polling.test.ts` › "coalesces concurrent poll-now requests…" (local timing race, same diff on base). Reconciled `routine-editor-target-prologue` #799 → merged/landed; 14 `dropped` re-checked, none moved back; 6 new candidates recorded.
+- **Next**: human review of #805, and a human look at main's red `claude-review-workflow.test.ts`. `omp-event-reducer` (22/25, the tied runner-up **candidate**, lost only on heat) is the natural next firing. Correctness items recorded, not fixed: `daemon-operator-action-prologue`'s missing `project.disabled` check; `workflow-validation-entry-point-drift`'s CLI `workflow validate` reference-check gap.
 
 ## omp-event-reducer
 

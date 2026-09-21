@@ -583,3 +583,43 @@ export function createGithubBackoffLedger(deps: {
   - `:1358` still builds a synthetic report.
   - ADR 0083's prose will name symbols that no longer exist.
 
+### Adjudication
+
+The criteria were stated neutrally in the transcript, in order: depth, locality, seam placement, test
+surface, blast radius. The advisor was then consulted as adjudicator.
+
+**Winner: Design D** (`engage` / `isPollable` / `pollable`), **amended with Design C's optional
+`now`**. The clock defaults to `() => Date.now()`, which is the house idiom at
+`src/lifecycle/host-pressure.ts:207` (`options.now ?? (() => Date.now())`). The default is
+late-bound, never a captured `Date.now`, so the daemon tests' `vi.spyOn(Date, "now")` keeps working.
+
+**Runner-up design: C.** On locality, seam placement and blast radius, C and D tie: they have the
+same three verbs, the same two real seams (clock, logger), the same two ports rejected as
+hypothetical, and the same 3-file diff. They separate on criterion 1, what a caller must *learn*.
+C calls its mutating verb `observe`, which gives a caller no signal that it writes a window and may
+emit a warn. D's `engage` says so. D's names also follow the existing symbols
+(`engageGithubBackoff`, `isProjectPollable`) and ADR 0083's prose. That matters here because this
+run fences the ADR text as not-edited.
+
+A and B were eliminated on their own admissions:
+
+- **A.** `pollableNow()(project)` "reads awkwardly", and the fallback A itself names adds an
+  `isPollable` method, at which point it converges on C/D. It also introduces a hoisted-predicate
+  misuse mode that none of the others has.
+- **B.** In its own words: "under a depth-first brief I would cut `windowFor` and `windowUntil`".
+  Two hypothetical seams and a single-caller verb add interface without depth. knip would not catch
+  that surface rotting.
+
+**Implementation watch-list carried from adjudication:**
+
+- Typecheck `isClaimAllowed: githubBackoff.isPollable` against `run-controller.ts:344`'s
+  `(project: DispatchProjectConfig) => boolean` early.
+- Actually run two mutation checks, since the daemon tests use `pino({ enabled: false })`:
+  1. remove `!wasActive`, and expect a second warn;
+  2. disable the lapse `delete`, and expect the info-once assertion to fail.
+
+  Revert both.
+- `tests/daemon-issue-polling.test.ts` must pass **untouched**. That is the behaviour-preservation
+  evidence.
+- The CLAUDE.md workflow-docs rule does not bind: no action kind, predicate, provider, template,
+  templating variable or terminal-state behaviour changes.

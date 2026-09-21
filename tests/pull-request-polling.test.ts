@@ -134,7 +134,7 @@ describe("pollConfiguredGitHubPullRequestsFromConfig (#309, ADR 0077)", () => {
 
     // ok: true (the row is still kept, per the test above) but the
     // rate-limit message must still be attached -- otherwise a caller
-    // scanning for rate-limited projects (daemon.ts's engageGithubBackoff /
+    // scanning for rate-limited projects (the GitHub backoff ledger's engage /
     // rateLimitedTokens) never sees it and retries the same GraphQL call
     // every tick.
     expect(status.projects).toEqual([

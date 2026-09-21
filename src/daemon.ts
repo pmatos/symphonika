@@ -25,11 +25,9 @@ import {
 import type {
   FilteredProjectIssueSnapshot,
   GitHubIssuesApi,
-  GitHubRepositoryIdentity,
-  PollingProjectConfig
+  GitHubRepositoryIdentity
 } from "./issue-polling.js";
 import {
-  backoffUntil,
   DEFAULT_GITHUB_ISSUES_API,
   DEFAULT_POLLING_INTERVAL_MS,
   emptyIssuePollStatus,
@@ -37,16 +35,15 @@ import {
   normalizeIssueSnapshot,
   pollConfiguredGitHubIssuesFromConfig,
   projectPollIdentityKey,
-  rateLimitedTokens,
   readConfiguredPollingIntervalMs,
   replaceIssuePollStatus,
-  resolveEnvBackedValue,
   tryAddLabelsToIssue,
   tryGetIssue,
   tryGetPullRequestFollowupState,
   tryMergePullRequest,
   tryRemoveLabelsFromIssue
 } from "./issue-polling.js";
+import { createGithubBackoffLedger } from "./github-backoff-ledger.js";
 import { interpretPullRequest } from "./pull-request-state.js";
 import { ActiveRunRegistry, CANCEL_REASONS } from "./lifecycle/active-runs.js";
 import { createAsyncMutex } from "./lifecycle/async-mutex.js";
@@ -552,15 +549,10 @@ export async function startDaemon(
   // its own GraphQL round-trips must not gate issue dispatch, so it isn't
   // awaited by refreshIssuePollStatus and needs its own reentrancy check.
   let prPolling = false;
-  // Keyed by resolved GitHub token -- shared between issue polling and PR
-  // polling below (both draw on the same per-token rate-limit budget for a
-  // given project, so a rate-limit error from either one backs off both),
-  // but scoped per token rather than globally: SPEC.md §6 lets each
-  // project's tracker reference an independent $VAR_NAME, and GitHub
-  // tracks rate-limit budgets per token, not per Symphonika deployment.
-  // Values are only ever used as opaque Map keys, never logged (the
-  // resolved token is a secret -- see SPEC.md §6's redaction requirement).
-  const githubBackoffUntilByToken = new Map<string, number>();
+  // Shared between issue polling and PR polling below (both draw on the same
+  // per-token rate-limit budget for a given project, so a rate-limit error
+  // from either one backs off both).
+  const githubBackoff = createGithubBackoffLedger({ env, logger });
   let scheduledWork = Promise.resolve();
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
@@ -730,82 +722,6 @@ export async function startDaemon(
     return { errors: reloadStatus.errors, ok: !reloadBroken, snapshot };
   };
 
-  // A clean poll result is never allowed to clear an active window -- only
-  // to let it lapse on its own once `nowMs` passes it (self-cleaning here,
-  // with a one-time log on the transition, per token). The issue poll and
-  // the fire-and-forget PR poll each call engageGithubBackoff with their
-  // own results; a PR poll started before backoff was engaged can still be
-  // in flight when a later tick's issue poll engages it, and that stale
-  // poll's own eventual clean result doesn't prove the limit that triggered
-  // the newer window has recovered. Proactively clearing on any clean
-  // result would let that stale result erase a still-current window.
-  const isGithubBackoffActive = (nowMs: number, token: string): boolean => {
-    const until = githubBackoffUntilByToken.get(token);
-    if (until === undefined) {
-      return false;
-    }
-    if (nowMs >= until) {
-      githubBackoffUntilByToken.delete(token);
-      logger.info(
-        "symphonika GitHub API backoff window elapsed for one credential"
-      );
-      return false;
-    }
-    return true;
-  };
-
-  // Engages (or extends) the backoff window for every rate-limited token
-  // found in `reports` (each project's own poll report, e.g.
-  // IssuePollStatus.projects / PullRequestPollStatus.projects). Logs only
-  // on a given token's transition, not on every tick, so a sustained
-  // outage doesn't spam the log.
-  const engageGithubBackoff = (
-    reports: ReadonlyArray<{
-      error?: string;
-      name: string;
-      ok: boolean;
-      repository: GitHubRepositoryIdentity;
-    }>,
-    projects: readonly PollingProjectConfig[],
-    env: NodeJS.ProcessEnv
-  ): void => {
-    const nowMs = Date.now();
-    for (const token of rateLimitedTokens(reports, projects, env)) {
-      const wasActive = isGithubBackoffActive(nowMs, token);
-      githubBackoffUntilByToken.set(token, backoffUntil(nowMs));
-      if (!wasActive) {
-        logger.warn(
-          { backoffUntilMs: githubBackoffUntilByToken.get(token) },
-          "symphonika GitHub API rate limited; backing off polling for one credential"
-        );
-      }
-    }
-  };
-
-  // A project whose token can't be resolved (e.g. an unset $VAR_NAME) is
-  // always pollable here -- pollProject reports that failure itself,
-  // unrelated to rate-limit backoff. Structurally typed on tracker alone
-  // (rather than the full PollingProjectConfig) so the fresh-claim boundary
-  // re-check (ADR 0083) below can reuse it for a DispatchProjectConfig too.
-  const isProjectPollable = (
-    project: { tracker: PollingProjectConfig["tracker"] },
-    env: NodeJS.ProcessEnv,
-    nowMs: number
-  ): boolean => {
-    const token = resolveEnvBackedValue(project.tracker.token, env);
-    return token === undefined || !isGithubBackoffActive(nowMs, token);
-  };
-
-  // Splits `projects` into those whose resolved token isn't currently
-  // backing off (pollable now) and the rest (currently skipped).
-  const partitionProjectsForPolling = (
-    projects: readonly PollingProjectConfig[],
-    env: NodeJS.ProcessEnv,
-    nowMs: number
-  ): PollingProjectConfig[] => {
-    return projects.filter((project) => isProjectPollable(project, env, nowMs));
-  };
-
   const refreshIssuePollStatus = async (): Promise<void> => {
     if (!state.configExists || polling) {
       return;
@@ -832,10 +748,8 @@ export async function startDaemon(
       // them, same as pollProject's own "leave prior snapshot untouched"
       // contract on a failed project -- mergeIssuePollStatus below carries
       // those entries forward instead of a bare replace.
-      const pollableForIssues = partitionProjectsForPolling(
-        snapshot.polling.projects,
-        env,
-        Date.now()
+      const pollableForIssues = githubBackoff.pollable(
+        snapshot.polling.projects
       );
       // Always called, even with zero pollable projects (a cheap no-op
       // loop in that case) -- persistProjectPollState below must still run
@@ -851,7 +765,7 @@ export async function startDaemon(
           : { githubIssuesApi: options.githubIssuesApi }),
         initialErrors: errors
       });
-      engageGithubBackoff(nextStatus.projects, pollableForIssues, env);
+      githubBackoff.engage(nextStatus.projects, pollableForIssues);
       // A project can be pollable at tick start but skipped by the issue
       // poll after an earlier project sharing its token hits a rate limit.
       // Reports identify the name and repository actually attempted, so
@@ -956,11 +870,7 @@ export async function startDaemon(
       // skipped (not called with an empty list) when nothing is pollable,
       // since PR-poll persistence has no routine-host-adjacent side effect
       // to preserve.
-      const pollableForPrs = partitionProjectsForPolling(
-        snapshot.polling.projects,
-        env,
-        Date.now()
-      );
+      const pollableForPrs = githubBackoff.pollable(snapshot.polling.projects);
       if (!prPolling && pollableForPrs.length > 0) {
         prPolling = true;
         void (async () => {
@@ -971,11 +881,7 @@ export async function startDaemon(
                 env,
                 githubIssuesApi
               });
-            engageGithubBackoff(
-              pullRequestStatus.projects,
-              pollableForPrs,
-              env
-            );
+            githubBackoff.engage(pullRequestStatus.projects, pollableForPrs);
             persistProjectPullRequestPollState(runStore, pullRequestStatus);
             if (pullRequestStatus.errors.length > 0) {
               logger.warn(
@@ -1355,7 +1261,7 @@ export async function startDaemon(
                     if (project === undefined) {
                       return;
                     }
-                    engageGithubBackoff(
+                    githubBackoff.engage(
                       [
                         {
                           error: errorMessage(error),
@@ -1367,16 +1273,14 @@ export async function startDaemon(
                           }
                         }
                       ],
-                      snapshot.polling.projects,
-                      env
+                      snapshot.polling.projects
                     );
                   },
                   policy: snapshot.pullRequestPolicy,
                   shouldPollProject: (projectName: string) => {
                     const project = projectsByName.get(projectName);
                     return (
-                      project !== undefined &&
-                      isProjectPollable(project, env, Date.now())
+                      project !== undefined && githubBackoff.isPollable(project)
                     );
                   }
                 }),
@@ -1405,11 +1309,9 @@ export async function startDaemon(
         }
         const snapshot = runtimeConfig.getSnapshot();
         const dispatchableProjectNames = new Set(
-          partitionProjectsForPolling(
-            snapshot?.polling.projects ?? [],
-            env,
-            Date.now()
-          ).map((project) => project.name)
+          githubBackoff
+            .pollable(snapshot?.polling.projects ?? [])
+            .map((project) => project.name)
         );
         // ADR 0083 deliberately carries backed-off Projects' candidates in
         // issuePollStatus for status and snapshot continuity. Keep that
@@ -1429,8 +1331,7 @@ export async function startDaemon(
             // loading config or workflow state. Re-checked per pick from
             // inside its narrowed claim section immediately before
             // sym:claimed.
-            isClaimAllowed: (project) =>
-              isProjectPollable(project, env, Date.now()),
+            isClaimAllowed: githubBackoff.isPollable,
             // Each successful claim's agent run is detached (issue #720):
             // track it in inflightDispatches alongside this tick's own
             // promise so shutdown drain (see the `stop` handler's

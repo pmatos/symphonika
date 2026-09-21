@@ -538,6 +538,16 @@ A Dispatch Project's scheduler state for polling cadence, last poll outcome, and
 Routine Hosts are never polled and have no cursor.
 _Avoid_: issue cursor
 
+**GitHub Backoff Window**:
+A fixed interval, per resolved tracker credential, during which the daemon makes no new GitHub calls
+for any Project whose token resolves to that credential. It is opened by a rate-limit-shaped poll
+report. Issue polling, the pull-request poll, PR follow-up and the fresh-claim boundary share it. A
+clean poll result never closes it early; it lapses the first time it is checked after its deadline.
+A Project whose token does not resolve is never held by it. `createGithubBackoffLedger`
+(`src/github-backoff-ledger.ts`) owns the windows and their transition-only logging (ADR 0083).
+_Avoid_: global backoff, retry backoff when referring to the rate-limit window (retry backoff is
+ADR 0020's per-Run provider retry delay)
+
 **Dispatch Overlap Guard**:
 An optional Dispatch-Project admission gate that delays a candidate when its known pull-request file
 footprint intersects the periodically refreshed Workspace footprint of an in-flight Run in the same

@@ -434,4 +434,152 @@ memory and today's fresh scan agree. The next-best new candidate, `cli-daemon-ca
 
 ## Design
 
-*Written at step 4, below.*
+### Problem space (framing handed to the design sub-agents)
+
+**Constraints any interface must satisfy** (ADR 0083, preserved exactly):
+
+- Windows are keyed by the **resolved** token (`resolveEnvBackedValue(project.tracker.token, env)`),
+  never logged — the token is a secret (SPEC.md §6).
+- Engage/extend sets `until = backoffUntil(nowMs)` for every token `rateLimitedTokens(reports,
+  projects, env)` returns; it warns **only** on the inactive→active transition.
+- A window is never cleared by a clean result; it **lapses** the first time it is checked with
+  `nowMs >= until`, deleting the entry and logging "elapsed" once.
+- A Project whose token does not resolve is always pollable.
+- Eight call sites across four consumers: the issue poll (partition, engage), the fire-and-forget
+  PR poll (re-partition, engage), PR follow-up (`onProjectRateLimited` synthesising a one-report
+  engage, `shouldPollProject`), and fresh dispatch (candidate filter via partition, `isClaimAllowed`
+  per-pick re-check typed on `DispatchProjectConfig`). Every site passes `Date.now()` at call time.
+
+**Dependency category**: in-process (a `Map`, a clock value, a pino `Logger`). `env` is data. No
+I/O crosses the seam, so no port is required — the deepened module is tested directly through its
+interface with a capturing logger.
+
+**Illustrative sketch (not a proposal):**
+
+```ts
+const ledger = createGithubBackoffLedger({ logger });
+ledger.engage(reports, projects, env, Date.now());
+ledger.isPollable(project, env, Date.now());
+```
+
+### Design-it-twice proposals
+
+Four sub-agents ran in parallel. Each was given the same technical brief and a different
+constraint. None edited files. Each proposal is condensed below to its interface, what it hides, and
+what it admits about itself. All four agree on the implementation: the token→`until` map is
+private; `rateLimitedTokens`/`backoffUntil` are consumed, not moved; the lapse check runs inside
+engage before the overwrite (so re-engaging an expired window logs *elapsed* then *rate limited*);
+the overwrite is not `Math.max`; tokens never leave the module. All four also reject a single-report
+`engageProject(project)` shortcut resolving `project.tracker.token` directly, because it would
+silently drop `rateLimitedTokens`' conservative fan-out to duplicate declarations (ADR 0083).
+
+#### Design A — minimal (two entry points)
+
+```ts
+export function createGithubBackoffLedger(deps: {
+  env: NodeJS.ProcessEnv; logger: Logger; now?: () => number;
+}): {
+  engage: (reports: readonly PollReport[], projects: readonly PollingProjectConfig[]) => void;
+  pollableNow: () => (project: Credentialed) => boolean;
+};
+```
+
+- **Usage.** `projects.filter(githubBackoff.pollableNow())` and
+  `isClaimAllowed: (p) => githubBackoff.pollableNow()(p)`.
+- **Hides.** The map, token resolution, lapse and transition logs, and the calls to
+  `rateLimitedTokens` and `backoffUntil`.
+- **Seams.** `now` has one production adapter plus a test double; the design says so itself — "a
+  hypothetical seam, not a real one". No seam has two production adapters.
+- **First test.** "engages one window per rate-limited credential, logs only transitions, lapses at
+  the boundary". It captures pino lines through an in-memory `write`. It is red on the missing
+  module, and the design says outright it is not a characterization test.
+- **Self-admitted costs.**
+  - `pollableNow()(project)` "reads awkwardly" at two sites. The fallback it names is to add an
+    `isPollable` sugar method, which brings it to three entry points.
+  - A hoisted predicate (`isClaimAllowed: githubBackoff.pollableNow()`) would silently delay lapses.
+    That is on the safe side, but it is a new misuse mode.
+
+#### Design B — maximum flexibility (five methods, two options)
+
+```ts
+export function createGithubBackoffLedger(options: {
+  env; logger: Pick<Logger,"info"|"warn">; now?: () => number; windowUntil?: (nowMs: number) => number;
+}): {
+  engage(reports, projects): void;
+  engageProject(project, error: string, projects): void;
+  windowFor(project): { untilMs: number } | undefined;
+  isPollable(project): boolean;
+  pollable<P>(projects: readonly P[]): P[];
+};
+```
+
+- **Usage.** `onProjectRateLimited` calls `engageProject(project, errorMessage(error), projects)`,
+  which routes internally through `rateLimitedTokens` and so keeps the fan-out.
+- **Self-admitted costs.**
+  - `windowUntil` is "hypothetical — ADR 0083 rejected variable windows".
+  - `windowFor` has "no production caller besides `isPollable`" (speculative dashboard use).
+  - `engageProject` has one caller.
+  - In its own words: "under a depth-first brief I would cut `windowFor` and `windowUntil`". knip
+    does not see the unused option or method surface, so it would rot silently.
+
+#### Design C — optimised for the common caller (three verbs)
+
+```ts
+export function createGithubBackoffLedger(options: {
+  env: NodeJS.ProcessEnv; logger: Pick<Logger,"info"|"warn">; now?: () => number; // default () => Date.now(), late-bound
+}): {
+  allows: (project: TokenBearing) => boolean;
+  pollable: <P extends TokenBearing>(projects: readonly P[]) => P[];
+  observe: (reports: readonly Report[], projects: readonly PollingProjectConfig[]) => void;
+};
+```
+
+- **Usage.** `githubBackoff.pollable(snapshot.polling.projects)`, `isClaimAllowed: githubBackoff.allows`,
+  and `observe(nextStatus.projects, pollableForIssues)`. Six of the eight sites become one short call.
+- **Implementation choices.** Methods are arrow properties, so they are safe to pass unbound.
+  `pollable` reads the clock once per call.
+- **Test double.** The clock follows the `createHostPressureGate({ now })` idiom
+  (`src/lifecycle/host-pressure.ts:207`).
+- **First test.** "keeps a credential's window through a later clean poll and lapses it exactly at
+  backoffUntil, logging each transition once". It uses `vi.fn` loggers and is red on the missing
+  module. The design also says to disable the `delete` on lapse and confirm the test goes red.
+- **Self-admitted costs.**
+  - `observe` is thin: a pass-through to `rateLimitedTokens`/`backoffUntil` plus ordering and
+    transition logging.
+  - `:1358` gains only the loss of `env`.
+  - Callers must know that `allows`/`pollable` can log; that is ADR 0083's lapse-on-read rule, kept
+    on purpose.
+
+#### Design D — ports and adapters (three verbs, required clock)
+
+```ts
+export function createGithubBackoffLedger(deps: {
+  env: NodeJS.ProcessEnv; logger: Pick<Logger,"info"|"warn">; now: () => number;
+}): {
+  engage(reports: readonly PollReport[], polled: readonly PollingProjectConfig[]): void;
+  isPollable(project: TokenBearing): boolean;
+  pollable<P extends TokenBearing>(projects: readonly P[]): P[];
+};
+```
+
+- **Ports.** Of the four ports considered, it keeps two:
+  - **Clock**: a production `() => Date.now()` and a test `let t`.
+  - **Logger**: production pino, and a test pino writing to an in-memory sink. Its reason is that
+    this pins numeric levels 30/40 and exact messages
+    (`tests/daemon-heartbeat.test.ts:38-41` precedent).
+
+  It rejects two as hypothetical seams:
+  - **Token resolution**: `rateLimitedTokens` resolves through `env` internally anyway, so a
+    disagreeing test adapter would make engage and `isPollable` look up different windows.
+  - **Window storage**: one adapter, and it would carry secret keys across the seam.
+
+  It also rejects a domain event-sink port, because it would move the message text into an untested
+  adapter.
+- **First test.** "warns once when a credential enters backoff, not again while its window stays
+  active". It is red on the missing module; the design grep-checked that no test contains either log
+  string, and pairs it with a `!wasActive`-removal mutation check.
+- **Self-admitted costs.**
+  - `pollable` "earns its place only by reading the clock once per batch".
+  - `:1358` still builds a synthetic report.
+  - ADR 0083's prose will name symbols that no longer exist.
+

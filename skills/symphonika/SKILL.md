@@ -1,13 +1,24 @@
 ---
-name: symphonika-workflow
-description: Design and write a Symphonika Workflow Contract (WORKFLOW.md or workflow.yml) by grilling the user one question at a time. Use when the user wants to create, edit, or design a Symphonika workflow, mentions "symphonika workflow", asks how to wire up agent states, wait states, merge_pr states, predicates, or transitions, or describes an orchestration pipeline they want to run under Symphonika. Detects unsupported requirements and offers to file a feature request at pmatos/symphonika.
+name: symphonika
+description: Help with Symphonika, either by designing and writing a Workflow Contract (WORKFLOW.md or workflow.yml) by grilling the user one question at a time, or by explaining/editing a local Symphonika install — the `symphonika` CLI, its systemd --user service, and where `symphonika.yml`/state-root config live and how to change them safely. Use when the user mentions "symphonika", wants to wire up agent states, wait states, merge_pr states, predicates, or transitions; wants to run `symphonika init`/`doctor`/`daemon`/`service install`/`poll-now`; asks where Symphonika's config or state lives, how to change service or provider settings, or how to inspect/restart the `symphonika.service` unit. Detects unsupported workflow requirements and offers to file a feature request at pmatos/symphonika.
 ---
 
-# Symphonika Workflow Designer
+# Symphonika
+
+This skill covers two different jobs — work out which one applies before doing anything else:
+
+- **Design or edit a Workflow Contract** (`WORKFLOW.md` / `workflow.yml`) — the user wants to change how issues get implemented: states, providers, predicates, merge policy. Go to [Designing a Workflow Contract](#designing-a-workflow-contract).
+- **Operate a local Symphonika install** — the user wants to know or change how their `symphonika` CLI and service are configured: where `symphonika.yml` lives, how to edit it safely, how the service picks up changes, troubleshooting. Go to [Operating a local install](#operating-a-local-install).
+
+If the request could be either (e.g. "my workflow isn't dispatching"), start with
+[Operating a local install](#operating-a-local-install) — most "it's not working" reports are
+configuration or service problems, not workflow design problems.
+
+## Designing a Workflow Contract
 
 Interview the user one question at a time until you can confidently write a valid `WORKFLOW.md` or `workflow.yml` for their Symphonika Project, OR confirm the design needs a Symphonika feature that does not exist yet.
 
-## Quick start
+### Quick start
 
 Two checkouts are in play: the **target project** (whose Workflow Contract you're writing) and the
 **Symphonika checkout** (wherever `docs/workflows.md`, `SPEC.md`, `docs/adr/`, and `src/` live — the
@@ -18,7 +29,7 @@ thing that defines what's possible). They're usually different repos; confirm yo
 3. Run the grilling loop below until every branch is resolved.
 4. Choose the artifact (`WORKFLOW.md` or `workflow.yml`), render it from one of the [EXAMPLES.md](EXAMPLES.md) shapes, and write it after the user approves the final draft.
 
-## Grilling loop
+### Grilling loop
 
 Ask **one question at a time**. For each, propose your recommended answer and the reasoning. Walk down each branch of the decision tree, resolving dependencies before moving to the next branch.
 
@@ -35,7 +46,7 @@ Cover at minimum:
 
 If a question can be answered by reading `SPEC.md`, `CONTEXT.md`, `docs/adr/`, or the project's existing `symphonika.yml` / current `WORKFLOW.md`, read instead of asking.
 
-## Capability check (gate before writing)
+### Capability check (gate before writing)
 
 Before drafting the artifact, run through [REFERENCE.md](REFERENCE.md#supported-vs-unsupported) and flag anything the user asked for that is **not** supported in current Symphonika. Common asks that are out of scope today:
 
@@ -48,7 +59,7 @@ Before drafting the artifact, run through [REFERENCE.md](REFERENCE.md#supported-
 
 If anything is unsupported, **stop drafting** and run the feature-request flow below.
 
-## Feature request flow
+### Feature request flow
 
 1. Summarize the missing capability in one sentence and confirm the user agrees with the framing.
 2. Build a minimal example workflow (paste-ready YAML or Markdown) that illustrates how the user would write it if the feature existed.
@@ -76,7 +87,7 @@ If anything is unsupported, **stop drafting** and run the feature-request flow b
    ```
 6. Print the issue URL `gh` returns. Do **not** stage, commit, or push anything else in response.
 
-## Writing the artifact
+### Writing the artifact
 
 After the design is fully resolved and supported:
 
@@ -90,8 +101,36 @@ After the design is fully resolved and supported:
 
 `symphonika.yml` edits from this skill are limited to the `projects[].workflow:` reconciliation in step 1 (option b). Do not touch any other field — service-level runtime settings, providers, tracker config, and workspace roots are out of scope for a workflow-design skill.
 
+## Operating a local install
+
+The user's `symphonika` CLI drives a local, long-running Symphonika service — a systemd `--user`
+unit by default (`symphonika.service`), running `symphonika daemon` continuously. Read
+[OPERATIONS.md](OPERATIONS.md) before making config edits or troubleshooting claims; do not guess a
+flag, a path, or a systemd command from memory — this is the same "don't guess" posture the
+[Feature request flow](#feature-request-flow) already takes toward workflow capabilities.
+
+Quick orientation:
+
+- `symphonika` is the CLI binary; `symphonika.service` is the systemd `--user` unit installed by
+  `symphonika service install`.
+- Service Config: `symphonika.yml`, normally `$XDG_CONFIG_HOME/symphonika/symphonika.yml`
+  (`~/.config/symphonika/symphonika.yml`). A sibling `env` file holds secrets such as
+  `SYMPHONIKA_SMTP_PASSWORD`; it is never baked into the unit.
+- Runtime evidence (the SQLite run store, Run/Firing logs, workspaces) lives under the **state
+  root**, normally `~/.local/state/symphonika` — a different directory from the config file.
+- Most `symphonika.yml` and Workflow Contract edits hot-reload on the next daemon tick or
+  `symphonika poll-now`; no restart needed. Unit-level changes (PATH capture, `EnvironmentFile=`,
+  `OOMScoreAdjust=`) need `symphonika service install --force` followed by
+  `systemctl --user restart symphonika.service`.
+- Diagnose before editing: `symphonika doctor`, `symphonika status --watch`,
+  `journalctl --user -u symphonika.service`.
+
+See [OPERATIONS.md](OPERATIONS.md) for the full command/file reference and troubleshooting flow.
+
 ## See also
 
-- `docs/workflows.md` in the Symphonika checkout — the canonical, complete authoring reference (see Quick start).
-- [REFERENCE.md](REFERENCE.md) — skill-specific capability-gate summary, sourced from `docs/workflows.md`
-- [EXAMPLES.md](EXAMPLES.md) — canned workflow shapes for common goals
+- `docs/workflows.md` in the Symphonika checkout — the canonical, complete authoring reference for Workflow Contracts (see Quick start).
+- `docs/tutorial.md` and `SPEC.md` §13 ("CLI") in the Symphonika checkout — the canonical CLI and service-operation reference.
+- [REFERENCE.md](REFERENCE.md) — skill-specific capability-gate summary for workflow design, sourced from `docs/workflows.md`.
+- [EXAMPLES.md](EXAMPLES.md) — canned workflow shapes for common goals.
+- [OPERATIONS.md](OPERATIONS.md) — skill-specific CLI/service/config summary, sourced from `docs/tutorial.md`, `SPEC.md`, and the ADRs it cites.

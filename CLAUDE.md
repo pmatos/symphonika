@@ -68,20 +68,31 @@ the check fails.
 
 ## Agent skills
 
-### Workflow-design skill
+### Symphonika skill
 
-`skills/symphonika-workflow/` (SKILL.md, REFERENCE.md, EXAMPLES.md) helps design and write a
-Workflow Contract. `docs/workflows.md` is the canonical authoring reference for the FSM's syntax and
-semantics — action kinds, predicates, `workflow.use` templates, templating variables, providers,
-terminal states; REFERENCE.md points into it rather than re-deriving facts independently, but still
-names a few things directly (e.g. the six action kinds) where that's more useful than a bare pointer.
-Both go stale silently: nothing fails CI when either drifts from `src/workflow/`,
-`src/lifecycle/run-controller.ts`, or `src/builtin-templates.ts`. Whenever a change in this PR alters
-FSM syntax or semantics — a new/removed action kind, predicate, provider, template, templating
-variable, or terminal-state behavior — update `docs/workflows.md` in the same PR, and check
-`skills/symphonika-workflow/` for anything it names directly rather than pointing at
-`docs/workflows.md`. When unsure whether a change qualifies, diff both docs' claims against the
-touched source rather than guessing.
+`skills/symphonika/` (SKILL.md, REFERENCE.md, EXAMPLES.md, OPERATIONS.md) covers two jobs: designing
+a Workflow Contract, and operating a local Symphonika install (CLI, systemd `--user` service,
+`symphonika.yml`/state-root config). Both halves point into living docs rather than re-deriving facts
+independently, and both go stale silently — nothing fails CI when either drifts.
+
+For the workflow-design half: `docs/workflows.md` is the canonical authoring reference for the FSM's
+syntax and semantics — action kinds, predicates, `workflow.use` templates, templating variables,
+providers, terminal states; REFERENCE.md points into it, but still names a few things directly (e.g.
+the six action kinds) where that's more useful than a bare pointer, and can drift from
+`src/workflow/`, `src/lifecycle/run-controller.ts`, or `src/builtin-templates.ts`. Whenever a change
+in this PR alters FSM syntax or semantics — a new/removed action kind, predicate, provider, template,
+templating variable, or terminal-state behavior — update `docs/workflows.md` in the same PR, and
+check REFERENCE.md for anything it names directly rather than pointing at `docs/workflows.md`.
+
+For the operations half: `docs/tutorial.md` and `SPEC.md` §13 ("CLI") are canonical for CLI
+commands/flags, config file locations, and service behavior; OPERATIONS.md points into those plus
+the ADRs it cites, but names some CLI commands and config paths directly. Whenever a change in this
+PR alters a CLI command/flag, a config file's default location, or hot-reload/service-install
+behavior, update `docs/tutorial.md`/`SPEC.md` in the same PR and check OPERATIONS.md for anything it
+names directly.
+
+When unsure whether either half's change qualifies, diff the skill's claims against the touched
+source rather than guessing.
 
 ### Issue tracker
 

@@ -134,7 +134,6 @@ import {
 import {
   classifyFailure,
   inspectWorkspaceContentDigest,
-  inspectWorkspaceHead,
   type ClassifiedTerminal
 } from "./classify-failure.js";
 import {
@@ -4575,7 +4574,6 @@ export class RunController {
     // See ADR 0093 / issue #640.
     let workspaceOperation: IssueWorkspacePreparation | undefined;
     let workspaceAbortCleanup: Promise<void> | undefined;
-    let headShaAtAttemptStart: string | undefined;
     let contentDigestAtAttemptStart: string | undefined;
     let headInspectionFailed = false;
     let caughtError: unknown;
@@ -4828,16 +4826,11 @@ export class RunController {
         respectsIssueLabels
       );
       try {
-        headShaAtAttemptStart = await input.deadline.race(
-          inspectWorkspaceHead({
-            workspacePath: started.evidence.workspacePath,
-            ...input.deadline.signalOption
-          })
-        );
         contentDigestAtAttemptStart = await input.deadline.race(
           inspectWorkspaceContentDigest({
             baseBranch: input.project.workspace.git.base_branch,
-            workspacePath: started.evidence.workspacePath
+            workspacePath: started.evidence.workspacePath,
+            ...input.deadline.signalOption
           })
         );
       } catch (error) {
@@ -5014,9 +5007,6 @@ export class RunController {
                     ? {}
                     : { contentDigestAtStart: contentDigestAtAttemptStart }),
                   headInspectionFailed,
-                  ...(headShaAtAttemptStart === undefined
-                    ? {}
-                    : { headShaAtStart: headShaAtAttemptStart }),
                   workspacePath: started.evidence.workspacePath
                 }
               })

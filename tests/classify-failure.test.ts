@@ -51,41 +51,18 @@ describe("classifyFailure", () => {
     expect(result.kind).toBe("success");
   });
 
-  it("classifies a clean process_exit as success after the branch was rebased onto an advanced base mid-attempt", async () => {
+  it("classifies a clean process_exit as advanced after a mid-attempt rebase carried real new work", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
-    const { headShaAtStart } = await createGitWorkspaceRebasedOntoAdvancedBase({
-      branchName: "sym/symphonika/806-test",
-      workspacePath
-    });
-
-    // Pin that the fixture genuinely rewrote history rather than degrading to a
-    // fast-forward: headShaAtStart must no longer be reachable from HEAD via
-    // parent links, or this test would stop exercising the #806 regression.
-    expect(await isAncestor(workspacePath, headShaAtStart, "HEAD")).toBe(false);
-
-    const result = await classifyFailure({
-      cancelRequested: false,
-      events: [
-        { type: "session_started" },
-        { type: "process_exit", exitCode: 0 }
-      ],
-      redactSecrets: [],
-      successWorkspace: { baseBranch: "main", headShaAtStart, workspacePath }
-    });
-
-    expect(result.kind).toBe("success");
-    expect(result.branchAdvancedSinceAttemptStart).toBe(true);
-  });
-
-  it("classifies a clean process_exit as advanced (content digest) after a mid-attempt rebase carried real new work", async () => {
-    const root = await makeTempRoot();
-    const workspacePath = path.join(root, "workspace");
-    const { contentDigestAtStart } =
+    const { contentDigestAtStart, headShaAtStart } =
       await createGitWorkspaceRebasedOntoAdvancedBase({
-        branchName: "sym/symphonika/806-digest-test",
+        branchName: "sym/symphonika/806-test",
         workspacePath
       });
+
+    // Pin that the fixture genuinely rewrote history rather than degrading to
+    // a fast-forward, or this test would stop exercising the #806 regression.
+    expect(await isAncestor(workspacePath, headShaAtStart, "HEAD")).toBe(false);
 
     const result = await classifyFailure({
       cancelRequested: false,
@@ -105,7 +82,7 @@ describe("classifyFailure", () => {
     expect(result.branchAdvancedSinceAttemptStart).toBe(true);
   });
 
-  it("classifies a clean process_exit as NOT advanced (content digest) when only a commit --amend changed HEAD's SHA", async () => {
+  it("classifies a clean process_exit as NOT advanced when only a commit --amend changed HEAD's SHA", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
     const { contentDigestAtStart, headShaAtStart } =
@@ -132,9 +109,8 @@ describe("classifyFailure", () => {
       }
     });
 
-    // The regression the digest check exists to close: a same-content
-    // rewrite (a bare amend) must not read as real new work, unlike the
-    // plain-SHA fallback above, which can't tell the two apart.
+    // The regression this check exists to close: a same-content rewrite (a
+    // bare amend) must not read as real new work.
     expect(result.kind).toBe("success");
     expect(result.branchAdvancedSinceAttemptStart).toBe(false);
   });

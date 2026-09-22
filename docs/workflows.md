@@ -380,8 +380,7 @@ are content-addressed, so a clean rebase reproduces the same diff text and the s
 (symphonika#806). A same-content rewrite with no real new work — a bare `git commit --amend`, a
 no-diff reword/squash, or a rebase that adds no new commit — also reproduces the same digest, so it
 correctly reads as `false`. Combine it with `branch_ahead_of_base` when a state must create and
-retain its own commit. Falls back to a plain `HEAD` SHA inequality (unable to tell a same-content
-rewrite apart from real work) for any caller that predates the digest snapshot.
+retain its own commit. See ADR-2026-09-22-1417.
 
 `artifact_exists` is the one predicate whose value is a query argument rather than an expected
 observation, so it is not compared against a signal at all — Symphonika resolves each path against

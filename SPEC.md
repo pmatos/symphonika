@@ -607,11 +607,7 @@ success having written no plan takes the `blocked` exit instead of advancing to 
 implementation stage. `branch_ahead_of_base` remains the cumulative branch-vs-base signal.
 For each agent Attempt, Symphonika also snapshots a digest of `git diff origin/<base>...HEAD`
 immediately before provider execution; `branch_advanced_since_attempt_start` is true whenever the
-completion digest differs from that snapshot. Comparing diff content rather than `HEAD`'s SHA means
-a mid-attempt rebase onto an advanced base — which rewrites the attempt's own commits to new SHAs
-while still representing real forward progress — reproduces the same digest and correctly reads as
-advanced (symphonika#806), while a same-SHA-different-content rewrite (e.g. `git commit --amend`)
-reproduces the same digest too and correctly reads as not advanced. The second transition's
+completion digest differs from that snapshot (ADR-2026-09-22-1417). The second transition's
 requirement of a distinct refactor commit is enforced by this predicate together with the
 `BLOCKED.md` sentinel and the prompt instructions. Any fallback uses the template's `blocked` exit.
 Repositories may

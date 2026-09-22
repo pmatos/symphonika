@@ -133,7 +133,7 @@ import {
 } from "./claim-label-writer.js";
 import {
   classifyFailure,
-  inspectWorkspaceHead,
+  inspectWorkspaceContentDigest,
   type ClassifiedTerminal
 } from "./classify-failure.js";
 import {
@@ -4574,7 +4574,7 @@ export class RunController {
     // See ADR 0093 / issue #640.
     let workspaceOperation: IssueWorkspacePreparation | undefined;
     let workspaceAbortCleanup: Promise<void> | undefined;
-    let headShaAtAttemptStart: string | undefined;
+    let contentDigestAtAttemptStart: string | undefined;
     let headInspectionFailed = false;
     let caughtError: unknown;
     // Hoisted so the finally can read them on any exit path (including a
@@ -4826,8 +4826,9 @@ export class RunController {
         respectsIssueLabels
       );
       try {
-        headShaAtAttemptStart = await input.deadline.race(
-          inspectWorkspaceHead({
+        contentDigestAtAttemptStart = await input.deadline.race(
+          inspectWorkspaceContentDigest({
+            baseBranch: input.project.workspace.git.base_branch,
             workspacePath: started.evidence.workspacePath,
             ...input.deadline.signalOption
           })
@@ -5002,10 +5003,10 @@ export class RunController {
                 ),
                 successWorkspace: {
                   baseBranch: input.project.workspace.git.base_branch,
-                  headInspectionFailed,
-                  ...(headShaAtAttemptStart === undefined
+                  ...(contentDigestAtAttemptStart === undefined
                     ? {}
-                    : { headShaAtStart: headShaAtAttemptStart }),
+                    : { contentDigestAtStart: contentDigestAtAttemptStart }),
+                  headInspectionFailed,
                   workspacePath: started.evidence.workspacePath
                 }
               })

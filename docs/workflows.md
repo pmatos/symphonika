@@ -371,11 +371,16 @@ The parser recognizes the following keys:
 attempt started from. It is a property of the branch, not of the attempt: in a multi-state walk it
 stays `true` for every later state once any earlier state has committed.
 
-`branch_advanced_since_attempt_start` is attempt-local. Symphonika snapshots `HEAD` after Workspace
-preparation and before the provider runs. The signal is true only when completion `HEAD` differs
-from that snapshot and the snapshot remains its ancestor, so a no-op or amended/rewritten earlier
-commit does not satisfy it. Combine it with `branch_ahead_of_base` when a state must create and
-retain its own commit without changing the cumulative predicate's compatibility semantics.
+`branch_advanced_since_attempt_start` is attempt-local. Symphonika snapshots a digest of
+`git diff origin/<base_branch>...HEAD` after Workspace preparation and before the provider runs. The
+signal is true whenever the completion digest differs from that snapshot. Diff content, not `HEAD`'s
+SHA, is what's compared: a mid-attempt `git rebase`/`reset --hard` onto an advanced base rewrites the
+attempt's own earlier commits to new SHAs even though real work was strictly added, and blob hashes
+are content-addressed, so a clean rebase reproduces the same diff text and the same digest
+(symphonika#806). A same-content rewrite with no real new work — a bare `git commit --amend`, a
+no-diff reword/squash, or a rebase that adds no new commit — also reproduces the same digest, so it
+correctly reads as `false`. Combine it with `branch_ahead_of_base` when a state must create and
+retain its own commit. See ADR-2026-09-22-1417.
 
 `artifact_exists` is the one predicate whose value is a query argument rather than an expected
 observation, so it is not compared against a signal at all — Symphonika resolves each path against

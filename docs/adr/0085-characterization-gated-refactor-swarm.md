@@ -2,6 +2,12 @@
 
 Status: Accepted
 
+**Amendment note (symphonika#806):** `branch_advanced_since_attempt_start`'s implementation changed
+from a `HEAD`-ancestry check to a content-digest comparison so it survives a mid-attempt rebase onto
+an advanced base without losing this ADR's "distinct commit" requirement for `red_team`/
+`refactoring`. See ADR-2026-09-22-1417 for the rationale and `docs/workflows.md`'s
+`branch_advanced_since_attempt_start` section for the predicate's authoring reference.
+
 ## Context
 
 Large, frequently changed, undertested modules are expensive to refactor safely, but risk ranking

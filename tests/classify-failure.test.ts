@@ -7,7 +7,10 @@ import { classifyFailure } from "../src/lifecycle/classify-failure.js";
 import { WorkspacePreparationError } from "../src/workspace.js";
 import {
   createGitWorkspaceAhead,
-  createGitWorkspaceAtBase
+  createGitWorkspaceAmendedWithoutContentChange,
+  createGitWorkspaceAtBase,
+  createGitWorkspaceRebasedOntoAdvancedBase,
+  isAncestor
 } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
@@ -46,6 +49,70 @@ describe("classifyFailure", () => {
     });
 
     expect(result.kind).toBe("success");
+  });
+
+  it("classifies a clean process_exit as advanced after a mid-attempt rebase carried real new work", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    const { contentDigestAtStart, headShaAtStart } =
+      await createGitWorkspaceRebasedOntoAdvancedBase({
+        branchName: "sym/symphonika/806-test",
+        workspacePath
+      });
+
+    // Pin that the fixture genuinely rewrote history rather than degrading to
+    // a fast-forward, or this test would stop exercising the #806 regression.
+    expect(await isAncestor(workspacePath, headShaAtStart, "HEAD")).toBe(false);
+
+    const result = await classifyFailure({
+      cancelRequested: false,
+      events: [
+        { type: "session_started" },
+        { type: "process_exit", exitCode: 0 }
+      ],
+      redactSecrets: [],
+      successWorkspace: {
+        baseBranch: "main",
+        contentDigestAtStart,
+        workspacePath
+      }
+    });
+
+    expect(result.kind).toBe("success");
+    expect(result.branchAdvancedSinceAttemptStart).toBe(true);
+  });
+
+  it("classifies a clean process_exit as NOT advanced when only a commit --amend changed HEAD's SHA", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    const { contentDigestAtStart, headShaAtStart } =
+      await createGitWorkspaceAmendedWithoutContentChange({
+        branchName: "sym/symphonika/806-amend-test",
+        workspacePath
+      });
+
+    // Pin that the amend really did change HEAD's SHA, so a fixture bug that
+    // left HEAD untouched couldn't make this test pass for the wrong reason.
+    expect(await isAncestor(workspacePath, headShaAtStart, "HEAD")).toBe(false);
+
+    const result = await classifyFailure({
+      cancelRequested: false,
+      events: [
+        { type: "session_started" },
+        { type: "process_exit", exitCode: 0 }
+      ],
+      redactSecrets: [],
+      successWorkspace: {
+        baseBranch: "main",
+        contentDigestAtStart,
+        workspacePath
+      }
+    });
+
+    // The regression this check exists to close: a same-content rewrite (a
+    // bare amend) must not read as real new work.
+    expect(result.kind).toBe("success");
+    expect(result.branchAdvancedSinceAttemptStart).toBe(false);
   });
 
   it("classifies exit code 0 with no commits ahead of base as deterministic failure", async () => {

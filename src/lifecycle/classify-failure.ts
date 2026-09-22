@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { contentHash } from "../content-hash.js";
 import type { NormalizedProviderEvent } from "../provider.js";
 import { withProviderStderrTail } from "../providers/provider-stderr.js";
 import { redactAll } from "../redaction.js";
 import type { FailureClassification } from "../run-store.js";
-import { git, WorkspacePreparationError } from "../workspace.js";
+import { WorkspacePreparationError } from "../workspace.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,8 +31,11 @@ export type ClassifyFailureInput = {
     // verification for the issue-driven Run lifecycle never sets this.
     allowZeroCommits?: boolean;
     baseBranch: string;
+    // A digest of `git diff <base>...HEAD` taken immediately before the
+    // provider ran; see inspectWorkspaceContentDigest and
+    // docs/workflows.md's branch_advanced_since_attempt_start section.
+    contentDigestAtStart?: string;
     headInspectionFailed?: boolean;
-    headShaAtStart?: string;
     workspacePath: string;
   };
 };
@@ -49,11 +53,6 @@ export type ClassifiedTerminal = {
 
 export type WorkspaceCommitInspectionInput = {
   baseBranch: string;
-  workspacePath: string;
-};
-
-export type WorkspaceHeadInspectionInput = {
-  signal?: AbortSignal;
   workspacePath: string;
 };
 
@@ -174,12 +173,7 @@ async function verifyWorkspaceSuccess(
       };
     }
     const branchAdvancedSinceAttemptStart =
-      workspace.headShaAtStart === undefined
-        ? true
-        : await inspectWorkspaceAdvancedSinceHead({
-            headShaAtStart: workspace.headShaAtStart,
-            workspacePath: workspace.workspacePath
-          });
+      await computeBranchAdvancedSinceAttemptStart(workspace);
     return {
       branchAdvancedSinceAttemptStart,
       commitsAhead: true,
@@ -194,13 +188,12 @@ async function verifyWorkspaceSuccess(
 export async function inspectWorkspaceCommitsAhead(
   workspace: WorkspaceCommitInspectionInput
 ): Promise<boolean> {
-  const baseRef = `refs/remotes/origin/${workspace.baseBranch}`;
   const { stdout } = await execFileAsync("git", [
     "-C",
     workspace.workspacePath,
     "rev-list",
     "--count",
-    `${baseRef}..HEAD`
+    `${baseRef(workspace.baseBranch)}..HEAD`
   ]);
   const trimmed = stdout.trim();
   if (!/^\d+$/.test(trimmed)) {
@@ -209,51 +202,53 @@ export async function inspectWorkspaceCommitsAhead(
   return Number(trimmed) > 0;
 }
 
-export async function inspectWorkspaceHead(
-  workspace: WorkspaceHeadInspectionInput
-): Promise<string> {
-  // Uses the shared process-group-aware git() helper, not execFileAsync,
-  // so a caller that passes a deadline signal actually tears down a stalled
-  // `git rev-parse` rather than merely abandoning the promise racing it.
-  const stdout = await git(
-    ["-C", workspace.workspacePath, "rev-parse", "--verify", "HEAD^{commit}"],
-    workspace.signal
-  );
-  const trimmed = stdout.trim();
-  if (!/^[0-9a-f]{40,64}$/i.test(trimmed)) {
-    throw new Error(`invalid git HEAD: ${trimmed}`);
-  }
-  return trimmed;
+function baseRef(baseBranch: string): string {
+  return `refs/remotes/origin/${baseBranch}`;
 }
 
-async function inspectWorkspaceAdvancedSinceHead(workspace: {
-  headShaAtStart: string;
-  workspacePath: string;
-}): Promise<boolean> {
-  try {
-    await execFileAsync("git", [
+const CONTENT_DIGEST_MAX_BUFFER = 10 * 1024 * 1024;
+
+// A content fingerprint of what the branch carries beyond base, immune to
+// history rewriting: `git diff <base>...HEAD` diffs HEAD against the
+// merge-base of base and HEAD, so a clean rebase/reset onto an advanced base
+// reproduces the same diff text (blob hashes are content-addressed, so an
+// unchanged file's lines hash identically regardless of which commit carries
+// them) and this digest stays the same, while real new content changes it.
+// See docs/workflows.md's branch_advanced_since_attempt_start section.
+//
+// Takes `signal` directly (not the shared process-group-aware git() helper
+// from workspace.ts, whose 1MB output cap is too small for a real diff): a
+// caller racing this under a Run Slot Deadline still needs the `git diff`
+// process torn down rather than merely abandoned when the deadline fires.
+export async function inspectWorkspaceContentDigest(
+  workspace: WorkspaceCommitInspectionInput & { signal?: AbortSignal }
+): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "git",
+    [
       "-C",
       workspace.workspacePath,
-      "merge-base",
-      "--is-ancestor",
-      workspace.headShaAtStart,
-      "HEAD"
-    ]);
-  } catch (error) {
-    if (gitExitCode(error) === 1) {
-      return false;
-    }
-    throw error;
-  }
-  return (await inspectWorkspaceHead(workspace)) !== workspace.headShaAtStart;
+      "diff",
+      `${baseRef(workspace.baseBranch)}...HEAD`
+    ],
+    { maxBuffer: CONTENT_DIGEST_MAX_BUFFER, signal: workspace.signal }
+  );
+  return contentHash(stdout);
 }
 
-function gitExitCode(error: unknown): number | undefined {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    const code = (error as { code?: unknown }).code;
-    return typeof code === "number" ? code : undefined;
+// No content digest to compare against defaults to true, matching the
+// pre-symphonika#806 behavior for a caller (Routine Firing) that opts out of
+// advancement detection entirely.
+async function computeBranchAdvancedSinceAttemptStart(workspace: {
+  baseBranch: string;
+  contentDigestAtStart?: string;
+  workspacePath: string;
+}): Promise<boolean> {
+  if (workspace.contentDigestAtStart === undefined) {
+    return true;
   }
-  return undefined;
+  const currentDigest = await inspectWorkspaceContentDigest(workspace);
+  return currentDigest !== workspace.contentDigestAtStart;
 }
 
 function workspaceInspectionFailed(): ClassifiedTerminal {

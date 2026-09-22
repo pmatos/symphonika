@@ -7,7 +7,8 @@ import { classifyFailure } from "../src/lifecycle/classify-failure.js";
 import { WorkspacePreparationError } from "../src/workspace.js";
 import {
   createGitWorkspaceAhead,
-  createGitWorkspaceAtBase
+  createGitWorkspaceAtBase,
+  createGitWorkspaceRebasedOntoAdvancedBase
 } from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
@@ -46,6 +47,28 @@ describe("classifyFailure", () => {
     });
 
     expect(result.kind).toBe("success");
+  });
+
+  it("classifies a clean process_exit as success after the branch was rebased onto an advanced base mid-attempt", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    const { headShaAtStart } = await createGitWorkspaceRebasedOntoAdvancedBase({
+      branchName: "sym/symphonika/806-test",
+      workspacePath
+    });
+
+    const result = await classifyFailure({
+      cancelRequested: false,
+      events: [
+        { type: "session_started" },
+        { type: "process_exit", exitCode: 0 }
+      ],
+      redactSecrets: [],
+      successWorkspace: { baseBranch: "main", headShaAtStart, workspacePath }
+    });
+
+    expect(result.kind).toBe("success");
+    expect(result.branchAdvancedSinceAttemptStart).toBe(true);
   });
 
   it("classifies exit code 0 with no commits ahead of base as deterministic failure", async () => {

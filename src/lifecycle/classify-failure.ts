@@ -226,34 +226,17 @@ export async function inspectWorkspaceHead(
   return trimmed;
 }
 
+// Deliberately not an ancestry check (no `git merge-base --is-ancestor`): a
+// mid-attempt `git rebase`/`reset --hard` onto an advanced base — the agent's
+// own, correct response to a fast-moving base branch — rewrites the attempt's
+// earlier commits to new SHAs, so the pre-attempt HEAD is no longer an
+// ancestor of the post-rebase HEAD even though the branch strictly gained
+// real work. Plain inequality survives that rewrite; see symphonika#806.
 async function inspectWorkspaceAdvancedSinceHead(workspace: {
   headShaAtStart: string;
   workspacePath: string;
 }): Promise<boolean> {
-  try {
-    await execFileAsync("git", [
-      "-C",
-      workspace.workspacePath,
-      "merge-base",
-      "--is-ancestor",
-      workspace.headShaAtStart,
-      "HEAD"
-    ]);
-  } catch (error) {
-    if (gitExitCode(error) === 1) {
-      return false;
-    }
-    throw error;
-  }
   return (await inspectWorkspaceHead(workspace)) !== workspace.headShaAtStart;
-}
-
-function gitExitCode(error: unknown): number | undefined {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    const code = (error as { code?: unknown }).code;
-    return typeof code === "number" ? code : undefined;
-  }
-  return undefined;
 }
 
 function workspaceInspectionFailed(): ClassifiedTerminal {

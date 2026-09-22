@@ -247,7 +247,7 @@ _Avoid_: raw provider log
 The per-Run mapping that turns one Coding Agent's raw protocol messages (its Provider Event
 Log) into Normalized Event Log entries, owning any cross-message carry-forward state privately
 so it is testable without spawning the provider. One per provider adapter (`codex-events`,
-`claude-events`).
+`claude-events`, `omp-events`).
 _Avoid_: parser, event mapper
 
 **Provider Stream Stall**:

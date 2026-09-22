@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 
 import type { NormalizedProviderEvent } from "../provider.js";
@@ -30,6 +31,15 @@ export type ClassifyFailureInput = {
     // verification for the issue-driven Run lifecycle never sets this.
     allowZeroCommits?: boolean;
     baseBranch: string;
+    // A digest of `git diff <base>...HEAD` taken immediately before the
+    // provider ran (see inspectWorkspaceContentDigest). Preferred over
+    // headShaAtStart when present: a mid-attempt rebase/reset rewrites
+    // commits to new SHAs even when their content is identical, but the
+    // branch's diff against base is patch-equivalent across that rewrite, so
+    // comparing digests (rather than the raw SHA) tells real new content
+    // apart from a same-content rewrite (a bare amend, a no-diff
+    // reword/squash). See symphonika#806 and its follow-up.
+    contentDigestAtStart?: string;
     headInspectionFailed?: boolean;
     headShaAtStart?: string;
     workspacePath: string;
@@ -174,12 +184,7 @@ async function verifyWorkspaceSuccess(
       };
     }
     const branchAdvancedSinceAttemptStart =
-      workspace.headShaAtStart === undefined
-        ? true
-        : await inspectWorkspaceAdvancedSinceHead({
-            headShaAtStart: workspace.headShaAtStart,
-            workspacePath: workspace.workspacePath
-          });
+      await computeBranchAdvancedSinceAttemptStart(workspace);
     return {
       branchAdvancedSinceAttemptStart,
       commitsAhead: true,
@@ -209,6 +214,30 @@ export async function inspectWorkspaceCommitsAhead(
   return Number(trimmed) > 0;
 }
 
+// A content fingerprint of what the branch carries beyond base, immune to
+// history rewriting: `git diff <base>...HEAD` diffs HEAD against the
+// merge-base of base and HEAD, so a clean rebase/reset onto an advanced base
+// reproduces the same diff text (blob hashes are content-addressed, so an
+// unchanged file's lines hash identically regardless of which commit carries
+// them) and this digest stays the same, while real new content changes it.
+// Comparing two of these digests answers "did this attempt's content change"
+// in a way a raw HEAD SHA comparison cannot: a same-content rewrite (a bare
+// `git commit --amend`, a no-diff reword/squash) also changes the SHA but
+// leaves this digest untouched. See symphonika#806 and its follow-up.
+const CONTENT_DIGEST_MAX_BUFFER = 10 * 1024 * 1024;
+
+export async function inspectWorkspaceContentDigest(
+  workspace: WorkspaceCommitInspectionInput
+): Promise<string> {
+  const baseRef = `refs/remotes/origin/${workspace.baseBranch}`;
+  const { stdout } = await execFileAsync(
+    "git",
+    ["-C", workspace.workspacePath, "diff", `${baseRef}...HEAD`],
+    { maxBuffer: CONTENT_DIGEST_MAX_BUFFER }
+  );
+  return createHash("sha256").update(stdout).digest("hex");
+}
+
 export async function inspectWorkspaceHead(
   workspace: WorkspaceHeadInspectionInput
 ): Promise<string> {
@@ -226,17 +255,33 @@ export async function inspectWorkspaceHead(
   return trimmed;
 }
 
-// Deliberately not an ancestry check (no `git merge-base --is-ancestor`): a
-// mid-attempt `git rebase`/`reset --hard` onto an advanced base — the agent's
-// own, correct response to a fast-moving base branch — rewrites the attempt's
-// earlier commits to new SHAs, so the pre-attempt HEAD is no longer an
-// ancestor of the post-rebase HEAD even though the branch strictly gained
-// real work. Plain inequality survives that rewrite; see symphonika#806.
-async function inspectWorkspaceAdvancedSinceHead(workspace: {
-  headShaAtStart: string;
+// Prefers the content digest (immune to history rewriting and to a
+// same-content rewrite alike) over the older headShaAtStart signal, which
+// stays as a fallback for any caller that hasn't started passing
+// contentDigestAtStart yet. Neither present defaults to true, matching the
+// pre-symphonika#806 behavior for a caller that opts out of advancement
+// detection entirely.
+async function computeBranchAdvancedSinceAttemptStart(workspace: {
+  baseBranch: string;
+  contentDigestAtStart?: string;
+  headShaAtStart?: string;
   workspacePath: string;
 }): Promise<boolean> {
-  return (await inspectWorkspaceHead(workspace)) !== workspace.headShaAtStart;
+  if (workspace.contentDigestAtStart !== undefined) {
+    const currentDigest = await inspectWorkspaceContentDigest(workspace);
+    return currentDigest !== workspace.contentDigestAtStart;
+  }
+  if (workspace.headShaAtStart !== undefined) {
+    // Deliberately not an ancestry check (no `git merge-base --is-ancestor`):
+    // a mid-attempt rebase/reset onto an advanced base rewrites the
+    // attempt's earlier commits to new SHAs, so the pre-attempt HEAD is no
+    // longer an ancestor of the post-rebase HEAD even though the branch
+    // strictly gained real work. Plain inequality survives that rewrite but,
+    // unlike the digest above, can't tell a same-content rewrite (a bare
+    // amend) from real new work; see symphonika#806.
+    return (await inspectWorkspaceHead(workspace)) !== workspace.headShaAtStart;
+  }
+  return true;
 }
 
 function workspaceInspectionFailed(): ClassifiedTerminal {

@@ -133,6 +133,7 @@ import {
 } from "./claim-label-writer.js";
 import {
   classifyFailure,
+  inspectWorkspaceContentDigest,
   inspectWorkspaceHead,
   type ClassifiedTerminal
 } from "./classify-failure.js";
@@ -4575,6 +4576,7 @@ export class RunController {
     let workspaceOperation: IssueWorkspacePreparation | undefined;
     let workspaceAbortCleanup: Promise<void> | undefined;
     let headShaAtAttemptStart: string | undefined;
+    let contentDigestAtAttemptStart: string | undefined;
     let headInspectionFailed = false;
     let caughtError: unknown;
     // Hoisted so the finally can read them on any exit path (including a
@@ -4832,6 +4834,12 @@ export class RunController {
             ...input.deadline.signalOption
           })
         );
+        contentDigestAtAttemptStart = await input.deadline.race(
+          inspectWorkspaceContentDigest({
+            baseBranch: input.project.workspace.git.base_branch,
+            workspacePath: started.evidence.workspacePath
+          })
+        );
       } catch (error) {
         // A deadline or preparation cancellation must unwind the slot. Only a
         // settled Git inspection failure is deferred until clean provider
@@ -5002,6 +5010,9 @@ export class RunController {
                 ),
                 successWorkspace: {
                   baseBranch: input.project.workspace.git.base_branch,
+                  ...(contentDigestAtAttemptStart === undefined
+                    ? {}
+                    : { contentDigestAtStart: contentDigestAtAttemptStart }),
                   headInspectionFailed,
                   ...(headShaAtAttemptStart === undefined
                     ? {}

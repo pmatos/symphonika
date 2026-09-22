@@ -2,6 +2,23 @@
 
 Status: Accepted
 
+**Amendment note (symphonika#806/PR #807):** the branch-advancement check no longer requires the
+pre-attempt `HEAD` snapshot to remain an ancestor of the post-attempt `HEAD`. A mid-attempt `git
+rebase`/`reset --hard` onto an advanced base rewrites the attempt's own earlier commits to new SHAs
+even though real work was strictly added, so the ancestor requirement produced false negatives for
+that legitimate case. The check now compares a digest of `git diff origin/<base>...HEAD` snapshotted
+before and after the attempt instead of comparing `HEAD`'s SHA
+(`inspectWorkspaceContentDigest`/`computeBranchAdvancedSinceAttemptStart` in
+`src/lifecycle/classify-failure.ts`): blob hashes are content-addressed, so a clean rebase reproduces
+the same diff text and the same digest, while a same-SHA-different-content rewrite (a bare `git
+commit --amend`, a no-diff reword/squash, or a rebase that adds no refactor commit at all) also
+reproduces the same digest and correctly reads as not advanced. The tradeoff described in "Risk
+ranking stays in a report Routine" below therefore still holds: `red_team`'s and `refactoring`'s
+`branch_advanced_since_attempt_start` gate distinguishes a legitimate rebase from a no-op rewrite,
+same as before symphonika#806. The `BLOCKED.md` sentinel (ADR-2026-09-10-1630) and the prompts' own
+instructions remain independent, complementary guards. See `docs/workflows.md`'s
+`branch_advanced_since_attempt_start` section.
+
 ## Context
 
 Large, frequently changed, undertested modules are expensive to refactor safely, but risk ranking

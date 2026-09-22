@@ -232,7 +232,7 @@ async function pollProjectPullRequests(
 
   // A rate-limited enrichment call must still surface here even though the
   // row itself is kept (see buildSnapshot's catch) -- otherwise the caller
-  // (daemon.ts's engageGithubBackoff) never sees the rate limit and retries
+  // (the GitHub backoff ledger's engage) never sees the rate limit and retries
   // the same GraphQL calls every tick. See ADR 0083.
   const rateLimitError = built.find(
     (entry) => entry.enrichmentError !== undefined

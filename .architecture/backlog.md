@@ -48,7 +48,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 
 ## routine-editor-target-prologue
 
-- **Status**: in-flight
+- **Status**: landed
 - **Score**: 22/25 (leverage 4, locality 4, blast radius 1, heat 5)
 - **PR**: #799
 - **Files**: ~3 estimated; 3 actual (new `src/http/routine-resolution.ts`, new `tests/routine-resolution.test.ts`, `src/http/pages.ts` at +74/-251) — exact
@@ -65,16 +65,86 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Committed**: report + reconciled backlog (`c567614`), the three design proposals (`70c0416`), implementation + tests (`638612e`), CONTEXT.md term + adjudication (`a4fb9e2`), this in-flight update.
 - **Evidence**: PR #799. Quality gate green, each step a separate command: lint, typecheck, format:check, knip, test (2969 passed / 187 files), build. Diff 3 files, exactly the estimate. **Test-first with a behavioural red**: the module was created with the real signature and a `throw new Error("not implemented")` body and the import wired in *before* the test, so the red was 10 named behaviours failing rather than a module-resolution error. **The test was mutation-checked**: collapsing both refusals to 404 produced exactly 1 named failure; normalizing `editAction` to always carry `/edit` produced exactly 2. Both reverted, suite re-run green. The four existing routine-editor test files were **not touched** — their passing unchanged is the behaviour-preservation evidence; all three handler tails are byte-identical. No published package, wire, or CLI interface changed. `origin/main` unchanged at push (0 behind); no rebase needed. Reconciled `editor-save-outcome-epilogue` #789 → merged/landed; all 14 `dropped` entries re-checked, none moved back; `snapshot-search` re-scored 15/25 → 20/25 on a narrowed seam. No in-flight PR blocked this run.
 - **Next**: human review of #799. `github-backoff-ledger` (22/25, the tied runner-up **candidate**, lost only on blast radius) is the natural next firing. Two **correctness** findings were recorded and deliberately not fixed — `worktree-registration-probe`'s symlink defect and `pre-provider-terminal-write-trio`'s missing-mutex asymmetry; both want a human, not a deepening run.
+- **Reconciled 2026-09-22**: PR #799 merged 2026-09-21T07:57:39Z (`590f5ac`); status moved `in-flight` → `landed`. `src/http/routine-resolution.ts` and the `Routine Edit Target` CONTEXT.md term are on `main`. The named follow-up `github-backoff-ledger` was re-verified present at HEAD and **picked by the 2026-09-22 run**.
 
 ## github-backoff-ledger
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 22/25 (leverage 4, locality 5, blast radius 2, heat 5)
-- **Files**: ~3 estimated
-- **Modules**: `src/daemon.ts` — `githubBackoffUntilByToken` (563, a `Map` declared inside the ~1,500-line `startDaemon`), `isGithubBackoffActive` (736-755), `engageGithubBackoff` (757-781), `isProjectPollable` (785-797), `partitionProjectsForPolling` (799-807); eight call sites at 835, 854, 959, 974, 1358, 1379, 1408, 1433; already-extracted pure half `src/issue-polling.ts` `backoffUntil` (1781) / `rateLimitedTokens` (1800)
+- **PR**: #805
+- **Files**: ~3 estimated; 6 actual (`src/daemon.ts` +17/−131, new `src/github-backoff-ledger.ts`, new `tests/github-backoff-ledger.test.ts`, `CONTEXT.md` term, two one-line stale-comment fixes in `src/pull-request-polling.ts` / `tests/pull-request-polling.test.ts`) — exactly 2x, inside tolerance
+- **Modules**: `src/daemon.ts` — `githubBackoffUntilByToken` (563, a `Map` declared inside the ~1,500-line `startDaemon`), `isGithubBackoffActive` (733-755), `engageGithubBackoff` (757-781), `isProjectPollable` (783-797), `partitionProjectsForPolling` (799-807); eight call sites at 835, 854, 959, 974, 1358, 1379, 1408, 1433; already-extracted pure half `src/issue-polling.ts` `backoffUntil` (1781) / `rateLimitedTokens` (1800)
 - **Summary**: A `createGithubBackoffLedger({logger, now})` returning `{isActive, engage, isPollable}` owning the ADR-0083 window lifetime, the transition-only logging rule and the unresolvable-token exemption.
 - **First seen**: 2026-09-21
-- **Reason**: **Runner-up candidate** to `routine-editor-target-prologue` this run at an exact 22/25 tie, lost on the rubric's first tie-break (blast radius 2 vs 1). Blast 2 is load-bearing and justified: the pure policy half already lives in `issue-polling.ts`, so a clean extraction spans `daemon.ts` + a new module + its test — "a module and its direct callers". Largest test-surface gain of any candidate this run: the transition-only logging rule and the `nowMs === until` boundary are currently unreachable without booting a daemon and faking GitHub. `partitionProjectsForPolling` is additionally a one-line `filter` wrapper, interface ≈ implementation. **The natural next firing.**
+- **Reason**: **Runner-up candidate** to `routine-editor-target-prologue` this run at an exact 22/25 tie, lost on the rubric's first tie-break (blast radius 2 vs 1). Blast 2 is load-bearing and justified: the pure policy half already lives in `issue-polling.ts`, so a clean extraction spans `daemon.ts` + a new module + its test — "a module and its direct callers". Largest test-surface gain of any candidate this run: the transition-only logging rule and the `nowMs === until` boundary are currently unreachable without booting a daemon and faking GitHub. `partitionProjectsForPolling` is additionally a one-line `filter` wrapper, interface ≈ implementation. **The natural next firing.** — **Picked by the 2026-09-22 run** (top surviving candidate at 22/25; tied with the new `omp-event-reducer`, also 22/25 — within 1 point — and won the rubric's second tie-break, higher heat 5 vs 4, after blast radius tied at 2). Friction re-verified at HEAD `604d0b4`: `daemon.ts` unchanged since 2026-09-18, all eight call sites present. Scope fenced: `backoffUntil`/`rateLimitedTokens` stay in `issue-polling.ts`; ADR 0083's decisions preserved exactly and its text not edited (it names the four closures by symbol — amendment proposed in the PR body instead).
+
+### Run 2026-09-22 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/symphonika/routine/refactor-audit/01M33370QG` (**adopted**; all four conditions held — non-default, 0 unique commits ahead of `origin/main`, no upstream, unpublished on origin). Not renamed, per the adopted-branch rule; the slug is recorded here and in the report instead.
+- **Committed**: report + reconciled backlog (`f91f349`), four design proposals (`13dcfcb`), adjudication (`8d725fa`), implementation + tests (`20e317a`), CONTEXT.md term (`e2a5746`), implementation evidence (`a1bd8d8`), this in-flight update.
+- **Evidence**: PR #805. Design-it-twice winner **D** (`engage`/`isPollable`/`pollable`) amended with C's optional late-bound `now` (house idiom `createHostPressureGate`); runner-up **design** C lost on depth (`observe` hides that it writes). Test-first with a behavioural red (11 named failures on a throwing stub); mutation-checked (`!wasActive` removal, lapse-`delete` removal, per-project clock read — each exactly 1 named failure, all reverted). `tests/daemon-issue-polling.test.ts` untouched. Gate, each a separate command: lint ✅, typecheck ✅, format:check ✅, knip ✅, build ✅, test 2978 passed / **2 failed — both pre-existing on untouched `origin/main` `604d0b4`** (verified in a clean worktree): `claude-review-workflow.test.ts` › "reports advisory reviewer failures…" (also red in main's CI run 35575494322 after #803) and `daemon-issue-polling.test.ts` › "coalesces concurrent poll-now requests…" (local timing race, same diff on base). Reconciled `routine-editor-target-prologue` #799 → merged/landed; 14 `dropped` re-checked, none moved back; 6 new candidates recorded.
+- **Next**: human review of #805, and a human look at main's red `claude-review-workflow.test.ts`. `omp-event-reducer` (22/25, the tied runner-up **candidate**, lost only on heat) is the natural next firing. Correctness items recorded, not fixed: `daemon-operator-action-prologue`'s missing `project.disabled` check; `workflow-validation-entry-point-drift`'s CLI `workflow validate` reference-check gap.
+
+## omp-event-reducer
+
+- **Status**: proposed
+- **Score**: 22/25 (leverage 5, locality 4, blast radius 2, heat 4)
+- **Files**: ~3 estimated (`src/providers/omp.ts`, new `src/providers/omp-events.ts`, new test)
+- **Modules**: `src/providers/omp.ts` — `mapOmpFrame` (299-441), `mapStateResponse`/`mapFailedResponse`/`mapPromptResponse`/`mapNegotiationResponse` (443-515), `providerEventFromQueueItem` (287-297), mapping-only `ActiveOmpRun` fields `sessionId`/`assistantText`/`completedAssistantText` (29-37)
+- **Summary**: A `createOmpEventReducer()` owning OMP frame/response → `ProviderEvent` mapping plus its session and assistant-text state, so mapping is unit-testable without a fake OMP subprocess; third sibling of the landed `codex-event-reducer` (#617) and `claude-event-reducer` (#627).
+- **First seen**: 2026-09-22
+- **Reason**: **Runner-up candidate** to `github-backoff-ledger` on 2026-09-22 at an exact 22/25 tie; blast radius tied at 2, lost the second tie-break on heat (4 vs 5 — `omp.ts` 12 commits since 2026-08-20 vs `daemon.ts` 33, heat scored like the sibling codex precedent). 33 of 96 `tests/omp-provider.test.ts` tests spawn a fake OMP script; #780 and #778 both paid that cost for mapping-only changes. `promptDispatched`/`terminalEventSeen` stay with the turn loop; the field accessors at 1608-1635 are shared with `runOmpTurn`. Landing it first makes `omp-frame-read-loop`'s `mapMatched` a clean parameter. **The natural next firing.**
+
+## cli-daemon-call-prologue
+
+- **Status**: proposed
+- **Score**: 21/25 (leverage 4, locality 4, blast radius 1, heat 4)
+- **Files**: ~3 estimated
+- **Modules**: `src/cli.ts` — `poll-now` (1039-1066), `update` (1095-1126), `fire-now` (1164-1191), `cancel` (1810-1836), `adopt-pr` (1887-1913); helpers `fetchDaemonStatus` (2037-2067), `resolveDaemonUrl` (2069-2079); `status` variant (876-880)
+- **Summary**: A `connectToDaemon({stateRoot, explicitUrl, fetcher})` returning `{kind:"connected", daemonUrl, status} | {kind:"unavailable", message}` owning the endpoint-descriptor + state-root-mismatch reachability policy, plus a commander adapter for the two-line failure.
+- **First seen**: 2026-09-22
+- **Reason**: Five ~25-line copies of one prologue. Deliberate variance kept at callers: `update`'s second hint line (1104-1108), `status`'s unavailable fallback. Leverage held at 4 (not 5) because CLI tests already inject a fetcher, so the test surface barely moves. Pins: `tests/cli-runs.test.ts:983`, `:2324`, `:2343`, `:2381`; `tests/cli-update.test.ts:354`, `:375`; `tests/cli-adopt-pr.test.ts:86`.
+
+## daemon-operator-action-prologue
+
+- **Status**: proposed
+- **Score**: 20/25 (leverage 3, locality 4, blast radius 1, heat 5)
+- **Files**: ~3 estimated
+- **Modules**: `src/daemon.ts` — `adoptPullRequest` (1683-1726), `mergePullRequest` (2095-2132), `writeIssueLabels` (2198-2239); helpers `verifySnapshotRepositoryBinding` (2780-2800), `sameGitHubRepository` (2766-2774)
+- **Summary**: A shared tracker-lookup + token-resolution + `{owner, repo, token}` assembly for the three operator mutations, owning the `tracker is not configured` / `tracker.token is not available` refusal pair.
+- **First seen**: 2026-09-22
+- **Reason**: Leverage held at 3: the shared stretch is ~12 lines and **not contiguous** — adopt interleaves priority/workflow/adoptable-state checks, merge/labels interleave `verifySnapshotRepositoryBinding` — so collapsing into one call reorders which refusal wins on multi-failure input; the behaviour-preserving seam is two thin calls (near interface ≈ implementation). **Correctness question, recorded not fixed**: none of the three checks `project.disabled` while `repositoryForProject` (`src/pull-request-followup.ts:607-632`) does — an operator may be able to merge/label/adopt in a gracefully-disabled Project (ADR 0021); intent unverified, a human should look.
+
+## operator-cancel-decision-twin
+
+- **Status**: proposed
+- **Score**: 19/25 (leverage 3, locality 4, blast radius 2, heat 5)
+- **Files**: ~4 estimated
+- **Modules**: `src/daemon.ts:1609-1635` (`cancelViaUi`), `src/http/app.ts:392-396` (fallback wiring), `:1172-1215` (`cancelRunInStore`); Run-vs-Firing discrimination also at `app.ts:775-780`, `daemon.ts:2474-2488`
+- **Summary**: One `decideOperatorCancel(runStore, id)` for the Run-vs-Firing discrimination and terminal guard, used by the daemon, redirect and shutdown; the HTTP `cancelRun` option becomes required.
+- **First seen**: 2026-09-22
+- **Reason**: `cancelRunInStore` never runs in production (the only `createHttpApp` caller always passes `cancelRun`), yet the cancel-pinning tests exercise it (`tests/http-app-runs.test.ts:1252-1355`, `tests/routine-surfaces.test.ts:301-370`, comment at `:325`). The fallback settles immediately; the daemon path is cooperative — so making the option required changes what those tests exercise, a call a human should make.
+
+## cli-daemon-response-envelope
+
+- **Status**: proposed
+- **Score**: 18/25 (leverage 3, locality 3, blast radius 1, heat 4)
+- **Files**: ~2 estimated
+- **Modules**: `src/cli.ts` — `postPollNow` (2217-2253), `postUpdateNow` (2255-2295), `postFireRoutine` (2297-2345), `waitForRoutineFiring` (2347-2399); response types duplicated at `cli.ts:127-160` vs `src/http/app.ts:101-112`, `:176-182`, `:424-473`
+- **Summary**: A `callDaemon(fetcher, url, init, read, label)` envelope for daemon POST responses; do after `cli-daemon-call-prologue`.
+- **First seen**: 2026-09-22
+- **Reason**: Four copies of fetch/catch → JSON/catch → `!ok` → `read*`. `postCancel`/`postAdoptPr` deliberately excluded (status-specific branching). Drift: `postCancel` ignores `body.error` on an unexpected non-OK status, so a 403 `{error}` reads "daemon returned HTTP 403" for `cancel` but shows the reason for `poll-now`.
+
+## workflow-validation-entry-point-drift
+
+- **Status**: dropped
+- **Score**: n/a (contradicts ADR 0076; not behaviour-preserving)
+- **Modules**: `src/reload.ts:1453-1515`, `src/doctor.ts:1711-1791`, `src/workflow/fsm-expansion.ts:125-150`, `:222-305` (via `src/cli.ts:745-805`)
+- **Summary**: One `validateWorkflowContract(...)` verdict for reload, doctor, the editor and CLI `workflow validate`/`explain`.
+- **First seen**: 2026-09-22
+- **Reason**: Filter: **contradicts ADR 0076** (`docs/adr/0076-config-editors.md:95-99`, sharing "deliberately not shared") and **not behaviour-preserving** (`workflow validate` would start failing on some inputs). Three observed drifts recorded for a human: (1) CLI `workflow validate` never calls `validateExpandedWorkflowReferences`, so it reports ok for a raw-FSM contract with a missing agent-state prompt file that reload rejects (`tests/reload.test.ts:390`), contrary to the ADR 0051 addendum (`:111-114`) — a **correctness** item schedulable without reopening ADR 0076; (2) reload lists markdown front-matter errors twice (`reload.ts:1500-1502` joins errors `fsm-expansion.ts:398-400` already included); (3) only doctor checks workflow provider references.
 
 ## dispatch-provider-resolution
 
@@ -84,7 +154,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Modules**: `src/lifecycle/run-controller.ts` 1143-1190 (honours the state override), 3040-3080 (honours it), 3480-3510 (`executeContinuation`, omits it), 3653-3670 (`dispatchReviewFollowup`, omits it); rule restated at `src/doctor.ts:1750-1756` and as prose on `RetryPayload` at `run-controller.ts:428-440`
 - **Summary**: A `resolveDispatchProvider(providersConfig, project, state?)` returning `{provider, providerCommand, providerName} | {failure}` owning the "target state's `action.provider` else Project default" rule, the `Partial<>` command cast, and both `provider_command_missing` / `provider_not_registered` reasons.
 - **First seen**: 2026-09-21
-- **Reason**: The override rule is written out twice, deliberately omitted twice, and documented a third time as a comment — and `ContinuationPayload` carries no provider at all, so the hazard the `RetryPayload` comment names (a state declaring `action.provider: claude` in a codex project) is unguarded on the continuation path. `dispatchReviewFollowup` is safe only by an out-of-band raw-FSM refusal 25 lines earlier (3628-3638), invisible at the resolution site. Pinning tests exist for the honouring half only (`tests/daemon-dispatch.test.ts:2727`, `:3195`); the continuation path needs a characterization test first.
+- **Reason**: The override rule is written out twice, deliberately omitted twice, and documented a third time as a comment — and `ContinuationPayload` carries no provider at all, so the hazard the `RetryPayload` comment names (a state declaring `action.provider: claude` in a codex project) is unguarded on the continuation path. `dispatchReviewFollowup` is safe only by an out-of-band raw-FSM refusal 25 lines earlier (3628-3638), invisible at the resolution site. Pinning tests exist for the honouring half only (`tests/daemon-dispatch.test.ts:2727`, `:3195`); the continuation path needs a characterization test first. **Scope widened 2026-09-22**: `src/routines/dispatcher.ts:325-341` (`fireRoutineNow`) and `:925-975` (`dispatchDueRoutines`) repeat the same `routine.provider ?? project.agent.provider` rule, `Partial<RunControllerProvidersConfig>` cast and not-registered/command-missing pair; estimate grows ~3 → ~4 files, blast band stays 2, score unchanged.
 
 ## worktree-registration-probe
 
@@ -105,7 +175,7 @@ filter holds, and never deletes entries. Statuses change; rows stay.
 - **Modules**: `src/doctor.ts` 286-462 (+ `rejectPerProjectRoutines` 325-341, `serviceRoutineSchema` 381-419), `src/reload.ts` 174-474 (+ 1117-1133, 382-420), `src/config-schemas.ts` 1-125
 - **Summary**: Finish the migration `src/config-schemas.ts` already started — move `providerNameSchema`/`trackerSchema`/`issueFiltersSchema`/`prioritySchema`/`agentSchema`/`serviceRoutineSchema`/`rejectPerProjectRoutines` into the one designated owner so doctor and the reloader answer the same question.
 - **First seen**: 2026-09-21
-- **Reason**: The grammar is defined twice, same names, same order; `serviceRoutineSchema` (39 lines, two custom ADR-0069 error messages) and `rejectPerProjectRoutines` are byte-identical. Already drifted: `reload.ts:426-429` types `state.root` as `z.string().min(1)` with no `.passthrough()` where `doctor.ts:435-441` uses `pathStringSchema` with `.passthrough()`; `reload.ts:441-448` knows `global.pressure` (ADR 0088) and `doctor.ts` does not — so `symphonika doctor` answers a different question from the reloader, exactly what doctor exists to pre-empt. Three dedicated test files stand by (`tests/config-schemas.test.ts`, `tests/reload.test.ts`, `tests/doctor.test.ts`); a table of malformed configs asserted to produce the same verdict from both entry points is the red test and will fail on the two gaps before any refactor.
+- **Reason**: The grammar is defined twice, same names, same order; `serviceRoutineSchema` (39 lines, two custom ADR-0069 error messages) and `rejectPerProjectRoutines` are byte-identical. Already drifted: `reload.ts:426-429` types `state.root` as `z.string().min(1)` with no `.passthrough()` where `doctor.ts:435-441` uses `pathStringSchema` with `.passthrough()`; `reload.ts:441-448` knows `global.pressure` (ADR 0088) and `doctor.ts` does not — so `symphonika doctor` answers a different question from the reloader, exactly what doctor exists to pre-empt. Three dedicated test files stand by (`tests/config-schemas.test.ts`, `tests/reload.test.ts`, `tests/doctor.test.ts`); a table of malformed configs asserted to produce the same verdict from both entry points is the red test and will fail on the two gaps before any refactor. **Caveat recorded 2026-09-22**: ADR 0079 (`docs/adr/0079-github-releases-and-self-update.md:100-103`) records doctor's *top-level* Service Config schema as deliberately thinner (omits daemon-runtime-only keys), so the `global.pressure` gap is by design, not drift, and a same-verdict table over top-level keys would contradict it. Moving the shared *sub-schemas* into `config-schemas.ts` remains eligible; re-scope before picking.
 
 ## firing-lifecycle-window
 

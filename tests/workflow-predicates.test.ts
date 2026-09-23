@@ -20,6 +20,11 @@ const agentResultSignalKeys = [
   "provider_success"
 ];
 
+// The keys a Workflow Claim (src/workflow/claim.ts) can populate. Read from
+// the run evidence directory by src/lifecycle/claim-probe.ts, independently
+// of signalsFromTerminal's agent-result projection above.
+const claimSignalKeys = ["claim_status"];
+
 function everyPullRequestSignalKey(): Set<string> {
   const keys = new Set<string>();
   for (const checks of ["failure", "pending", "success", "unknown"] as const) {
@@ -56,14 +61,19 @@ describe("workflow predicate registry", () => {
         expect([...pullRequestKeys], key).toContain(key);
         continue;
       }
+      if (evaluation === "claim_signal") {
+        expect(claimSignalKeys, key).toContain(key);
+        continue;
+      }
       expect(evaluation, key).toBe("artifact");
     }
   });
 
-  it("accepts no key beyond the ones the two signal projections emit plus artifact_exists", () => {
+  it("accepts no key beyond the ones the three signal projections emit plus artifact_exists", () => {
     const accounted = new Set([
       ...agentResultSignalKeys,
       ...everyPullRequestSignalKey(),
+      ...claimSignalKeys,
       "artifact_exists"
     ]);
     expect(
@@ -84,6 +94,7 @@ describe("workflow predicate registry", () => {
       "agent_signal"
     );
     expect(workflowPredicateEvaluation("checks")).toBe("pr_signal");
+    expect(workflowPredicateEvaluation("claim_status")).toBe("claim_signal");
     expect(workflowPredicateEvaluation("nonsense")).toBeUndefined();
     expect(workflowPredicateEvaluation("toString")).toBeUndefined();
     expect(workflowPredicateEvaluation("constructor")).toBeUndefined();

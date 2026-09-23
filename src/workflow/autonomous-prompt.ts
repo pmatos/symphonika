@@ -5,6 +5,11 @@ import path from "node:path";
 import type { IssueSnapshot } from "../issue-polling.js";
 import { isPathInside } from "../path-safety.js";
 import type { AgentProviderName } from "../provider.js";
+import { workflowClaimFilePath } from "./claim.js";
+import {
+  attemptEvidenceFileName,
+  runEvidenceDirectoryPath
+} from "./evidence-paths.js";
 import type { ExpandedWorkflow } from "./types.js";
 
 export const AUTONOMY_PREAMBLE_VERSION = "autonomy-preamble-v4";
@@ -35,6 +40,10 @@ type PromptProvider = {
   name: AgentProviderName;
 };
 
+type PromptClaim = {
+  path: string;
+};
+
 export type RenderAutonomousPromptInput = {
   branch: PromptBranch;
   extraInstructions?: string;
@@ -42,6 +51,7 @@ export type RenderAutonomousPromptInput = {
   project: PromptProject;
   provider: PromptProvider;
   run: PromptRun;
+  stateRoot: string;
   template: string;
   workflowContentHash?: string;
   workflowPath: string;
@@ -58,7 +68,6 @@ export type PersistRunEvidenceInput = RenderAutonomousPromptInput & {
   attemptNumber: number;
   expandedWorkflow: ExpandedWorkflow;
   renderedPrompt: RenderedAutonomousPrompt;
-  stateRoot: string;
 };
 
 export type RunEvidencePaths = {
@@ -71,6 +80,7 @@ export type RunEvidencePaths = {
 
 type PromptContext = {
   branch: PromptBranch;
+  claim: PromptClaim;
   issue: IssueSnapshot;
   project: PromptProject;
   provider: PromptProvider;
@@ -83,6 +93,7 @@ const allowedTemplateFields: Record<
   ReadonlySet<string>
 > = {
   branch: new Set(["name", "ref"]),
+  claim: new Set(["path"]),
   issue: new Set([
     "body",
     "created_at",
@@ -127,6 +138,13 @@ export function renderAutonomousPrompt(
 ): RenderedAutonomousPrompt {
   const context: PromptContext = {
     branch: input.branch,
+    claim: {
+      path: workflowClaimFilePath(
+        input.stateRoot,
+        input.run.id,
+        input.run.attempt
+      )
+    },
     issue: input.issue,
     project: input.project,
     provider: input.provider,
@@ -181,11 +199,9 @@ export function validatePromptTemplateExpressions(
 export async function persistRunEvidence(
   input: PersistRunEvidenceInput
 ): Promise<RunEvidencePaths> {
-  const runEvidenceDirectory = path.join(
-    path.resolve(input.stateRoot),
-    "logs",
-    "runs",
-    safePathSegment(input.run.id)
+  const runEvidenceDirectory = runEvidenceDirectoryPath(
+    input.stateRoot,
+    input.run.id
   );
 
   if (isPathInside(runEvidenceDirectory, input.workspace.path)) {
@@ -255,16 +271,6 @@ export async function persistRunEvidence(
 
 function workflowGraphFileName(attemptNumber: number): string {
   return attemptEvidenceFileName("workflow-graph", attemptNumber, "json");
-}
-
-function attemptEvidenceFileName(
-  stem: string,
-  attemptNumber: number,
-  extension: string
-): string {
-  return attemptNumber === 1
-    ? `${stem}.${extension}`
-    : `${stem}.attempt-${attemptNumber}.${extension}`;
 }
 
 function previousAttemptNotice(workspace: PromptWorkspace): string {
@@ -353,11 +359,4 @@ function templateExpressionError(
 
 function contentHash(contents: string): string {
   return `sha256:${createHash("sha256").update(contents).digest("hex")}`;
-}
-
-function safePathSegment(input: string): string {
-  const segment = input
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return segment.length === 0 ? "run" : segment;
 }

@@ -8,6 +8,7 @@ import {
   persistRunEvidence,
   renderAutonomousPrompt
 } from "../src/workflow/autonomous-prompt.js";
+import { workflowClaimFilePath } from "../src/workflow/claim.js";
 import { loadExpandedWorkflow } from "../src/workflow/fsm-expansion.js";
 
 const tempRoots: string[] = [];
@@ -30,6 +31,7 @@ afterEach(async () => {
 describe("autonomous prompt rendering", () => {
   it("keeps rendered autonomous prompt output stable", () => {
     const rendered = renderAutonomousPrompt({
+      stateRoot: "/state",
       branch: {
         name: "sym/symphonika/157-autonomous-prompt",
         ref: "refs/heads/sym/symphonika/157-autonomous-prompt"
@@ -103,6 +105,7 @@ describe("autonomous prompt rendering", () => {
 
   it("renders normalized run variables and prepends the autonomy preamble", () => {
     const rendered = renderAutonomousPrompt({
+      stateRoot: "/state",
       branch: {
         name: "sym/symphonika/7-render-prompts",
         ref: "refs/heads/sym/symphonika/7-render-prompts"
@@ -155,9 +158,35 @@ describe("autonomous prompt rendering", () => {
     expect(rendered.preambleVersion).toBe(AUTONOMY_PREAMBLE_VERSION);
   });
 
+  it("exposes claim.path pointing at the run evidence directory", () => {
+    const rendered = renderAutonomousPrompt({
+      stateRoot: "/state",
+      branch: {
+        name: "sym/symphonika/7-render-prompts",
+        ref: "refs/heads/sym/symphonika/7-render-prompts"
+      },
+      issue: issueSnapshot(),
+      project: { name: "symphonika" },
+      provider: { command: DEFAULT_CODEX_COMMAND, name: "codex" },
+      run: { attempt: 2, continuation: false, id: "run-7" },
+      template: "Write your claim to {{claim.path}}.",
+      workflowPath: "/repo/WORKFLOW.md",
+      workspace: {
+        path: "/state/workspaces/symphonika/issues/7-render-prompts",
+        previous_attempt: false,
+        root: "/state/workspaces/symphonika"
+      }
+    });
+
+    expect(rendered.prompt).toContain(
+      `Write your claim to ${workflowClaimFilePath("/state", "run-7", 2)}.`
+    );
+  });
+
   it("fails rendering when the workflow references an unknown variable", () => {
     expect(() =>
       renderAutonomousPrompt({
+        stateRoot: "/state",
         branch: {
           name: "sym/symphonika/7-render-prompts",
           ref: "refs/heads/sym/symphonika/7-render-prompts"
@@ -189,6 +218,7 @@ describe("autonomous prompt rendering", () => {
   it("rejects inherited object property names as template variables", () => {
     expect(() =>
       renderAutonomousPrompt({
+        stateRoot: "/state",
         branch: {
           name: "sym/symphonika/7-render-prompts",
           ref: "refs/heads/sym/symphonika/7-render-prompts"
@@ -219,6 +249,7 @@ describe("autonomous prompt rendering", () => {
 
   it("calls out previous-attempt workspaces in the rendered prompt", () => {
     const rendered = renderAutonomousPrompt({
+      stateRoot: "/state",
       branch: {
         name: "sym/symphonika/7-render-prompts",
         ref: "refs/heads/sym/symphonika/7-render-prompts"
@@ -283,6 +314,7 @@ describe("autonomous prompt rendering", () => {
         continuation: false,
         id: "run-7"
       },
+      stateRoot,
       template: "Work on {{issue.title}}.",
       workflowPath,
       workspace: {
@@ -298,8 +330,7 @@ describe("autonomous prompt rendering", () => {
       ...input,
       attemptNumber: input.run.attempt,
       expandedWorkflow: expanded.workflow,
-      renderedPrompt: rendered,
-      stateRoot
+      renderedPrompt: rendered
     });
 
     expect(evidence.runEvidenceDirectory).toBe(
@@ -365,6 +396,7 @@ describe("autonomous prompt rendering", () => {
         continuation: false,
         id: "run-7"
       },
+      stateRoot,
       template: "Work on {{issue.title}}.",
       workflowContentHash: expanded.workflow.contentHash,
       workflowPath,
@@ -380,8 +412,7 @@ describe("autonomous prompt rendering", () => {
       ...input,
       attemptNumber: 1,
       expandedWorkflow: expanded.workflow,
-      renderedPrompt: rendered,
-      stateRoot
+      renderedPrompt: rendered
     });
 
     expect(evidence.workflowGraphPath).toBe(
@@ -448,6 +479,7 @@ describe("autonomous prompt rendering", () => {
         continuation: false,
         id: "run-7"
       },
+      stateRoot,
       template: "Work on {{issue.title}}.",
       workflowContentHash: expanded.workflow.contentHash,
       workflowPath,
@@ -463,8 +495,7 @@ describe("autonomous prompt rendering", () => {
       ...input,
       attemptNumber: 2,
       expandedWorkflow: expanded.workflow,
-      renderedPrompt: rendered,
-      stateRoot
+      renderedPrompt: rendered
     });
 
     expect(path.basename(evidence.promptPath)).toBe("prompt.attempt-2.md");
@@ -557,6 +588,7 @@ describe("autonomous prompt rendering", () => {
         continuation: false,
         id: "run-9"
       },
+      stateRoot,
       template: "Work on {{issue.title}}.",
       workflowContentHash: expanded.workflow.contentHash,
       workflowPath,
@@ -572,8 +604,7 @@ describe("autonomous prompt rendering", () => {
       ...input,
       attemptNumber: 2,
       expandedWorkflow: expanded.workflow,
-      renderedPrompt: rendered,
-      stateRoot
+      renderedPrompt: rendered
     });
 
     expect(evidence.workflowGraphPath).toBe(

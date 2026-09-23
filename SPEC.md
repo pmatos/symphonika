@@ -668,8 +668,24 @@ Available top-level objects:
 - `branch`
 - `run`
 - `provider`
+- `claim`
 
 Symphonika prepends a standard autonomy preamble to every rendered workflow prompt.
+
+`claim.path` is a per-attempt file path outside the Run Workspace, in the same evidence directory
+`persistRunEvidence` writes prompt/metadata files to. It is available to every Workflow prompt
+regardless of whether the current state's predicates use it. An agent state whose predicates name
+`claim_status` should instruct its prompt to write a JSON object `{status, summary}` there as one of
+its last actions — `status` matching the same three-value vocabulary as `terminal`
+(`success`/`blocked`/`failure`) — as a deliberate tool call, the same reliability property the
+Routine Outcome Claim's file channel has (below in this section). Symphonika reads the file back after the
+provider exits (bounded, size-capped, BOM-tolerant, schema-validated) and offers the parsed status as
+the `claim_status` predicate. A missing, oversized, or schema-invalid claim leaves `claim_status`
+absent rather than failing the attempt, so a state gating on it should still declare its own
+`provider_success` or `artifact_exists` fallback. This reinforces the `BLOCKED.md` sentinel
+(§5.2 above) rather than replacing it: unlike `BLOCKED.md`, the claim file lives outside the
+Workspace, so no git-tracked-file provenance check or workspace-reuse clearing applies to it. See
+ADR-2026-09-23-1400.
 
 Routine prompt rendering uses the same strict templating rules and the same standard autonomy
 preamble, plus a provider-neutral notice that each firing is one-shot, will not be re-invoked, and

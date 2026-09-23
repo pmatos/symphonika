@@ -5,6 +5,8 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
+import { createPollNowTrigger } from "../src/daemon-poll-now.js";
+import type { PollNowResult } from "../src/http/app.js";
 import type {
   AgentProvider,
   AgentProviderRegistry,
@@ -1147,80 +1149,60 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
-  it("coalesces concurrent poll-now requests into one manual polling cycle", async () => {
-    const root = await makeTempRoot();
-    await writeValidProject(root);
-    const manualPoll = deferred<ReturnType<typeof issueFixture>[]>();
-    const githubIssuesApi = {
-      listOpenIssues: vi
-        .fn()
-        .mockResolvedValueOnce([
-          issueFixture({
-            labels: [],
-            number: 79,
-            title: "Startup snapshot"
-          })
-        ])
-        .mockImplementationOnce(() => manualPoll.promise)
-    };
-
-    const daemon = await startDaemon({
-      cwd: root,
-      env: { GITHUB_TOKEN: "secret-token" },
-      githubIssuesApi,
-      logger: pino({ enabled: false }),
-      port: 0
+  it("coalesces queued and in-flight manual polls, then admits a new cycle", async () => {
+    const gate = deferred<void>();
+    const scheduled: Array<() => Promise<void>> = [];
+    let candidateIssues = 0;
+    const tick = vi.fn(async () => {
+      await gate.promise;
+      candidateIssues += 1;
+    });
+    const pollNow = createPollNowTrigger({
+      enqueueScheduledWork: (work) => {
+        scheduled.push(work);
+      },
+      summarize: (kind): PollNowResult => ({
+        candidateIssues,
+        dispatching: false,
+        errors: 0,
+        filteredIssues: 0,
+        issuePolling: { errors: [], projects: [] },
+        kind,
+        state: "idle"
+      }),
+      tick
     });
 
-    try {
-      const first = fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
-      await waitFor(() =>
-        Promise.resolve(githubIssuesApi.listOpenIssues.mock.calls.length >= 2)
-      );
-      const second = fetch(`${daemon.url}/api/poll-now`, { method: "POST" });
-      manualPoll.resolve([
-        issueFixture({
-          labels: ["agent-ready"],
-          number: 80,
-          title: "Manual poll snapshot"
-        })
-      ]);
+    const first = pollNow();
+    const whileQueued = pollNow();
+    expect(scheduled).toHaveLength(1);
 
-      const [firstResponse, secondResponse] = await Promise.all([
-        first,
-        second
-      ]);
-      const firstBody = (await firstResponse.json()) as {
-        candidateIssues: number;
-        kind: string;
-      };
-      const secondBody = (await secondResponse.json()) as {
-        candidateIssues: number;
-        kind: string;
-      };
+    const running = scheduled.shift()!();
+    const whileRunning = pollNow();
+    gate.resolve();
+    await running;
 
-      expect(firstResponse.status).toBe(200);
-      expect(secondResponse.status).toBe(200);
-      expect(firstBody).toMatchObject({
-        candidateIssues: 1,
-        kind: "queued"
-      });
-      expect(secondBody).toMatchObject({
-        candidateIssues: 1,
-        kind: "coalesced"
-      });
-      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(2);
+    const results = await Promise.all([first, whileQueued, whileRunning]);
+    expect(
+      results.map(({ candidateIssues: candidates, kind }) => ({
+        candidates,
+        kind
+      }))
+    ).toEqual([
+      { candidates: 1, kind: "queued" },
+      { candidates: 1, kind: "coalesced" },
+      { candidates: 1, kind: "coalesced" }
+    ]);
+    expect(tick).toHaveBeenCalledTimes(1);
 
-      const statusResponse = await fetch(`${daemon.url}/api/status`);
-      const status = (await statusResponse.json()) as {
-        candidateIssues: Array<{ issue: { number: number } }>;
-      };
-      expect(status.candidateIssues.map((entry) => entry.issue.number)).toEqual(
-        [80]
-      );
-    } finally {
-      await daemon.stop();
-    }
+    const afterCompletion = pollNow();
+    expect(scheduled).toHaveLength(1);
+    await scheduled.shift()!();
+    expect(await afterCompletion).toMatchObject({
+      candidateIssues: 2,
+      kind: "queued"
+    });
+    expect(tick).toHaveBeenCalledTimes(2);
   });
 
   it("marks GitHub issues stale when sym:claimed is present and no live run exists", async () => {

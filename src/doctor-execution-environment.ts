@@ -379,9 +379,9 @@ function systemdEnvironmentPath(
   return environmentPath;
 }
 
-// Shared with doctor.ts's ExecStart runtime/script liveness check, which
-// tokenizes the same systemdArg-escaped argument syntax this Environment=
-// directive parsing already relies on.
+// Tokenizes a systemd directive's value the way systemd's own word-splitting
+// does: single/double-quoted spans preserve internal whitespace, backslash
+// escapes the next character.
 export function splitSystemdWords(input: string): string[] {
   const words: string[] = [];
   let current = "";
@@ -677,10 +677,7 @@ function providerLabel(providerName: AgentProviderName): ProviderLabel {
   }
 }
 
-// Exported for doctor.ts's ExecStart runtime/script liveness check, which
-// resolves `node` on the operator's current PATH to compare it against the
-// unit's frozen ExecStart runtime.
-export async function resolveExecutable(
+async function resolveExecutable(
   executable: string,
   cwd: string,
   environmentPath: string | undefined,

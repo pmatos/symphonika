@@ -34,7 +34,6 @@ import {
 import {
   inspectConfiguredDoctorEnvironment,
   inspectDoctorHostEnvironment,
-  resolveExecutable,
   splitSystemdWords,
   type DoctorExecutionEnvironmentReport
 } from "./doctor-execution-environment.js";
@@ -76,6 +75,10 @@ export type DoctorOptions = {
   configPath?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  // Test seam for the runtime the ExecStart liveness check compares the
+  // installed unit's pinned runtime against -- i.e. what `service install`
+  // would pin if re-run right now. Production callers use process.execPath.
+  execPath?: string;
   githubApi?: GitHubApi;
   githubIssuesApi?: GitHubIssuesApi;
   homeDir?: string;
@@ -480,6 +483,7 @@ export async function runDoctor(
   const githubIssuesApi = options.githubIssuesApi ?? DEFAULT_GITHUB_ISSUES_API;
   const agentProviders = options.agentProviders ?? DEFAULT_AGENT_PROVIDERS;
   const homeDir = options.homeDir ?? homedir();
+  const execPath = options.execPath ?? process.execPath;
   const errors: string[] = [];
   const projects: DoctorProjectReport[] = [];
   // Both the structural drift check and the frozen-PATH check read the same
@@ -494,8 +498,7 @@ export async function runDoctor(
       servicePath,
       serviceContent,
       homeDir,
-      env,
-      cwd
+      execPath
     ),
     inspectDoctorHostEnvironment({
       cwd,
@@ -724,6 +727,18 @@ async function runLiveCheck(
 // is the idiomatic way to neutralize the limit without touching the base
 // unit, so warning on the directive's mere presence would nag exactly the
 // operator who fixed it. See winningAssignment.
+// `--force` only rewrites unit files and runs `systemctl --user
+// daemon-reload` (see runServiceInstall/defaultReload in service.ts) -- it
+// never restarts an already-running daemon, which keeps its old unit (and
+// lacks whatever this guidance is attached to) until an operator separately
+// restarts it. Shared by every check below that tells an operator to
+// regenerate the unit, so the restart reminder can't go missing from one.
+const REINSTALL_HINT =
+  "re-run `symphonika service install --force` (repeat the original " +
+  "`--config <path>` option if one was used) to refresh it; a running " +
+  "daemon only picks up the change after `systemctl --user restart " +
+  "symphonika.service`";
+
 async function checkInstalledUnitDrift(
   unitDir: string,
   servicePath: string,
@@ -734,16 +749,7 @@ async function checkInstalledUnitDrift(
   }
 
   const warnings: string[] = [];
-  // `--force` only rewrites unit files and runs `systemctl --user
-  // daemon-reload` (see runServiceInstall/defaultReload in service.ts) --
-  // it never restarts an already-running daemon, which keeps its old unit
-  // (and lacks whatever protection this drift check is warning about) until
-  // an operator separately restarts it.
-  const reinstallHint =
-    "re-run `symphonika service install --force` (repeat the original " +
-    "`--config <path>` option if one was used) to refresh it; a running " +
-    "daemon only picks up the change after `systemctl --user restart " +
-    "symphonika.service`";
+  const reinstallHint = REINSTALL_HINT;
   if (!serviceContent.includes("Slice=symphonika-daemon.slice")) {
     warnings.push(
       `${servicePath} predates the daemon/provider cgroup split (docs/adr/0064) — ${reinstallHint}`
@@ -817,8 +823,7 @@ async function checkInstalledUnitExecStartLiveness(
   servicePath: string,
   serviceContent: string | undefined,
   homeDir: string,
-  env: NodeJS.ProcessEnv,
-  cwd: string
+  currentExecPath: string
 ): Promise<{ errors: string[]; warnings: string[] }> {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -836,44 +841,39 @@ async function checkInstalledUnitExecStartLiveness(
   }
   const { runtimePath, scriptPath } = parsed;
 
-  const reinstallHint =
+  const failsToStartHint =
     "the unit will fail to start (203/EXEC) on its next start (crash, " +
-    "watchdog kill, or reboot) -- re-run `symphonika service install " +
-    "--force` (repeat the original `--config <path>` option if one was " +
-    "used) to refresh it";
+    `watchdog kill, or reboot) -- ${REINSTALL_HINT}`;
   const runtimeOk = await pathIsExecutableFile(runtimePath);
   if (!runtimeOk) {
     errors.push(
-      `${servicePath} ExecStart runtime ${runtimePath} is missing or not executable; ${reinstallHint}`
+      `${servicePath} ExecStart runtime ${runtimePath} is missing or not executable; ${failsToStartHint}`
     );
   }
   if (!(await pathIsReadableFile(scriptPath))) {
     errors.push(
-      `${servicePath} ExecStart script ${scriptPath} is missing; ${reinstallHint}`
+      `${servicePath} ExecStart script ${scriptPath} is missing; ${failsToStartHint}`
     );
   }
 
-  // Only compare against the operator's *current* PATH resolution of `node`
+  // Compared against the runtime that a `service install --force` re-run
+  // would pin *right now* (this doctor process's own execPath), not
+  // whatever `node` happens to resolve to on the operator's PATH -- a PATH
+  // shim (asdf/mise/volta) can legitimately differ from the real binary
+  // without the unit being stale, which would make this warning permanent
+  // and un-clearable by the very remediation it recommends. Only compare
   // when the pinned runtime itself is still usable -- a missing/broken
-  // runtime is already reported above, and diffing it against PATH would
-  // just be redundant noise on top of that error.
-  if (runtimeOk && typeof env.PATH === "string" && env.PATH.trim().length > 0) {
-    const currentNode = await resolveExecutable(
-      "node",
-      cwd,
-      env.PATH,
-      env.PATHEXT
-    );
-    if (currentNode !== undefined) {
-      const [unitReal, currentReal] = await Promise.all([
-        realpath(runtimePath).catch(() => runtimePath),
-        realpath(currentNode).catch(() => currentNode)
-      ]);
-      if (unitReal !== currentReal) {
-        warnings.push(
-          `${servicePath} ExecStart runtime ${runtimePath} differs from node resolved on PATH (${currentNode}) -- re-run \`symphonika service install\` before removing the old node version`
-        );
-      }
+  // runtime is already reported above, and diffing it here would just be
+  // redundant noise on top of that error.
+  if (runtimeOk) {
+    const [unitReal, currentReal] = await Promise.all([
+      realpath(runtimePath).catch(() => runtimePath),
+      realpath(currentExecPath).catch(() => currentExecPath)
+    ]);
+    if (unitReal !== currentReal) {
+      warnings.push(
+        `${servicePath} ExecStart runtime ${runtimePath} differs from the node currently running \`symphonika\` (${currentExecPath}) -- ${REINSTALL_HINT}; do this before removing the old node version`
+      );
     }
   }
 

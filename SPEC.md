@@ -2632,10 +2632,13 @@ config path and points the operator to `symphonika init`.
   failures here are errors, not warnings — the unit will fail to start (`203/EXEC`) on its next
   start, for example after an `nvm uninstall` of the version it was installed under, a crash, a
   watchdog kill, or a reboot, even though an already-running daemon is unaffected. Also warns
-  (non-fatally) when the pinned runtime's real path differs from `node` resolved on the operator's
-  current PATH, prompting a re-install before the old runtime is removed. An `ExecStart=` that
-  doesn't match the generator's `sh -c '...' symphonika "<runtime>" "<script>"` shape (a hand-rolled
-  unit, or one predating this check) is skipped rather than guessed at (#804)
+  (non-fatally) when the pinned runtime's real path differs from `doctor`'s own `process.execPath`
+  — i.e. what a `service install --force` re-run would pin right now — prompting a re-install before
+  the old runtime is removed; comparing against `node` resolved on the operator's shell PATH instead
+  would false-warn whenever that resolves to a version-manager shim (asdf/mise/volta) rather than the
+  real binary, in a way re-installing could never clear. An `ExecStart=` that doesn't match the
+  generator's `sh -c '...' symphonika "<runtime>" "<script>"` shape (a hand-rolled unit, or one
+  predating this check) is skipped rather than guessed at (#804)
 - installed providers-slice build capacity: when `symphonika.service` and a finite byte-size
   `symphonika-providers.slice` `MemoryMax=` (bytes or a K/M/G/T suffix) are present, estimate the
   aggregate worst case as the host's available parallelism times 1.5 GiB peak RSS per compiler

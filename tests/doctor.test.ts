@@ -1632,7 +1632,8 @@ describe("doctor", () => {
             (error) =>
               error.includes(missingRuntime) &&
               error.includes("203/EXEC") &&
-              error.includes("service install --force")
+              error.includes("service install --force") &&
+              error.includes("restart")
           )
         ).toBe(true);
         expect(report.ok).toBe(false);
@@ -1666,7 +1667,8 @@ describe("doctor", () => {
           report.errors.some(
             (error) =>
               error.includes(missingScript) &&
-              error.includes("service install --force")
+              error.includes("service install --force") &&
+              error.includes("restart")
           )
         ).toBe(true);
         expect(
@@ -1702,7 +1704,8 @@ describe("doctor", () => {
           report.errors.some(
             (error) =>
               error.includes(unusableRuntime) &&
-              error.includes("service install --force")
+              error.includes("service install --force") &&
+              error.includes("restart")
           )
         ).toBe(true);
       });
@@ -1757,11 +1760,14 @@ describe("doctor", () => {
       // Round-trips a runtime path through systemdArg's escaping (\, ", $, %)
       // and back, proving the parser inverts it correctly rather than just
       // happening to work on paths with no special characters.
-      it("correctly extracts a pinned runtime path containing $, % and spaces", async () => {
+      it('correctly extracts a pinned runtime path containing \\, ", $, % and spaces', async () => {
         const root = await makeTempRoot();
         const homeDir = await makeTempRoot();
         const unitDir = path.join(homeDir, ".config", "systemd", "user");
-        const weirdDir = path.join(homeDir, "weird $dir %90 name");
+        const weirdDir = path.join(
+          homeDir,
+          'weird \\dir "quoted" $dir %90 name'
+        );
         const weirdRuntime = path.join(weirdDir, "node");
         await mkdir(unitDir, { recursive: true });
         await writeStubExecutables(weirdDir, ["node"]);
@@ -1846,13 +1852,46 @@ describe("doctor", () => {
         );
       });
 
-      it("warns when the pinned runtime differs from node resolved on the operator's PATH", async () => {
+      // A second, longer shape that clears the `words.length < 6` bar but
+      // still isn't the sh/-c/symphonika wrapper, so the sh/-c/symphonika
+      // predicate itself -- not just the length guard -- has to be the thing
+      // that rejects it.
+      it("does not error on a 6+-word ExecStart shape it does not recognize", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        await mkdir(unitDir, { recursive: true });
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          "[Service]\nExecStart=/usr/bin/env node /missing/cli.js daemon --config /x.yml\n",
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: {},
+          homeDir
+        });
+
+        expect(report.errors.some((error) => error.includes("ExecStart"))).toBe(
+          false
+        );
+      });
+
+      // The comparand is doctor's own execPath (what `service install
+      // --force` would pin right now), not `node` resolved on the
+      // operator's shell PATH -- a PATH shim (asdf/mise/volta) can
+      // legitimately differ from the real binary without the unit being
+      // stale, which would make the warning permanent and un-clearable by
+      // its own recommended fix.
+      it("warns when the pinned runtime differs from doctor's own execPath", async () => {
         const root = await makeTempRoot();
         const homeDir = await makeTempRoot();
         const unitDir = path.join(homeDir, ".config", "systemd", "user");
         const pinnedDir = path.join(homeDir, "pinned-node-dir");
         const currentDir = path.join(homeDir, "current-node-dir");
         const pinnedRuntime = path.join(pinnedDir, "node");
+        const currentExecPath = path.join(currentDir, "node");
         await mkdir(unitDir, { recursive: true });
         await writeStubExecutables(pinnedDir, ["node"]);
         await writeStubExecutables(currentDir, ["node"]);
@@ -1868,7 +1907,8 @@ describe("doctor", () => {
 
         const report = await runDoctor({
           configPath: path.join(root, "nonexistent.yml"),
-          env: { PATH: currentDir },
+          env: {},
+          execPath: currentExecPath,
           homeDir
         });
 
@@ -1876,7 +1916,9 @@ describe("doctor", () => {
           report.warnings.some(
             (warning) =>
               warning.includes(pinnedRuntime) &&
-              warning.includes("service install")
+              warning.includes(currentExecPath) &&
+              warning.includes("service install --force") &&
+              warning.includes("restart")
           )
         ).toBe(true);
         expect(
@@ -1884,7 +1926,7 @@ describe("doctor", () => {
         ).toBe(false);
       });
 
-      it("does not warn when the pinned runtime matches node resolved on the operator's PATH", async () => {
+      it("does not warn when the pinned runtime matches doctor's own execPath", async () => {
         const root = await makeTempRoot();
         const homeDir = await makeTempRoot();
         const unitDir = path.join(homeDir, ".config", "systemd", "user");
@@ -1904,36 +1946,8 @@ describe("doctor", () => {
 
         const report = await runDoctor({
           configPath: path.join(root, "nonexistent.yml"),
-          env: { PATH: nodeDir },
-          homeDir
-        });
-
-        expect(
-          report.warnings.some((warning) => warning.includes("differs from"))
-        ).toBe(false);
-      });
-
-      it("does not warn about a PATH-node difference when the operator's PATH is empty", async () => {
-        const root = await makeTempRoot();
-        const homeDir = await makeTempRoot();
-        const unitDir = path.join(homeDir, ".config", "systemd", "user");
-        const pinnedDir = path.join(homeDir, "pinned-node-dir");
-        const pinnedRuntime = path.join(pinnedDir, "node");
-        await mkdir(unitDir, { recursive: true });
-        await writeStubExecutables(pinnedDir, ["node"]);
-        await writeFile(
-          path.join(unitDir, "symphonika.service"),
-          currentServiceUnit(
-            "/usr/bin:/bin",
-            pinnedRuntime,
-            fileURLToPath(import.meta.url)
-          ),
-          "utf8"
-        );
-
-        const report = await runDoctor({
-          configPath: path.join(root, "nonexistent.yml"),
           env: {},
+          execPath: runtime,
           homeDir
         });
 

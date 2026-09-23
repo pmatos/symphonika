@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { buildCli } from "../src/cli.js";
@@ -24,14 +25,38 @@ import {
 const tempRoots: string[] = [];
 // Built by the real generator rather than hand-written, so a new structural
 // directive in the unit template can never silently leave these fixtures
-// behind while the drift checks they exercise still claim to pass.
-const currentServiceUnit = (unitPath = "/usr/bin:/bin") =>
+// behind while the drift checks they exercise still claim to pass. execPath
+// and scriptPath default to real, always-executable/readable files on any
+// host running this suite (the vitest worker's own node runtime and this
+// test file) rather than hardcoded paths like /usr/bin/node, because the
+// ExecStart liveness check below stats them for real.
+const currentServiceUnit = (
+  unitPath = "/usr/bin:/bin",
+  execPath = process.execPath,
+  scriptPath = fileURLToPath(import.meta.url)
+) =>
   renderServiceUnit({
     environmentFilePath: "/home/op/.config/symphonika/env",
-    execPath: "/usr/bin/node",
+    execPath,
     path: unitPath,
-    scriptPath: "/opt/symphonika/dist/cli.js"
+    scriptPath
   });
+// Renders just the ExecStart= line for a given runtime/script pair, so a
+// drop-in can override it the way an operator's own `service install --force`
+// re-run would, without hand-writing the sh -c wrapper the generator emits.
+function execStartLine(execPath: string, scriptPath: string): string {
+  const rendered = renderServiceUnit({
+    environmentFilePath: "/home/op/.config/symphonika/env",
+    execPath,
+    path: "/usr/bin:/bin",
+    scriptPath
+  });
+  const match = /^ExecStart=.*$/m.exec(rendered);
+  if (match === null) {
+    throw new Error("renderServiceUnit did not produce an ExecStart= line");
+  }
+  return match[0];
+}
 const DEFAULT_CODEX_COMMAND = `codex -p symphonika -c sandbox_mode=danger-full-access -c approval_policy=never --dangerously-bypass-approvals-and-sandbox app-server`;
 const originalCodexHome = process.env.CODEX_HOME;
 const originalGithubToken = process.env.GITHUB_TOKEN;
@@ -1568,6 +1593,354 @@ describe("doctor", () => {
       expect(report.warnings).toEqual([
         `${servicePath} is installed but has no Environment=PATH= directive`
       ]);
+    });
+
+    // #804: `nvm uninstall` of an old node version leaves the installed unit's
+    // ExecStart pinned to a runtime that no longer exists — dead on its next
+    // start (203/EXEC) even though the already-running daemon is unaffected.
+    describe("ExecStart runtime/script liveness", () => {
+      it("errors when the pinned node runtime no longer exists", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        const missingRuntime = path.join(
+          homeDir,
+          "nvm",
+          "v26.5.0",
+          "bin",
+          "node"
+        );
+        await mkdir(unitDir, { recursive: true });
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          currentServiceUnit(
+            "/usr/bin:/bin",
+            missingRuntime,
+            fileURLToPath(import.meta.url)
+          ),
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: {},
+          homeDir
+        });
+
+        expect(
+          report.errors.some(
+            (error) =>
+              error.includes(missingRuntime) &&
+              error.includes("203/EXEC") &&
+              error.includes("service install --force")
+          )
+        ).toBe(true);
+        expect(report.ok).toBe(false);
+      });
+
+      it("errors when the ExecStart script no longer exists", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        const missingScript = path.join(
+          homeDir,
+          "opt",
+          "symphonika",
+          "dist",
+          "cli.js"
+        );
+        await mkdir(unitDir, { recursive: true });
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          currentServiceUnit("/usr/bin:/bin", process.execPath, missingScript),
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: {},
+          homeDir
+        });
+
+        expect(
+          report.errors.some(
+            (error) =>
+              error.includes(missingScript) &&
+              error.includes("service install --force")
+          )
+        ).toBe(true);
+        expect(
+          report.errors.some((error) => error.includes(process.execPath))
+        ).toBe(false);
+      });
+
+      it("errors when the pinned runtime exists but is not executable", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        const unusableRuntime = path.join(homeDir, "not-executable-node");
+        await mkdir(unitDir, { recursive: true });
+        await writeFile(unusableRuntime, "not actually a binary", "utf8");
+        await chmod(unusableRuntime, 0o644);
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          currentServiceUnit(
+            "/usr/bin:/bin",
+            unusableRuntime,
+            fileURLToPath(import.meta.url)
+          ),
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: {},
+          homeDir
+        });
+
+        expect(
+          report.errors.some(
+            (error) =>
+              error.includes(unusableRuntime) &&
+              error.includes("service install --force")
+          )
+        ).toBe(true);
+      });
+
+      it("does not error when the ExecStart script exists but is not executable", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        const readOnlyScript = path.join(homeDir, "cli.js");
+        await mkdir(unitDir, { recursive: true });
+        await writeFile(readOnlyScript, "// stub cli entrypoint\n", "utf8");
+        await chmod(readOnlyScript, 0o644);
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          currentServiceUnit("/usr/bin:/bin", process.execPath, readOnlyScript),
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: {},
+          homeDir
+        });
+
+        expect(report.errors.some((error) => error.includes("ExecStart"))).toBe(
+          false
+        );
+      });
+
+      it("does not error when the pinned runtime and script both exist", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        await mkdir(unitDir, { recursive: true });
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          currentServiceUnit(),
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: {},
+          homeDir
+        });
+
+        expect(report.errors.some((error) => error.includes("ExecStart"))).toBe(
+          false
+        );
+      });
+
+      // Round-trips a runtime path through systemdArg's escaping (\, ", $, %)
+      // and back, proving the parser inverts it correctly rather than just
+      // happening to work on paths with no special characters.
+      it("correctly extracts a pinned runtime path containing $, % and spaces", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        const weirdDir = path.join(homeDir, "weird $dir %90 name");
+        const weirdRuntime = path.join(weirdDir, "node");
+        await mkdir(unitDir, { recursive: true });
+        await writeStubExecutables(weirdDir, ["node"]);
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          currentServiceUnit(
+            "/usr/bin:/bin",
+            weirdRuntime,
+            fileURLToPath(import.meta.url)
+          ),
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: {},
+          homeDir
+        });
+
+        expect(report.errors.some((error) => error.includes("ExecStart"))).toBe(
+          false
+        );
+      });
+
+      // service install --force only rewrites the base unit, but an operator
+      // (or a future upgrade path) could still park a replacement ExecStart=
+      // in a drop-in; the last one wins per systemd, so the drop-in's runtime
+      // is the one that must be checked, not the base unit's.
+      it("checks the ExecStart a drop-in overrides, not the base unit's", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        const servicePath = path.join(unitDir, "symphonika.service");
+        const dropInDir = `${servicePath}.d`;
+        const missingRuntime = path.join(homeDir, "replaced-node");
+        await mkdir(dropInDir, { recursive: true });
+        await writeFile(servicePath, currentServiceUnit(), "utf8");
+        await writeFile(
+          path.join(dropInDir, "20-execstart.conf"),
+          `[Service]\n${execStartLine(missingRuntime, fileURLToPath(import.meta.url))}\n`,
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: {},
+          homeDir
+        });
+
+        expect(
+          report.errors.some((error) => error.includes(missingRuntime))
+        ).toBe(true);
+        expect(
+          report.errors.some((error) => error.includes(process.execPath))
+        ).toBe(false);
+      });
+
+      // Pre-0055 units and any hand-rolled ExecStart= (see
+      // tests/update/cutover.test.ts) don't match the generator's `sh -c '...'
+      // symphonika "<runtime>" "<script>"` shape. Parsing must recognize that
+      // it can't identify the runtime/script arguments and skip rather than
+      // guess wrong and false-error on a unit that is actually fine.
+      it("does not error on an ExecStart shape it does not recognize", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        await mkdir(unitDir, { recursive: true });
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          "[Service]\nExecStart=/bin/symphonika daemon --config /srv/symphonika/symphonika.yml\n",
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: {},
+          homeDir
+        });
+
+        expect(report.errors.some((error) => error.includes("ExecStart"))).toBe(
+          false
+        );
+      });
+
+      it("warns when the pinned runtime differs from node resolved on the operator's PATH", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        const pinnedDir = path.join(homeDir, "pinned-node-dir");
+        const currentDir = path.join(homeDir, "current-node-dir");
+        const pinnedRuntime = path.join(pinnedDir, "node");
+        await mkdir(unitDir, { recursive: true });
+        await writeStubExecutables(pinnedDir, ["node"]);
+        await writeStubExecutables(currentDir, ["node"]);
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          currentServiceUnit(
+            "/usr/bin:/bin",
+            pinnedRuntime,
+            fileURLToPath(import.meta.url)
+          ),
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: { PATH: currentDir },
+          homeDir
+        });
+
+        expect(
+          report.warnings.some(
+            (warning) =>
+              warning.includes(pinnedRuntime) &&
+              warning.includes("service install")
+          )
+        ).toBe(true);
+        expect(
+          report.errors.some((error) => error.includes(pinnedRuntime))
+        ).toBe(false);
+      });
+
+      it("does not warn when the pinned runtime matches node resolved on the operator's PATH", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        const nodeDir = path.join(homeDir, "node-dir");
+        const runtime = path.join(nodeDir, "node");
+        await mkdir(unitDir, { recursive: true });
+        await writeStubExecutables(nodeDir, ["node"]);
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          currentServiceUnit(
+            "/usr/bin:/bin",
+            runtime,
+            fileURLToPath(import.meta.url)
+          ),
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: { PATH: nodeDir },
+          homeDir
+        });
+
+        expect(
+          report.warnings.some((warning) => warning.includes("differs from"))
+        ).toBe(false);
+      });
+
+      it("does not warn about a PATH-node difference when the operator's PATH is empty", async () => {
+        const root = await makeTempRoot();
+        const homeDir = await makeTempRoot();
+        const unitDir = path.join(homeDir, ".config", "systemd", "user");
+        const pinnedDir = path.join(homeDir, "pinned-node-dir");
+        const pinnedRuntime = path.join(pinnedDir, "node");
+        await mkdir(unitDir, { recursive: true });
+        await writeStubExecutables(pinnedDir, ["node"]);
+        await writeFile(
+          path.join(unitDir, "symphonika.service"),
+          currentServiceUnit(
+            "/usr/bin:/bin",
+            pinnedRuntime,
+            fileURLToPath(import.meta.url)
+          ),
+          "utf8"
+        );
+
+        const report = await runDoctor({
+          configPath: path.join(root, "nonexistent.yml"),
+          env: {},
+          homeDir
+        });
+
+        expect(
+          report.warnings.some((warning) => warning.includes("differs from"))
+        ).toBe(false);
+      });
     });
 
     it("reports no warnings when no systemd unit has been installed", async () => {

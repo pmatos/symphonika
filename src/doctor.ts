@@ -4,7 +4,9 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rm,
+  stat,
   writeFile
 } from "node:fs/promises";
 import { availableParallelism, homedir } from "node:os";
@@ -32,6 +34,8 @@ import {
 import {
   inspectConfiguredDoctorEnvironment,
   inspectDoctorHostEnvironment,
+  resolveExecutable,
+  splitSystemdWords,
   type DoctorExecutionEnvironmentReport
 } from "./doctor-execution-environment.js";
 import {
@@ -484,8 +488,15 @@ export async function runDoctor(
   const unitDir = userUnitDir(homeDir, env);
   const servicePath = path.join(unitDir, "symphonika.service");
   const serviceContent = await readEffectiveUnitContent(servicePath);
-  const [warnings, hostEnvironment] = await Promise.all([
+  const [warnings, execStartLiveness, hostEnvironment] = await Promise.all([
     checkInstalledUnitDrift(unitDir, servicePath, serviceContent),
+    checkInstalledUnitExecStartLiveness(
+      servicePath,
+      serviceContent,
+      homeDir,
+      env,
+      cwd
+    ),
     inspectDoctorHostEnvironment({
       cwd,
       env,
@@ -496,7 +507,9 @@ export async function runDoctor(
     })
   ]);
   let environment = hostEnvironment.environment;
+  errors.push(...execStartLiveness.errors);
   errors.push(...hostEnvironment.errors);
+  warnings.push(...execStartLiveness.warnings);
   warnings.push(...hostEnvironment.warnings);
   const rawConfig = await readConfig(configPath, errors);
 
@@ -697,8 +710,10 @@ async function runLiveCheck(
 // when no unit is installed at all (`service install` was never run) —
 // that's not a doctor concern. `ExecStart`/`Environment=PATH` are baked in
 // at install time from the operator's own environment, so the `.service`
-// file can't be regenerated and byte-compared generically; only structural
-// markers (Slice=, Type=notify) are checked there. The `.slice` files are
+// file can't be regenerated and byte-compared generically here; only
+// structural markers (Slice=, Type=notify) are checked in this function.
+// checkInstalledUnitExecStartLiveness (below) separately validates that the
+// runtime/script ExecStart= pins still exist and are usable (#804). The `.slice` files are
 // also checked structurally because their resource-limit values are
 // operator-customizable (README.md) — presence, never value. A directive a
 // slice is supposed to have SHED is the one exception, and it has to read
@@ -788,6 +803,142 @@ async function checkInstalledUnitDrift(
   );
 
   return warnings;
+}
+
+// #804: `service install` bakes process.execPath and dist/cli.js into
+// ExecStart= at install time (see renderServiceUnit in service.ts). Neither
+// is regenerated when the operator's node runtime moves or is removed (e.g.
+// `nvm uninstall` of the version a running daemon was installed under) --
+// the already-running daemon is unaffected, but the installed unit is dead on
+// its next start (203/EXEC) after a crash, watchdog kill, or reboot. This is
+// an error, not a drift warning: unlike the structural checks above, this
+// unit will not merely run in a stale mode, it will fail to start at all.
+async function checkInstalledUnitExecStartLiveness(
+  servicePath: string,
+  serviceContent: string | undefined,
+  homeDir: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string
+): Promise<{ errors: string[]; warnings: string[] }> {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  if (serviceContent === undefined) {
+    return { errors, warnings };
+  }
+
+  const rawExecStart = winningServiceAssignment(serviceContent, "ExecStart");
+  const parsed =
+    rawExecStart === undefined
+      ? undefined
+      : parseGeneratedExecStart(rawExecStart, homeDir);
+  if (parsed === undefined) {
+    return { errors, warnings };
+  }
+  const { runtimePath, scriptPath } = parsed;
+
+  const reinstallHint =
+    "the unit will fail to start (203/EXEC) on its next start (crash, " +
+    "watchdog kill, or reboot) -- re-run `symphonika service install " +
+    "--force` (repeat the original `--config <path>` option if one was " +
+    "used) to refresh it";
+  const runtimeOk = await pathIsExecutableFile(runtimePath);
+  if (!runtimeOk) {
+    errors.push(
+      `${servicePath} ExecStart runtime ${runtimePath} is missing or not executable; ${reinstallHint}`
+    );
+  }
+  if (!(await pathIsReadableFile(scriptPath))) {
+    errors.push(
+      `${servicePath} ExecStart script ${scriptPath} is missing; ${reinstallHint}`
+    );
+  }
+
+  // Only compare against the operator's *current* PATH resolution of `node`
+  // when the pinned runtime itself is still usable -- a missing/broken
+  // runtime is already reported above, and diffing it against PATH would
+  // just be redundant noise on top of that error.
+  if (runtimeOk && typeof env.PATH === "string" && env.PATH.trim().length > 0) {
+    const currentNode = await resolveExecutable(
+      "node",
+      cwd,
+      env.PATH,
+      env.PATHEXT
+    );
+    if (currentNode !== undefined) {
+      const [unitReal, currentReal] = await Promise.all([
+        realpath(runtimePath).catch(() => runtimePath),
+        realpath(currentNode).catch(() => currentNode)
+      ]);
+      if (unitReal !== currentReal) {
+        warnings.push(
+          `${servicePath} ExecStart runtime ${runtimePath} differs from node resolved on PATH (${currentNode}) -- re-run \`symphonika service install\` before removing the old node version`
+        );
+      }
+    }
+  }
+
+  return { errors, warnings };
+}
+
+// Recognizes only the exact shape renderServiceUnit generates (see
+// service.ts): `/bin/sh -c '<body>' symphonika "<runtime>" "<script>"
+// [<config>]`. A hand-rolled or pre-0055 ExecStart= (see
+// tests/update/cutover.test.ts) won't match; returning undefined for those
+// skips the check rather than guessing at argument positions and false-
+// erroring on a unit that is actually fine.
+function parseGeneratedExecStart(
+  rawValue: string,
+  homeDir: string
+): { runtimePath: string; scriptPath: string } | undefined {
+  const words = splitSystemdWords(rawValue).map((word) =>
+    unescapeSystemdWord(word, homeDir)
+  );
+  if (
+    words.length < 6 ||
+    path.basename(words[0] ?? "") !== "sh" ||
+    words[1] !== "-c" ||
+    words[3] !== "symphonika"
+  ) {
+    return undefined;
+  }
+  const runtimePath = words[4];
+  const scriptPath = words[5];
+  if (runtimePath === undefined || scriptPath === undefined) {
+    return undefined;
+  }
+  return { runtimePath, scriptPath };
+}
+
+// Undoes systemdArg's escaping (see service.ts): `$` is doubled to `$$` and
+// `%` to `%%` there so systemd does not treat either as the start of its own
+// expansion syntax. `%h` is also accepted here (even though the generator
+// itself never emits it in ExecStart args) for symmetry with
+// systemdEnvironmentPath's handling of an operator-authored PATH drop-in.
+function unescapeSystemdWord(word: string, homeDir: string): string {
+  return word
+    .replace(/\$\$/g, "$")
+    .replace(/%%|%h/g, (specifier) => (specifier === "%%" ? "%" : homeDir));
+}
+
+async function pathIsExecutableFile(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath, constants.X_OK);
+    return (await stat(filePath)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// The ExecStart script is passed as node's first argument, not exec'd
+// directly, so it only needs to exist and be readable -- a built dist/cli.js
+// is mode 0644, and requiring X_OK would false-error on a valid install.
+async function pathIsReadableFile(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath, constants.R_OK);
+    return (await stat(filePath)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 // readEffectiveUnitContent concatenates the base unit and sorted drop-ins in

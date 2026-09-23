@@ -77,8 +77,9 @@ symphonika cancel <run-id-or-firing-id>
 ```
 
 `doctor` is the first thing to run when something looks wrong: it checks config parse, Project
-shape, GitHub auth and labels, provider commands and profiles, the *installed service's* PATH
-liveness, Workflow Contract paths, Routine declarations, database/workspace paths, and SMTP config.
+shape, GitHub auth and labels, provider commands and profiles, the *installed service's* PATH and
+ExecStart runtime/script liveness (SPEC.md §13), Workflow Contract paths, Routine declarations,
+database/workspace paths, and SMTP config.
 `PINO_LOG_LEVEL=debug symphonika daemon` gives verbose logs for a foreground run.
 
 ## Self-update

@@ -379,7 +379,10 @@ function systemdEnvironmentPath(
   return environmentPath;
 }
 
-function splitSystemdWords(input: string): string[] {
+// Shared with doctor.ts's ExecStart runtime/script liveness check, which
+// tokenizes the same systemdArg-escaped argument syntax this Environment=
+// directive parsing already relies on.
+export function splitSystemdWords(input: string): string[] {
   const words: string[] = [];
   let current = "";
   let quote: "'" | '"' | undefined;
@@ -674,7 +677,10 @@ function providerLabel(providerName: AgentProviderName): ProviderLabel {
   }
 }
 
-async function resolveExecutable(
+// Exported for doctor.ts's ExecStart runtime/script liveness check, which
+// resolves `node` on the operator's current PATH to compare it against the
+// unit's frozen ExecStart runtime.
+export async function resolveExecutable(
   executable: string,
   cwd: string,
   environmentPath: string | undefined,

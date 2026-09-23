@@ -396,7 +396,7 @@ The parser recognizes the following keys:
 | `has_unresolved_reviews` | `true`, `false` | no | always | supported |
 | `unresolved_review_threads` | non-negative integer | no | always | supported, exact count only; a wait transition may only gate on `0` — a positive value fails `workflow validate` (issue #632), use `has_unresolved_reviews: true` |
 | `artifact_exists` | path, or a sequence of paths | yes | yes | supported, existence only |
-| `claim_status` | `success`, `blocked`, `failure` | yes, when a valid Workflow Claim file was written | no | supported, opt-in — see Workflow Claim above |
+| `claim_status` | `success`, `blocked`, `failure` | yes, when a valid Workflow Claim file was written | no | supported, opt-in — see Workflow Claim above; naming it on a `wait`/`merge_pr` state fails `workflow validate`, the same way it does on `close_issue`/`label_issue`/`comment` |
 
 `branch_ahead_of_base` counts commits ahead of `origin/<base_branch>`, not ahead of the commit the
 attempt started from. It is a property of the branch, not of the attempt: in a multi-state walk it

@@ -556,6 +556,7 @@ async function expandRawStateMachineWorkflow(
   }
   errors.push(...validateWaitStateCoverage(states, workflowPath));
   errors.push(...validateIssueContentActionPredicates(states, workflowPath));
+  errors.push(...validateWaitLikeClaimPredicates(states, workflowPath));
 
   return {
     errors,
@@ -620,18 +621,58 @@ function validateIssueContentActionPredicates(
   states: ExpandedWorkflowState[],
   workflowPath: string
 ): string[] {
+  return validateUnreachablePredicates(
+    states,
+    workflowPath,
+    (state) => isIssueContentActionKind(state.action?.kind),
+    new Set(["pr_signal", "agent_signal", "claim_signal"])
+  );
+}
+
+// A wait/merge_pr state polls GitHub for PR signals (pr_signal is legitimate
+// there); it never runs a provider, so it can no more produce a Workflow
+// Claim than close_issue/label_issue/comment can (probeStateClaim is only
+// ever called from the agent-attempt-completion path, never from the wait
+// re-evaluation path) -- a complete_when or transition naming claim_status
+// here would otherwise validate cleanly and then never match at runtime,
+// parking the run forever with no diagnostic.
+function validateWaitLikeClaimPredicates(
+  states: ExpandedWorkflowState[],
+  workflowPath: string
+): string[] {
+  return validateUnreachablePredicates(
+    states,
+    workflowPath,
+    (state) =>
+      state.action?.kind === "wait" || state.action?.kind === "merge_pr",
+    new Set(["claim_signal"])
+  );
+}
+
+function validateUnreachablePredicates(
+  states: ExpandedWorkflowState[],
+  workflowPath: string,
+  matchesState: (state: ExpandedWorkflowState) => boolean,
+  unreachableEvaluations: ReadonlySet<WorkflowPredicateEvaluation>
+): string[] {
   const errors: string[] = [];
   for (const state of states) {
-    if (!isIssueContentActionKind(state.action?.kind)) {
+    if (!matchesState(state)) {
       continue;
     }
-    for (const key of unreachablePredicateKeys(state.completeWhen)) {
+    for (const key of unreachablePredicateKeys(
+      state.completeWhen,
+      unreachableEvaluations
+    )) {
       errors.push(
         `workflow state ${state.id} at ${workflowPath} ${state.action?.kind} action's complete_when names ${key}, which this action never produces and can never satisfy`
       );
     }
     for (const transition of state.transitions) {
-      for (const key of unreachablePredicateKeys(transition.when)) {
+      for (const key of unreachablePredicateKeys(
+        transition.when,
+        unreachableEvaluations
+      )) {
         errors.push(
           `workflow state ${state.id} at ${workflowPath} ${state.action?.kind} action's transition to ${transition.to} names ${key}, which this action never produces and can never satisfy`
         );
@@ -641,14 +682,13 @@ function validateIssueContentActionPredicates(
   return errors;
 }
 
-function unreachablePredicateKeys(predicates: WorkflowPredicateMap): string[] {
+function unreachablePredicateKeys(
+  predicates: WorkflowPredicateMap,
+  unreachableEvaluations: ReadonlySet<WorkflowPredicateEvaluation>
+): string[] {
   return Object.keys(predicates).filter((key) => {
     const evaluation = workflowPredicateEvaluation(key);
-    return (
-      evaluation === "pr_signal" ||
-      evaluation === "agent_signal" ||
-      evaluation === "claim_signal"
-    );
+    return evaluation !== undefined && unreachableEvaluations.has(evaluation);
   });
 }
 

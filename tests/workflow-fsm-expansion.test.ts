@@ -2645,6 +2645,66 @@ describe("state machine workflow definitions", () => {
       `workflow state commenting at ${workflowPath} comment action's transition to done names claim_status, which this action never produces and can never satisfy`
     );
   });
+
+  it("rejects a wait transition that gates on claim_status, which it can never produce", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: wait_stray_claim_signal",
+        "  initial: waiting",
+        "  states:",
+        "    waiting:",
+        "      action:",
+        "        kind: wait",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            claim_status: blocked",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state waiting at ${workflowPath} wait action's transition to done names claim_status, which this action never produces and can never satisfy`
+    );
+  });
+
+  it("rejects a merge_pr transition that gates on claim_status, which it can never produce", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: merge_pr_stray_claim_signal",
+        "  initial: merging",
+        "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            claim_status: success",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state merging at ${workflowPath} merge_pr action's transition to done names claim_status, which this action never produces and can never satisfy`
+    );
+  });
 });
 
 describe("built-in workflow templates", () => {

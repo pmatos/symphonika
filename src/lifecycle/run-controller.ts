@@ -5301,10 +5301,10 @@ export class RunController {
         stateRoot: this.stateRoot
       })
     ]);
-    const signals = {
-      ...signalsFromTerminal(input.terminal),
-      ...(claimStatus === undefined ? {} : { claim_status: claimStatus })
-    };
+    const signals = signalsFromTerminal(input.terminal);
+    if (claimStatus !== undefined) {
+      signals.claim_status = claimStatus;
+    }
     const decision = decideNextStep({
       actionExecuted: input.actionExecuted,
       ...(artifactExists === undefined ? {} : { artifactExists }),

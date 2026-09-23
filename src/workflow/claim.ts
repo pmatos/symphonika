@@ -10,13 +10,7 @@ import {
   runEvidenceDirectoryPath
 } from "./evidence-paths.js";
 
-// A Workflow Claim reinforces (not replaces) the predicate-graph-driven
-// terminal-state determination FSM/Workflow runs already use: an agent state
-// may opt in by naming `claim_status` in complete_when/transitions, and this
-// is the file the agent writes to make that claim (issue #776, generalizing
-// the Routine Outcome Claim pattern from #759/PR #775). Vocabulary matches
-// `terminal:` exactly so a claim can name the same three outcomes a raw-FSM
-// author can already declare.
+// Matches terminal:'s vocabulary exactly (see ADR-2026-09-23-1400).
 type WorkflowClaimStatus = "blocked" | "failure" | "success";
 
 export type WorkflowClaim = {
@@ -32,10 +26,7 @@ const workflowClaimSchema = z
   .strict();
 
 // Deliberately self-contained rather than sharing routines/outcome.ts's
-// reader: that module ships a tested, merged reliability-critical path for a
-// different subsystem, and this claim's payload (two fields, no URL
-// verification) does not need the routine reconciliation machinery layered
-// on top of it. Same bounded-read rationale, independent blast radius.
+// reader -- see ADR-2026-09-23-1400.
 export function parseWorkflowClaimText(text: string): WorkflowClaim | null {
   const unprefixed = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   let candidate: unknown;
@@ -119,6 +110,18 @@ export async function readWorkflowClaimFile(
     );
     return null;
   } finally {
-    await handle.close();
+    // A close() rejection must not override the try/catch's return value --
+    // that would turn a successful read, or a graceful "treat as absent",
+    // into an uncaught rejection propagating out of applyWorkflowOutcome's
+    // Promise.all and into runAttemptLifecycle's finally block, aborting
+    // terminal-state bookkeeping for the whole attempt.
+    try {
+      await handle.close();
+    } catch (error) {
+      logger?.warn(
+        { claimPath, err: errorMessage(error) },
+        "symphonika workflow claim file close failed; ignoring"
+      );
+    }
   }
 }

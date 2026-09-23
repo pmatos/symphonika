@@ -1,9 +1,7 @@
 import path from "node:path";
 
-// Shared by persistRunEvidence (autonomous-prompt.ts) and the Workflow Claim
-// path (claim.ts), which both name files inside the same per-run evidence
-// directory. Kept in its own module so neither of those two pulls the other
-// one in as a dependency.
+// Own module so persistRunEvidence (autonomous-prompt.ts) and claim.ts can
+// both depend on it without either pulling in the other.
 export function runEvidenceDirectoryPath(
   stateRoot: string,
   runId: string

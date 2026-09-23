@@ -36,6 +36,11 @@ required check existed only for that and have been removed.
 ## Workflow
 
 - Prefer small vertical slices with tests.
+- When dispatching subagents or reviewing a provider run's output, check the evidence behind each
+  result (the actual diff, command output, test run, or cited file lines) before accepting it; a
+  subagent's own summary is a claim, not proof. When several agents report back, consolidate their
+  findings into one summary table (e.g. agent | finding | evidence checked | verdict) instead of
+  relaying each report raw.
 - Update `SPEC.md`, `CONTEXT.md`, or `docs/adr/` when implementation work resolves a domain or
   architecture decision.
 - Do not silently change the upstream `symphony/` submodule unless the task explicitly asks for it.

@@ -22,6 +22,7 @@ import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
 } from "./daemon-endpoint.js";
+import { createPollNowTrigger } from "./daemon-poll-now.js";
 import type {
   FilteredProjectIssueSnapshot,
   GitHubIssuesApi,
@@ -557,7 +558,6 @@ export async function startDaemon(
   let lastPollErrorsKey = "";
   let lastPullRequestFollowupAt = Date.now();
   let recomputeRoutineSchedulesFromNow = true;
-  let pendingPollNow: Promise<PollNowResult> | undefined;
   const inflightDispatches = new Set<Promise<void>>();
   const projectsLoader = (): Promise<
     Map<string, RunControllerProjectConfig>
@@ -1460,32 +1460,11 @@ export async function startDaemon(
     kind,
     state: dispatchRuntime.dispatching ? "dispatching" : "idle"
   });
-  const triggerPollNow = (): Promise<PollNowResult> => {
-    if (pendingPollNow !== undefined) {
-      return pendingPollNow.then((result) => ({
-        ...result,
-        kind: "coalesced"
-      }));
-    }
-
-    const queued = new Promise<PollNowResult>((resolve, reject) => {
-      enqueueScheduledWork(async () => {
-        try {
-          await tick();
-          resolve(pollNowSummary("queued"));
-        } catch (error) {
-          const reason =
-            error instanceof Error ? error : new Error(errorMessage(error));
-          reject(reason);
-          throw reason;
-        }
-      });
-    });
-    pendingPollNow = queued.finally(() => {
-      pendingPollNow = undefined;
-    });
-    return pendingPollNow;
-  };
+  const triggerPollNow = createPollNowTrigger({
+    enqueueScheduledWork,
+    summarize: pollNowSummary,
+    tick
+  });
 
   let intervalMs: number | undefined;
   if (state.configExists) {

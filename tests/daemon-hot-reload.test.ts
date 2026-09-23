@@ -147,9 +147,10 @@ describe("daemon hot reload", () => {
 
   it("applies changed project filters, provider commands, and workflow prompts to future work", async () => {
     const root = await makeTempRoot();
+    // Keep interval ticks out of this manual reload scenario; cadence is tested above.
     await writeProject(root, {
       labelsAll: ["agent-ready"],
-      pollingIntervalMs: 1_000,
+      pollingIntervalMs: 60_000,
       providerCommand: "codex old-command app-server",
       workflowBody: "First workflow for {{issue.title}}.\n"
     });
@@ -236,7 +237,7 @@ describe("daemon hot reload", () => {
 
       await writeProject(root, {
         labelsAll: ["next-ready"],
-        pollingIntervalMs: 1_000,
+        pollingIntervalMs: 60_000,
         providerCommand: "codex new-command app-server",
         workflowBody: "Second workflow for {{issue.title}}.\n"
       });
@@ -244,17 +245,29 @@ describe("daemon hot reload", () => {
         method: "POST"
       });
       expect(response.status).toBe(200);
-      await waitFor(() => Promise.resolve(providerInputs.length === 2));
+      expect(await response.json()).toMatchObject({
+        candidateIssues: 1,
+        kind: "queued"
+      });
+      expect(githubIssuesApi.listOpenIssues).toHaveBeenCalledTimes(2);
+      await waitFor(
+        () =>
+          Promise.resolve(
+            providerInputs.some((input) => input.issue.number === 82)
+          ),
+        { timeoutMs: 5_000 }
+      );
       await waitForRunCount(daemon.url, 2);
+      expect(providerInputs.map((input) => input.issue.number)).toEqual([
+        81, 82
+      ]);
 
-      expect(providerInputs[0]?.issue.number).toBe(81);
       expect(providerInputs[0]?.provider.command).toBe(
         "codex old-command app-server"
       );
       expect(providerInputs[0]?.prompt).toContain(
         "First workflow for First reload run."
       );
-      expect(providerInputs[1]?.issue.number).toBe(82);
       expect(providerInputs[1]?.provider.command).toBe(
         "codex new-command app-server"
       );
@@ -266,7 +279,7 @@ describe("daemon hot reload", () => {
     } finally {
       await daemon.stop();
     }
-  });
+  }, 10_000);
 
   it("keeps the last good workflow snapshot when a workflow reload is invalid", async () => {
     const root = await makeTempRoot();

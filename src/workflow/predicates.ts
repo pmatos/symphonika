@@ -12,13 +12,14 @@ import type { WorkflowPredicateValue } from "./types.js";
 // tests/workflow-predicates.test.ts pins each signal kind to the projection
 // that actually emits it.
 export type WorkflowPredicateEvaluation =
-  "agent_signal" | "artifact" | "pr_signal";
+  "agent_signal" | "artifact" | "claim_signal" | "pr_signal";
 
 export const workflowPredicateEvaluations = {
   artifact_exists: "artifact",
   branch_advanced_since_attempt_start: "agent_signal",
   branch_ahead_of_base: "agent_signal",
   checks: "pr_signal",
+  claim_status: "claim_signal",
   has_unresolved_reviews: "pr_signal",
   mergeable: "pr_signal",
   pr_merged: "pr_signal",

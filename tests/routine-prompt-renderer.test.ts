@@ -75,6 +75,7 @@ describe("RoutinePromptRenderer", () => {
       project: { name: "symphonika" },
       provider: baseInput.provider,
       run: { attempt: 1, continuation: false, id: "run-1" },
+      stateRoot: "/state",
       template: "Report",
       workflowPath: "/tmp/WORKFLOW.md",
       workspace: {

@@ -112,6 +112,7 @@ import {
   probeStateArtifacts,
   statePredicateKeys
 } from "./artifact-probe.js";
+import { probeStateClaim } from "./claim-probe.js";
 import {
   buildEdgeBudgetExhaustedReason,
   buildNoProgressReason,
@@ -5030,6 +5031,7 @@ export class RunController {
         if (currentState !== undefined && loadedWorkflow !== undefined) {
           workflowOutcome = await this.applyWorkflowOutcome({
             actionExecuted: attemptCreated,
+            attemptNumber: input.attemptNumber,
             branchName: started?.evidence.branchName,
             currentState,
             deferRetryableTransientAdvance,
@@ -5222,6 +5224,7 @@ export class RunController {
         continuation: input.isContinuation,
         id: input.runId
       },
+      stateRoot: this.stateRoot,
       template: input.promptTemplate ?? workflow.body,
       workflowContentHash: workflow.contentHash,
       workflowPath,
@@ -5236,8 +5239,7 @@ export class RunController {
       ...promptInput,
       attemptNumber: input.attemptNumber,
       expandedWorkflow: workflow.expandedWorkflow,
-      renderedPrompt,
-      stateRoot: this.stateRoot
+      renderedPrompt
     });
     const attemptSuffix =
       input.attemptNumber === 1 ? "" : `.attempt-${input.attemptNumber}`;
@@ -5275,6 +5277,7 @@ export class RunController {
 
   private async applyWorkflowOutcome(input: {
     actionExecuted: boolean;
+    attemptNumber: number;
     branchName: string | undefined;
     currentState: ExpandedWorkflowState;
     deferRetryableTransientAdvance?: boolean;
@@ -5285,11 +5288,23 @@ export class RunController {
     workflow: ExpandedWorkflow;
     workspacePath: string | undefined;
   }): Promise<WorkflowOutcomeResult> {
-    const signals = signalsFromTerminal(input.terminal);
-    const artifactExists = await probeStateArtifacts({
-      state: input.currentState,
-      workspacePath: input.workspacePath
-    });
+    const [artifactExists, claimStatus] = await Promise.all([
+      probeStateArtifacts({
+        state: input.currentState,
+        workspacePath: input.workspacePath
+      }),
+      probeStateClaim({
+        attemptNumber: input.attemptNumber,
+        logger: this.logger,
+        runId: input.runId,
+        state: input.currentState,
+        stateRoot: this.stateRoot
+      })
+    ]);
+    const signals = {
+      ...signalsFromTerminal(input.terminal),
+      ...(claimStatus === undefined ? {} : { claim_status: claimStatus })
+    };
     const decision = decideNextStep({
       actionExecuted: input.actionExecuted,
       ...(artifactExists === undefined ? {} : { artifactExists }),

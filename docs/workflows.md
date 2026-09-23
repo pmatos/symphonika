@@ -232,14 +232,44 @@ action:
 The prompt file must exist when `doctor` or daemon reload validates Project readiness. It uses the
 same strict variables and autonomy preamble as a Markdown Workflow Contract.
 
-An agent result currently projects only:
+An agent result currently projects:
 
 - `provider_success`
 - `branch_ahead_of_base`
 - `branch_advanced_since_attempt_start`
+- `claim_status`, when the agent wrote a valid Workflow Claim file (below)
 
 Do not put PR predicates such as `checks` in an agent state's `complete_when`; those signals are
 produced when a `wait` or `merge_pr` state polls GitHub.
+
+### Workflow Claim
+
+An agent state whose predicates name `claim_status` opts into a second, file-based terminal-state
+signal alongside `provider_success` and `artifact_exists` — the same reliability pattern the
+Routine Outcome Claim (`docs/tutorial.md`) uses for Routine Firings, generalized to raw-FSM states
+(issue #776). Every rendered Workflow prompt exposes `{{claim.path}}`: a per-attempt file path
+outside the Run Workspace, so writing it is a deliberate tool call rather than trailing prose that
+can be truncated or wrapped in commentary. A prompt for a state that names `claim_status` should
+instruct the agent to write a JSON object there as one of its last actions:
+
+```json
+{ "status": "blocked", "summary": "No open PR found for this branch." }
+```
+
+`status` uses the same three-value vocabulary as `terminal`: `success`, `blocked`, `failure`.
+Symphonika reads the file back after the provider process exits (bounded to 64KB, BOM-tolerant,
+schema-validated) and offers the parsed `status` as the `claim_status` predicate, compared by
+strict equality like every other non-artifact predicate. A missing, oversized, or schema-invalid
+claim file leaves `claim_status` absent — a transition naming it simply does not match, the same
+way an absent PR or artifact signal behaves today — so a state should still declare its own
+`provider_success` or `artifact_exists` fallback rather than relying on `claim_status` alone.
+
+Unlike `BLOCKED.md`, a Workflow Claim file lives outside the Run Workspace (in the same per-run
+evidence directory `persistRunEvidence` already writes to), named per attempt the same way
+`prompt.attempt-N.md` is. No git-tracked-file provenance check or workspace-reuse clearing applies
+to it, and it never collides with a managed repository's own files. `BLOCKED.md` remains the
+`artifact_exists`-based sentinel this reinforces, not replaces — see
+ADR-2026-09-23-1400.
 
 ### `wait`
 
@@ -366,6 +396,7 @@ The parser recognizes the following keys:
 | `has_unresolved_reviews` | `true`, `false` | no | always | supported |
 | `unresolved_review_threads` | non-negative integer | no | always | supported, exact count only; a wait transition may only gate on `0` — a positive value fails `workflow validate` (issue #632), use `has_unresolved_reviews: true` |
 | `artifact_exists` | path, or a sequence of paths | yes | yes | supported, existence only |
+| `claim_status` | `success`, `blocked`, `failure` | yes, when a valid Workflow Claim file was written | no | supported, opt-in — see Workflow Claim above |
 
 `branch_ahead_of_base` counts commits ahead of `origin/<base_branch>`, not ahead of the commit the
 attempt started from. It is a property of the branch, not of the attempt: in a multi-state walk it
@@ -491,6 +522,7 @@ or executable expressions.
 | `branch` | `name`, `ref` |
 | `run` | `id`, `attempt`, `continuation` |
 | `provider` | `name`, `command` |
+| `claim` | `path` |
 
 Arrays and objects, such as `issue.labels`, render as JSON. A previous-attempt notice and the
 standard autonomy preamble are added outside your prompt file.

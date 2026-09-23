@@ -608,13 +608,14 @@ function validateWaitStateCoverage(
 
 // close_issue/label_issue/comment observe nothing external: their signal map
 // is always the constant {} (observeIssueContentAction never populates a
-// pr_signal or agent_signal key), so a complete_when or transition predicate
-// naming one of those keys can never match. Unlike a `wait` misconfiguration
-// -- caught here before any GitHub write happens -- a mismatch on one of
-// these three kinds would otherwise only surface as `decision.kind ===
-// "blocked"` *after* observeIssueContentAction has already performed the
-// GitHub mutation, since the action always executes before the transition
-// table is even consulted.
+// pr_signal, agent_signal, or claim_signal key -- no provider runs for these
+// three, so nothing ever writes a Workflow Claim either), so a complete_when
+// or transition predicate naming one of those keys can never match. Unlike a
+// `wait` misconfiguration -- caught here before any GitHub write happens --
+// a mismatch on one of these three kinds would otherwise only surface as
+// `decision.kind === "blocked"` *after* observeIssueContentAction has
+// already performed the GitHub mutation, since the action always executes
+// before the transition table is even consulted.
 function validateIssueContentActionPredicates(
   states: ExpandedWorkflowState[],
   workflowPath: string
@@ -643,7 +644,11 @@ function validateIssueContentActionPredicates(
 function unreachablePredicateKeys(predicates: WorkflowPredicateMap): string[] {
   return Object.keys(predicates).filter((key) => {
     const evaluation = workflowPredicateEvaluation(key);
-    return evaluation === "pr_signal" || evaluation === "agent_signal";
+    return (
+      evaluation === "pr_signal" ||
+      evaluation === "agent_signal" ||
+      evaluation === "claim_signal"
+    );
   });
 }
 

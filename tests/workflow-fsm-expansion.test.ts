@@ -2614,6 +2614,37 @@ describe("state machine workflow definitions", () => {
       `workflow state closing at ${workflowPath} close_issue action's complete_when names provider_success, which this action never produces and can never satisfy`
     );
   });
+
+  it("rejects a comment transition that gates on claim_status, which it can never produce", async () => {
+    const root = await makeTempRoot();
+    const workflowPath = path.join(root, "workflow.yml");
+    await writeFile(
+      workflowPath,
+      [
+        "workflow:",
+        "  name: comment_stray_claim_signal",
+        "  initial: commenting",
+        "  states:",
+        "    commenting:",
+        "      action:",
+        "        kind: comment",
+        "        body: Update posted.",
+        "      transitions:",
+        "        - to: done",
+        "          when:",
+        "            claim_status: blocked",
+        "    done:",
+        "      terminal: success",
+        ""
+      ].join("\n")
+    );
+
+    const result = await loadExpandedWorkflow(workflowPath);
+
+    expect(result.errors).toContain(
+      `workflow state commenting at ${workflowPath} comment action's transition to done names claim_status, which this action never produces and can never satisfy`
+    );
+  });
 });
 
 describe("built-in workflow templates", () => {

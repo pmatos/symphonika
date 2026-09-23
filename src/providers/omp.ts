@@ -13,6 +13,11 @@ import { renderProviderCommandTemplate } from "../provider-command-template.js";
 import { parseProviderCommand, type ProviderLabel } from "./command-parse.js";
 import { mapProcessQueueControlEvent } from "./jsonl-process-queue.js";
 import {
+  createOmpEventReducer,
+  type OmpEventReducer,
+  type OmpResponseCommand
+} from "./omp-events.js";
+import {
   providerProcessExitResult,
   shutdownProviderProcess
 } from "./provider-process.js";
@@ -27,13 +32,11 @@ type JsonObject = Record<string, unknown>;
 const PROVIDER_LABEL: ProviderLabel = "Oh My Pi";
 
 type ActiveOmpRun = ProviderRunState & {
-  assistantText?: string;
-  completedAssistantText?: string;
   nextRequestId: number;
   promptDispatched: boolean;
   queue?: ProcessQueue;
+  reducer: OmpEventReducer;
   terminalEventSeen: boolean;
-  sessionId: string | undefined;
 };
 
 type ProcessQueuePayload =
@@ -121,7 +124,7 @@ export function createOmpProvider(
       cancelled: false,
       nextRequestId: 1,
       promptDispatched: false,
-      sessionId: undefined,
+      reducer: createOmpEventReducer(),
       terminalEventSeen: false
     }),
     label: PROVIDER_LABEL,
@@ -197,7 +200,7 @@ async function* runOmpTurn(
       queue,
       id,
       activeRun,
-      mapNegotiationResponse
+      "negotiate_protocol"
     );
     if (negotiated.stopped) {
       return;
@@ -212,8 +215,11 @@ async function* runOmpTurn(
 
   const stateId = requestId(activeRun);
   writeJson(child, { id: stateId, type: "get_state" });
-  const state = yield* readUntilResponse(queue, stateId, activeRun, (raw) =>
-    mapStateResponse(raw, activeRun)
+  const state = yield* readUntilResponse(
+    queue,
+    stateId,
+    activeRun,
+    "get_state"
   );
   if (state.stopped) {
     return;
@@ -231,12 +237,7 @@ async function* runOmpTurn(
     message: input.prompt,
     type: "prompt"
   });
-  const prompt = yield* readUntilResponse(
-    queue,
-    promptId,
-    activeRun,
-    mapPromptResponse
-  );
+  const prompt = yield* readUntilResponse(queue, promptId, activeRun, "prompt");
   if (prompt.stopped) {
     return;
   }
@@ -290,228 +291,10 @@ function providerEventFromQueueItem(
 ): ProviderEvent {
   const event =
     item.kind === "message"
-      ? mapOmpFrame(item.raw, activeRun)
+      ? activeRun.reducer.reduce(item.raw)
       : mapProcessQueueControlEvent(item, activeRun.cancelled);
 
   return { ...event, receivedAt: item.receivedAt };
-}
-
-function mapOmpFrame(raw: unknown, activeRun: ActiveOmpRun): ProviderEvent {
-  const type = stringField(raw, "type");
-
-  // Watchdog liveness marker (ADR 0087, issue #779 amendment). Fires once per
-  // prompt, so no throttle (cf. codex-events.ts's progressMarkerEvent).
-  if (type === "agent_start") {
-    return {
-      normalized: {
-        sessionId: activeRun.sessionId,
-        signal: "agent_start",
-        type: "progress"
-      },
-      raw
-    };
-  }
-
-  if (type === "extension_ui_request") {
-    const method = stringField(raw, "method");
-    if (
-      method === "select" ||
-      method === "confirm" ||
-      method === "input" ||
-      method === "editor" ||
-      method === "open_url"
-    ) {
-      return {
-        normalized: {
-          instructions: stringField(raw, "instructions"),
-          message: stringField(raw, "message"),
-          method,
-          requestId: stringField(raw, "id"),
-          sessionId: activeRun.sessionId,
-          title: stringField(raw, "title"),
-          type: "input_required",
-          url: stringField(raw, "url")
-        },
-        raw
-      };
-    }
-  }
-
-  if (type === "message_update") {
-    const update = objectField(raw, "assistantMessageEvent");
-    const updateType = stringField(update, "type");
-    if (updateType === "text_delta" || updateType === "thinking_delta") {
-      const delta = stringField(update, "delta") ?? "";
-      if (updateType === "text_delta") {
-        activeRun.assistantText = (activeRun.assistantText ?? "") + delta;
-      }
-      return {
-        normalized: {
-          message: delta,
-          messageKind: updateType === "text_delta" ? "text" : "thinking",
-          sessionId: activeRun.sessionId,
-          type: "message"
-        },
-        raw
-      };
-    }
-    if (updateType === "error") {
-      const errorMessage = objectField(update, "error");
-      return {
-        normalized: {
-          message:
-            stringField(errorMessage, "errorMessage") ??
-            "Oh My Pi assistant turn failed",
-          type: "turn_failed"
-        },
-        raw
-      };
-    }
-  }
-
-  if (type === "notice" && stringField(raw, "level") === "error") {
-    return {
-      normalized: {
-        message: stringField(raw, "message") ?? "Oh My Pi reported an error",
-        type: "turn_failed"
-      },
-      raw
-    };
-  }
-
-  if (type === "message_end") {
-    const message = objectField(raw, "message");
-    if (
-      stringField(message, "role") === "assistant" &&
-      activeRun.assistantText !== undefined
-    ) {
-      activeRun.completedAssistantText = activeRun.assistantText;
-      delete activeRun.assistantText;
-    }
-    const usage = objectField(message, "usage");
-    if (stringField(message, "role") === "assistant" && usage !== undefined) {
-      return {
-        normalized: {
-          sessionId: activeRun.sessionId,
-          tokenUsage: {
-            cacheReadTokens: numberField(usage, "cacheRead"),
-            cacheWriteTokens: numberField(usage, "cacheWrite"),
-            inputTokens: numberField(usage, "input"),
-            outputTokens: numberField(usage, "output"),
-            totalTokens: numberField(usage, "totalTokens")
-          },
-          type: "usage_updated"
-        },
-        raw
-      };
-    }
-  }
-
-  if (type === "tool_execution_start") {
-    return {
-      normalized: {
-        input: objectField(raw, "args"),
-        sessionId: activeRun.sessionId,
-        toolCallId: stringField(raw, "toolCallId"),
-        toolName: stringField(raw, "toolName"),
-        type: "tool_call"
-      },
-      raw
-    };
-  }
-
-  if (type === "turn_end") {
-    const result = activeRun.assistantText ?? activeRun.completedAssistantText;
-    // OMP does not expose a stable turn id, and a session can emit more than
-    // one turn_end before its terminal agent_end. Clearing the completed
-    // text once consumed here stops a later, textless turn from reporting an
-    // earlier turn's stale result.
-    delete activeRun.completedAssistantText;
-    return {
-      normalized: {
-        ...(result === undefined ? {} : { result }),
-        sessionId: activeRun.sessionId,
-        type: "turn_completed"
-      },
-      raw
-    };
-  }
-
-  return { raw };
-}
-
-function mapStateResponse(
-  raw: unknown,
-  activeRun: ActiveOmpRun
-): ProviderEvent {
-  if (!successfulResponse(raw)) {
-    return mapFailedResponse(raw);
-  }
-
-  const state = objectField(raw, "data");
-  const sessionId = stringField(state, "sessionId");
-  activeRun.sessionId = sessionId;
-  const model = objectField(state, "model");
-  const modelId = stringField(model, "id");
-  const modelProvider = stringField(model, "provider");
-
-  return {
-    normalized: {
-      model:
-        modelProvider !== undefined && modelId !== undefined
-          ? `${modelProvider}/${modelId}`
-          : modelId,
-      sessionFile: stringField(state, "sessionFile"),
-      sessionId,
-      type: "session_started"
-    },
-    raw
-  };
-}
-
-function mapFailedResponse(raw: unknown): ProviderEvent {
-  return {
-    normalized: {
-      command: stringField(raw, "command"),
-      message: stringField(raw, "error") ?? "Oh My Pi RPC command failed",
-      type: "turn_failed"
-    },
-    raw
-  };
-}
-
-function mapPromptResponse(raw: unknown): ProviderEvent {
-  if (!successfulResponse(raw)) {
-    return mapFailedResponse(raw);
-  }
-  if (agentInvocationRejected(raw)) {
-    return {
-      normalized: {
-        command: "prompt",
-        message: "Oh My Pi did not invoke an agent for the prompt",
-        type: "turn_failed"
-      },
-      raw
-    };
-  }
-  return { raw };
-}
-
-function mapNegotiationResponse(raw: unknown): ProviderEvent {
-  if (!successfulResponse(raw)) {
-    return mapFailedResponse(raw);
-  }
-  if (numberField(objectField(raw, "data"), "protocolVersion") !== 2) {
-    return {
-      normalized: {
-        command: "negotiate_protocol",
-        message: "Oh My Pi did not confirm RPC protocol v2",
-        type: "turn_failed"
-      },
-      raw
-    };
-  }
-  return { raw };
 }
 
 async function* readUntilFrame(
@@ -559,15 +342,16 @@ async function* readUntilResponse(
   queue: ProcessQueue,
   id: string,
   activeRun: ActiveOmpRun,
-  mapResponse: (raw: unknown, activeRun: ActiveOmpRun) => ProviderEvent = (
-    raw
-  ) => (successfulResponse(raw) ? { raw } : mapFailedResponse(raw))
+  responseTo: OmpResponseCommand
 ): AsyncGenerator<ProviderEvent, ResponseReadResult> {
   while (true) {
     const item = await queue.next();
     const event =
       item.kind === "message" && stringField(item.raw, "id") === id
-        ? { ...mapResponse(item.raw, activeRun), receivedAt: item.receivedAt }
+        ? {
+            ...activeRun.reducer.reduce(item.raw, responseTo),
+            receivedAt: item.receivedAt
+          }
         : providerEventFromQueueItem(item, activeRun);
     if (event.normalized?.type === "process_exit") {
       if (!activeRun.cancelled && !activeRun.terminalEventSeen) {

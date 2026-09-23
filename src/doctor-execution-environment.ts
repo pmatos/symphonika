@@ -379,7 +379,10 @@ function systemdEnvironmentPath(
   return environmentPath;
 }
 
-function splitSystemdWords(input: string): string[] {
+// Tokenizes a systemd directive's value the way systemd's own word-splitting
+// does: single/double-quoted spans preserve internal whitespace, backslash
+// escapes the next character.
+export function splitSystemdWords(input: string): string[] {
   const words: string[] = [];
   let current = "";
   let quote: "'" | '"' | undefined;

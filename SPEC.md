@@ -2625,6 +2625,20 @@ config path and points the operator to `symphonika init`.
 - installed `symphonika.service` PATH liveness for selected Project provider executables and `gh`;
   the effective assignment includes adjacent `.service.d/*.conf` drop-ins, and failures here are
   warnings because the unit's frozen PATH may be intentional
+- installed `symphonika.service` ExecStart runtime/script liveness: the node runtime and
+  `dist/cli.js` path pinned into `ExecStart=` at install time (see `renderServiceUnit` in
+  `service.ts`) are parsed back out of the effective unit (base plus drop-ins) and checked for
+  existence; the runtime must also be executable, the script only readable. Unlike PATH liveness,
+  failures here are errors, not warnings — the unit will fail to start (`203/EXEC`) on its next
+  start, for example after an `nvm uninstall` of the version it was installed under, a crash, a
+  watchdog kill, or a reboot, even though an already-running daemon is unaffected. Also warns
+  (non-fatally) when the pinned runtime's real path differs from `doctor`'s own `process.execPath`
+  — i.e. what a `service install --force` re-run would pin right now — prompting a re-install before
+  the old runtime is removed; comparing against `node` resolved on the operator's shell PATH instead
+  would false-warn whenever that resolves to a version-manager shim (asdf/mise/volta) rather than the
+  real binary, in a way re-installing could never clear. An `ExecStart=` that doesn't match the
+  generator's `sh -c '...' symphonika "<runtime>" "<script>"` shape (a hand-rolled unit, or one
+  predating this check) is skipped rather than guessed at (#804)
 - installed providers-slice build capacity: when `symphonika.service` and a finite byte-size
   `symphonika-providers.slice` `MemoryMax=` (bytes or a K/M/G/T suffix) are present, estimate the
   aggregate worst case as the host's available parallelism times 1.5 GiB peak RSS per compiler

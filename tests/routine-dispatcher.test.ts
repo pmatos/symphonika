@@ -218,6 +218,7 @@ describe("RoutineFiringDispatcher", () => {
     };
     runStore.syncRoutines([routine]);
     const delivered: NotificationMessage[] = [];
+    const slotCountsAtDeliveryStart: number[] = [];
     const notificationDeliveries = new NotificationDeliveryTracker();
 
     try {
@@ -230,6 +231,7 @@ describe("RoutineFiringDispatcher", () => {
         notification: {
           createSink: () => ({
             deliver(message: NotificationMessage) {
+              slotCountsAtDeliveryStart.push(activeRuns.countInFlight());
               delivered.push(message);
               return Promise.resolve();
             }
@@ -278,6 +280,7 @@ describe("RoutineFiringDispatcher", () => {
       await notificationDeliveries.settled();
 
       expect(delivered).toHaveLength(1);
+      expect(slotCountsAtDeliveryStart).toEqual([0]);
       expect(delivered[0]?.subject).toContain("daily-report");
       expect(runStore.getRoutineFiring("manual-fire-notify")).toMatchObject({
         notificationState: "sent",

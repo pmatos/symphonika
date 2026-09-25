@@ -404,62 +404,16 @@ export function fireRoutineNow(
       reason: detail.state
     };
   }
-  input.activeRuns.reserveSlot({
-    issueNumber: syntheticRoutineIssueNumber(firingId),
-    projectName: routine.projectName,
-    respectsIssueLabels: false,
-    runId: firingId
-  });
-  const completion = runRoutineFiring({
-    activeRuns: input.activeRuns,
-    configDir: input.configDir,
-    env: input.env ?? process.env,
+  const completion = startClaimedRoutineFiring({
     firingId,
-    globalMaxInFlight: input.globalConcurrency.maxInFlight,
-    githubIssuesApi: input.githubIssuesApi,
-    inspectWorkspaceCommitsAhead:
-      input.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
-    ...(input.cancellationSettleMs === undefined
-      ? {}
-      : { cancellationSettleMs: input.cancellationSettleMs }),
-    ...(input.claimUrlVerificationTimeoutMs === undefined
-      ? {}
-      : { claimUrlVerificationTimeoutMs: input.claimUrlVerificationTimeoutMs }),
-    logger: input.logger,
     now: new Date(),
-    prepareRoutineWorkspace:
-      input.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace,
     project,
     provider,
     providerCommand,
     providerName,
-    // A closure, not a snapshot: resolved fresh on every call so a Service
-    // Config reload mid-firing (changing smtp_password_env or its value) is
-    // honored by evidence recorded after the reload, matching the delivery
-    // config's own re-resolution in recordRoutineFiringNotification (ADR
-    // 0067).
-    redactSecrets: () =>
-      resolveRedactSecrets(input.notification, input.env ?? process.env),
     routine: detail,
-    runStore: input.runStore,
-    stateRoot: input.stateRoot
-  })
-    .finally(() => {
-      input.activeRuns.unregister(firingId);
-    })
-    .then((firingResult) => {
-      // The concurrency slot above is released before background
-      // notification delivery starts. The daemon-owned tracker drains it
-      // during graceful shutdown without keeping manual firing completion
-      // open on SMTP I/O (ADR 0085).
-      enqueueRoutineFiringNotification(
-        input,
-        firingId,
-        project,
-        detail,
-        firingResult
-      );
-    });
+    runtime: input
+  });
   return {
     completion,
     firingId,
@@ -643,8 +597,6 @@ export async function dispatchDueRoutines(
   const missed: DispatchDueRoutinesResult["missed"] = [];
   const skipped: DispatchDueRoutinesResult["skipped"] = [];
   const now = input.now ?? new Date();
-  const prepareRoutineWorkspace =
-    input.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace;
   const createFiringId = input.createFiringId ?? (() => createUlid());
   const createFanoutId = input.createFanoutId ?? (() => createUlid());
   const projects = [...input.projects.values()];
@@ -658,8 +610,6 @@ export async function dispatchDueRoutines(
     }
   >();
   const firingTasks: Promise<void>[] = [];
-  const redactSecrets = (): string[] =>
-    resolveRedactSecrets(input.notification, input.env ?? process.env);
 
   for (const project of projects) {
     if (project.disabled === true) {
@@ -1119,58 +1069,17 @@ export async function dispatchDueRoutines(
         continue;
       }
 
-      input.activeRuns.reserveSlot({
-        issueNumber: syntheticRoutineIssueNumber(firingId),
-        projectName: project.name,
-        respectsIssueLabels: false,
-        runId: firingId
-      });
       fired.push(firingId);
-      const firingTask = runRoutineFiring({
+      const firingTask = startClaimedRoutineFiring({
         firingId,
-        env: input.env ?? process.env,
-        globalMaxInFlight: input.globalConcurrency.maxInFlight,
-        githubIssuesApi: input.githubIssuesApi,
-        inspectWorkspaceCommitsAhead:
-          input.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
-        ...(input.cancellationSettleMs === undefined
-          ? {}
-          : { cancellationSettleMs: input.cancellationSettleMs }),
-        ...(input.claimUrlVerificationTimeoutMs === undefined
-          ? {}
-          : {
-              claimUrlVerificationTimeoutMs: input.claimUrlVerificationTimeoutMs
-            }),
-        logger: input.logger,
         now,
-        prepareRoutineWorkspace,
         project,
         provider,
         providerCommand,
         providerName,
-        redactSecrets,
         routine: routineDetail,
-        runStore: input.runStore,
-        stateRoot: input.stateRoot,
-        configDir: input.configDir,
-        activeRuns: input.activeRuns
-      })
-        .finally(() => {
-          input.activeRuns.unregister(firingId);
-        })
-        .then((firingResult) => {
-          // Notification delivery is best-effort and can be as slow as the
-          // SMTP server allows (see ADR 0067); enqueue it after the slot is
-          // released so a stalled relay holds neither project capacity nor
-          // this routine dispatch open (ADR 0085).
-          enqueueRoutineFiringNotification(
-            input,
-            firingId,
-            project,
-            routineDetail,
-            firingResult
-          );
-        });
+        runtime: input
+      });
       firingTasks.push(firingTask);
     }
   }
@@ -2076,9 +1985,95 @@ async function inspectRoutineCommitsAhead(input: {
   }
 }
 
-// Shared by fireRoutineNow and dispatchDueRoutines's per-firing task chain so
-// both enqueue notification delivery identically instead of each hand-rolling
-// the same `.deliveries.enqueue(...)` call.
+type ClaimedRoutineFiringInput = {
+  firingId: string;
+  now: Date;
+  project: RunControllerProjectConfig;
+  provider: NonNullable<AgentProviderRegistry[AgentProviderName]>;
+  providerCommand: string;
+  providerName: AgentProviderName;
+  routine: RoutineStatus & { prompt: string };
+  runtime: Pick<
+    DispatchDueRoutinesInput,
+    | "activeRuns"
+    | "cancellationSettleMs"
+    | "claimUrlVerificationTimeoutMs"
+    | "configDir"
+    | "env"
+    | "globalConcurrency"
+    | "githubIssuesApi"
+    | "inspectWorkspaceCommitsAhead"
+    | "logger"
+    | "notification"
+    | "prepareRoutineWorkspace"
+    | "runStore"
+    | "stateRoot"
+  >;
+};
+
+function startClaimedRoutineFiring(
+  input: ClaimedRoutineFiringInput
+): Promise<void> {
+  const { runtime } = input;
+  const env = runtime.env ?? process.env;
+
+  // Admission and the durable claim stay with the manual/scheduled caller.
+  // Once claimed, this module owns the slot for the whole execution.
+  runtime.activeRuns.reserveSlot({
+    issueNumber: syntheticRoutineIssueNumber(input.firingId),
+    projectName: input.project.name,
+    respectsIssueLabels: false,
+    runId: input.firingId
+  });
+
+  return runRoutineFiring({
+    activeRuns: runtime.activeRuns,
+    configDir: runtime.configDir,
+    env,
+    firingId: input.firingId,
+    globalMaxInFlight: runtime.globalConcurrency.maxInFlight,
+    githubIssuesApi: runtime.githubIssuesApi,
+    inspectWorkspaceCommitsAhead:
+      runtime.inspectWorkspaceCommitsAhead ?? inspectWorkspaceCommitsAhead,
+    ...(runtime.cancellationSettleMs === undefined
+      ? {}
+      : { cancellationSettleMs: runtime.cancellationSettleMs }),
+    ...(runtime.claimUrlVerificationTimeoutMs === undefined
+      ? {}
+      : {
+          claimUrlVerificationTimeoutMs: runtime.claimUrlVerificationTimeoutMs
+        }),
+    logger: runtime.logger,
+    now: input.now,
+    prepareRoutineWorkspace:
+      runtime.prepareRoutineWorkspace ?? defaultPrepareRoutineWorkspace,
+    project: input.project,
+    provider: input.provider,
+    providerCommand: input.providerCommand,
+    providerName: input.providerName,
+    // Resolve again on every evidence write so a mid-firing config reload
+    // changes redaction immediately instead of leaving a dispatch-time snapshot.
+    redactSecrets: () => resolveRedactSecrets(runtime.notification, env),
+    routine: input.routine,
+    runStore: runtime.runStore,
+    stateRoot: runtime.stateRoot
+  })
+    .finally(() => {
+      runtime.activeRuns.unregister(input.firingId);
+    })
+    .then((firingResult) => {
+      // Notification delivery starts only after the slot is released. The
+      // daemon-owned tracker, not this promise, owns the background work.
+      enqueueRoutineFiringNotification(
+        runtime,
+        input.firingId,
+        input.project,
+        input.routine,
+        firingResult
+      );
+    });
+}
+
 function enqueueRoutineFiringNotification(
   input: Pick<
     DispatchDueRoutinesInput,

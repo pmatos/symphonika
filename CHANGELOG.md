@@ -1,5 +1,20 @@
 # Changelog
 
+# [0.8.0](https://github.com/pmatos/symphonika/compare/v0.7.0...v0.8.0) (2026-09-27)
+
+
+### Bug Fixes
+
+* make branch-advancement check survive a mid-attempt rebase ([#807](https://github.com/pmatos/symphonika/issues/807)) ([82c6c28](https://github.com/pmatos/symphonika/commit/82c6c28939034b804910ec3eb3222505838c0431))
+* make daemon polling tests deterministic ([#815](https://github.com/pmatos/symphonika/issues/815)) ([8999155](https://github.com/pmatos/symphonika/commit/89991556b7db867faa9825c137de74f8171bcd18))
+* update pinned claude-code-action SHA in workflow test ([#808](https://github.com/pmatos/symphonika/issues/808)) ([75966d5](https://github.com/pmatos/symphonika/commit/75966d5af8d9abd53618a6b193219b70222379bd))
+
+
+### Features
+
+* flag installed unit whose pinned node runtime no longer exists ([#812](https://github.com/pmatos/symphonika/issues/812)) ([88a4564](https://github.com/pmatos/symphonika/commit/88a4564ea96ed0030aad4a804cee9f4db0992c7b))
+* **workflow:** add a file-based workflow claim channel via claim_status ([#814](https://github.com/pmatos/symphonika/issues/814)) ([4102975](https://github.com/pmatos/symphonika/commit/4102975987621ab3a8450e8eef66f125f519fd22))
+
 # [0.7.0](https://github.com/pmatos/symphonika/compare/v0.6.1...v0.7.0) (2026-09-18)
 
 

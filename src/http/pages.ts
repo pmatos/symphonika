@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import { Hono, type Context, type MiddlewareHandler } from "hono";
-import { parse } from "yaml";
 
 import { contentHash } from "../content-hash.js";
 import type { WorkflowFormat } from "../config-schemas.js";
@@ -31,13 +30,15 @@ import {
 } from "../provider-stream-status.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
-import {
-  loadRoutineDeclaration,
-  parseRoutineDeclaration
-} from "../routines/declaration-loader.js";
-import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
+import { loadRoutineDeclaration } from "../routines/declaration-loader.js";
 import { formatPullRequestReference } from "../notifications/message.js";
 import { createSaveConfirmer } from "./save-confirm.js";
+import {
+  createEditorPreviewer,
+  providerCommandsDiffer,
+  type EditorPreviewRenderInput,
+  type EditorPreviewTarget
+} from "./editor-preview.js";
 import {
   groupRoutinesByName,
   resolveNamedRoutineGroup,
@@ -59,11 +60,7 @@ import {
   formatCapReachedReason,
   parseCapReachedReason
 } from "../lifecycle/terminal-reason.js";
-import {
-  DEFAULT_WATCHDOG_CONFIG,
-  validateServiceConfigContent,
-  type WatchdogConfig
-} from "../reload.js";
+import { DEFAULT_WATCHDOG_CONFIG, type WatchdogConfig } from "../reload.js";
 import type {
   AttemptStatus,
   ListRunsFilter,
@@ -380,6 +377,11 @@ export function registerPages(options: RegisterPagesOptions): void {
     layout,
     resolveWritePath: options.resolveWritePath,
     triggerReload: options.triggerReload
+  });
+  const previewEditor = createEditorPreviewer({
+    csrfSecret: options.csrfSecret,
+    layout,
+    renderPreview: renderEditorPreview
   });
 
   // GET /config/edit returns the raw service config, including
@@ -1696,38 +1698,11 @@ export function registerPages(options: RegisterPagesOptions): void {
         );
       }
       const body = await context.req.parseBody();
-      const content = readRequiredFormField(body, "content");
-      const expectedContentHash = readRequiredFormField(
-        body,
-        "expected_content_hash"
+      return await previewEditor.respond(
+        context,
+        workflowEditorPreviewTarget(name, workflow),
+        { body, kind: "submitted" }
       );
-      const validation = await validateWorkflowContractContent(
-        content,
-        workflow.path,
-        workflow.format
-      );
-      const onDisk = await readFile(workflow.path, "utf8").catch(() => null);
-
-      const csrfToken = csrfTokenFor(
-        options.csrfSecret,
-        ensureSession(context)
-      );
-      const html = layout(
-        `Confirm changes to ${name} workflow`,
-        renderEditorPreview({
-          confirmAction: `/projects/${encodeURIComponent(name)}/workflow/edit/confirm`,
-          content,
-          csrfToken,
-          errors: validation.errors,
-          expectedContentHash,
-          name: `${name} workflow`,
-          onDisk,
-          previewAction: `/projects/${encodeURIComponent(name)}/workflow/edit/preview`,
-          projectParam: undefined,
-          reviewAction: `/projects/${encodeURIComponent(name)}/workflow/edit`
-        })
-      );
-      return context.html(html);
     }
   );
 
@@ -1760,18 +1735,10 @@ export function registerPages(options: RegisterPagesOptions): void {
         kind: "workflow_contract",
         name: `${name} workflow`,
         renderInvalid: async ({ csrfToken, errors }) =>
-          renderEditorPreview({
-            confirmAction: `/projects/${encodeURIComponent(name)}/workflow/edit/confirm`,
-            content,
-            csrfToken,
-            errors,
-            expectedContentHash,
-            name: `${name} workflow`,
-            onDisk: await readFile(workflow.path, "utf8").catch(() => null),
-            previewAction: `/projects/${encodeURIComponent(name)}/workflow/edit/preview`,
-            projectParam: undefined,
-            reviewAction: `/projects/${encodeURIComponent(name)}/workflow/edit`
-          }),
+          await previewEditor.renderInvalid(
+            workflowEditorPreviewTarget(name, workflow),
+            { content, csrfToken, errors, expectedContentHash }
+          ),
         savedRedirect: `/projects/${encodeURIComponent(name)}`,
         validationPath: workflow.path,
         workflowFormat: workflow.format
@@ -1835,42 +1802,11 @@ export function registerPages(options: RegisterPagesOptions): void {
         );
       }
       const body = await context.req.parseBody();
-      const content = readRequiredFormField(body, "content");
-      const expectedContentHash = readRequiredFormField(
-        body,
-        "expected_content_hash"
+      return await previewEditor.respond(
+        context,
+        serviceConfigEditorPreviewTarget(configPath),
+        { body, kind: "submitted" }
       );
-      const validation = await validateServiceConfigContent(
-        content,
-        configPath
-      );
-      const onDisk = await readFile(configPath, "utf8").catch(() => null);
-
-      const csrfToken = csrfTokenFor(
-        options.csrfSecret,
-        ensureSession(context)
-      );
-      const html = layout(
-        "Confirm changes to service config",
-        renderEditorPreview({
-          confirmAction: "/config/edit/confirm",
-          content,
-          csrfToken,
-          errors: validation.errors,
-          expectedContentHash,
-          ...(validation.errors.length === 0 &&
-          onDisk !== null &&
-          providerCommandsDiffer(onDisk, content)
-            ? { extraConfirmationHtml: renderProviderCommandConfirmation() }
-            : {}),
-          name: "service config",
-          onDisk,
-          previewAction: "/config/edit/preview",
-          projectParam: undefined,
-          reviewAction: "/config/edit"
-        })
-      );
-      return context.html(html);
     }
   );
 
@@ -1903,28 +1839,16 @@ export function registerPages(options: RegisterPagesOptions): void {
         providerCommandsDiffer(onDisk, content) &&
         !confirmedProviderCommandChange
       ) {
-        const csrfToken = csrfTokenFor(
-          options.csrfSecret,
-          ensureSession(context)
-        );
-        return context.html(
-          layout(
-            "Confirm changes to service config",
-            renderEditorPreview({
-              confirmAction: "/config/edit/confirm",
-              content,
-              csrfToken,
-              errors: [],
-              expectedContentHash,
-              extraConfirmationHtml: renderProviderCommandConfirmation(),
-              name: "service config",
-              onDisk,
-              previewAction: "/config/edit/preview",
-              projectParam: undefined,
-              reviewAction: "/config/edit"
-            })
-          ),
-          422
+        return await previewEditor.respond(
+          context,
+          serviceConfigEditorPreviewTarget(configPath),
+          {
+            draft: { content, expectedContentHash },
+            errors: [],
+            kind: "prepared",
+            onDisk,
+            status: 422
+          }
         );
       }
 
@@ -1935,19 +1859,11 @@ export function registerPages(options: RegisterPagesOptions): void {
         filePath: configPath,
         kind: "service_config",
         name: "service config",
-        renderInvalid: ({ csrfToken, errors }) =>
-          renderEditorPreview({
-            confirmAction: "/config/edit/confirm",
-            content,
-            csrfToken,
-            errors,
-            expectedContentHash,
-            name: "service config",
-            onDisk,
-            previewAction: "/config/edit/preview",
-            projectParam: undefined,
-            reviewAction: "/config/edit"
-          }),
+        renderInvalid: async ({ csrfToken, errors }) =>
+          await previewEditor.renderInvalid(
+            serviceConfigEditorPreviewTarget(configPath),
+            { content, csrfToken, errors, expectedContentHash }
+          ),
         savedRedirect: "/",
         validationPath: configPath
       });
@@ -2142,41 +2058,17 @@ export function registerPages(options: RegisterPagesOptions): void {
       const { declaration, expectedSourcePath, includeInactive, projectParam } =
         target;
 
-      const content = readRequiredFormField(body, "content");
-      const expectedContentHash = readRequiredFormField(
-        body,
-        "expected_content_hash"
-      );
-      const validation = parseRoutineDeclaration(
-        content,
-        declaration.sourcePath
-      );
-      const onDisk = await readFile(declaration.sourcePath, "utf8").catch(
-        () => null
-      );
-
-      const csrfToken = csrfTokenFor(
-        options.csrfSecret,
-        ensureSession(context)
-      );
-      const html = layout(
-        `Confirm changes to ${name}`,
-        renderEditorPreview({
-          confirmAction: `/routines/${encodeURIComponent(name)}/edit/confirm`,
-          content,
-          csrfToken,
-          errors: validation.errors,
-          expectedContentHash,
-          ...(expectedSourcePath === undefined ? {} : { expectedSourcePath }),
+      return await previewEditor.respond(
+        context,
+        routineEditorPreviewTarget({
+          declarationPath: declaration.sourcePath,
+          expectedSourcePath,
           includeInactive,
           name,
-          onDisk,
-          previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
-          projectParam,
-          reviewAction: `/routines/${encodeURIComponent(name)}/edit`
-        })
+          projectParam
+        }),
+        { body, kind: "submitted" }
       );
-      return context.html(html);
     }
   );
 
@@ -2217,22 +2109,16 @@ export function registerPages(options: RegisterPagesOptions): void {
         kind: "routine_declaration",
         name,
         renderInvalid: async ({ csrfToken, errors }) =>
-          renderEditorPreview({
-            confirmAction: `/routines/${encodeURIComponent(name)}/edit/confirm`,
-            content,
-            csrfToken,
-            errors,
-            expectedContentHash,
-            ...(expectedSourcePath === undefined ? {} : { expectedSourcePath }),
-            includeInactive,
-            name,
-            onDisk: await readFile(declaration.sourcePath, "utf8").catch(
-              () => null
-            ),
-            previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
-            projectParam,
-            reviewAction: `/routines/${encodeURIComponent(name)}/edit`
-          }),
+          await previewEditor.renderInvalid(
+            routineEditorPreviewTarget({
+              declarationPath: declaration.sourcePath,
+              expectedSourcePath,
+              includeInactive,
+              name,
+              projectParam
+            }),
+            { content, csrfToken, errors, expectedContentHash }
+          ),
         savedRedirect: `/routines/${encodeURIComponent(name)}${querySuffix}`
       });
     }
@@ -2286,25 +2172,27 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
     }
 
-    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
-    const html = layout(
-      `Confirm ${disabled ? "disabling" : "enabling"} ${name}`,
-      renderEditorPreview({
-        confirmAction: `/routines/${encodeURIComponent(name)}/edit/confirm`,
-        content: toggled.content,
-        csrfToken,
-        errors: [],
-        expectedContentHash: contentHash(onDisk),
+    return await previewEditor.respond(
+      context,
+      routineEditorPreviewTarget({
+        declarationPath: declaration.sourcePath,
         expectedSourcePath: declaration.sourcePath,
         includeInactive,
         name,
+        projectParam
+      }),
+      {
+        draft: {
+          content: toggled.content,
+          expectedContentHash: contentHash(onDisk)
+        },
+        errors: [],
+        kind: "prepared",
         onDisk,
-        previewAction: `/routines/${encodeURIComponent(name)}/edit/preview`,
-        projectParam,
+        pageTitle: `Confirm ${disabled ? "disabling" : "enabling"} ${name}`,
         reviewAction: `/routines/${encodeURIComponent(name)}`
-      })
+      }
     );
-    return context.html(html);
   }
 
   options.app.post(
@@ -5708,71 +5596,61 @@ function renderServiceConfigBlastRadius(): string {
   return `<div class="empty"><strong>This save affects</strong>The whole daemon on its next reload: every Project's caps and eligibility, every Routine's declared targets, and (see below) which process each provider spawns.</div>`;
 }
 
-// #307 AC: "Editing providers.*.command requires an explicit confirmation
-// step distinct from an ordinary save." providers.codex/claude/omp are the
-// only three provider names the schema allows (src/reload.ts's
-// serviceConfigSchema) — compared directly rather than diffing an
-// arbitrary map. A parse failure on either side returns undefined for that
-// side's command, which reads as "unchanged" here; that's fine because a
-// YAML syntax error is already caught and blocks the save entirely before
-// this ever gets called with the invalid content standing for real.
-function providerCommandsDiffer(before: string, after: string): boolean {
-  const providerNames = ["claude", "codex", "omp"] as const;
-  return providerNames.some(
-    (name) =>
-      extractProviderCommand(before, name) !==
-      extractProviderCommand(after, name)
-  );
+function workflowEditorPreviewTarget(
+  name: string,
+  workflow: { format: WorkflowFormat; path: string }
+): EditorPreviewTarget {
+  const base = `/projects/${encodeURIComponent(name)}/workflow/edit`;
+  return {
+    artifact: {
+      format: workflow.format,
+      kind: "workflow_contract",
+      path: workflow.path
+    },
+    confirmAction: `${base}/confirm`,
+    name: `${name} workflow`,
+    previewAction: `${base}/preview`,
+    reviewAction: base
+  };
 }
 
-function extractProviderCommand(
-  content: string,
-  providerName: string
-): string | undefined {
-  let parsed: unknown;
-  try {
-    parsed = parse(content);
-  } catch {
-    return undefined;
-  }
-  if (!isPlainRecord(parsed) || !isPlainRecord(parsed.providers)) {
-    return undefined;
-  }
-  const provider = parsed.providers[providerName];
-  if (!isPlainRecord(provider) || typeof provider.command !== "string") {
-    return undefined;
-  }
-  return provider.command;
+function serviceConfigEditorPreviewTarget(
+  configPath: string
+): EditorPreviewTarget {
+  return {
+    artifact: { kind: "service_config", path: configPath },
+    confirmAction: "/config/edit/confirm",
+    name: "service config",
+    previewAction: "/config/edit/preview",
+    reviewAction: "/config/edit"
+  };
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function renderProviderCommandConfirmation(): string {
-  return `<div class="alert" role="alert"><strong>This save changes a provider command</strong>Editing <code>providers.*.command</code> changes what process the daemon spawns for that provider — check the box to confirm you intend this.<label><input type="checkbox" name="confirm_provider_command_change" required> I understand this changes what process the daemon spawns</label></div>`;
-}
-
-function renderEditorPreview(input: {
-  confirmAction: string;
-  content: string;
-  csrfToken: string;
-  errors: string[];
-  expectedContentHash: string;
-  expectedSourcePath?: string;
-  // #307 AC: "Editing providers.*.command requires an explicit confirmation
-  // distinct from an ordinary save." Rendered between the diff and the
-  // Confirm save button (not folded into it) so it reads as a distinct
-  // step, not decoration on the normal one. Only the service-config editor
-  // ever sets this.
-  extraConfirmationHtml?: string;
-  includeInactive?: boolean;
+function routineEditorPreviewTarget(input: {
+  declarationPath: string;
+  expectedSourcePath: string | undefined;
+  includeInactive: boolean;
   name: string;
-  onDisk: string | null;
-  previewAction: string;
   projectParam: string | undefined;
-  reviewAction: string;
-}): string {
+}): EditorPreviewTarget {
+  const base = `/routines/${encodeURIComponent(input.name)}/edit`;
+  return {
+    artifact: { kind: "routine_declaration", path: input.declarationPath },
+    confirmAction: `${base}/confirm`,
+    ...(input.expectedSourcePath === undefined
+      ? {}
+      : { expectedSourcePath: input.expectedSourcePath }),
+    includeInactive: input.includeInactive,
+    name: input.name,
+    previewAction: `${base}/preview`,
+    ...(input.projectParam === undefined
+      ? {}
+      : { projectParam: input.projectParam }),
+    reviewAction: base
+  };
+}
+
+function renderEditorPreview(input: EditorPreviewRenderInput): string {
   const navigationSuffix = routineQuerySuffix(
     input.projectParam,
     input.includeInactive === true

@@ -8,7 +8,7 @@ import { parseRoutineDeclaration } from "../routines/declaration-loader.js";
 import { validateServiceConfigContent } from "../reload.js";
 import { validateWorkflowContractContent } from "../workflow/fsm-expansion.js";
 
-type SaveContentKind =
+export type SaveContentKind =
   "routine_declaration" | "service_config" | "workflow_contract";
 
 export type ReloadOutcome = { errors: string[]; ok: boolean };
@@ -40,6 +40,10 @@ export type SavePipelineInput = {
   // extension. Ignored for routine_declaration.
   workflowFormat?: WorkflowFormat;
 };
+export type SaveValidationInput = Pick<
+  SavePipelineInput,
+  "content" | "filePath" | "kind" | "validationPath" | "workflowFormat"
+>;
 
 export type SavePipelineResult =
   | { errors: string[]; kind: "invalid" }
@@ -68,6 +72,15 @@ const VALIDATORS: Record<
       workflowFormat ?? "auto"
     )
 };
+export async function validateSaveContent(
+  input: SaveValidationInput
+): Promise<{ errors: string[] }> {
+  return await VALIDATORS[input.kind](
+    input.content,
+    input.validationPath ?? input.filePath,
+    input.workflowFormat
+  );
+}
 
 // The one path every editor's save button calls through (#306): validate
 // with the same parser reload uses, refuse a stale write before touching
@@ -79,11 +92,7 @@ const VALIDATORS: Record<
 export async function runSavePipeline(
   input: SavePipelineInput
 ): Promise<SavePipelineResult> {
-  const validation = await VALIDATORS[input.kind](
-    input.content,
-    input.validationPath ?? input.filePath,
-    input.workflowFormat
-  );
+  const validation = await validateSaveContent(input);
   if (validation.errors.length > 0) {
     return { errors: validation.errors, kind: "invalid" };
   }

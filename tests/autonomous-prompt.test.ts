@@ -427,8 +427,7 @@ describe("autonomous prompt rendering", () => {
       source: {
         kind: "markdown",
         path: workflowPath
-      },
-      templateFiles: []
+      }
     });
     expect(graph.contentHash).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(Array.isArray(graph.states)).toBe(true);

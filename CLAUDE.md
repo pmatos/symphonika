@@ -78,14 +78,16 @@ the check fails.
 `skills/symphonika/` (SKILL.md, REFERENCE.md, EXAMPLES.md, OPERATIONS.md) covers two jobs: designing
 a Workflow Contract, and operating a local Symphonika install (CLI, systemd `--user` service,
 `symphonika.yml`/state-root config). Both halves point into living docs rather than re-deriving facts
-independently, and both go stale silently — nothing fails CI when either drifts.
+independently, and both go stale silently — nothing fails CI when either drifts, except that
+`tests/skill-examples.test.ts` validates every `yaml` workflow block in EXAMPLES.md,
+`docs/tutorial.md`, and `docs/workflows.md`.
 
 For the workflow-design half: `docs/workflows.md` is the canonical authoring reference for the FSM's
-syntax and semantics — action kinds, predicates, `workflow.use` templates, templating variables,
-providers, terminal states; REFERENCE.md points into it, but still names a few things directly (e.g.
+syntax and semantics — action kinds, predicates, templating variables, providers,
+terminal states; REFERENCE.md points into it, but still names a few things directly (e.g.
 the six action kinds) where that's more useful than a bare pointer, and can drift from
-`src/workflow/`, `src/lifecycle/run-controller.ts`, or `src/builtin-templates.ts`. Whenever a change
-in this PR alters FSM syntax or semantics — a new/removed action kind, predicate, provider, template,
+`src/workflow/` or `src/lifecycle/run-controller.ts`. Whenever a change
+in this PR alters FSM syntax or semantics — a new/removed action kind, predicate, provider,
 templating variable, or terminal-state behavior — update `docs/workflows.md` in the same PR, and
 check REFERENCE.md for anything it names directly rather than pointing at `docs/workflows.md`.
 

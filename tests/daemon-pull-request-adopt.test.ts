@@ -202,7 +202,7 @@ async function writeAdoptPrProject(
 }
 
 // A second project shape with no wait/merge_pr state anywhere -- the
-// builtin_single_agent_pr case ADR-2026-09-03-1158 refuses outright.
+// single-agent (agent -> done) case ADR-2026-09-03-1158 refuses outright.
 async function writeNonPrAwareProject(root: string): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(

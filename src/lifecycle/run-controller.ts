@@ -5422,11 +5422,7 @@ export class RunController {
       const workflowPath = path.resolve(this.configDir, workflow.path);
       const contents = await readFile(workflowPath, "utf8");
       const format = workflow.format;
-      const expanded = await expandWorkflowDefinition(
-        contents,
-        workflowPath,
-        format
-      );
+      const expanded = expandWorkflowDefinition(contents, workflowPath, format);
       // Raw FSM YAML files commonly open with the `---` document marker; the
       // markdown contract parser would reject those as missing a closing
       // delimiter. Skip it entirely for raw FSM — per-state `action.prompt`

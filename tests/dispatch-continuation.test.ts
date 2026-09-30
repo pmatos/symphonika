@@ -1004,7 +1004,7 @@ describe("dispatch continuation cap", () => {
       "symphonika workflow suppressed label-driven continuation"
     );
 
-    // This is the exact builtin_single_agent_pr shape (agent -> done,
+    // This is the single-agent shape (agent -> done,
     // gated on provider_success && branch_ahead_of_base): the terminal was
     // reached the instant the agent finished, with no external confirmation
     // that whatever PR it opened has been reviewed or merged yet. Releasing

@@ -58,6 +58,5 @@ export type ExpandedWorkflow = {
     path: string;
   };
   states: ExpandedWorkflowState[];
-  templateFiles: string[];
 };
 import type { AgentProviderName } from "../provider.js";

@@ -15,8 +15,7 @@ function makeWorkflow(states: ExpandedWorkflowState[]): ExpandedWorkflow {
     initial: states[0]?.id ?? "",
     name: "test_workflow",
     source: { kind: "raw_fsm", path: "/tmp/test.yml" },
-    states,
-    templateFiles: []
+    states
   };
 }
 

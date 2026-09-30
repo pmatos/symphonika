@@ -641,11 +641,9 @@ describe("RuntimeConfigReloader workflow validation", () => {
     });
   });
 
-  it("stores template-expanded raw FSM snapshots and refreshes when a template changes", async () => {
+  it("stores raw FSM snapshots and refreshes when the workflow changes", async () => {
     const root = await makeTempRoot();
     await writeProjectConfig(root, "workflow.yml");
-    const templateDir = path.join(root, ".symphonika", "workflow-templates");
-    await mkdir(templateDir, { recursive: true });
     await mkdir(path.join(root, "prompts"), { recursive: true });
     await writeFile(path.join(root, "prompts/plan.md"), "Plan.\n", "utf8");
     await writeFile(
@@ -654,46 +652,24 @@ describe("RuntimeConfigReloader workflow validation", () => {
       "utf8"
     );
     const workflowPath = path.join(root, "workflow.yml");
-    const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
-    await writeFile(
-      workflowPath,
+    const workflowFor = (prompt: string): string =>
       [
         "workflow:",
         "  name: issue_to_merge",
-        "  initial: build_pr",
-        "  use:",
-        "    build_pr:",
-        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
-        "      exits:",
-        "        success: done",
+        "  initial: planning",
         "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        `        prompt: ${prompt}`,
+        "      transitions:",
+        "        - to: done",
         "    done:",
         "      terminal: success",
         ""
-      ].join("\n"),
-      "utf8"
-    );
-    await writeFile(
-      templatePath,
-      [
-        "name: plan_tdd_pr",
-        "entry: planning",
-        "exits:",
-        "  success: pr_open",
-        "states:",
-        "  planning:",
-        "    action:",
-        "      kind: agent",
-        "      provider: codex",
-        "      prompt: prompts/plan.md",
-        "    transitions:",
-        "      - to: pr_open",
-        "  pr_open:",
-        "    exit: success",
-        ""
-      ].join("\n"),
-      "utf8"
-    );
+      ].join("\n");
+    await writeFile(workflowPath, workflowFor("prompts/plan.md"), "utf8");
 
     const reloader = new RuntimeConfigReloader({
       configPath: path.join(root, "symphonika.yml")
@@ -705,32 +681,13 @@ describe("RuntimeConfigReloader workflow validation", () => {
     }
     const firstHash = firstWorkflow.expandedWorkflow.contentHash;
 
-    expect(firstWorkflow.expandedWorkflow.templateFiles).toEqual([
-      templatePath
-    ]);
     expect(
       firstWorkflow.expandedWorkflow.states.map((state) => state.id)
-    ).toEqual(["done", "build_pr.planning"]);
+    ).toEqual(["planning", "done"]);
 
     await writeFile(
-      templatePath,
-      [
-        "name: plan_tdd_pr",
-        "entry: planning",
-        "exits:",
-        "  success: pr_open",
-        "states:",
-        "  planning:",
-        "    action:",
-        "      kind: agent",
-        "      provider: codex",
-        "      prompt: prompts/revised-plan.md",
-        "    transitions:",
-        "      - to: pr_open",
-        "  pr_open:",
-        "    exit: success",
-        ""
-      ].join("\n"),
+      workflowPath,
+      workflowFor("prompts/revised-plan.md"),
       "utf8"
     );
     await reloader.reload();
@@ -752,7 +709,7 @@ describe("RuntimeConfigReloader workflow validation", () => {
         provider: "codex"
       },
       completeWhen: {},
-      id: "build_pr.planning",
+      id: "planning",
       transitions: [{ to: "done", when: {} }]
     });
   });

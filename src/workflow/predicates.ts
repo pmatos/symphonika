@@ -43,8 +43,8 @@ export type ArtifactPredicateParse = { error: string } | { paths: string[] };
 
 // A synthetic root standing in for the Run Workspace at validation time, when
 // no Workspace has been prepared yet. Containment is a property of the authored
-// path, not of the directory it will later resolve against, so the same
-// isPathInside guard fsm-expansion uses for Template paths answers it here.
+// path, not of the directory it will later resolve against, so an isPathInside
+// check against this root answers it here.
 const validationWorkspaceRoot = path.resolve(path.sep, "symphonika-workspace");
 
 export function parseArtifactExistsPaths(

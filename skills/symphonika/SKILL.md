@@ -38,7 +38,7 @@ Cover at minimum:
 1. **Goal** — what should one Run of this workflow accomplish?
 2. **Shape** — single-state (Markdown `WORKFLOW.md`) or multi-state (raw FSM `workflow.yml`)? Default to single-state unless the user names at least one of: review-feedback loop, conflict resolution, wait-then-merge, conditional branches.
 3. **Providers** — Codex, Claude, or OMP per agent state? Per-state `action.provider` routing is fully supported at runtime; mix providers across states freely (see [REFERENCE.md](REFERENCE.md#providers)).
-4. **States** — for each FSM node: kind (`agent` | `wait` | `merge_pr` | `comment` | `label_issue` | `close_issue`), prompt path (for `agent`), `complete_when` (see REFERENCE.md's State action kinds section — only needed when completion differs from the advance condition), transitions, terminal flag. Consider whether a `workflow.use` template (builtin or custom) already covers part of the shape instead of hand-authoring every state.
+4. **States** — for each FSM node: kind (`agent` | `wait` | `merge_pr` | `comment` | `label_issue` | `close_issue`), prompt path (for `agent`), `complete_when` (see REFERENCE.md's State action kinds section — only needed when completion differs from the advance condition), transitions, terminal flag. Symphonika has no workflow templates — author every state, starting from the [EXAMPLES.md](EXAMPLES.md) shape closest to the goal (plan then implement, autofix loop, merge when green, refactor swarm).
 5. **Predicates** — which of the supported predicates (see REFERENCE, including `artifact_exists`) gate each transition? Reject predicates that do not exist. Walk through wait-state transition order explicitly — a plausible-looking order can leave a state parked forever (REFERENCE.md's Predicates section has the worked example).
 6. **Prompt body** — what does the agent need to be told? What templating variables (`issue`, `project`, `workspace`, `branch`, `run`, `provider`) does it use? Confirm every `{{var}}` resolves; strict Mustache fails on unknown vars.
 7. **Terminal states** — at least one `terminal: success` and (usually) one `terminal: blocked` or `terminal: failure`. Verify every non-terminal state has a transition that can fire.
@@ -56,6 +56,7 @@ Before drafting the artifact, run through [REFERENCE.md](REFERENCE.md#supported-
 - Workspace auto-cleanup, cross-repo PRs, provider sandboxing
 - Conditional logic inside prompts beyond strict Mustache variable substitution
 - Multiple parallel agent runs per issue
+- Reusable workflow templates / sub-graph composition (`workflow.use` was removed; every state is authored in full)
 
 If anything is unsupported, **stop drafting** and run the feature-request flow below.
 
@@ -97,7 +98,7 @@ After the design is fully resolved and supported:
 2. **Enumerate every file the workflow will need.** Start with the contract file itself. For an FSM workflow, also walk every `agent` state's `action.prompt:` and treat each distinct path as a file to write. For each referenced prompt path: check whether it already exists in the target project; if it does not, draft prompt content using [EXAMPLES.md](EXAMPLES.md) Example 4 as the template (specialized for that state's responsibility) and add it to the write list. Symphonika's raw-FSM validation fails with `workflow state ... prompt not found` when any referenced prompt file is missing, so the workflow file alone is not a usable artifact.
 3. Show the user the **full write list**. Tag each path `NEW` or `REPLACES (existing N lines)`; for a `NEW` path show the rendered content, for a `REPLACES` path show a diff against the existing file, not just the new content — the user can't judge an overwrite from the new content alone. Ask for explicit approval to write the whole set. Approval must cover every file — partial approval is not permitted.
 4. On approval, write every file in the list to its named path. Use `Write` (overwrite) only if the user has confirmed they want to replace any existing file there. If step 1 chose option (b), also `Edit` `symphonika.yml` to update `projects[].workflow:` — a narrow `Edit` only, never a full rewrite.
-5. Have the user (or run yourself, if you have a shell in the target project) validate the result using the commands in REFERENCE.md's Validation and inspection section (`workflow validate`, `workflow explain` — including for reviewing a `workflow.use` expansion — and `doctor` as the broader check).
+5. Have the user (or run yourself, if you have a shell in the target project) validate the result using the commands in REFERENCE.md's Validation and inspection section (`workflow validate`, `workflow explain`, and `doctor` as the broader check).
 
 `symphonika.yml` edits from this skill are limited to the `projects[].workflow:` reconciliation in step 1 (option b). Do not touch any other field — service-level runtime settings, providers, tracker config, and workspace roots are out of scope for a workflow-design skill.
 

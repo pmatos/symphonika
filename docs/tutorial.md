@@ -623,6 +623,9 @@ workflow:
             checks: failure
         - to: repair
           when:
+            mergeable: false
+        - to: repair
+          when:
             has_unresolved_reviews: true
 
     repair:
@@ -682,76 +685,110 @@ Service Config.
 The exact PR signal values and missing-signal behavior are documented under
 [Predicates and signal availability](./workflows.md#6-predicates-and-signal-availability).
 
-## 16. Compose built-in templates
+## 16. Combine shapes
 
-When the graph shape is familiar, built-ins remove repeated state declarations:
+Symphonika has no templates or imports: every state lives in one `workflow.states` map. To build a
+longer pipeline, copy the states of the shapes you need into one file, keep state ids unique, and
+point each shape's success transition at the next shape's first state. The
+[Symphonika skill's examples](../skills/symphonika/EXAMPLES.md) hold each common shape in full;
+this pipeline plans with Claude, implements with Codex, repairs review feedback until the PR is
+clean, and merges:
 
 ```yaml
 workflow:
   name: plan_fix_merge
-  initial: build
-
-  use:
-    build:
-      template: builtin:plan-tdd-pr
-      with:
-        planner: claude
-        implementer: codex
-      exits:
-        success: fix
-        blocked: blocked
-
-    fix:
-      template: builtin:autofix-until-clean
-      exits:
-        success: merge
-        blocked: blocked
-
-    merge:
-      template: builtin:merge-when-green
-      with:
-        method: squash
-      exits:
-        success: done
-        blocked: blocked
-
+  initial: planning
   states:
+    planning:
+      action:
+        kind: agent
+        provider: claude
+        prompt: prompts/plan.md
+      transitions:
+        - to: implementing
+          when:
+            provider_success: true
+            artifact_exists: PLAN.md
+        - to: blocked
+
+    implementing:
+      action:
+        kind: agent
+        provider: codex
+        prompt: prompts/impl.md
+      transitions:
+        - to: waiting
+          when:
+            provider_success: true
+            branch_ahead_of_base: true
+        - to: blocked
+
+    waiting:
+      action:
+        kind: wait
+      transitions:
+        - to: merging
+          when:
+            checks: success
+            unresolved_review_threads: 0
+        - to: blocked
+          when:
+            checks: failure
+        - to: autofix
+          when:
+            has_unresolved_reviews: true
+
+    autofix:
+      action:
+        kind: agent
+        provider: codex
+        prompt: prompts/autofix.md
+      transitions:
+        - to: waiting
+          when:
+            provider_success: true
+        - to: blocked
+
+    merging:
+      action:
+        kind: merge_pr
+        method: squash
+      transitions:
+        - to: done
+          when:
+            pr_merged: true
+        - to: blocked
+          when:
+            pr_open: false
+        - to: blocked
+          when:
+            checks: failure
+        - to: blocked
+          when:
+            mergeable: false
+
     done:
       terminal: success
+
     blocked:
       terminal: blocked
 ```
 
-The five built-ins are:
+Create the referenced prompt files before validation: `prompts/plan.md`, `prompts/impl.md`, and
+`prompts/autofix.md`.
 
-- `builtin:single-agent-pr`
-- `builtin:plan-tdd-pr`
-- `builtin:refactor-swarm`
-- `builtin:autofix-until-clean`
-- `builtin:merge-when-green`
+The repository's [`refactor-workflow.yml`](../refactor-workflow.yml) is a characterization-gated
+refactor: `red_team`, `refactoring`, and `verifying` agent states over `prompts/red-team.md`,
+`prompts/refactor.md`, and `prompts/verify.md`. It is an issue Workflow, not a risk scanner. The
+repository also ships `routines/refactor-audit.md` as a bounded weekly scanner that files at most
+three ranked issues. Register that Routine only after declaring a Dispatch Project whose raw-FSM
+Workflow is that refactor workflow and whose Required Eligibility Label is `refactor-ready`; a
+separate label keeps those issues out of a different Workflow used for ordinary repository work.
+Adjust the Routine's labels and batching policy when copying it to another repository.
 
-The built-ins use these default prompt paths:
-
-```text
-single-agent-pr     WORKFLOW.md
-plan-tdd-pr         prompts/plan.md, prompts/impl.md
-refactor-swarm      prompts/red-team.md, prompts/refactor.md, prompts/verify.md
-autofix-until-clean prompts/autofix.md
-```
-
-Override those paths under `with` or create the files before validation.
-
-`builtin:refactor-swarm` is an issue Workflow, not a risk scanner. The repository also ships
-`routines/refactor-audit.md` as a bounded weekly scanner that files at most three ranked issues.
-Register that Routine only after declaring a Dispatch Project whose raw-FSM Workflow uses the
-built-in and whose Required Eligibility Label is `refactor-ready`; a separate label keeps those
-issues out of a different Workflow used for ordinary repository work. Adjust the Routine's labels
-and batching policy when copying it to another repository.
-
-For repository-specific reusable fragments, create a YAML template under
-`.symphonika/workflow-templates/` and reference it by relative path. Templates support typed scalar
-inputs, one entry, internal states, and named exits. The full template language and every built-in
-contract are in [Reusable templates](./workflows.md#8-reusable-templates).
+A workflow that still declares `workflow.use` (the removed template mechanism) fails validation.
+Replace each instance with the states it used to expand to; see
+[Common shapes](./workflows.md#8-common-shapes).
 
 ## 17. Iterate safely
 
@@ -764,7 +801,7 @@ symphonika doctor
 symphonika poll-now
 ```
 
-`validate` and `explain` expand templates without dispatching. The daemon reloads valid edits on its
+`validate` and `explain` read the workflow without dispatching. The daemon reloads valid edits on its
 next tick; `poll-now` requests that tick immediately. In-flight attempts retain the prompt and graph
 hash captured when they began.
 
@@ -783,9 +820,9 @@ Useful authoring rules:
 - Give wait loops closed-PR and failure escape paths.
 - Keep each agent prompt focused on one state's responsibility.
 - Tell repair agents to update the existing PR.
-- Validate every referenced prompt and template before dispatch.
+- Validate every referenced prompt before dispatch.
 - Treat parser-recognized but runtime-incomplete actions as reserved; see
-  [Supported, reserved, and unsupported](./workflows.md#12-supported-reserved-and-unsupported).
+  [Supported, reserved, and unsupported](./workflows.md#11-supported-reserved-and-unsupported).
 
 # Part III: scheduled work with Routines
 
@@ -1199,7 +1236,8 @@ Start it with `--port <n>` and pass
 - Read the [complete Workflow language](./workflows.md).
 - Study the repository's production [`workflow.yml`](../workflow.yml) and prompts.
 - Inspect [SPEC.md §5](../SPEC.md#5-config-files) for configuration contracts.
-- Review [ADR-0049](./adr/0049-builtin-workflow-templates.md) for built-in template decisions.
+- Review [ADR-2026-09-30-0848](./adr/2026-09-30-0848-remove-workflow-templates.md) for why workflows
+  have no templates.
 - Review [ADR-0058](./adr/0058-routine-catch-up-overlap-and-skip-accounting.md),
   [ADR-0060](./adr/0060-routine-lifecycle-control.md),
   [ADR-0062](./adr/0062-routine-hosts.md), and

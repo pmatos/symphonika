@@ -55,7 +55,8 @@ Use the local `gh` CLI for every GitHub read and mutation. Create each selected 
 - the stable target marker;
 - the complete risk calculation and evidence sources;
 - the behavior surface that needs characterization;
-- instructions to run the repository's workflow built from `builtin:refactor-swarm`;
+- instructions to run the repository's characterization-gated refactor workflow
+  (`refactor-workflow.yml`: `red_team`, `refactoring`, `verifying`);
 - an explicit requirement that the red-team characterization-test commit remain unchanged during
   refactoring; and
 - the selected priority and why it follows from the rank.

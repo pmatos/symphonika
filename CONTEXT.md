@@ -66,15 +66,9 @@ _Avoid_: service config when referring to repo-owned agent policy
 
 **Expanded Workflow Graph**:
 The fully resolved state machine the Orchestrator validates, stores as run evidence, and executes
-after Markdown compatibility and Workflow Template expansion. A PR-observing wait in a valid graph
+after Markdown compatibility compilation. A PR-observing wait in a valid graph
 has a transition for every settled actionable Pull Request State combination; pending or unknown
 observations may remain parked for polling.
-_Avoid_: workflow template when referring to the executable graph
-
-**Workflow Template**:
-A reusable, side-effect-free FSM fragment with scalar inputs, one entry state, and named exits,
-resolved into an Expanded Workflow Graph during workflow expansion.
-_Avoid_: prompt template when referring to reusable workflow states
 
 **Autonomous Prompt**:
 The exact provider prompt rendered for one Run, including the standard autonomy preamble, optional
@@ -648,7 +642,6 @@ _Avoid_: chat session
 - A **Routine Host** declares an **Issue Tracker** configuration only to enable **Routine Pull
   Request** discovery for its `kind: git` firings
 - A **Workflow Contract** compiles to an **Expanded Workflow Graph**
-- A **Workflow Template** contributes resolved states to an **Expanded Workflow Graph**
 - An **Autonomous Prompt** is rendered from a **Workflow Contract** or workflow state prompt for one
   **Run**
 - An **Issue Tracker** provides many **Issues**

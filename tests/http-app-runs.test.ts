@@ -241,8 +241,7 @@ describe("HTTP app — runs API and pages", () => {
               terminal: "success",
               transitions: []
             }
-          ],
-          templateFiles: []
+          ]
         })
       );
 
@@ -2082,8 +2081,7 @@ describe("HTTP app — runs API and pages", () => {
                 terminal: "success",
                 transitions: []
               }
-            ],
-            templateFiles: []
+            ]
           },
           null,
           2
@@ -2180,8 +2178,7 @@ describe("HTTP app — runs API and pages", () => {
               terminal: "blocked",
               transitions: []
             }
-          ],
-          templateFiles: []
+          ]
         })
       );
 
@@ -2266,8 +2263,7 @@ describe("HTTP app — runs API and pages", () => {
         initial: "run_agent",
         name: "single_agent_workflow",
         source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
-        states: [],
-        templateFiles: []
+        states: []
       });
       await writeFile(graphPath, graphJson);
 
@@ -2344,8 +2340,7 @@ describe("HTTP app — runs API and pages", () => {
           initial: "run_agent",
           name: "single_agent_workflow",
           source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
-          states: [],
-          templateFiles: []
+          states: []
         })
       );
       await writeFile(attempt1Prompt, "attempt 1 prompt\n");
@@ -2367,8 +2362,7 @@ describe("HTTP app — runs API and pages", () => {
           initial: "run_agent",
           name: "single_agent_workflow_v2",
           source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
-          states: [],
-          templateFiles: []
+          states: []
         })
       );
 
@@ -2510,8 +2504,7 @@ describe("HTTP app — runs API and pages", () => {
           initial: "run_agent",
           name: "single_agent_workflow",
           source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
-          states: [],
-          templateFiles: []
+          states: []
         })
       );
 

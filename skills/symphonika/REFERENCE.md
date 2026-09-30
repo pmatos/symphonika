@@ -36,16 +36,13 @@ operational" below) — don't design a workflow around it.
 state's completion condition differs from its advance condition (see the States section for the
 field table).
 
-## Reusable workflow templates (`workflow.use`)
+## No workflow templates
 
-A raw FSM can splice in a named sub-graph instead of hand-authoring every state — see
-[EXAMPLES.md](EXAMPLES.md#5-using-a-built-in-workflow-template) for a worked sample. Mechanics:
-
-- `template:` is `builtin:<name>` or a path relative to the workflow file (must stay inside its directory).
-- `with:` supplies the template's declared typed inputs.
-- `exits:` maps the template's named exits onto state IDs in your graph.
-- `initial:`/a transition `to:` may name the bare instance id (resolves to `<instance>.<entry-state>`) or the fully-expanded `<instance>.<stateId>` directly — both work; prefer the bare form to match `docs/workflows.md`'s own examples.
-- Built-ins exist today (five, as of this writing) — read `docs/workflows.md`'s built-in-templates table for the current list, each one's inputs/defaults/exits, and exact expanded behavior. Don't guess their semantics from the name, and don't trust a specific count or name list here without checking that table — it's exactly the kind of detail that drifts.
+Every raw FSM is authored in full under `workflow.states`. `workflow.use` (reusable sub-graphs and the
+`builtin:<name>` templates) was removed; a workflow that still declares it fails validation with
+`workflow.use is not supported`. Start from the closest [EXAMPLES.md](EXAMPLES.md) shape (plan then
+implement, autofix loop, merge when green, refactor swarm, ...) and specialize it; to combine shapes,
+merge their `states:` maps and keep state ids unique (see EXAMPLES.md's "Combining shapes").
 
 ## Predicates
 
@@ -83,9 +80,6 @@ missing `issue.id` and `provider.command` for a while). Arrays/objects (e.g. `is
 as JSON. The autonomy preamble and previous-attempt notice are added automatically — don't duplicate
 them in the prompt body.
 
-This is a *separate* substitution pass from `workflow.use` template `with:` values — same `{{ }}`
-syntax, different variable sets, different stage.
-
 ## Terminal states
 
 `terminal:` accepts `success`, `blocked`, or `failure`. A terminal state must not also declare
@@ -112,8 +106,8 @@ fire.
 — don't rely on a copy here going stale. Common asks worth naming explicitly because they come up in
 the grilling loop:
 
-- Not supported: parallel/fan-out states, webhooks/scripts/human-approval states, remote template
-  registries, conditionals inside prompts, ranged/numeric predicates, mid-walk label predicates,
+- Not supported: parallel/fan-out states, webhooks/scripts/human-approval states, reusable workflow
+  templates or sub-graph composition (`workflow.use` was removed), conditionals inside prompts, ranged/numeric predicates, mid-walk label predicates,
   time-based wait transitions, cross-repository PRs, provider sandboxing.
 - Parsed but not operational: the `fail` action kind, and the `timeout`/`branch_pushed` predicate names.
 - Operational labels (`sym:*` namespace, plus `agent-ready`) are orchestrator-owned — a workflow's
@@ -135,6 +129,6 @@ design leans on the exact details:
 
 Before dispatching, run (against the target project):
 
-- `symphonika workflow validate --project <name>` — validates the expanded graph for one project; prefer this when iterating on one workflow.
-- `symphonika workflow explain --project <name>` — prints the expanded graph, including `workflow.use` template expansion, for review.
+- `symphonika workflow validate --project <name>` — validates the graph for one project; prefer this when iterating on one workflow.
+- `symphonika workflow explain --project <name>` — prints the parsed graph (states, actions, transitions) for review.
 - `symphonika doctor` — broader service-level check that also validates workflow contracts, but isn't the targeted tool for one workflow.

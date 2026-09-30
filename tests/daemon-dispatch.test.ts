@@ -1564,15 +1564,12 @@ describe("daemon dispatch", () => {
     if (snapshot === undefined || !("expandedWorkflow" in snapshot)) {
       throw new Error("expected reloader to expose a workflow snapshot");
     }
-    const sentinelTemplate = "sentinel-only-in-snapshot.txt";
+    const sentinelName = "sentinel-only-in-snapshot";
     const mutatedSnapshot: WorkflowSnapshot = {
       ...snapshot,
       expandedWorkflow: {
         ...snapshot.expandedWorkflow,
-        templateFiles: [
-          ...snapshot.expandedWorkflow.templateFiles,
-          sentinelTemplate
-        ]
+        name: sentinelName
       }
     };
     const mutatedProject: RunControllerProjectConfig = {
@@ -1645,9 +1642,9 @@ describe("daemon dispatch", () => {
         "workflow-graph.json"
       );
       const graph = JSON.parse(await readFile(graphPath, "utf8")) as {
-        templateFiles: string[];
+        name: string;
       };
-      expect(graph.templateFiles).toContain(sentinelTemplate);
+      expect(graph.name).toBe(sentinelName);
     } finally {
       runStore.close();
     }
@@ -1915,7 +1912,7 @@ describe("daemon dispatch", () => {
     }
   });
 
-  it("blocks refactor-swarm when only the red-team state advanced the branch", async () => {
+  it("blocks the two-commit refactor workflow when only the red-team state advanced the branch", async () => {
     const root = await makeTempRoot();
     await writeTwoCommitRawFsmProject(root);
 
@@ -4394,14 +4391,51 @@ async function writeTwoCommitRawFsmProject(root: string): Promise<void> {
     [
       "workflow:",
       "  name: two_commit_gate",
-      "  initial: refactor",
-      "  use:",
-      "    refactor:",
-      "      template: builtin:refactor-swarm",
-      "      exits:",
-      "        success: done",
-      "        blocked: failed",
+      "  initial: red_team",
       "  states:",
+      "    red_team:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompts/red-team.md",
+      "      transitions:",
+      "        - to: failed",
+      "          when:",
+      "            artifact_exists: BLOCKED.md",
+      "        - to: refactoring",
+      "          when:",
+      "            provider_success: true",
+      "            branch_advanced_since_attempt_start: true",
+      "            branch_ahead_of_base: true",
+      "        - to: failed",
+      "    refactoring:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompts/refactor.md",
+      "      transitions:",
+      "        - to: failed",
+      "          when:",
+      "            artifact_exists: BLOCKED.md",
+      "        - to: verifying",
+      "          when:",
+      "            provider_success: true",
+      "            branch_advanced_since_attempt_start: true",
+      "            branch_ahead_of_base: true",
+      "        - to: failed",
+      "    verifying:",
+      "      action:",
+      "        kind: agent",
+      "        provider: codex",
+      "        prompt: prompts/verify.md",
+      "      transitions:",
+      "        - to: failed",
+      "          when:",
+      "            artifact_exists: BLOCKED.md",
+      "        - to: done",
+      "          when:",
+      "            provider_success: true",
+      "        - to: failed",
       "    done:",
       "      terminal: success",
       "    failed:",
@@ -4423,9 +4457,9 @@ async function writeTwoCommitRawFsmProject(root: string): Promise<void> {
   ]);
 }
 
-// Mirrors the shape of `builtin:plan-tdd-pr`: planning advances on
-// `provider_success: true` alone (no `complete_when` gate, no
-// `branch_ahead_of_base` requirement on the transition). Implementing still
+// A plan-then-implement shape without the plan-file gate the skill's Example 5
+// adds: planning advances on `provider_success: true` alone (no `complete_when`
+// gate, no `branch_ahead_of_base` requirement on the transition). Implementing still
 // gates on `branch_ahead_of_base: true` so an uncommitted impl pass falls
 // through to the fallback `to: failed` terminal.
 async function writeTransitionOnlyMultiStateRawFsmProject(

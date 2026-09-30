@@ -1,5 +1,7 @@
 # Built-in workflow templates ship as inline YAML in TypeScript
 
+Status: Superseded by ADR-2026-09-30-0848 (workflow templates were removed)
+
 Symphonika ships five built-in workflow templates (`builtin:single-agent-pr`,
 `builtin:plan-tdd-pr`, `builtin:refactor-swarm`, `builtin:autofix-until-clean`,
 `builtin:merge-when-green`) as conveniences

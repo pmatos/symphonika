@@ -1,3 +1,6 @@
 # Persist expanded workflow graph in run evidence
 
+**Amendment note (ADR-2026-09-30-0848):** workflow templates were removed, so the persisted graph no
+longer carries `templateFiles`; graphs written by earlier versions still do and readers ignore it.
+
 Symphonika will persist the expanded workflow graph for every workflow-backed run as per-attempt evidence under the run's evidence directory, written as `workflow-graph.json` for the first attempt and `workflow-graph.attempt-<N>.json` for retries. The persisted graph carries the workflow name, source kind (markdown compatibility or raw FSM), source path, content hash, initial state, states, transitions, terminal markers, and template files. Markdown `WORKFLOW.md` workflows record their one-state compatibility graph; explicit raw FSM YAML workflows record their parsed expanded graph without enabling multi-state dispatch. The path is also stored in nullable `workflow_graph_path` columns on `runs` and `attempts` as a Run Store implementation detail. Public readers use Run Store value getters and artifact descriptors so CLI and HTTP surfaces can audit the graph without learning the on-disk filename or JSON path.

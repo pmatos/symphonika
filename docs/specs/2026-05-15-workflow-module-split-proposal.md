@@ -4,6 +4,9 @@ Status: proposed
 Date: 2026-05-15
 Issue: #144
 
+**Amendment note (ADR-2026-09-30-0848):** workflow templates and built-in template resolution
+were removed; references to them below describe the original design.
+
 ## Goal
 
 Split `src/workflow.ts` along the ADR boundaries that already exist in the product model, without

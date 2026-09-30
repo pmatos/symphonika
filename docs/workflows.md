@@ -553,7 +553,9 @@ each instance with the states its template used to expand to. Expansion named ea
 `<instance>.<state>`; dots are legal in state ids, so keeping those names preserves the state ids
 of runs that are already parked mid-workflow. Also update `initial:` and every `to:` that named an
 instance: they must now name the state explicitly (`shipit` becomes `shipit.agent`, the entry
-state the template expanded to).
+state the template expanded to). Exits the instance mapped (`exits: { success: done }`) never
+produced a state of their own: transitions that led to them pointed at the mapped target, so
+retarget those transitions at that state (`done`) instead of at `<instance>.<exit state>`.
 
 ## 9. Execution semantics
 

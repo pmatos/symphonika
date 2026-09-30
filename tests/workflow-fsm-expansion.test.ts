@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   collectWorkflowPromptConventionWarnings,
   explainWorkflow,
+  expandWorkflowDefinition,
   loadExpandedWorkflow,
   validateExpandedWorkflowReferences
 } from "../src/workflow/fsm-expansion.js";
@@ -80,11 +81,10 @@ describe("state machine workflow definitions", () => {
     });
   });
 
-  it("rejects workflow.use because workflow templates are no longer supported", async () => {
-    const root = await makeTempRoot();
-    const workflowPath = path.join(root, "workflow.yml");
-    await writeFile(
-      workflowPath,
+  it("rejects workflow.use because workflow templates are no longer supported", () => {
+    const workflowPath = "workflow.yml";
+
+    const result = expandWorkflowDefinition(
       [
         "workflow:",
         "  name: templated",
@@ -98,10 +98,10 @@ describe("state machine workflow definitions", () => {
         "    done:",
         "      terminal: success",
         ""
-      ].join("\n")
+      ].join("\n"),
+      workflowPath,
+      "raw_fsm"
     );
-
-    const result = await loadExpandedWorkflow(workflowPath);
 
     expect(result.errors).toEqual([
       `workflow definition at ${workflowPath} workflow.use is not supported; declare every state directly under workflow.states`

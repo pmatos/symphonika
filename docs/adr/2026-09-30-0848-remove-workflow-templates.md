@@ -48,7 +48,8 @@ Raw-FSM workflows declare every state under `workflow.states`. There is no `work
   with zero template sources), so redeploying does not change any template-free project's hash.
 - The five built-in shapes become worked examples in `skills/symphonika/EXAMPLES.md` (Examples 3 and
   5–8), and the repository's `refactor-workflow.yml` carries the refactor swarm's three states in
-  full. `tests/skill-examples.test.ts` validates every `yaml` workflow block in EXAMPLES.md and
+  full. `tests/skill-examples.test.ts` validates every `yaml` workflow block in EXAMPLES.md,
+  `docs/tutorial.md` and `docs/workflows.md`, checks Example 8 equals `refactor-workflow.yml`, and
   replays the refactor workflow's routing decisions, so the copies cannot drift into invalidity
   silently.
 - Chaining shapes means merging their `states:` maps and keeping ids unique. State ids may contain

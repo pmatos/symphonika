@@ -400,6 +400,13 @@ function parseExplicitWorkflowDefinition(
     return undefined;
   }
 
+  if (parsed.workflow.use !== undefined) {
+    errors.push(
+      `workflow definition at ${workflowPath} workflow.use is not supported; declare every state directly under workflow.states`
+    );
+    return undefined;
+  }
+
   return parsed.workflow;
 }
 
@@ -409,16 +416,6 @@ function expandRawStateMachineWorkflow(
   workflowContents: string,
   errors: string[]
 ): ExpandedWorkflowLoadResult {
-  if (rawWorkflow.use !== undefined) {
-    errors.push(
-      `workflow definition at ${workflowPath} workflow.use is not supported; declare every state directly under workflow.states`
-    );
-    return {
-      errors,
-      workflow: emptyExpandedWorkflow(workflowContents, workflowPath, "raw_fsm")
-    };
-  }
-
   const name = stringProperty(rawWorkflow, "name");
   if (name === undefined) {
     errors.push(
@@ -434,14 +431,12 @@ function expandRawStateMachineWorkflow(
   }
 
   const rawStates = recordProperty(rawWorkflow, "states");
+  const states: ExpandedWorkflowState[] = [];
   if (rawStates === undefined) {
     errors.push(
       `workflow definition at ${workflowPath} must define workflow.states`
     );
-  }
-
-  const states: ExpandedWorkflowState[] = [];
-  if (rawStates !== undefined) {
+  } else {
     for (const [stateId, rawState] of Object.entries(rawStates)) {
       states.push(parseWorkflowState(stateId, rawState, workflowPath, errors));
     }

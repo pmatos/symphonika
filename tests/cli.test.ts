@@ -1138,7 +1138,6 @@ describe("CLI", () => {
       "action: agent provider=codex prompt=prompts/plan.md"
     );
     expect(output.stdout).toContain("terminal: success");
-    expect(output.stdout).not.toContain("template files");
   });
 
   it("validates the selected workflow graph and reports state-machine errors", async () => {

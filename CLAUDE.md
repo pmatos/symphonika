@@ -79,7 +79,8 @@ the check fails.
 a Workflow Contract, and operating a local Symphonika install (CLI, systemd `--user` service,
 `symphonika.yml`/state-root config). Both halves point into living docs rather than re-deriving facts
 independently, and both go stale silently — nothing fails CI when either drifts, except that
-`tests/skill-examples.test.ts` validates every `yaml` workflow block in EXAMPLES.md.
+`tests/skill-examples.test.ts` validates every `yaml` workflow block in EXAMPLES.md,
+`docs/tutorial.md`, and `docs/workflows.md`.
 
 For the workflow-design half: `docs/workflows.md` is the canonical authoring reference for the FSM's
 syntax and semantics — action kinds, predicates, templating variables, providers,

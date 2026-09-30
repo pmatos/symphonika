@@ -733,6 +733,9 @@ workflow:
             checks: failure
         - to: repair
           when:
+            mergeable: false
+        - to: repair
+          when:
             has_unresolved_reviews: true
 
     repair:

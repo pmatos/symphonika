@@ -2,8 +2,14 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { decideNextStep } from "../src/lifecycle/state-machine-dispatch.js";
-import { expandWorkflowDefinition } from "../src/workflow/fsm-expansion.js";
+import {
+  decideNextStep,
+  findWorkflowState
+} from "../src/lifecycle/state-machine-dispatch.js";
+import {
+  expandWorkflowDefinition,
+  loadExpandedWorkflow
+} from "../src/workflow/fsm-expansion.js";
 import type { ExpandedWorkflow } from "../src/workflow/types.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -21,7 +27,7 @@ function decide(
   signals: Record<string, boolean | number | string>,
   artifactExists: (candidate: string) => boolean = () => false
 ) {
-  const state = workflow.states.find((candidate) => candidate.id === id);
+  const state = findWorkflowState(workflow, id);
   if (state === undefined) {
     throw new Error(`expected state ${id}`);
   }
@@ -33,16 +39,17 @@ function decide(
   });
 }
 
-describe("skills/symphonika/EXAMPLES.md", () => {
+describe("shipped workflow examples", () => {
   it.each([
-    ["skills/symphonika/EXAMPLES.md", 6],
-    ["docs/tutorial.md", 1]
+    "skills/symphonika/EXAMPLES.md",
+    "docs/tutorial.md",
+    "docs/workflows.md"
   ])(
     "only ships workflow blocks in %s that validate cleanly as raw FSM",
-    async (file, minimumBlocks) => {
+    async (file) => {
       const blocks = await workflowBlocks(file);
 
-      expect(blocks.length).toBeGreaterThanOrEqual(minimumBlocks);
+      expect(blocks.length).toBeGreaterThan(0);
       for (const block of blocks) {
         const result = expandWorkflowDefinition(block, file, "raw_fsm");
         expect(result.errors, block).toEqual([]);
@@ -66,7 +73,12 @@ describe("skills/symphonika/EXAMPLES.md", () => {
     const signals = { branch_ahead_of_base: true, provider_success: true };
 
     expect(
-      decide(workflow, "planning", signals, (path) => path === "PLAN.md")
+      decide(
+        workflow,
+        "planning",
+        signals,
+        (candidate) => candidate === "PLAN.md"
+      )
     ).toMatchObject({ kind: "advance", to: "implementing" });
     expect(decide(workflow, "planning", signals)).toMatchObject({
       kind: "advance",
@@ -76,13 +88,26 @@ describe("skills/symphonika/EXAMPLES.md", () => {
 });
 
 describe("refactor-workflow.yml", () => {
-  it("routes failed and rejected passes to blocked and lets verification succeed read-only", async () => {
-    const contents = await readFile(
+  it("matches the skill's characterization-gated refactor example", async () => {
+    const example = (
+      await workflowBlocks("skills/symphonika/EXAMPLES.md")
+    ).find((block) => block.includes("name: characterization_gated_refactor"));
+    if (example === undefined) {
+      throw new Error("expected the characterization_gated_refactor example");
+    }
+    const shipped = await loadExpandedWorkflow(
       path.join(repoRoot, "refactor-workflow.yml"),
-      "utf8"
+      "raw_fsm"
     );
-    const { errors, workflow } = expandWorkflowDefinition(
-      contents,
+
+    expect(
+      expandWorkflowDefinition(example, "workflow.yml", "raw_fsm").workflow
+        .states
+    ).toEqual(shipped.workflow.states);
+  });
+
+  it("routes failed and rejected passes to blocked and lets verification succeed read-only", async () => {
+    const { errors, workflow } = await loadExpandedWorkflow(
       path.join(repoRoot, "refactor-workflow.yml"),
       "raw_fsm"
     );

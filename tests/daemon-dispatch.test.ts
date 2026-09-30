@@ -1912,7 +1912,7 @@ describe("daemon dispatch", () => {
     }
   });
 
-  it("blocks refactor-swarm when only the red-team state advanced the branch", async () => {
+  it("blocks the two-commit refactor workflow when only the red-team state advanced the branch", async () => {
     const root = await makeTempRoot();
     await writeTwoCommitRawFsmProject(root);
 
@@ -4457,9 +4457,9 @@ async function writeTwoCommitRawFsmProject(root: string): Promise<void> {
   ]);
 }
 
-// Mirrors the shape of the plan-then-implement recipe: planning advances on
-// `provider_success: true` alone (no `complete_when` gate, no
-// `branch_ahead_of_base` requirement on the transition). Implementing still
+// A plan-then-implement shape without the plan-file gate the skill's Example 5
+// adds: planning advances on `provider_success: true` alone (no `complete_when`
+// gate, no `branch_ahead_of_base` requirement on the transition). Implementing still
 // gates on `branch_ahead_of_base: true` so an uncommitted impl pass falls
 // through to the fallback `to: failed` terminal.
 async function writeTransitionOnlyMultiStateRawFsmProject(

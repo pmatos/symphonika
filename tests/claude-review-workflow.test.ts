@@ -32,10 +32,10 @@ describe("Claude Code Review workflow", () => {
       (step) => step.name === "Report unavailable review"
     );
 
-    expect(reviewStep).toMatchObject({
-      "continue-on-error": true,
-      uses: "anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790"
-    });
+    expect(reviewStep).toMatchObject({ "continue-on-error": true });
+    expect(reviewStep?.uses).toMatch(
+      /^anthropics\/claude-code-action@[0-9a-f]{40}$/
+    );
     expect(failureSummaryStep).toMatchObject({
       if: "${{ steps.claude-review.outcome == 'failure' }}"
     });

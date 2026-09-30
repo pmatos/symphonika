@@ -167,31 +167,21 @@ If runs are still in flight, the command reports the drain wait and returns inst
 | `refused: <reason>` | 1 |
 | `error: <detail>` | 1 |
 
-### Built-in workflow templates
+### Workflows are authored in full
 
-Raw-FSM workflows can reference built-in templates by prefix without authoring local YAML, for example:
-
-```yaml
-workflow:
-  name: ship_pr
-  initial: shipit
-  use:
-    shipit:
-      template: builtin:single-agent-pr
-      exits:
-        success: done
-        blocked: failed
-  states:
-    done:
-      terminal: success
-    failed:
-      terminal: blocked
-```
-
-The built-ins (`builtin:single-agent-pr`, `builtin:plan-tdd-pr`, `builtin:refactor-swarm`, `builtin:autofix-until-clean`, `builtin:merge-when-green`) expand through the same template machinery as repo-local templates and surface as `template files: builtin:<name>` in `workflow validate` / `workflow explain`. `refactor-swarm` commits characterization tests, then asks a second agent for a behavior-preserving refactor that leaves those tests untouched, then runs a read-only verifier that rejects the branch when the baseline moved or no distinct refactor commit exists. Override a built-in by writing the equivalent YAML to `.symphonika/workflow-templates/<name>.yml` and swapping the `template:` reference. See [docs/adr/0049-builtin-workflow-templates.md](docs/adr/0049-builtin-workflow-templates.md) and [ADR 0085](docs/adr/0085-characterization-gated-refactor-swarm.md).
+Raw-FSM workflows declare every state under `workflow.states`; there are no templates or imports
+(`workflow.use` and the `builtin:` templates were removed, see
+[ADR-2026-09-30-0848](docs/adr/2026-09-30-0848-remove-workflow-templates.md)). The Symphonika skill's
+[EXAMPLES.md](skills/symphonika/EXAMPLES.md) holds the common shapes in full — implement-and-stop,
+plan then implement, autofix until the PR is clean, merge when green, and a characterization-gated
+refactor — and helps you write one from scratch. The repository's own
+[refactor-workflow.yml](refactor-workflow.yml) is the refactor shape: it commits characterization
+tests, then asks a second agent for a behavior-preserving refactor that leaves those tests
+untouched, then runs a read-only verifier that rejects the branch when the baseline moved or no
+distinct refactor commit exists (see [ADR 0085](docs/adr/0085-characterization-gated-refactor-swarm.md)).
 
 The [workflow-language reference](docs/workflows.md) documents raw-FSM states, actions, predicates,
-prompt variables, local template authoring, built-in contracts, and runtime signal availability.
+prompt variables, common shapes, and runtime signal availability.
 
 ## Self-Hosting
 

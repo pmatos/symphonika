@@ -1742,8 +1742,7 @@ describe("CLI run commands", () => {
               terminal: "success",
               transitions: []
             }
-          ],
-          templateFiles: []
+          ]
         },
         null,
         2

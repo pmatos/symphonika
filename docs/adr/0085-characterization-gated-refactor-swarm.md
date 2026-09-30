@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+**Amendment note (ADR-2026-09-30-0848):** workflow templates were removed; `builtin:refactor-swarm`
+is now the repository's `refactor-workflow.yml`, with the same three states, predicates, and
+prompts. References to the built-in template below describe the original design.
+
 **Amendment note (symphonika#806):** `branch_advanced_since_attempt_start`'s implementation changed
 from a `HEAD`-ancestry check to a content-digest comparison so it survives a mid-attempt rebase onto
 an advanced base without losing this ADR's "distinct commit" requirement for `red_team`/

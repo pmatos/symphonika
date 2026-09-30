@@ -130,15 +130,15 @@ The top-level fields are:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `name` | yes | Workflow name stored in graph evidence |
-| `initial` | yes | State id or template-instance id entered first |
-| `states` | when `use` is empty | Locally declared states |
-| `use` | no | Instances of built-in or repository-local templates |
+| `initial` | yes | State id entered first |
+| `states` | yes | Every state in the graph, declared in full |
 
-At least one of `states` or `use` must contribute a state. State and template-instance ids must
-start with a letter or underscore and may then contain letters, digits, `_`, `.`, or `-`.
+State ids must start with a letter or underscore and may then contain letters, digits, `_`, `.`, or
+`-`.
 
-The `initial` target and every transition target must resolve to a declared state. When a target
-names a template instance, expansion rewrites it to that template's entry state.
+The `initial` target and every transition target must resolve to a declared state. `workflow.use`, the
+removed template mechanism, is rejected with a validation error rather than silently dropped (see
+[section 8](#8-common-shapes)).
 
 ## 4. States
 
@@ -527,218 +527,35 @@ or executable expressions.
 Arrays and objects, such as `issue.labels`, render as JSON. A previous-attempt notice and the
 standard autonomy preamble are added outside your prompt file.
 
-## 8. Reusable templates
+## 8. Common shapes
 
-A template is a YAML state-machine fragment with typed scalar inputs, one entry, and named exits.
-Repository-local templates are resolved relative to the main workflow and must remain inside its
-directory.
+Symphonika has no template, import, or sub-graph mechanism: every state of a workflow is declared
+under `workflow.states` in one file. The recurring shapes are worked out in full in the Symphonika
+skill's [EXAMPLES.md](../skills/symphonika/EXAMPLES.md), which is validated by the test suite:
 
-`entry` and `states` are required. `inputs` and `exits` are optional mappings. `name` is
-conventional descriptive metadata; the caller-visible instance name comes from the key under
-`workflow.use`.
-
-### Template file
-
-`.symphonika/workflow-templates/plan-implement.yml`:
-
-```yaml
-name: plan_implement
-entry: planning
-
-inputs:
-  planner:
-    type: provider
-    default: codex
-  implementer:
-    type: provider
-    default: codex
-  plan_prompt:
-    type: path
-    default: prompts/plan.md
-  implement_prompt:
-    type: path
-    default: prompts/implement.md
-
-exits:
-  success: done
-  blocked: blocked
-
-states:
-  planning:
-    action:
-      kind: agent
-      provider: "{{ planner }}"
-      prompt: "{{ plan_prompt }}"
-    transitions:
-      - to: implementing
-        when:
-          provider_success: true
-      - to: blocked
-
-  implementing:
-    action:
-      kind: agent
-      provider: "{{ implementer }}"
-      prompt: "{{ implement_prompt }}"
-    transitions:
-      - to: done
-        when:
-          provider_success: true
-          branch_ahead_of_base: true
-      - to: blocked
-
-  done:
-    exit: success
-
-  blocked:
-    exit: blocked
-```
-
-An exit state may be a non-terminal state with `exit: <name>`, in which case the caller must map
-that exit. A terminal state may also be a declared exit; if the caller leaves it unmapped, it
-remains a terminal inside the expanded template.
-
-### Template inputs
-
-Input names must be identifiers: a letter or underscore followed by letters, digits, or
-underscores.
-
-| Type | Accepted value |
+| Shape | Example |
 | --- | --- |
-| `boolean` | YAML boolean |
-| `number` | finite YAML number |
-| `provider` | `codex`, `claude`, or `omp` |
-| `label` | non-empty string |
-| `path` | non-empty string without a NUL character |
-| `string` | non-empty string |
+| One agent, then stop | Example 3, implement-and-stop |
+| Implement, review-feedback loop, conflict resolution, merge | Example 2 |
+| Planning agent, then implementation agent | Example 5 |
+| Wait and autofix until the PR is clean | Example 6 |
+| Workflow-owned `merge_pr` with a fixed method | Example 7 |
+| Characterization-gated refactor (`red_team`, `refactoring`, `verifying`) | Example 8, and the repository's [`refactor-workflow.yml`](../refactor-workflow.yml) |
 
-Inputs without defaults are required. Supplying an undeclared input is an error.
+To combine shapes, copy the states of each into one `states` map, keep state ids unique, and point
+one shape's success transition at the next shape's first state.
 
-Use `{{ input_name }}` in any string value inside a template. If the whole YAML scalar is one tag,
-boolean and number types remain booleans and numbers. A tag embedded inside a larger string is
-converted to text. Template interpolation is distinct from prompt interpolation: it expands the
-graph at load time and can reference only declared template inputs.
+`workflow.use` and the `builtin:<name>` templates (`single-agent-pr`, `plan-tdd-pr`,
+`refactor-swarm`, `autofix-until-clean`, `merge-when-green`) were removed by
+[ADR-2026-09-30-0848](./adr/2026-09-30-0848-remove-workflow-templates.md). A workflow that still
+declares `workflow.use` fails validation with `workflow.use is not supported`. To migrate, replace
+each instance with the states its template used to expand to. Expansion named each state
+`<instance>.<state>`; dots are legal in state ids, so keeping those names preserves the state ids
+of runs that are already parked mid-workflow. Also update `initial:` and every `to:` that named an
+instance: they must now name the state explicitly (`shipit` becomes `shipit.agent`, the entry
+state the template expanded to).
 
-### Using a local template
-
-```yaml
-workflow:
-  name: plan_then_ship
-  initial: build
-
-  use:
-    build:
-      template: .symphonika/workflow-templates/plan-implement.yml
-      with:
-        planner: claude
-        implementer: codex
-      exits:
-        success: done
-        blocked: blocked
-
-  states:
-    done:
-      terminal: success
-    blocked:
-      terminal: blocked
-```
-
-Expansion prefixes internal ids with the instance id, such as `build.planning`. Template instances
-and local states cannot share an id. A transition or `initial` value that targets `build` is
-rewritten to `build`'s entry state.
-
-Only declared exits can leave the template. Every non-terminal exit must be mapped. An exit mapping
-may target a local state or another template instance.
-
-Local template paths must be relative, cannot escape the directory containing the main workflow,
-and contribute to the workflow content hash and evidence.
-
-## 9. Built-in templates
-
-Built-ins use the same expansion machinery and are referenced with `builtin:<name>`.
-
-| Template | Entry behavior | Inputs and defaults | Exits |
-| --- | --- | --- | --- |
-| `builtin:single-agent-pr` | One agent must succeed with commits ahead of base | `provider: codex`, `prompt: WORKFLOW.md` | `success`, `blocked` |
-| `builtin:plan-tdd-pr` | Planning agent, then implementation agent | `planner: codex`, `implementer: codex`, `plan_prompt: prompts/plan.md`, `impl_prompt: prompts/impl.md`, `plan_artifact: PLAN.md` | `success`, `blocked` |
-| `builtin:refactor-swarm` | Characterize current behavior, refactor, then independently verify | `red_teamer: codex`, `refactorer: codex`, `verifier: codex`, `red_team_prompt: prompts/red-team.md`, `refactor_prompt: prompts/refactor.md`, `verify_prompt: prompts/verify.md` | `success`, `blocked` |
-| `builtin:autofix-until-clean` | Wait for checks/reviews, then run an autofix agent and loop | `provider: codex`, `fix_prompt: prompts/autofix.md` | `success`, `blocked` |
-| `builtin:merge-when-green` | Enter a policy-controlled merge state | `method: squash` | `success`, `blocked` |
-
-Their exact expanded behavior is:
-
-- **`single-agent-pr`:** run the configured agent and take `success` only when
-  `provider_success: true` and `branch_ahead_of_base: true`; every other completed outcome takes
-  `blocked`.
-- **`plan-tdd-pr`:** a successful planner advances to the implementer without requiring a commit,
-  but only if it actually wrote `plan_artifact` (default `PLAN.md`) into the Workspace — a planner
-  that returns success having produced no plan takes `blocked` instead of handing an empty plan to
-  the implementer. Set `plan_artifact` to whatever path your plan prompt tells the planner to
-  write. The implementer takes `success` only with provider success and commits ahead of base.
-  Either state's fallback takes `blocked`.
-- **`refactor-swarm`:** the red-team agent must succeed and commit characterization tests before
-  the refactorer runs. Both mutating states require `provider_success: true`,
-  `branch_ahead_of_base: true`, and `branch_advanced_since_attempt_start: true`, so the refactorer
-  cannot reuse the red-team commit to reach verification. The verifier independently re-checks the
-  two commits and takes `success` on `provider_success: true` alone because it is instructed not to
-  modify the Workspace; rejection takes `blocked`. All three states share the
-  issue Workspace, but each receives only its own rendered prompt and the fixed structured prompt
-  variables—never a prior provider transcript or reasoning trail. The verifier can and should
-  inspect files, commits, diffs, and tests. This is prompt isolation, not sandboxing.
-- **`autofix-until-clean`:** its wait state takes `success` when checks succeed and unresolved
-  threads equal zero, takes `blocked` when checks fail, and launches the autofix agent when checks
-  report `has_unresolved_reviews: true`. Other PR states stay parked. A successful autofix returns
-  to the wait; its fallback takes `blocked`.
-- **`merge-when-green`:** enter `merge_pr` directly. A successful merge takes `success`; a closed
-  PR, failed checks, or explicit merge conflict takes `blocked`; all other observations stay
-  parked. Service-level merge policy still controls whether a merge is attempted.
-
-Example composition:
-
-```yaml
-workflow:
-  name: plan_fix_merge
-  initial: build
-
-  use:
-    build:
-      template: builtin:plan-tdd-pr
-      with:
-        planner: claude
-        implementer: codex
-      exits:
-        success: fix
-        blocked: blocked
-
-    fix:
-      template: builtin:autofix-until-clean
-      exits:
-        success: merge
-        blocked: blocked
-
-    merge:
-      template: builtin:merge-when-green
-      with:
-        method: squash
-      exits:
-        success: done
-        blocked: blocked
-
-  states:
-    done:
-      terminal: success
-    blocked:
-      terminal: blocked
-```
-
-This example requires the built-ins' default prompt files to exist. You can override their paths
-through `with`.
-
-`workflow validate` and `workflow explain` list `builtin:<name>` under `template files`, so the
-expanded graph remains auditable. A local template does not automatically shadow a built-in; change
-the `template` value explicitly.
-
-## 10. Execution semantics
+## 9. Execution semantics
 
 ### State entry and advancement
 
@@ -796,10 +613,10 @@ Every attempt stores:
 - provider logs; and
 - `workflow-graph.json`.
 
-Template sources contribute to the graph content hash. The run-detail page can render the expanded
-graph, and `show-run` reports state transitions alongside attempts.
+The graph content hash covers the workflow file. The run-detail page can render the captured graph,
+and `show-run` reports state transitions alongside attempts.
 
-## 11. Validation and inspection
+## 10. Validation and inspection
 
 Validate the selected Project without dispatching:
 
@@ -807,14 +624,14 @@ Validate the selected Project without dispatching:
 symphonika workflow validate --config symphonika.yml --project my-app
 ```
 
-Print the expanded graph:
+Print the graph:
 
 ```sh
 symphonika workflow explain --config symphonika.yml --project my-app
 ```
 
-Both commands select the Project from the Service Config, load the workflow, expand templates, and
-report graph and parse errors. `validate` also prints a summary of the expanded graph.
+Both commands select the Project from the Service Config, load the workflow, and report graph and
+parse errors. `validate` also prints a summary of the graph.
 
 `doctor` adds the full Project preflight, including checking that every raw-FSM agent prompt path
 exists. Daemon reload performs the same reference check. Raw prompt contents are rendered strictly
@@ -831,12 +648,10 @@ Common validation failures:
 - a prompt file that does not exist (`doctor` or daemon reload);
 - an unknown Markdown-contract variable, or a raw prompt variable that fails when its state starts;
 - an unsupported predicate;
-- a PR-observing wait state with no transition for a settled actionable signal combination;
-- a template path outside the workflow directory;
-- a missing required template input; or
-- an unmapped non-terminal template exit.
+- a PR-observing wait state with no transition for a settled actionable signal combination; or
+- a `workflow.use` block, which is no longer supported.
 
-## 12. Supported, reserved, and unsupported
+## 11. Supported, reserved, and unsupported
 
 ### Safe to use
 
@@ -845,8 +660,6 @@ Common validation failures:
 - Ordered strict-equality transitions
 - Supported agent-result and PR predicates from the table above
 - Per-state Codex/Claude/OMP routing
-- Local templates and all six scalar input types
-- The five built-in templates
 - Poll-driven wait and policy-controlled merge loops
 - Issue content actions (`close_issue`, `label_issue`, `comment`) chained after a `merge_pr` or
   `wait` state
@@ -868,14 +681,14 @@ match.
 - parallel or fan-out states
 - nested workflows or dynamic state creation
 - scripts, webhooks, arbitrary commands, or human-approval states
-- remote template registries
+- reusable workflow templates or sub-graph composition (`workflow.use` was removed)
 - conditionals or helpers inside prompts
 - numeric comparisons or ranged predicates
 - mid-walk label predicates
 - time-based wait-state transitions
 - cross-repository pull requests
 
-## 13. Complete issue-to-merge example
+## 12. Complete issue-to-merge example
 
 The repository's own [`workflow.yml`](../workflow.yml) is the most detailed shipped example. This
 smaller version shows the complete runtime-supported shape:
@@ -970,4 +783,4 @@ For the architectural rationale, see [ADR-0045](./adr/0045-persist-expanded-work
 [ADR-0046](./adr/0046-state-advance-vs-continuation.md),
 [ADR-0047](./adr/0047-poll-driven-wait-states.md),
 [ADR-0048](./adr/0048-fsm-controlled-merge-states.md), and
-[ADR-0049](./adr/0049-builtin-workflow-templates.md).
+[ADR-2026-09-30-0848](./adr/2026-09-30-0848-remove-workflow-templates.md).

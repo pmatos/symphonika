@@ -63,8 +63,7 @@ describe("RunStore detail queries", () => {
         initial: "run_agent",
         name: "single_agent_workflow",
         source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
-        states: [{ completeWhen: {}, id: "run_agent", transitions: [] }],
-        templateFiles: []
+        states: [{ completeWhen: {}, id: "run_agent", transitions: [] }]
       };
 
       await Promise.all([
@@ -234,8 +233,7 @@ describe("RunStore detail queries", () => {
           initial: "run_agent",
           name: "single_agent_workflow",
           source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
-          states: [],
-          templateFiles: []
+          states: []
         })
       );
       store.createRun({
@@ -386,8 +384,7 @@ describe("RunStore detail queries", () => {
         initial: "run_agent",
         name: "attempt-1",
         source: { kind: "markdown", path: "/repo/WORKFLOW.md" },
-        states: [{ completeWhen: {}, id: "run_agent", transitions: [] }],
-        templateFiles: []
+        states: [{ completeWhen: {}, id: "run_agent", transitions: [] }]
       };
       const attempt2Workflow = { ...attempt1Workflow, name: "attempt-2" };
       await Promise.all([

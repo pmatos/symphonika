@@ -170,7 +170,8 @@ projects:
 
   # Dedicated Dispatch Project for the refactor-audit Routine below. Its own
   # eligibility label keeps risk-ranked refactor issues out of the Workflow
-  # above, and its raw-FSM Workflow composes builtin:refactor-swarm. Uncomment
+  # above, and its raw-FSM Workflow (refactor-workflow.yml) is the
+  # characterization-gated red_team -> refactoring -> verifying swarm. Uncomment
   # this together with the `routines:` block at the bottom of this file.
   # - name: symphonika-refactors
   #   tracker:

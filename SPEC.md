@@ -591,29 +591,25 @@ Raw FSM agent states may declare `action.provider` to route that state to a spec
 Agent Provider. If an agent state omits `action.provider`, Symphonika uses the Project's
 `agent.provider` from `symphonika.yml`.
 
-Raw FSM workflows may reference five built-in Workflow Templates through the `builtin:` namespace:
-`single-agent-pr`, `plan-tdd-pr`, `refactor-swarm`, `autofix-until-clean`, and
-`merge-when-green`. Built-ins expand through the same validation, state-prefixing, exit-mapping,
-and evidence path as repository-local templates. `refactor-swarm` runs three serial agent states:
-`red_team` and `refactoring` each require provider success, `branch_ahead_of_base`, and
-`branch_advanced_since_attempt_start`, then `verifying` requires provider success alone because
-verification is read-only. Each of the three states is also gated on a `BLOCKED.md` sentinel,
-checked before its own success transition: a rejected red-team, refactor, or verify pass writes
-that file instead of relying on its process exit code, and the state routes to the `blocked` exit
-regardless of `provider_success`. See ADR-2026-09-10-1630. `plan-tdd-pr`'s `planning` state requires
-provider success **and**
-`artifact_exists` on its `plan_artifact` input (default `PLAN.md`), so a planner that returns
-success having written no plan takes the `blocked` exit instead of advancing to an unplanned
-implementation stage. `branch_ahead_of_base` remains the cumulative branch-vs-base signal.
+Raw FSM workflows declare every state under `workflow.states`; there is no template, import, or
+sub-graph mechanism (ADR-2026-09-30-0848). A `workflow.use` block is a Workflow Contract validation
+error. Recurring shapes are authored in full; the Symphonika skill's `EXAMPLES.md` holds them, and
+the repository's `refactor-workflow.yml` is the characterization-gated refactor. That workflow runs
+three serial agent states: `red_team` and `refactoring` each require provider success,
+`branch_ahead_of_base`, and `branch_advanced_since_attempt_start`, then `verifying` requires
+provider success alone because verification is read-only. Each of the three states is also gated on
+a `BLOCKED.md` sentinel, checked before its own success transition: a rejected red-team, refactor,
+or verify pass writes that file instead of relying on its process exit code, and the state routes
+to its blocked terminal regardless of `provider_success`. See ADR-2026-09-10-1630. A planning
+state that hands a plan to an implementation state should require provider success **and**
+`artifact_exists` on the plan file, so a planner that returns success having written no plan does
+not advance to an unplanned implementation stage. `branch_ahead_of_base` remains the cumulative
+branch-vs-base signal.
 For each agent Attempt, Symphonika also snapshots a digest of `git diff origin/<base>...HEAD`
 immediately before provider execution; `branch_advanced_since_attempt_start` is true whenever the
-completion digest differs from that snapshot (ADR-2026-09-22-1417). The second transition's
+completion digest differs from that snapshot (ADR-2026-09-22-1417). The refactor workflow's
 requirement of a distinct refactor commit is enforced by this predicate together with the
-`BLOCKED.md` sentinel and the prompt instructions. Any fallback uses the template's `blocked` exit.
-Repositories may
-explicitly replace a built-in reference with a local
-`.symphonika/workflow-templates/<name>.yml`; local files never auto-shadow the reserved namespace.
-See ADRs 0049 and 0085.
+`BLOCKED.md` sentinel and the prompt instructions. See ADR 0085.
 
 Workflow predicates are compared to observed signals by strict equality, with one exception:
 `artifact_exists` names a path (or a sequence of paths, gating on all of them) that must exist in the
@@ -1042,7 +1038,7 @@ Each provider attempt stores:
 - issue branch
 - issue snapshot
 - expanded workflow graph (workflow name, source kind, source path, content hash, initial
-  state, states, transitions, terminal markers, template files)
+  state, states, transitions, terminal markers)
 
 First attempts write `prompt.md`, `prompt-metadata.json`, `issue-snapshot.json`, and
 `workflow-graph.json`. Retries write `prompt.attempt-<N>.md`,

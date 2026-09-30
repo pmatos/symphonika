@@ -3,6 +3,9 @@
 Status: proposed
 Date: 2026-05-07
 
+**Amendment note (ADR-2026-09-30-0848):** the workflow-template and built-in-template sections of
+this proposal were later removed; raw-FSM workflows declare every state under `workflow.states`.
+
 ## Context
 
 Symphonika currently treats a Project workflow as one repository-owned prompt contract. That is

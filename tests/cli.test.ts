@@ -1,6 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
 import {
-  mkdir,
   mkdtemp,
   readFile,
   rename,
@@ -1073,12 +1072,9 @@ describe("CLI", () => {
     );
   });
 
-  it("explains the expanded workflow graph for a selected project", async () => {
+  it("explains the workflow graph for a selected project", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
-    const templateDir = path.join(root, ".symphonika", "workflow-templates");
-    await mkdir(templateDir, { recursive: true });
-    const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
     await writeFile(
       configPath,
       [
@@ -1089,13 +1085,12 @@ describe("CLI", () => {
       ].join("\n")
     );
     await writeFile(
-      templatePath,
+      path.join(root, "workflow.yml"),
       [
-        "name: plan_tdd_pr",
-        "entry: planning",
-        "exits:",
-        "  success: pr_open",
-        "states:",
+        "workflow:",
+        "  name: issue_to_merge",
+        "  initial: planning",
+        "  states:",
         "    planning:",
         "      action:",
         "        kind: agent",
@@ -1104,24 +1099,7 @@ describe("CLI", () => {
         "      complete_when:",
         "        artifact_exists: PLAN.md",
         "      transitions:",
-        "        - to: pr_open",
-        "    pr_open:",
-        "      exit: success",
-        ""
-      ].join("\n")
-    );
-    await writeFile(
-      path.join(root, "workflow.yml"),
-      [
-        "workflow:",
-        "  name: issue_to_merge",
-        "  initial: build_pr",
-        "  use:",
-        "    build_pr:",
-        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
-        "      exits:",
-        "        success: done",
-        "  states:",
+        "        - to: done",
         "    done:",
         "      terminal: success",
         ""
@@ -1155,12 +1133,12 @@ describe("CLI", () => {
     expect(output.stdout).toContain(
       `source: ${path.join(root, "workflow.yml")}`
     );
-    expect(output.stdout).toContain(`template files: ${templatePath}`);
-    expect(output.stdout).toContain("state: build_pr.planning");
+    expect(output.stdout).toContain("state: planning");
     expect(output.stdout).toContain(
       "action: agent provider=codex prompt=prompts/plan.md"
     );
     expect(output.stdout).toContain("terminal: success");
+    expect(output.stdout).not.toContain("template files");
   });
 
   it("validates the selected workflow graph and reports state-machine errors", async () => {
@@ -1539,12 +1517,9 @@ describe("CLI", () => {
     }
   });
 
-  it("validates a template-backed workflow and prints the expanded graph", async () => {
+  it("validates a raw FSM workflow and prints its graph", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
-    const templateDir = path.join(root, ".symphonika", "workflow-templates");
-    await mkdir(templateDir, { recursive: true });
-    const templatePath = path.join(templateDir, "plan-tdd-pr.yml");
     await writeFile(
       configPath,
       [
@@ -1555,37 +1530,19 @@ describe("CLI", () => {
       ].join("\n")
     );
     await writeFile(
-      templatePath,
-      [
-        "name: plan_tdd_pr",
-        "entry: planning",
-        "exits:",
-        "  success: pr_open",
-        "states:",
-        "  planning:",
-        "    action:",
-        "      kind: agent",
-        "      provider: codex",
-        "      prompt: prompts/plan.md",
-        "    transitions:",
-        "      - to: pr_open",
-        "  pr_open:",
-        "    exit: success",
-        ""
-      ].join("\n")
-    );
-    await writeFile(
       path.join(root, "workflow.yml"),
       [
         "workflow:",
         "  name: issue_to_merge",
-        "  initial: build_pr",
-        "  use:",
-        "    build_pr:",
-        "      template: .symphonika/workflow-templates/plan-tdd-pr.yml",
-        "      exits:",
-        "        success: done",
+        "  initial: planning",
         "  states:",
+        "    planning:",
+        "      action:",
+        "        kind: agent",
+        "        provider: codex",
+        "        prompt: prompts/plan.md",
+        "      transitions:",
+        "        - to: done",
         "    done:",
         "      terminal: success",
         ""
@@ -1618,9 +1575,8 @@ describe("CLI", () => {
     expect(output.stdout).toContain(
       "workflow validate ok: symphonika -> issue_to_merge"
     );
-    expect(output.stdout).toContain(`template files: ${templatePath}`);
-    expect(output.stdout).toContain("state: build_pr.planning");
-    expect(output.stdout).not.toContain("state: pr_open");
+    expect(output.stdout).toContain("state: planning");
+    expect(output.stdout).toContain("state: done");
   });
 
   it("explains the compatibility graph for a Markdown WORKFLOW.md", async () => {
@@ -1673,73 +1629,7 @@ describe("CLI", () => {
     expect(output.stdout).toContain("terminal: success");
   });
 
-  it("validates a workflow backed by a built-in template and surfaces builtin: provenance", async () => {
-    const root = await makeTempRoot();
-    const configPath = path.join(root, "symphonika.yml");
-    await writeFile(
-      configPath,
-      [
-        "projects:",
-        "  - name: symphonika",
-        "    workflow: ./workflow.yml",
-        ""
-      ].join("\n")
-    );
-    await writeFile(
-      path.join(root, "workflow.yml"),
-      [
-        "workflow:",
-        "  name: issue_to_pr",
-        "  initial: shipit",
-        "  use:",
-        "    shipit:",
-        "      template: builtin:single-agent-pr",
-        "      with:",
-        "        provider: codex",
-        "        prompt: prompts/single-agent.md",
-        "      exits:",
-        "        success: done",
-        "        blocked: failed",
-        "  states:",
-        "    done:",
-        "      terminal: success",
-        "    failed:",
-        "      terminal: blocked",
-        ""
-      ].join("\n")
-    );
-    const output = { stderr: "", stdout: "" };
-    const program = buildCli({ registerSignalHandlers: false });
-    program.exitOverride();
-    program.configureOutput({
-      writeErr: (message) => {
-        output.stderr += message;
-      },
-      writeOut: (message) => {
-        output.stdout += message;
-      }
-    });
-
-    await program.parseAsync([
-      "node",
-      "symphonika",
-      "workflow",
-      "validate",
-      "--config",
-      configPath,
-      "--project",
-      "symphonika"
-    ]);
-
-    expect(output.stderr).toBe("");
-    expect(output.stdout).toContain(
-      "workflow validate ok: symphonika -> issue_to_pr"
-    );
-    expect(output.stdout).toContain("template files: builtin:single-agent-pr");
-    expect(output.stdout).toContain("state: shipit.agent");
-  });
-
-  it("explains a workflow that gates merge on the builtin:merge-when-green template", async () => {
+  it("explains a workflow whose entry state is a merge_pr action", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
     await writeFile(
@@ -1756,14 +1646,19 @@ describe("CLI", () => {
       [
         "workflow:",
         "  name: pr_merge",
-        "  initial: gate",
-        "  use:",
-        "    gate:",
-        "      template: builtin:merge-when-green",
-        "      exits:",
-        "        success: shipped",
-        "        blocked: needs_human",
+        "  initial: merging",
         "  states:",
+        "    merging:",
+        "      action:",
+        "        kind: merge_pr",
+        "        method: squash",
+        "      transitions:",
+        "        - to: shipped",
+        "          when:",
+        "            pr_merged: true",
+        "        - to: needs_human",
+        "          when:",
+        "            pr_open: false",
         "    shipped:",
         "      terminal: success",
         "    needs_human:",
@@ -1796,8 +1691,8 @@ describe("CLI", () => {
 
     expect(output.stderr).toBe("");
     expect(output.stdout).toContain("workflow: pr_merge");
-    expect(output.stdout).toContain("template files: builtin:merge-when-green");
-    expect(output.stdout).toContain("initial: gate.merging");
-    expect(output.stdout).toContain("state: gate.merging");
+    expect(output.stdout).toContain("initial: merging");
+    expect(output.stdout).toContain("state: merging");
+    expect(output.stdout).toContain("action: merge_pr method=squash");
   });
 });

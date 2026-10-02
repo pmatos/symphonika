@@ -1,7 +1,7 @@
 import path from "node:path";
 
-// Own module so persistRunEvidence (autonomous-prompt.ts) and claim.ts can
-// both depend on it without either pulling in the other.
+// Per-run evidence directory and per-attempt file naming, shared by
+// persistRunEvidence (autonomous-prompt.ts).
 export function runEvidenceDirectoryPath(
   stateRoot: string,
   runId: string

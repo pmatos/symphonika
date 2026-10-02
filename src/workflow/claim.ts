@@ -1,23 +1,9 @@
-import { open } from "node:fs/promises";
-import type { FileHandle } from "node:fs/promises";
-import path from "node:path";
-
-import type { Logger } from "pino";
 import { z } from "zod";
 
-import {
-  attemptEvidenceFileName,
-  runEvidenceDirectoryPath
-} from "./evidence-paths.js";
+import { parseFinalMessageClaim } from "../claim-parsing.js";
+import type { NormalizedProviderEvent } from "../provider.js";
 
-// Matches terminal:'s vocabulary exactly (see ADR-2026-09-23-1400).
-type WorkflowClaimStatus = "blocked" | "failure" | "success";
-
-export type WorkflowClaim = {
-  status: WorkflowClaimStatus;
-  summary: string;
-};
-
+// status matches terminal:'s vocabulary exactly.
 const workflowClaimSchema = z
   .object({
     status: z.enum(["success", "blocked", "failure"]),
@@ -25,103 +11,40 @@ const workflowClaimSchema = z
   })
   .strict();
 
-// Deliberately self-contained rather than sharing routines/outcome.ts's
-// reader -- see ADR-2026-09-23-1400.
-export function parseWorkflowClaimText(text: string): WorkflowClaim | null {
-  const unprefixed = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-  let candidate: unknown;
-  try {
-    candidate = JSON.parse(unprefixed);
-  } catch {
-    return null;
-  }
-  const parsed = workflowClaimSchema.safeParse(candidate);
-  return parsed.success ? parsed.data : null;
-}
+// Handed to providers that accept a response schema (Claude --json-schema,
+// Codex turn/start.outputSchema). Oh My Pi's RPC mode has no such lever, so
+// its claim rides on the prompt instruction alone.
+export const WORKFLOW_CLAIM_JSON_SCHEMA = {
+  additionalProperties: false,
+  properties: {
+    status: {
+      enum: ["success", "blocked", "failure"],
+      type: "string"
+    },
+    summary: { type: "string" }
+  },
+  required: ["status", "summary"],
+  type: "object"
+} as const;
 
-// Attempt-scoped by construction: attemptEvidenceFileName suffixes every
-// attempt after the first, so a retry that reuses the same runId's evidence
-// directory (persistRunEvidence, same convention) never reads an earlier
-// attempt's stale claim.
-export function workflowClaimFilePath(
-  stateRoot: string,
-  runId: string,
-  attemptNumber: number
-): string {
-  return path.join(
-    runEvidenceDirectoryPath(stateRoot, runId),
-    attemptEvidenceFileName("claim", attemptNumber, "json")
-  );
-}
+// Shared by every state that names claim_status, injected into the rendered
+// prompt so the wording cannot drift between prompt files.
+export const WORKFLOW_CLAIM_INSTRUCTIONS = [
+  "## Final claim",
+  "",
+  'Your final message MUST be a single bare JSON object and nothing else — no prose, no markdown fence: `{"status": "success" | "blocked" | "failure", "summary": "<one or two sentences>"}`.',
+  "",
+  "- `success`: you completed this state's task.",
+  "- `blocked`: you could not make progress and a human or an external change is needed (for example the failure requires a product decision). Explain what blocked you and what would unblock it in `summary`.",
+  "- `failure`: you attempted the task and it did not work.",
+  "",
+  "This claim is what the workflow gates this state's advance on. It applies on top of the operating contract: when you cannot proceed, still post the explanatory comment, but then end with a `blocked` claim rather than exiting with prose. A final message that is not exactly this JSON object is treated as a failure, so never omit it."
+].join("\n");
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error;
-}
-
-// Claim text is agent-authored, not bounded structured output -- cap it well
-// above a real claim's size before ever reading it, mirroring
-// ROUTINE_OUTCOME_CLAIM_FILE_MAX_BYTES in routines/outcome.ts.
-const WORKFLOW_CLAIM_FILE_MAX_BYTES = 64 * 1024;
-
-// Read after the provider process has exited, so there is no concurrent
-// writer. Missing, oversized, or malformed content is treated as absent: a
-// state gating on claim_status simply never matches that transition, the
-// same way an absent artifact or PR signal falls through today. Uses an open
-// file handle's fstat/read rather than stat-then-readFile on the path twice,
-// avoiding a TOCTOU window the same way readRoutineOutcomeClaimFile does.
-export async function readWorkflowClaimFile(
-  claimPath: string,
-  logger: Logger | undefined
-): Promise<WorkflowClaim | null> {
-  let handle: FileHandle;
-  try {
-    handle = await open(claimPath, "r");
-  } catch (error) {
-    if (!isNodeError(error) || error.code !== "ENOENT") {
-      logger?.warn(
-        { claimPath, err: errorMessage(error) },
-        "symphonika workflow claim file open failed; ignoring"
-      );
-    }
-    return null;
-  }
-  try {
-    const stats = await handle.stat();
-    if (!stats.isFile()) {
-      return null;
-    }
-    if (stats.size > WORKFLOW_CLAIM_FILE_MAX_BYTES) {
-      logger?.warn(
-        { claimPath, size: stats.size },
-        "symphonika workflow claim file exceeds size cap; ignoring"
-      );
-      return null;
-    }
-    const text = await handle.readFile("utf8");
-    return parseWorkflowClaimText(text);
-  } catch (error) {
-    logger?.warn(
-      { claimPath, err: errorMessage(error) },
-      "symphonika workflow claim file read failed; ignoring"
-    );
-    return null;
-  } finally {
-    // A close() rejection must not override the try/catch's return value --
-    // that would turn a successful read, or a graceful "treat as absent",
-    // into an uncaught rejection propagating out of applyWorkflowOutcome's
-    // Promise.all and into runAttemptLifecycle's finally block, aborting
-    // terminal-state bookkeeping for the whole attempt.
-    try {
-      await handle.close();
-    } catch (error) {
-      logger?.warn(
-        { claimPath, err: errorMessage(error) },
-        "symphonika workflow claim file close failed; ignoring"
-      );
-    }
-  }
+// A missing or schema-invalid claim is absent, so a transition naming
+// claim_status simply does not match and the state's fallback applies.
+export function parseWorkflowClaim(
+  events: readonly NormalizedProviderEvent[]
+): z.infer<typeof workflowClaimSchema> | null {
+  return parseFinalMessageClaim(events, workflowClaimSchema);
 }

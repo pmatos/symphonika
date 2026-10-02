@@ -73,26 +73,37 @@ describe("this repo's own workflow.yml (symphonika_self_driving)", () => {
   });
 
   it.each(["code_review_fix", "simplify", "autofix", "resolve_conflicts"])(
-    "gates %s's success transition on an artifact_exists: BLOCKED.md check ordered first (issue #730)",
+    "gates %s's success transition on a claim_status claim, blocked ordered first, failing closed (issue #813)",
     async (stateId) => {
       const { workflow } = await loadExpandedWorkflow(workflowPath);
       const state = findWorkflowState(workflow, stateId);
       expect(state).toBeDefined();
 
       const blockedIndex = state!.transitions.findIndex(
-        (transition) => transition.when.artifact_exists === "BLOCKED.md"
+        (transition) => transition.when.claim_status === "blocked"
       );
       const successIndex = state!.transitions.findIndex(
-        (transition) => transition.when.provider_success === true
+        (transition) => transition.when.claim_status === "success"
       );
 
       expect(blockedIndex).toBeGreaterThanOrEqual(0);
       expect(successIndex).toBeGreaterThanOrEqual(0);
       // First-match-wins transition dispatch (state-machine-dispatch.ts): the
-      // BLOCKED.md check must be checked before provider_success, or a
-      // rejected pass that still exits 0 would be read as success.
+      // blocked claim must be checked before the success transition, and a
+      // missing claim must not advance.
       expect(blockedIndex).toBeLessThan(successIndex);
       expect(state!.transitions[blockedIndex]?.to).toBe("failed");
+      expect(state!.transitions[successIndex]?.when.provider_success).toBe(
+        true
+      );
+      const fallback = state!.transitions.at(-1);
+      expect(fallback?.when).toEqual({});
+      expect(fallback?.to).toBe("failed");
+      expect(
+        state!.transitions.some(
+          (transition) => transition.when.artifact_exists === "BLOCKED.md"
+        )
+      ).toBe(false);
     }
   );
 });

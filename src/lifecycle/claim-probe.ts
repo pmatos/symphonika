@@ -1,27 +1,19 @@
-import type { Logger } from "pino";
-
-import {
-  readWorkflowClaimFile,
-  workflowClaimFilePath
-} from "../workflow/claim.js";
+import type { NormalizedProviderEvent } from "../provider.js";
+import { parseWorkflowClaim } from "../workflow/claim.js";
 import type { ExpandedWorkflowState } from "../workflow/types.js";
 import { statePredicateKeys } from "./artifact-probe.js";
 
-export async function probeStateClaim(input: {
-  attemptNumber: number;
-  logger: Logger | undefined;
-  runId: string;
+// The one definition of "this state gates on a Workflow Claim": it decides
+// both whether the provider is asked for one and whether it is read back.
+export function stateGatesOnClaim(state: ExpandedWorkflowState): boolean {
+  return statePredicateKeys(state).has("claim_status");
+}
+
+export function probeStateClaim(input: {
+  events: readonly NormalizedProviderEvent[];
   state: ExpandedWorkflowState;
-  stateRoot: string;
-}): Promise<string | undefined> {
-  if (!statePredicateKeys(input.state).has("claim_status")) {
-    return undefined;
-  }
-  const claimPath = workflowClaimFilePath(
-    input.stateRoot,
-    input.runId,
-    input.attemptNumber
-  );
-  const claim = await readWorkflowClaimFile(claimPath, input.logger);
-  return claim?.status;
+}): string | undefined {
+  return stateGatesOnClaim(input.state)
+    ? parseWorkflowClaim(input.events)?.status
+    : undefined;
 }

@@ -314,7 +314,7 @@ workflow:
 
 ## 8. Characterization-gated refactor (red-team → refactor → verify)
 
-Three serial agents: one characterizes current behavior, one refactors, one independently verifies read-only. A rejected pass writes `BLOCKED.md` instead of relying on a non-zero exit code — a failing Bash call only ends that subshell, not the provider session, so `provider_success` reads true regardless. The `BLOCKED.md` transition therefore comes first in every state. Requiring `branch_advanced_since_attempt_start` makes each pass add a new commit.
+Three serial agents: one characterizes current behavior, one refactors, one independently verifies read-only. Each pass ends with a structured claim (`claim_status`) as its final message instead of relying on a non-zero exit code — a failing Bash call only ends that subshell, not the provider session, so `provider_success` reads true regardless. The `claim_status: blocked` transition therefore comes first in every state, and advancing requires a positive `claim_status: success`, so a missing or malformed claim falls through to `blocked`. Requiring `branch_advanced_since_attempt_start` makes each pass add a new commit.
 
 ```yaml
 workflow:
@@ -330,9 +330,10 @@ workflow:
       transitions:
         - to: blocked
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: refactoring
           when:
+            claim_status: success
             provider_success: true
             branch_advanced_since_attempt_start: true
             branch_ahead_of_base: true
@@ -346,9 +347,10 @@ workflow:
       transitions:
         - to: blocked
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: verifying
           when:
+            claim_status: success
             provider_success: true
             branch_advanced_since_attempt_start: true
             branch_ahead_of_base: true
@@ -362,9 +364,10 @@ workflow:
       transitions:
         - to: blocked
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: done
           when:
+            claim_status: success
             provider_success: true
         - to: blocked
 

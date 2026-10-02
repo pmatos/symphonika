@@ -598,9 +598,11 @@ the repository's `refactor-workflow.yml` is the characterization-gated refactor.
 three serial agent states: `red_team` and `refactoring` each require provider success,
 `branch_ahead_of_base`, and `branch_advanced_since_attempt_start`, then `verifying` requires
 provider success alone because verification is read-only. Each of the three states is also gated on
-a `BLOCKED.md` sentinel, checked before its own success transition: a rejected red-team, refactor,
-or verify pass writes that file instead of relying on its process exit code, and the state routes
-to its blocked terminal regardless of `provider_success`. See ADR-2026-09-10-1630. A planning
+`claim_status`, checked before its own success transition: a rejected red-team, refactor, or verify
+pass ends with a `blocked` claim instead of relying on its process exit code, and the state routes
+to its blocked terminal regardless of `provider_success`. Advancing additionally requires a
+positive `claim_status: success`, so a missing or malformed claim falls through to the blocked
+terminal. See ADR-2026-10-02-1909. A planning
 state that hands a plan to an implementation state should require provider success **and**
 `artifact_exists` on the plan file, so a planner that returns success having written no plan does
 not advance to an unplanned implementation stage. `branch_ahead_of_base` remains the cumulative
@@ -609,7 +611,7 @@ For each agent Attempt, Symphonika also snapshots a digest of `git diff origin/<
 immediately before provider execution; `branch_advanced_since_attempt_start` is true whenever the
 completion digest differs from that snapshot (ADR-2026-09-22-1417). The refactor workflow's
 requirement of a distinct refactor commit is enforced by this predicate together with the
-`BLOCKED.md` sentinel and the prompt instructions. See ADR 0085.
+`claim_status` gate and the prompt instructions. See ADR 0085.
 
 Workflow predicates are compared to observed signals by strict equality, with one exception:
 `artifact_exists` names a path (or a sequence of paths, gating on all of them) that must exist in the
@@ -625,7 +627,9 @@ wait state whose predicates are only artefact predicates is polled without a tra
 while a wait state that also names PR predicates and every `merge_pr` state still require one. See
 ADR 0087.
 
-`BLOCKED.md` is a reserved artefact name, not an author-chosen one: a raw-FSM agent prompt that
+`BLOCKED.md` is a reserved artefact name, not an author-chosen one, and remains supported for
+workflows that prefer a sentinel file to `claim_status` (Symphonika's own workflows migrated to
+`claim_status`, ADR-2026-10-02-1909): a raw-FSM agent prompt that
 determines it is blocked writes that file (uncommitted) instead of relying on its process exit
 code — exiting non-zero from a Bash tool call only ends that subshell, not the provider session, so
 `provider_success` reads true regardless of the agent's own verdict. A `when: artifact_exists:
@@ -664,23 +668,21 @@ Available top-level objects:
 - `branch`
 - `run`
 - `provider`
-- `claim`
 
 Symphonika prepends a standard autonomy preamble to every rendered workflow prompt.
 
-`claim.path` is a per-attempt file path outside the Run Workspace, in the same evidence directory
-`persistRunEvidence` writes prompt/metadata files to. It is available to every Workflow prompt
-regardless of whether the current state's predicates use it. An agent state whose predicates name
-`claim_status` should instruct its prompt to write a JSON object `{status, summary}` there as one of
-its last actions — `status` matching the same three-value vocabulary as `terminal`
-(`success`/`blocked`/`failure`) — as a deliberate tool call, the same reliability property the
-Routine Outcome Claim's file channel has (below in this section). Symphonika reads the file back after the
-provider exits (bounded, size-capped, BOM-tolerant, schema-validated) and offers the parsed status as
-the `claim_status` predicate. A missing, oversized, or schema-invalid claim leaves `claim_status`
-absent rather than failing the attempt, so a state gating on it should still declare its own
-`provider_success` or `artifact_exists` fallback. This reinforces the `BLOCKED.md` sentinel
-(§5.2 above) rather than replacing it: unlike `BLOCKED.md`, the claim file lives outside the
-Workspace, so no git-tracked-file provenance check or workspace-reuse clearing applies to it. See
+An agent state whose predicates name `claim_status` gates on a Workflow Claim: a `{status, summary}`
+object, `status` sharing `terminal`'s vocabulary (`success`/`blocked`/`failure`), that the agent
+emits as its final message. For such a state Symphonika adds a "Final claim" section to the
+rendered prompt, after the workflow prompt body, and passes the claim's JSON Schema to the provider (Claude `--json-schema`, Codex
+`turn/start.outputSchema`); Oh My Pi's RPC mode has no schema lever, so its claim relies on the
+prompt instruction alone. After the provider exits, Symphonika reads the last `turn_completed`
+event — its schema-enforced structured output when present, otherwise the final message text,
+schema-validated — and offers the parsed status as the `claim_status` predicate. A missing or
+malformed claim leaves `claim_status` absent rather than failing the attempt, so a state should gate
+advancing on a positive `claim_status: success` and end with a fallback transition, which makes an
+agent that never emits a valid claim fail closed. States that do not name `claim_status` receive no
+claim section and no schema. See ADR-2026-10-02-1909, which supersedes the file-based channel of
 ADR-2026-09-23-1400.
 
 Routine prompt rendering uses the same strict templating rules and the same standard autonomy

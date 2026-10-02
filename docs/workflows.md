@@ -237,39 +237,52 @@ An agent result currently projects:
 - `provider_success`
 - `branch_ahead_of_base`
 - `branch_advanced_since_attempt_start`
-- `claim_status`, when the agent wrote a valid Workflow Claim file (below)
+- `claim_status`, when the agent's final message was a valid Workflow Claim (below)
 
 Do not put PR predicates such as `checks` in an agent state's `complete_when`; those signals are
 produced when a `wait` or `merge_pr` state polls GitHub.
 
 ### Workflow Claim
 
-An agent state whose predicates name `claim_status` opts into a second, file-based terminal-state
-signal alongside `provider_success` and `artifact_exists` — the same reliability pattern the
-Routine Outcome Claim (`docs/tutorial.md`) uses for Routine Firings, generalized to raw-FSM states
-(issue #776). Every rendered Workflow prompt exposes `{{claim.path}}`: a per-attempt file path
-outside the Run Workspace, so writing it is a deliberate tool call rather than trailing prose that
-can be truncated or wrapped in commentary. A prompt for a state that names `claim_status` should
-instruct the agent to write a JSON object there as one of its last actions:
+An agent state whose predicates name `claim_status` gates on the agent's own terminal verdict,
+carried by its final message rather than a sentinel file. For such a state Symphonika appends a
+standard "Final claim" section to the rendered prompt (after the workflow prompt body), instructing the agent to end with a single
+bare JSON object:
 
 ```json
 { "status": "blocked", "summary": "No open PR found for this branch." }
 ```
 
-`status` uses the same three-value vocabulary as `terminal`: `success`, `blocked`, `failure`.
-Symphonika reads the file back after the provider process exits (bounded to 64KB, BOM-tolerant,
-schema-validated) and offers the parsed `status` as the `claim_status` predicate, compared by
-strict equality like every other non-artifact predicate. A missing, oversized, or schema-invalid
-claim file leaves `claim_status` absent — a transition naming it simply does not match, the same
-way an absent PR or artifact signal behaves today — so a state should still declare its own
-`provider_success` or `artifact_exists` fallback rather than relying on `claim_status` alone.
+`status` uses the same three-value vocabulary as `terminal`: `success`, `blocked`, `failure`. The
+same states also pass the claim's JSON Schema to the provider, so Claude (`--json-schema`) and
+Codex (`turn/start.outputSchema`) enforce the shape and cannot finish the turn without a valid
+claim. Oh My Pi's RPC mode has no schema lever yet, so an Oh My Pi state relies on the prompt
+instruction alone and reads the claim from the final message text.
 
-Unlike `BLOCKED.md`, a Workflow Claim file lives outside the Run Workspace (in the same per-run
-evidence directory `persistRunEvidence` already writes to), named per attempt the same way
-`prompt.attempt-N.md` is. No git-tracked-file provenance check or workspace-reuse clearing applies
-to it, and it never collides with a managed repository's own files. `BLOCKED.md` remains the
-`artifact_exists`-based sentinel this reinforces, not replaces — see
-ADR-2026-09-23-1400.
+Symphonika reads the last `turn_completed` event — its schema-enforced structured output when the
+provider produced one, otherwise the final message text — and offers the parsed `status` as the
+`claim_status` predicate, compared by strict equality like every other non-artifact predicate.
+Because a missing or malformed claim leaves `claim_status` absent, a transition naming it simply
+does not match. Gate advancing on a positive `claim_status: success` (together with
+`provider_success: true`) and end with a fallback transition, so an agent that never emits a valid
+claim falls through to failure rather than advancing:
+
+```yaml
+transitions:
+  - to: failed
+    when:
+      claim_status: blocked
+  - to: next_state
+    when:
+      claim_status: success
+      provider_success: true
+  - to: failed
+```
+
+A state that does not name `claim_status` is unaffected: its prompt gets no claim section and its
+provider receives no schema. `BLOCKED.md` with `artifact_exists` remains a supported artefact
+sentinel for workflows that prefer it, but Symphonika's own `workflow.yml` and
+`refactor-workflow.yml` use `claim_status` — see ADR-2026-10-02-1909.
 
 ### `wait`
 
@@ -396,7 +409,7 @@ The parser recognizes the following keys:
 | `has_unresolved_reviews` | `true`, `false` | no | always | supported |
 | `unresolved_review_threads` | non-negative integer | no | always | supported, exact count only; a wait transition may only gate on `0` — a positive value fails `workflow validate` (issue #632), use `has_unresolved_reviews: true` |
 | `artifact_exists` | path, or a sequence of paths | yes | yes | supported, existence only |
-| `claim_status` | `success`, `blocked`, `failure` | yes, when a valid Workflow Claim file was written | no | supported, opt-in — see Workflow Claim above; naming it on a `wait`/`merge_pr` state fails `workflow validate`, the same way it does on `close_issue`/`label_issue`/`comment` |
+| `claim_status` | `success`, `blocked`, `failure` | yes, when the final message was a valid Workflow Claim | no | supported, opt-in — see Workflow Claim above; naming it on a `wait`/`merge_pr` state fails `workflow validate`, the same way it does on `close_issue`/`label_issue`/`comment` |
 
 `branch_ahead_of_base` counts commits ahead of `origin/<base_branch>`, not ahead of the commit the
 attempt started from. It is a property of the branch, not of the attempt: in a multi-state walk it
@@ -522,7 +535,6 @@ or executable expressions.
 | `branch` | `name`, `ref` |
 | `run` | `id`, `attempt`, `continuation` |
 | `provider` | `name`, `command` |
-| `claim` | `path` |
 
 Arrays and objects, such as `issue.labels`, render as JSON. A previous-attempt notice and the
 standard autonomy preamble are added outside your prompt file.

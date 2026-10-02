@@ -28,7 +28,7 @@ quality checks.
 
 Commit the refactor separately from the red-team baseline; the next state rejects a branch that
 carries no distinct refactor commit. If the requested structure cannot be reached without changing
-characterized behavior, leave the tests untouched, make no refactor commit, **write `BLOCKED.md`
-in the workspace root** with an explanation of the incompatibility, and exit 0. A Bash tool call's
-`exit 1` only ends that subshell, not the provider session, so it cannot make `provider_success`
-false; the FSM gates this state's advance on `BLOCKED.md` not existing instead.
+characterized behavior, leave the tests untouched, make no refactor commit, and end with a
+`blocked` claim explaining the incompatibility. A Bash tool call's `exit 1` only ends that
+subshell, not the provider session, so the final claim is what the FSM gates this state's advance
+on. Otherwise, end with a `success` claim once the refactor commit is in place.

@@ -8,7 +8,6 @@ import {
   persistRunEvidence,
   renderAutonomousPrompt
 } from "../src/workflow/autonomous-prompt.js";
-import { workflowClaimFilePath } from "../src/workflow/claim.js";
 import { loadExpandedWorkflow } from "../src/workflow/fsm-expansion.js";
 
 const tempRoots: string[] = [];
@@ -158,8 +157,10 @@ describe("autonomous prompt rendering", () => {
     expect(rendered.preambleVersion).toBe(AUTONOMY_PREAMBLE_VERSION);
   });
 
-  it("exposes claim.path pointing at the run evidence directory", () => {
+  it("renders claim instructions after the workflow body, separate from extra instructions", () => {
     const rendered = renderAutonomousPrompt({
+      claimInstructions: "CLAIM CONTRACT",
+      extraInstructions: "REVIEW FOLLOWUP",
       stateRoot: "/state",
       branch: {
         name: "sym/symphonika/7-render-prompts",
@@ -168,8 +169,8 @@ describe("autonomous prompt rendering", () => {
       issue: issueSnapshot(),
       project: { name: "symphonika" },
       provider: { command: DEFAULT_CODEX_COMMAND, name: "codex" },
-      run: { attempt: 2, continuation: false, id: "run-7" },
-      template: "Write your claim to {{claim.path}}.",
+      run: { attempt: 1, continuation: false, id: "run-7" },
+      template: "WORKFLOW BODY",
       workflowPath: "/repo/WORKFLOW.md",
       workspace: {
         path: "/state/workspaces/symphonika/issues/7-render-prompts",
@@ -178,8 +179,12 @@ describe("autonomous prompt rendering", () => {
       }
     });
 
-    expect(rendered.prompt).toContain(
-      `Write your claim to ${workflowClaimFilePath("/state", "run-7", 2)}.`
+    const { prompt } = rendered;
+    expect(prompt.indexOf("REVIEW FOLLOWUP")).toBeLessThan(
+      prompt.indexOf("WORKFLOW BODY")
+    );
+    expect(prompt.indexOf("WORKFLOW BODY")).toBeLessThan(
+      prompt.indexOf("CLAIM CONTRACT")
     );
   });
 

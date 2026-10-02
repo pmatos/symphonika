@@ -87,6 +87,10 @@ import {
   parseWorkflowContract,
   type WorkflowEvidence
 } from "../workflow/contract-loading.js";
+import {
+  WORKFLOW_CLAIM_INSTRUCTIONS,
+  WORKFLOW_CLAIM_JSON_SCHEMA
+} from "../workflow/claim.js";
 import { expandWorkflowDefinition } from "../workflow/fsm-expansion.js";
 import { workflowPredicateEvaluation } from "../workflow/predicates.js";
 import { isIssueContentActionKind } from "../workflow/types.js";
@@ -112,7 +116,7 @@ import {
   probeStateArtifacts,
   statePredicateKeys
 } from "./artifact-probe.js";
-import { probeStateClaim } from "./claim-probe.js";
+import { probeStateClaim, stateGatesOnClaim } from "./claim-probe.js";
 import {
   buildEdgeBudgetExhaustedReason,
   buildNoProgressReason,
@@ -4780,10 +4784,18 @@ export class RunController {
           () => undefined
         );
       const prepared = await input.deadline.race(workspaceOperation);
+      // Only a state that gates on claim_status gets the claim contract:
+      // the schema constrains the provider's final message, which other
+      // agent states must keep free-form.
+      const claimGated =
+        currentState !== undefined && stateGatesOnClaim(currentState);
       started = await input.deadline.race(
         this.startAttempt({
           attemptId,
           attemptNumber: input.attemptNumber,
+          ...(claimGated
+            ? { claimInstructions: WORKFLOW_CLAIM_INSTRUCTIONS }
+            : {}),
           ...(input.extraInstructions === undefined
             ? {}
             : { extraInstructions: input.extraInstructions }),
@@ -4890,6 +4902,7 @@ export class RunController {
         deadline: input.deadline,
         evidence: started.evidence,
         issue: input.issue,
+        ...(claimGated ? { outputSchema: WORKFLOW_CLAIM_JSON_SCHEMA } : {}),
         prompt: started.prompt,
         promptPath: started.promptPath,
         provider: input.provider,
@@ -5035,6 +5048,7 @@ export class RunController {
             branchName: started?.evidence.branchName,
             currentState,
             deferRetryableTransientAdvance,
+            events: runtime.events,
             issue: input.issue,
             project: input.project,
             runId: input.runId,
@@ -5188,6 +5202,7 @@ export class RunController {
   private async startAttempt(input: {
     attemptId: string;
     attemptNumber: number;
+    claimInstructions?: string;
     extraInstructions?: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
@@ -5210,6 +5225,9 @@ export class RunController {
         name: prepared.branchName,
         ref: prepared.branchRef
       },
+      ...(input.claimInstructions === undefined
+        ? {}
+        : { claimInstructions: input.claimInstructions }),
       ...(input.extraInstructions === undefined
         ? {}
         : { extraInstructions: input.extraInstructions }),
@@ -5281,6 +5299,7 @@ export class RunController {
     branchName: string | undefined;
     currentState: ExpandedWorkflowState;
     deferRetryableTransientAdvance?: boolean;
+    events: readonly NormalizedProviderEvent[];
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
     runId: string;
@@ -5288,19 +5307,14 @@ export class RunController {
     workflow: ExpandedWorkflow;
     workspacePath: string | undefined;
   }): Promise<WorkflowOutcomeResult> {
-    const [artifactExists, claimStatus] = await Promise.all([
-      probeStateArtifacts({
-        state: input.currentState,
-        workspacePath: input.workspacePath
-      }),
-      probeStateClaim({
-        attemptNumber: input.attemptNumber,
-        logger: this.logger,
-        runId: input.runId,
-        state: input.currentState,
-        stateRoot: this.stateRoot
-      })
-    ]);
+    const artifactExists = await probeStateArtifacts({
+      state: input.currentState,
+      workspacePath: input.workspacePath
+    });
+    const claimStatus = probeStateClaim({
+      events: input.events,
+      state: input.currentState
+    });
     const signals = signalsFromTerminal(input.terminal);
     if (claimStatus !== undefined) {
       signals.claim_status = claimStatus;
@@ -5477,6 +5491,7 @@ export class RunController {
     deadline: RunSlotDeadline;
     evidence: AttemptEvidence;
     issue: IssueSnapshot;
+    outputSchema?: object;
     prompt: string;
     promptPath: string;
     provider: AgentProvider;
@@ -5524,6 +5539,9 @@ export class RunController {
         branchName: input.evidence.branchName,
         ...(globalMaxInFlight === undefined ? {} : { globalMaxInFlight }),
         issue: input.issue,
+        ...(input.outputSchema === undefined
+          ? {}
+          : { outputSchema: input.outputSchema }),
         prompt: input.prompt,
         promptPath: input.promptPath,
         provider: {

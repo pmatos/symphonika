@@ -25,7 +25,7 @@ rather than as success.
 **The Workflow Claim is the agent's final message, not a file.** A state that names `claim_status`:
 
 - receives a shared "Final claim" instruction section (`WORKFLOW_CLAIM_INSTRUCTIONS`,
-  `src/workflow/claim.ts`) appended to its rendered prompt, so the wording cannot drift between the
+  `src/workflow/claim.ts`) added to its rendered prompt (through the `extraInstructions` channel, so it precedes the workflow body), so the wording cannot drift between the
   seven prompt files;
 - has `WORKFLOW_CLAIM_JSON_SCHEMA` passed to the provider as `outputSchema` for that attempt only;
   states that do not name `claim_status` keep a free-form final message and no schema;

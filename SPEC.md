@@ -673,8 +673,8 @@ Symphonika prepends a standard autonomy preamble to every rendered workflow prom
 
 An agent state whose predicates name `claim_status` gates on a Workflow Claim: a `{status, summary}`
 object, `status` sharing `terminal`'s vocabulary (`success`/`blocked`/`failure`), that the agent
-emits as its final message. For such a state Symphonika appends a "Final claim" section to the
-rendered prompt and passes the claim's JSON Schema to the provider (Claude `--json-schema`, Codex
+emits as its final message. For such a state Symphonika adds a "Final claim" section to the
+rendered prompt, ahead of the workflow prompt body, and passes the claim's JSON Schema to the provider (Claude `--json-schema`, Codex
 `turn/start.outputSchema`); Oh My Pi's RPC mode has no schema lever, so its claim relies on the
 prompt instruction alone. After the provider exits, Symphonika reads the last `turn_completed`
 event — its schema-enforced structured output when present, otherwise the final message text,

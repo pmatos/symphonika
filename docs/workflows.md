@@ -246,7 +246,7 @@ produced when a `wait` or `merge_pr` state polls GitHub.
 
 An agent state whose predicates name `claim_status` gates on the agent's own terminal verdict,
 carried by its final message rather than a sentinel file. For such a state Symphonika appends a
-standard "Final claim" section to the rendered prompt, instructing the agent to end with a single
+standard "Final claim" section to the rendered prompt (ahead of the workflow prompt body), instructing the agent to end with a single
 bare JSON object:
 
 ```json

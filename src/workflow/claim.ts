@@ -44,7 +44,7 @@ export const WORKFLOW_CLAIM_INSTRUCTIONS = [
   "- `blocked`: you could not make progress and a human or an external change is needed (for example the failure requires a product decision). Explain what blocked you and what would unblock it in `summary`.",
   "- `failure`: you attempted the task and it did not work.",
   "",
-  "This claim is what the workflow gates this state's advance on. A final message that is not exactly this JSON object is treated as a failure, so never omit it."
+  "This claim is what the workflow gates this state's advance on. It applies on top of the operating contract: when you cannot proceed, still post the explanatory comment, but then end with a `blocked` claim rather than exiting with prose. A final message that is not exactly this JSON object is treated as a failure, so never omit it."
 ].join("\n");
 
 // A leading BOM is stripped first: a shell redirect or editor can prepend one

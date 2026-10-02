@@ -57,6 +57,11 @@ import { probeProviderCommand } from "./provider-probe.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { RoutineExecutionOverrides } from "./routines/types.js";
+import {
+  type GhAuthTokenReader,
+  readGhAuthToken,
+  withGhAuthTokenFallback
+} from "./gh-auth-token.js";
 import { unitEnvironmentFilePath, userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
@@ -94,6 +99,9 @@ export type DoctorOptions = {
   // Skip network-backed checks while retaining local executable, profile,
   // and installed-unit checks. Intended for CI and scripted JSON snapshots.
   offline?: boolean;
+  // Reads `gh auth token` when GITHUB_TOKEN is unset. Defaults to the real gh
+  // CLI only when env is process.env; an injected env never shells out.
+  ghAuthToken?: GhAuthTokenReader;
 };
 
 type DoctorLiveCheckReport = {
@@ -472,7 +480,19 @@ export async function runDoctor(
   options: DoctorOptions = {}
 ): Promise<DoctorReport> {
   const cwd = options.cwd ?? process.cwd();
-  const env = options.env ?? process.env;
+  const ghAuthToken =
+    options.ghAuthToken ??
+    (options.env === undefined ? readGhAuthToken : undefined);
+  const baseEnv = options.env ?? process.env;
+  const ghFallback =
+    ghAuthToken === undefined
+      ? { env: baseEnv, ghTokenUsed: false }
+      : await withGhAuthTokenFallback(baseEnv, ghAuthToken);
+  const env = ghFallback.env;
+  const ghTokenMissing =
+    ghAuthToken !== undefined &&
+    !ghFallback.ghTokenUsed &&
+    (baseEnv.GITHUB_TOKEN === undefined || baseEnv.GITHUB_TOKEN.length === 0);
   const resolvedConfig = resolveServiceConfigPath({
     ...withConfigPath(options.configPath),
     cwd,
@@ -514,6 +534,11 @@ export async function runDoctor(
   errors.push(...hostEnvironment.errors);
   warnings.push(...execStartLiveness.warnings);
   warnings.push(...hostEnvironment.warnings);
+  if (ghTokenMissing) {
+    warnings.push(
+      "GITHUB_TOKEN is unset and `gh auth token` returned no token; run `gh auth login` or export GITHUB_TOKEN"
+    );
+  }
   const rawConfig = await readConfig(configPath, errors);
 
   if (rawConfig === undefined) {

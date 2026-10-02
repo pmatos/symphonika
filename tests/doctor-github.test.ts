@@ -176,6 +176,98 @@ describe("GitHub Project validation", () => {
     );
   });
 
+  describe("gh auth token fallback", () => {
+    const labels = [
+      "agent-ready",
+      "sym:claimed",
+      "sym:running",
+      "sym:failed",
+      "sym:blocked",
+      "sym:stale",
+      "sym:human-needed"
+    ];
+
+    async function runWithoutGithubToken(
+      ghAuthToken: () => Promise<string | undefined>
+    ) {
+      const root = await makeTempRoot();
+      await writeValidProject(root);
+      const githubApi: GitHubApi = {
+        createLabel: vi.fn(),
+        listLabels: vi.fn().mockResolvedValue(labels),
+        validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+      };
+      const env = doctorTestEnv(root);
+      delete env.GITHUB_TOKEN;
+      const report = await runDoctor({
+        agentProviders: fakeAgentProviders(),
+        configPath: "symphonika.yml",
+        cwd: root,
+        env,
+        ghAuthToken,
+        githubApi,
+        homeDir: root,
+        offline: true
+      });
+      return { githubApi, report };
+    }
+
+    it("uses the token from gh auth token when GITHUB_TOKEN is unset", async () => {
+      const { githubApi, report } = await runWithoutGithubToken(() =>
+        Promise.resolve("gh-token")
+      );
+
+      expect(report.ok).toBe(true);
+      expect(report.warnings.join("\n")).not.toContain("gh auth token");
+      expect(githubApi.listLabels).toHaveBeenCalledWith({
+        owner: "pmatos",
+        repo: "symphonika",
+        token: "gh-token"
+      });
+    });
+
+    it("warns and reports the unset variable when gh auth token yields nothing", async () => {
+      const { report } = await runWithoutGithubToken(() =>
+        Promise.resolve(undefined)
+      );
+
+      expect(report.ok).toBe(false);
+      expect(report.warnings).toContain(
+        "GITHUB_TOKEN is unset and `gh auth token` returned no token; run `gh auth login` or export GITHUB_TOKEN"
+      );
+      expect(report.errors).toContain(
+        "projects.symphonika.tracker.token references unset environment variable $GITHUB_TOKEN"
+      );
+    });
+
+    it("prefers GITHUB_TOKEN over gh auth token", async () => {
+      const root = await makeTempRoot();
+      await writeValidProject(root);
+      const ghAuthToken = vi.fn().mockResolvedValue("gh-token");
+      const githubApi: GitHubApi = {
+        createLabel: vi.fn(),
+        listLabels: vi.fn().mockResolvedValue(labels),
+        validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+      };
+
+      await runDoctor({
+        agentProviders: fakeAgentProviders(),
+        configPath: "symphonika.yml",
+        cwd: root,
+        env: doctorTestEnv(root, { GITHUB_TOKEN: "env-token" }),
+        ghAuthToken,
+        githubApi,
+        homeDir: root,
+        offline: true
+      });
+
+      expect(ghAuthToken).not.toHaveBeenCalled();
+      expect(githubApi.listLabels).toHaveBeenCalledWith(
+        expect.objectContaining({ token: "env-token" })
+      );
+    });
+  });
+
   it("marks a Project valid for dispatch when operational and required eligibility labels are present", async () => {
     const root = await makeTempRoot();
     await writeValidProject(root);

@@ -116,7 +116,7 @@ import {
   probeStateArtifacts,
   statePredicateKeys
 } from "./artifact-probe.js";
-import { probeStateClaim } from "./claim-probe.js";
+import { probeStateClaim, stateGatesOnClaim } from "./claim-probe.js";
 import {
   buildEdgeBudgetExhaustedReason,
   buildNoProgressReason,
@@ -4788,19 +4788,17 @@ export class RunController {
       // the schema constrains the provider's final message, which other
       // agent states must keep free-form.
       const claimGated =
-        currentState !== undefined &&
-        statePredicateKeys(currentState).has("claim_status");
-      const extraInstructions = [
-        input.extraInstructions,
-        claimGated ? WORKFLOW_CLAIM_INSTRUCTIONS : undefined
-      ]
-        .filter((section) => section !== undefined)
-        .join("\n\n");
+        currentState !== undefined && stateGatesOnClaim(currentState);
       started = await input.deadline.race(
         this.startAttempt({
           attemptId,
           attemptNumber: input.attemptNumber,
-          ...(extraInstructions === "" ? {} : { extraInstructions }),
+          ...(claimGated
+            ? { claimInstructions: WORKFLOW_CLAIM_INSTRUCTIONS }
+            : {}),
+          ...(input.extraInstructions === undefined
+            ? {}
+            : { extraInstructions: input.extraInstructions }),
           isContinuation: input.isContinuation,
           issue: input.issue,
           prepared,
@@ -5204,6 +5202,7 @@ export class RunController {
   private async startAttempt(input: {
     attemptId: string;
     attemptNumber: number;
+    claimInstructions?: string;
     extraInstructions?: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
@@ -5226,6 +5225,9 @@ export class RunController {
         name: prepared.branchName,
         ref: prepared.branchRef
       },
+      ...(input.claimInstructions === undefined
+        ? {}
+        : { claimInstructions: input.claimInstructions }),
       ...(input.extraInstructions === undefined
         ? {}
         : { extraInstructions: input.extraInstructions }),

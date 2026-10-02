@@ -41,6 +41,7 @@ type PromptProvider = {
 
 export type RenderAutonomousPromptInput = {
   branch: PromptBranch;
+  claimInstructions?: string;
   extraInstructions?: string;
   issue: IssueSnapshot;
   project: PromptProject;
@@ -156,7 +157,8 @@ export function renderAutonomousPrompt(
       AUTONOMY_PREAMBLE,
       previousAttemptNotice(input.workspace),
       input.extraInstructions ?? "",
-      renderedWorkflow
+      renderedWorkflow,
+      input.claimInstructions ?? ""
     ]
       .filter((section) => section.length > 0)
       .join("\n"),
@@ -223,6 +225,7 @@ export async function persistRunEvidence(
     provider: input.provider,
     run: input.run,
     extra_instructions: input.extraInstructions !== undefined,
+    ...(input.claimInstructions === undefined ? {} : { claim_contract: true }),
     workspace: input.workspace,
     workflow: {
       content_hash: input.renderedPrompt.workflowContentHash,

@@ -25,13 +25,13 @@ rather than as success.
 **The Workflow Claim is the agent's final message, not a file.** A state that names `claim_status`:
 
 - receives a shared "Final claim" instruction section (`WORKFLOW_CLAIM_INSTRUCTIONS`,
-  `src/workflow/claim.ts`) added to its rendered prompt (through the `extraInstructions` channel, so it precedes the workflow body), so the wording cannot drift between the
+  `src/workflow/claim.ts`) added to its rendered prompt after the workflow body, through its own `claimInstructions` slot rather than the review-only `extraInstructions` channel, so the wording cannot drift between the
   seven prompt files;
 - has `WORKFLOW_CLAIM_JSON_SCHEMA` passed to the provider as `outputSchema` for that attempt only;
   states that do not name `claim_status` keep a free-form final message and no schema;
 - is evaluated from the last `turn_completed` event: its `structuredOutput` when the provider
-  produced one, otherwise the final message text (`parseWorkflowClaim`, mirroring
-  `parseRoutineOutcomeClaim`). The events are the in-memory `runtime.events` of the attempt;
+  produced one, otherwise the final message text (`parseWorkflowClaim`, sharing
+  `parseFinalMessageClaim` with `parseRoutineOutcomeClaim`). The events are the in-memory `runtime.events` of the attempt;
   `applyWorkflowOutcome` has one caller, so no persisted-log path is needed.
 
 **Oh My Pi relies on the prompt alone.** OMP's RPC mode exposes no response-schema lever (its

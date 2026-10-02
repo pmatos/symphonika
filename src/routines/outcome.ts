@@ -4,6 +4,7 @@ import type { FileHandle } from "node:fs/promises";
 import type { Logger } from "pino";
 import { z } from "zod";
 
+import { parseClaimText, parseFinalMessageClaim } from "../claim-parsing.js";
 import { sameIssueRepository } from "../issue-polling.js";
 import type {
   AgentProviderName,
@@ -107,52 +108,20 @@ export type ReconcileRoutineOutcomeInput = {
   terminalState: "succeeded" | "failed" | "cancelled";
 };
 
-function parseRoutineOutcomeClaimCandidate(
-  candidate: unknown
-): RoutineOutcomeClaim | null {
-  const parsed = routineOutcomeClaimSchema.safeParse(candidate);
-  return parsed.success ? parsed.data : null;
-}
-
 // Shared by the message-based turn_completed claim and the file-based claim
-// (#759) — both are agent-authored JSON text validated against the same
+// (#759) -- both are agent-authored JSON text validated against the same
 // schema, so a malformed or schema-invalid claim is treated as absent
-// identically on either channel. A leading BOM is stripped first: an editor
-// or shell redirect can prepend one to a file an agent writes, and
-// JSON.parse otherwise rejects an otherwise well-formed claim outright.
+// identically on either channel.
 export function parseRoutineOutcomeClaimText(
   text: string
 ): RoutineOutcomeClaim | null {
-  const unprefixed = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-  let candidate: unknown;
-  try {
-    candidate = JSON.parse(unprefixed);
-  } catch {
-    return null;
-  }
-  return parseRoutineOutcomeClaimCandidate(candidate);
+  return parseClaimText(text, routineOutcomeClaimSchema);
 }
 
 export function parseRoutineOutcomeClaim(
   events: NormalizedProviderEvent[]
 ): RoutineOutcomeClaim | null {
-  let completed: NormalizedProviderEvent | undefined;
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (events[index]?.type === "turn_completed") {
-      completed = events[index];
-      break;
-    }
-  }
-  if (completed === undefined) {
-    return null;
-  }
-  if (completed.structuredOutput !== undefined) {
-    return parseRoutineOutcomeClaimCandidate(completed.structuredOutput);
-  }
-  if (typeof completed.result === "string") {
-    return parseRoutineOutcomeClaimText(completed.result);
-  }
-  return null;
+  return parseFinalMessageClaim(events, routineOutcomeClaimSchema);
 }
 
 function errorMessage(error: unknown): string {

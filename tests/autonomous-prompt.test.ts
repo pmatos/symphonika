@@ -157,6 +157,37 @@ describe("autonomous prompt rendering", () => {
     expect(rendered.preambleVersion).toBe(AUTONOMY_PREAMBLE_VERSION);
   });
 
+  it("renders claim instructions after the workflow body, separate from extra instructions", () => {
+    const rendered = renderAutonomousPrompt({
+      claimInstructions: "CLAIM CONTRACT",
+      extraInstructions: "REVIEW FOLLOWUP",
+      stateRoot: "/state",
+      branch: {
+        name: "sym/symphonika/7-render-prompts",
+        ref: "refs/heads/sym/symphonika/7-render-prompts"
+      },
+      issue: issueSnapshot(),
+      project: { name: "symphonika" },
+      provider: { command: DEFAULT_CODEX_COMMAND, name: "codex" },
+      run: { attempt: 1, continuation: false, id: "run-7" },
+      template: "WORKFLOW BODY",
+      workflowPath: "/repo/WORKFLOW.md",
+      workspace: {
+        path: "/state/workspaces/symphonika/issues/7-render-prompts",
+        previous_attempt: false,
+        root: "/state/workspaces/symphonika"
+      }
+    });
+
+    const { prompt } = rendered;
+    expect(prompt.indexOf("REVIEW FOLLOWUP")).toBeLessThan(
+      prompt.indexOf("WORKFLOW BODY")
+    );
+    expect(prompt.indexOf("WORKFLOW BODY")).toBeLessThan(
+      prompt.indexOf("CLAIM CONTRACT")
+    );
+  });
+
   it("fails rendering when the workflow references an unknown variable", () => {
     expect(() =>
       renderAutonomousPrompt({

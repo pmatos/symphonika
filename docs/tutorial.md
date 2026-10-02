@@ -57,8 +57,9 @@ You need:
    export GITHUB_TOKEN=ghp_xxx...
    ```
 
-   `symphonika doctor` falls back to `gh auth token` when `GITHUB_TOKEN` is unset, and warns
-   only if neither yields a token. The daemon still reads `GITHUB_TOKEN` from its environment.
+   When a Project's `tracker.token` is `$GITHUB_TOKEN` and it is unset, `symphonika doctor`
+   (online runs only) falls back to `gh auth token` for GitHub API checks, and warns if neither
+   yields a token. Other commands and the daemon still read `GITHUB_TOKEN` from their environment.
 
 4. **Local `git` and `gh`.** The agent uses `gh` for every GitHub mutation; if it
    is missing or unauthenticated, the workflow contract cannot post comments or

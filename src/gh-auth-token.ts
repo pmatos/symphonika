@@ -1,32 +1,21 @@
-import { execFile } from "node:child_process";
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFile = promisify(execFileCallback);
 
 const GH_AUTH_TOKEN_TIMEOUT_MS = 5_000;
 
 export type GhAuthTokenReader = () => Promise<string | undefined>;
 
-export const readGhAuthToken: GhAuthTokenReader = () =>
-  new Promise((resolve) => {
-    execFile(
+export const readGhAuthToken: GhAuthTokenReader = async () => {
+  try {
+    const { stdout } = await execFile(
       "gh",
-      ["auth", "token"],
-      { timeout: GH_AUTH_TOKEN_TIMEOUT_MS },
-      (error, stdout) => {
-        const token = error === null ? stdout.trim() : "";
-        resolve(token.length > 0 ? token : undefined);
-      }
+      ["auth", "token", "--hostname", "github.com"],
+      { timeout: GH_AUTH_TOKEN_TIMEOUT_MS }
     );
-  });
-
-export async function withGhAuthTokenFallback(
-  env: NodeJS.ProcessEnv,
-  readToken: GhAuthTokenReader = readGhAuthToken
-): Promise<{ env: NodeJS.ProcessEnv; ghTokenUsed: boolean }> {
-  if (env.GITHUB_TOKEN !== undefined && env.GITHUB_TOKEN.length > 0) {
-    return { env, ghTokenUsed: false };
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
   }
-  const token = await readToken();
-  if (token === undefined) {
-    return { env, ghTokenUsed: false };
-  }
-  return { env: { ...env, GITHUB_TOKEN: token }, ghTokenUsed: true };
-}
+};

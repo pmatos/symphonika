@@ -57,11 +57,7 @@ import { probeProviderCommand } from "./provider-probe.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { RoutineExecutionOverrides } from "./routines/types.js";
-import {
-  type GhAuthTokenReader,
-  readGhAuthToken,
-  withGhAuthTokenFallback
-} from "./gh-auth-token.js";
+import { type GhAuthTokenReader, readGhAuthToken } from "./gh-auth-token.js";
 import { unitEnvironmentFilePath, userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
@@ -480,19 +476,7 @@ export async function runDoctor(
   options: DoctorOptions = {}
 ): Promise<DoctorReport> {
   const cwd = options.cwd ?? process.cwd();
-  const ghAuthToken =
-    options.ghAuthToken ??
-    (options.env === undefined ? readGhAuthToken : undefined);
-  const baseEnv = options.env ?? process.env;
-  const ghFallback =
-    ghAuthToken === undefined
-      ? { env: baseEnv, ghTokenUsed: false }
-      : await withGhAuthTokenFallback(baseEnv, ghAuthToken);
-  const env = ghFallback.env;
-  const ghTokenMissing =
-    ghAuthToken !== undefined &&
-    !ghFallback.ghTokenUsed &&
-    (baseEnv.GITHUB_TOKEN === undefined || baseEnv.GITHUB_TOKEN.length === 0);
+  const env = options.env ?? process.env;
   const resolvedConfig = resolveServiceConfigPath({
     ...withConfigPath(options.configPath),
     cwd,
@@ -534,11 +518,6 @@ export async function runDoctor(
   errors.push(...hostEnvironment.errors);
   warnings.push(...execStartLiveness.warnings);
   warnings.push(...hostEnvironment.warnings);
-  if (ghTokenMissing) {
-    warnings.push(
-      "GITHUB_TOKEN is unset and `gh auth token` returned no token; run `gh auth login` or export GITHUB_TOKEN"
-    );
-  }
   const rawConfig = await readConfig(configPath, errors);
 
   if (rawConfig === undefined) {
@@ -552,6 +531,23 @@ export async function runDoctor(
   if (parsedConfig === undefined) {
     return report({ configPath, environment, errors, projects, warnings });
   }
+
+  // Start `gh auth token` now so it overlaps the checks below; the token is
+  // only needed once Projects are validated.
+  const ghAuthToken =
+    options.ghAuthToken ??
+    (options.env === undefined ? readGhAuthToken : undefined);
+  const ghTokenRead =
+    ghAuthToken !== undefined &&
+    options.offline !== true &&
+    (env.GITHUB_TOKEN ?? "") === "" &&
+    parsedConfig.projects.some(
+      (project) =>
+        project.tracker !== undefined &&
+        envReferenceName(project.tracker.token) === "GITHUB_TOKEN"
+    )
+      ? ghAuthToken()
+      : undefined;
 
   const [buildMemoryWarnings, configuredEnvironment] = await Promise.all([
     serviceContent !== undefined
@@ -595,12 +591,21 @@ export async function runDoctor(
     );
   }
 
+  const ghToken = await ghTokenRead;
+  const trackerEnv =
+    ghToken === undefined ? env : { ...env, GITHUB_TOKEN: ghToken };
+  if (ghTokenRead !== undefined && ghToken === undefined) {
+    warnings.push(
+      "GITHUB_TOKEN is unset and `gh auth token` returned no token; run `gh auth login` or export GITHUB_TOKEN"
+    );
+  }
+
   for (const project of parsedConfig.projects) {
     const validation = await validateProject(
       project,
       parsedConfig,
       agentProviders,
-      env,
+      trackerEnv,
       errors,
       githubApi
     );
@@ -639,7 +644,11 @@ export async function runDoctor(
         ))
       );
     }
-    const staleIssues = await fetchStaleIssues(project, env, githubIssuesApi);
+    const staleIssues = await fetchStaleIssues(
+      project,
+      trackerEnv,
+      githubIssuesApi
+    );
     projects.push({
       ...validation,
       mode: "dispatch",

@@ -1,22 +1,24 @@
 import Database from "better-sqlite3";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
-import type { AgentProvider, ProviderEvent } from "../src/provider.js";
+import type {
+  AgentProvider,
+  ProviderEvent,
+  ProviderRunInput
+} from "../src/provider.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
-import { workflowClaimFilePath } from "../src/workflow/claim.js";
+import { WORKFLOW_CLAIM_JSON_SCHEMA } from "../src/workflow/claim.js";
 import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
 
-// Issue #776: claim_status generalizes the Routine Outcome Claim pattern
-// (#759/PR #775) to raw-FSM Workflow terminal-state signaling, reinforcing
-// (not replacing) BLOCKED.md -- an agent state may opt in by naming
-// claim_status in its predicates, and Symphonika reads a structured JSON
-// claim back from the run evidence directory (outside the workspace) after
-// the provider exits.
+// Issue #813: claim_status gates an agent state on the provider's final
+// message -- schema-enforced structured output on Claude/Codex, the bare JSON
+// message text on Oh My Pi -- replacing the BLOCKED.md sentinel. A missing or
+// invalid claim must fail closed rather than read as success.
 
 const tempRoots: string[] = [];
 const DEFAULT_CODEX_COMMAND =
@@ -75,7 +77,10 @@ function preparedWorkspaceFixture(root: string): PreparedIssueWorkspace {
   };
 }
 
-async function writeProject(root: string): Promise<void> {
+async function writeProject(
+  root: string,
+  options: { claimGated: boolean } = { claimGated: true }
+): Promise<void> {
   await writeFile(
     path.join(root, "symphonika.yml"),
     [
@@ -128,13 +133,23 @@ async function writeProject(root: string): Promise<void> {
       "        provider: codex",
       "        prompt: work-prompt.md",
       "      transitions:",
-      "        - to: blocked_terminal",
-      "          when:",
-      "            claim_status: blocked",
-      "        - to: done",
-      "          when:",
-      "            provider_success: true",
-      "        - to: failed",
+      ...(options.claimGated
+        ? [
+            "        - to: blocked_terminal",
+            "          when:",
+            "            claim_status: blocked",
+            "        - to: done",
+            "          when:",
+            "            claim_status: success",
+            "            provider_success: true",
+            "        - to: failed"
+          ]
+        : [
+            "        - to: done",
+            "          when:",
+            "            provider_success: true",
+            "        - to: failed"
+          ]),
       "    done:",
       "      terminal: success",
       "    blocked_terminal:",
@@ -146,7 +161,7 @@ async function writeProject(root: string): Promise<void> {
   );
   await writeFile(
     path.join(root, "work-prompt.md"),
-    "Do the work for #{{issue.number}}. Write your claim to {{claim.path}}.\n"
+    "Do the work for #{{issue.number}}.\n"
   );
 }
 
@@ -222,27 +237,23 @@ async function runUntilTerminal(
   }
 }
 
-// The fake provider can't know the real runEvidenceDirectory ahead of the
-// daemon assigning one -- unlike BLOCKED.md's fixed workspace-relative path,
-// the claim path is outside the workspace and keyed by the run id. Injecting
-// a deterministic createRunId lets the test precompute the same path
-// workflowClaimFilePath derives inside the running daemon.
-function providerWritingDeterministicClaim(
-  root: string,
-  claim: { status: string; summary: string } | undefined
+type FinalTurn = Record<string, unknown> | undefined;
+
+function providerEndingWith(
+  finalTurn: FinalTurn,
+  inputs: ProviderRunInput[]
 ): AgentProvider {
-  const claimPath = workflowClaimFilePath(
-    path.join(root, ".symphonika"),
-    DETERMINISTIC_RUN_ID,
-    1
-  );
   return {
     cancel: vi.fn().mockResolvedValue(undefined),
     name: "codex",
-    async *runAttempt(): AsyncGenerator<ProviderEvent> {
-      if (claim !== undefined) {
-        await mkdir(path.dirname(claimPath), { recursive: true });
-        await writeFile(claimPath, JSON.stringify(claim));
+    // eslint-disable-next-line @typescript-eslint/require-await
+    async *runAttempt(input: ProviderRunInput): AsyncGenerator<ProviderEvent> {
+      inputs.push(input);
+      if (finalTurn !== undefined) {
+        yield {
+          normalized: { type: "turn_completed", ...finalTurn },
+          raw: { kind: "turn_completed" }
+        };
       }
       yield {
         normalized: { exitCode: 0, type: "process_exit" },
@@ -253,59 +264,100 @@ function providerWritingDeterministicClaim(
   };
 }
 
-describe("claim_status gates an agent state's transition (issue #776)", () => {
-  it("routes to the blocked terminal when the provider writes a blocked claim.json and exits 0", async () => {
-    const root = await makeTempRoot();
-    const prepared = preparedWorkspaceFixture(root);
-    await createGitWorkspaceAhead(prepared);
-    await writeProject(root);
-
-    const run = await runUntilTerminal(
-      root,
-      providerWritingDeterministicClaim(root, {
-        status: "blocked",
-        summary: "No open PR found for this branch."
-      }),
-      prepared
-    );
-
-    expect(run.state).toBe("blocked");
-    expect(run.terminal_state_id).toBe("blocked_terminal");
-
-    // Proves the path the agent was told to write to is the same path
-    // Symphonika read back -- through the real startAttempt ->
-    // applyWorkflowOutcome pipeline, not just a shared test-side constant.
-    const promptPath = path.join(
+async function runWith(
+  finalTurn: FinalTurn,
+  options?: { claimGated: boolean }
+): Promise<{
+  inputs: ProviderRunInput[];
+  prompt: string;
+  root: string;
+  run: RunRow;
+}> {
+  const root = await makeTempRoot();
+  const prepared = preparedWorkspaceFixture(root);
+  await createGitWorkspaceAhead(prepared);
+  await writeProject(root, options);
+  const inputs: ProviderRunInput[] = [];
+  const run = await runUntilTerminal(
+    root,
+    providerEndingWith(finalTurn, inputs),
+    prepared
+  );
+  const prompt = await readFile(
+    path.join(
       root,
       ".symphonika",
       "logs",
       "runs",
       DETERMINISTIC_RUN_ID,
       "prompt.md"
-    );
-    const prompt = await readFile(promptPath, "utf8");
-    expect(prompt).toContain(
-      workflowClaimFilePath(
-        path.join(root, ".symphonika"),
-        DETERMINISTIC_RUN_ID,
-        1
-      )
-    );
+    ),
+    "utf8"
+  );
+  return { inputs, prompt, root, run };
+}
+
+describe("claim_status gates an agent state's transition (issue #813)", () => {
+  it("routes to the blocked terminal on a blocked structuredOutput claim, and asks the provider for the claim schema", async () => {
+    const { inputs, prompt, run } = await runWith({
+      structuredOutput: {
+        status: "blocked",
+        summary: "No open PR found for this branch."
+      }
+    });
+
+    expect(run.state).toBe("blocked");
+    expect(run.terminal_state_id).toBe("blocked_terminal");
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]?.outputSchema).toEqual(WORKFLOW_CLAIM_JSON_SCHEMA);
+    expect(prompt).toContain("## Final claim");
   });
 
-  it("advances normally when no claim file is written", async () => {
-    const root = await makeTempRoot();
-    const prepared = preparedWorkspaceFixture(root);
-    await createGitWorkspaceAhead(prepared);
-    await writeProject(root);
+  it("reads a bare-JSON final message when the provider has no structured output (Oh My Pi)", async () => {
+    const { run } = await runWith({
+      result: JSON.stringify({ status: "blocked", summary: "Cannot proceed." })
+    });
 
-    const run = await runUntilTerminal(
-      root,
-      providerWritingDeterministicClaim(root, undefined),
-      prepared
-    );
+    expect(run.state).toBe("blocked");
+    expect(run.terminal_state_id).toBe("blocked_terminal");
+  });
+
+  it("advances on a success claim", async () => {
+    const { run } = await runWith({
+      structuredOutput: { status: "success", summary: "All done." }
+    });
 
     expect(run.state).toBe("succeeded");
     expect(run.terminal_state_id).toBe("done");
+  });
+
+  it("fails closed when the final message is not a claim", async () => {
+    const { run } = await runWith({ result: "All done, nothing to report." });
+
+    expect(run.terminal_state_id).toBe("failed");
+  });
+
+  it("fails closed when the run emits no turn_completed at all", async () => {
+    const { run } = await runWith(undefined);
+
+    expect(run.terminal_state_id).toBe("failed");
+  });
+
+  it("fails closed on a failure claim even though the provider exited 0", async () => {
+    const { run } = await runWith({
+      structuredOutput: { status: "failure", summary: "Tests still red." }
+    });
+
+    expect(run.terminal_state_id).toBe("failed");
+  });
+
+  it("leaves a state that does not name claim_status unconstrained", async () => {
+    const { inputs, prompt, run } = await runWith(undefined, {
+      claimGated: false
+    });
+
+    expect(run.terminal_state_id).toBe("done");
+    expect(inputs[0]?.outputSchema).toBeUndefined();
+    expect(prompt).not.toContain("## Final claim");
   });
 });

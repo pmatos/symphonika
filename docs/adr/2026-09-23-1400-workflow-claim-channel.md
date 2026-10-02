@@ -1,6 +1,6 @@
 # A file-based Workflow Claim channel, reinforcing (not replacing) BLOCKED.md
 
-Status: Accepted
+Status: Superseded by ADR-2026-10-02-1909 (the claim file channel and `{{claim.path}}`; the `claim_status` predicate itself stays)
 
 ## Context
 

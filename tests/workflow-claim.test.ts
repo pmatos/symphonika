@@ -1,12 +1,10 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
+import type { NormalizedProviderEvent } from "../src/provider.js";
 import {
+  parseWorkflowClaim,
   parseWorkflowClaimText,
-  readWorkflowClaimFile,
-  workflowClaimFilePath
+  WORKFLOW_CLAIM_JSON_SCHEMA
 } from "../src/workflow/claim.js";
 
 describe("parseWorkflowClaimText", () => {
@@ -61,74 +59,84 @@ describe("parseWorkflowClaimText", () => {
   });
 });
 
-describe("workflowClaimFilePath", () => {
-  it("names the first attempt's claim file without a suffix", () => {
-    expect(workflowClaimFilePath("/state-root", "run-1", 1)).toBe(
-      path.join("/state-root", "logs", "runs", "run-1", "claim.json")
-    );
+describe("parseWorkflowClaim", () => {
+  const claim = { status: "blocked", summary: "No open PR found." } as const;
+
+  function completed(fields: Record<string, unknown>): NormalizedProviderEvent {
+    return { type: "turn_completed", ...fields };
+  }
+
+  it("prefers structuredOutput over the result text", () => {
+    const events = [
+      completed({
+        result: JSON.stringify({ status: "success", summary: "ignored" }),
+        structuredOutput: claim
+      })
+    ];
+
+    expect(parseWorkflowClaim(events)).toEqual(claim);
   });
 
-  it("suffixes retries by attempt number", () => {
-    expect(workflowClaimFilePath("/state-root", "run-1", 2)).toBe(
-      path.join("/state-root", "logs", "runs", "run-1", "claim.attempt-2.json")
-    );
+  it("falls back to parsing the final message text when there is no structuredOutput", () => {
+    const events = [completed({ result: JSON.stringify(claim) })];
+
+    expect(parseWorkflowClaim(events)).toEqual(claim);
+  });
+
+  it("reads the last turn_completed event", () => {
+    const events = [
+      completed({
+        result: JSON.stringify({ status: "failure", summary: "a" })
+      }),
+      { type: "progress" } as NormalizedProviderEvent,
+      completed({ result: JSON.stringify(claim) })
+    ];
+
+    expect(parseWorkflowClaim(events)).toEqual(claim);
+  });
+
+  it("returns null when the final message is prose", () => {
+    const events = [completed({ result: "All done, nothing to report." })];
+
+    expect(parseWorkflowClaim(events)).toBeNull();
+  });
+
+  it("returns null when structuredOutput is schema-invalid, without falling back to the text", () => {
+    const events = [
+      completed({
+        result: JSON.stringify(claim),
+        structuredOutput: { status: "done", summary: "x" }
+      })
+    ];
+
+    expect(parseWorkflowClaim(events)).toBeNull();
+  });
+
+  it("returns null when there is no turn_completed event", () => {
+    expect(parseWorkflowClaim([{ type: "process_exit" }])).toBeNull();
+    expect(parseWorkflowClaim([])).toBeNull();
+  });
+
+  it("returns null when the last turn_completed carries no text", () => {
+    const events = [
+      completed({ result: JSON.stringify(claim) }),
+      completed({})
+    ];
+
+    expect(parseWorkflowClaim(events)).toBeNull();
   });
 });
 
-describe("readWorkflowClaimFile", () => {
-  const tempDirs: string[] = [];
-
-  afterEach(async () => {
-    await Promise.all(
-      tempDirs.splice(0).map((dir) => rm(dir, { force: true, recursive: true }))
-    );
-  });
-
-  async function claimFilePath(): Promise<string> {
-    const dir = await mkdtemp(
-      path.join(tmpdir(), "symphonika-workflow-claim-")
-    );
-    tempDirs.push(dir);
-    return path.join(dir, "claim.json");
-  }
-
-  it("returns null when the file does not exist", async () => {
-    const filePath = await claimFilePath();
-
-    expect(await readWorkflowClaimFile(filePath, undefined)).toBeNull();
-  });
-
-  it("reads and validates a well-formed claim file", async () => {
-    const filePath = await claimFilePath();
-    const claim = { status: "blocked", summary: "No open PR found." };
-    await writeFile(filePath, JSON.stringify(claim), "utf8");
-
-    expect(await readWorkflowClaimFile(filePath, undefined)).toEqual(claim);
-  });
-
-  it("treats a file over the size cap as absent and logs a warning", async () => {
-    const filePath = await claimFilePath();
-    const oversized = JSON.stringify({
-      status: "blocked",
-      summary: "x".repeat(128 * 1024)
+describe("WORKFLOW_CLAIM_JSON_SCHEMA", () => {
+  it("is a strict object schema over exactly the claim's fields", () => {
+    expect(WORKFLOW_CLAIM_JSON_SCHEMA).toEqual({
+      additionalProperties: false,
+      properties: {
+        status: { enum: ["success", "blocked", "failure"], type: "string" },
+        summary: { type: "string" }
+      },
+      required: ["status", "summary"],
+      type: "object"
     });
-    await writeFile(filePath, oversized, "utf8");
-    const warnings: unknown[] = [];
-    const logger = { warn: (...args: unknown[]) => warnings.push(args) };
-
-    expect(
-      await readWorkflowClaimFile(
-        filePath,
-        logger as unknown as Parameters<typeof readWorkflowClaimFile>[1]
-      )
-    ).toBeNull();
-    expect(warnings).toHaveLength(1);
-  });
-
-  it("treats malformed JSON as absent", async () => {
-    const filePath = await claimFilePath();
-    await writeFile(filePath, "not json", "utf8");
-
-    expect(await readWorkflowClaimFile(filePath, undefined)).toBeNull();
   });
 });

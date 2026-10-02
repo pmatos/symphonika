@@ -1,27 +1,14 @@
-import type { Logger } from "pino";
-
-import {
-  readWorkflowClaimFile,
-  workflowClaimFilePath
-} from "../workflow/claim.js";
+import type { NormalizedProviderEvent } from "../provider.js";
+import { parseWorkflowClaim } from "../workflow/claim.js";
 import type { ExpandedWorkflowState } from "../workflow/types.js";
 import { statePredicateKeys } from "./artifact-probe.js";
 
-export async function probeStateClaim(input: {
-  attemptNumber: number;
-  logger: Logger | undefined;
-  runId: string;
+export function probeStateClaim(input: {
+  events: readonly NormalizedProviderEvent[];
   state: ExpandedWorkflowState;
-  stateRoot: string;
-}): Promise<string | undefined> {
+}): string | undefined {
   if (!statePredicateKeys(input.state).has("claim_status")) {
     return undefined;
   }
-  const claimPath = workflowClaimFilePath(
-    input.stateRoot,
-    input.runId,
-    input.attemptNumber
-  );
-  const claim = await readWorkflowClaimFile(claimPath, input.logger);
-  return claim?.status;
+  return parseWorkflowClaim(input.events)?.status;
 }

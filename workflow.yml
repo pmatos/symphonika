@@ -50,15 +50,19 @@ workflow:
         provider: claude
         prompt: prompts/code-review-fix.md
       transitions:
-        # A blocked pass (no open PR to review, etc.) writes BLOCKED.md
-        # instead of relying on a non-zero exit code -- exiting non-zero
-        # from a Bash tool call only ends that subshell, not the provider
-        # session, so provider_success reads true regardless (issue #730).
+        # The pass ends with a structured claim as its final message
+        # (schema-enforced on Claude/Codex). A blocked pass (no open PR to
+        # review, etc.) claims "blocked" instead of relying on a non-zero
+        # exit code -- exiting non-zero from a Bash tool call only ends that
+        # subshell, not the provider session, so provider_success reads true
+        # regardless (issue #730). Advance needs a positive success claim, so
+        # a missing or malformed claim falls through to failed.
         - to: failed
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: simplify
           when:
+            claim_status: success
             provider_success: true
         - to: failed
 
@@ -70,9 +74,10 @@ workflow:
       transitions:
         - to: failed
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: wait_for_pr
           when:
+            claim_status: success
             provider_success: true
         - to: failed
 
@@ -148,9 +153,10 @@ workflow:
       transitions:
         - to: failed
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: wait_for_pr
           when:
+            claim_status: success
             provider_success: true
         - to: failed
 
@@ -164,9 +170,10 @@ workflow:
       transitions:
         - to: failed
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: wait_for_pr
           when:
+            claim_status: success
             provider_success: true
         - to: failed
 

@@ -118,19 +118,29 @@ describe("refactor-workflow.yml", () => {
       branch_ahead_of_base: false,
       provider_success: false
     };
-    const noChange = { ...failure, provider_success: true };
+    const noChange = {
+      ...failure,
+      claim_status: "success",
+      provider_success: true
+    };
     const success = {
+      branch_advanced_since_attempt_start: true,
+      branch_ahead_of_base: true,
+      claim_status: "success",
+      provider_success: true
+    };
+    const unclaimed: Record<string, boolean> = {
       branch_advanced_since_attempt_start: true,
       branch_ahead_of_base: true,
       provider_success: true
     };
-    const blockedArtifact = (candidate: string) => candidate === "BLOCKED.md";
 
     for (const id of ["red_team", "refactoring", "verifying"]) {
       expect(decide(workflow, id, failure)).toMatchObject({ to: "blocked" });
-      expect(decide(workflow, id, success, blockedArtifact)).toMatchObject({
-        to: "blocked"
-      });
+      expect(
+        decide(workflow, id, { ...success, claim_status: "blocked" })
+      ).toMatchObject({ to: "blocked" });
+      expect(decide(workflow, id, unclaimed)).toMatchObject({ to: "blocked" });
     }
     expect(decide(workflow, "red_team", noChange)).toMatchObject({
       to: "blocked"

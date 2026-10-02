@@ -5,7 +5,6 @@ import path from "node:path";
 import type { IssueSnapshot } from "../issue-polling.js";
 import { isPathInside } from "../path-safety.js";
 import type { AgentProviderName } from "../provider.js";
-import { workflowClaimFilePath } from "./claim.js";
 import {
   attemptEvidenceFileName,
   runEvidenceDirectoryPath
@@ -38,10 +37,6 @@ type PromptRun = {
 type PromptProvider = {
   command: string;
   name: AgentProviderName;
-};
-
-type PromptClaim = {
-  path: string;
 };
 
 export type RenderAutonomousPromptInput = {
@@ -80,7 +75,6 @@ export type RunEvidencePaths = {
 
 type PromptContext = {
   branch: PromptBranch;
-  claim: PromptClaim;
   issue: IssueSnapshot;
   project: PromptProject;
   provider: PromptProvider;
@@ -93,7 +87,6 @@ const allowedTemplateFields: Record<
   ReadonlySet<string>
 > = {
   branch: new Set(["name", "ref"]),
-  claim: new Set(["path"]),
   issue: new Set([
     "body",
     "created_at",
@@ -138,13 +131,6 @@ export function renderAutonomousPrompt(
 ): RenderedAutonomousPrompt {
   const context: PromptContext = {
     branch: input.branch,
-    claim: {
-      path: workflowClaimFilePath(
-        input.stateRoot,
-        input.run.id,
-        input.run.attempt
-      )
-    },
     issue: input.issue,
     project: input.project,
     provider: input.provider,

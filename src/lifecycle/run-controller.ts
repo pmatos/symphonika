@@ -87,6 +87,10 @@ import {
   parseWorkflowContract,
   type WorkflowEvidence
 } from "../workflow/contract-loading.js";
+import {
+  WORKFLOW_CLAIM_INSTRUCTIONS,
+  WORKFLOW_CLAIM_JSON_SCHEMA
+} from "../workflow/claim.js";
 import { expandWorkflowDefinition } from "../workflow/fsm-expansion.js";
 import { workflowPredicateEvaluation } from "../workflow/predicates.js";
 import { isIssueContentActionKind } from "../workflow/types.js";
@@ -4780,13 +4784,23 @@ export class RunController {
           () => undefined
         );
       const prepared = await input.deadline.race(workspaceOperation);
+      // Only a state that gates on claim_status gets the claim contract:
+      // the schema constrains the provider's final message, which other
+      // agent states must keep free-form.
+      const claimGated =
+        currentState !== undefined &&
+        statePredicateKeys(currentState).has("claim_status");
+      const extraInstructions = [
+        input.extraInstructions,
+        claimGated ? WORKFLOW_CLAIM_INSTRUCTIONS : undefined
+      ]
+        .filter((section) => section !== undefined)
+        .join("\n\n");
       started = await input.deadline.race(
         this.startAttempt({
           attemptId,
           attemptNumber: input.attemptNumber,
-          ...(input.extraInstructions === undefined
-            ? {}
-            : { extraInstructions: input.extraInstructions }),
+          ...(extraInstructions === "" ? {} : { extraInstructions }),
           isContinuation: input.isContinuation,
           issue: input.issue,
           prepared,
@@ -4890,6 +4904,7 @@ export class RunController {
         deadline: input.deadline,
         evidence: started.evidence,
         issue: input.issue,
+        ...(claimGated ? { outputSchema: WORKFLOW_CLAIM_JSON_SCHEMA } : {}),
         prompt: started.prompt,
         promptPath: started.promptPath,
         provider: input.provider,
@@ -5035,6 +5050,7 @@ export class RunController {
             branchName: started?.evidence.branchName,
             currentState,
             deferRetryableTransientAdvance,
+            events: runtime.events,
             issue: input.issue,
             project: input.project,
             runId: input.runId,
@@ -5281,6 +5297,7 @@ export class RunController {
     branchName: string | undefined;
     currentState: ExpandedWorkflowState;
     deferRetryableTransientAdvance?: boolean;
+    events: readonly NormalizedProviderEvent[];
     issue: IssueSnapshot;
     project: RunControllerProjectConfig;
     runId: string;
@@ -5288,19 +5305,14 @@ export class RunController {
     workflow: ExpandedWorkflow;
     workspacePath: string | undefined;
   }): Promise<WorkflowOutcomeResult> {
-    const [artifactExists, claimStatus] = await Promise.all([
-      probeStateArtifacts({
-        state: input.currentState,
-        workspacePath: input.workspacePath
-      }),
-      probeStateClaim({
-        attemptNumber: input.attemptNumber,
-        logger: this.logger,
-        runId: input.runId,
-        state: input.currentState,
-        stateRoot: this.stateRoot
-      })
-    ]);
+    const artifactExists = await probeStateArtifacts({
+      state: input.currentState,
+      workspacePath: input.workspacePath
+    });
+    const claimStatus = probeStateClaim({
+      events: input.events,
+      state: input.currentState
+    });
     const signals = signalsFromTerminal(input.terminal);
     if (claimStatus !== undefined) {
       signals.claim_status = claimStatus;
@@ -5477,6 +5489,7 @@ export class RunController {
     deadline: RunSlotDeadline;
     evidence: AttemptEvidence;
     issue: IssueSnapshot;
+    outputSchema?: object;
     prompt: string;
     promptPath: string;
     provider: AgentProvider;
@@ -5524,6 +5537,9 @@ export class RunController {
         branchName: input.evidence.branchName,
         ...(globalMaxInFlight === undefined ? {} : { globalMaxInFlight }),
         issue: input.issue,
+        ...(input.outputSchema === undefined
+          ? {}
+          : { outputSchema: input.outputSchema }),
         prompt: input.prompt,
         promptPath: input.promptPath,
         provider: {

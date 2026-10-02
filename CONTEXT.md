@@ -160,12 +160,12 @@ _Avoid_: outcome handling, state mapping
 
 **Workflow Claim**:
 An agent-reported `{status, summary}` object an agent state opts into by naming `claim_status` in
-its predicates, written to a per-attempt file outside the Run Workspace (`{{claim.path}}`) as a
-deliberate tool call and read back by Symphonika after the provider exits. `status` shares
-`terminal`'s vocabulary (`success`/`blocked`/`failure`). Generalizes the Routine Outcome Claim
-pattern to raw-FSM states (issue #776); reinforces the `BLOCKED.md` sentinel rather than replacing
-it, since Workflow terminal-state determination as a whole stays predicate-graph-driven
-(Outcome Projection above), not self-report-driven the way a Routine Firing's outcome is.
+its predicates, emitted as the agent's final message (schema-enforced on Claude and Codex, prompt
+instruction only on Oh My Pi) and read back by Symphonika from the last `turn_completed` event.
+`status` shares `terminal`'s vocabulary (`success`/`blocked`/`failure`). A missing or malformed
+claim leaves the predicate absent, so states gate advancing on a positive `success` claim and fail
+closed otherwise. Replaces the `BLOCKED.md` sentinel in Symphonika's own workflows (issue #813,
+ADR-2026-10-02-1909).
 _Avoid_: Routine Outcome Claim when referring to Workflow/raw-FSM runs; BLOCKED.md, which is a
 bare existence sentinel with no parsed content
 

@@ -8,7 +8,6 @@ import {
   persistRunEvidence,
   renderAutonomousPrompt
 } from "../src/workflow/autonomous-prompt.js";
-import { workflowClaimFilePath } from "../src/workflow/claim.js";
 import { loadExpandedWorkflow } from "../src/workflow/fsm-expansion.js";
 
 const tempRoots: string[] = [];
@@ -156,31 +155,6 @@ describe("autonomous prompt rendering", () => {
     );
     expect(rendered.prompt).toContain("gh CLI");
     expect(rendered.preambleVersion).toBe(AUTONOMY_PREAMBLE_VERSION);
-  });
-
-  it("exposes claim.path pointing at the run evidence directory", () => {
-    const rendered = renderAutonomousPrompt({
-      stateRoot: "/state",
-      branch: {
-        name: "sym/symphonika/7-render-prompts",
-        ref: "refs/heads/sym/symphonika/7-render-prompts"
-      },
-      issue: issueSnapshot(),
-      project: { name: "symphonika" },
-      provider: { command: DEFAULT_CODEX_COMMAND, name: "codex" },
-      run: { attempt: 2, continuation: false, id: "run-7" },
-      template: "Write your claim to {{claim.path}}.",
-      workflowPath: "/repo/WORKFLOW.md",
-      workspace: {
-        path: "/state/workspaces/symphonika/issues/7-render-prompts",
-        previous_attempt: false,
-        root: "/state/workspaces/symphonika"
-      }
-    });
-
-    expect(rendered.prompt).toContain(
-      `Write your claim to ${workflowClaimFilePath("/state", "run-7", 2)}.`
-    );
   });
 
   it("fails rendering when the workflow references an unknown variable", () => {

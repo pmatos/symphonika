@@ -57,6 +57,7 @@ import { probeProviderCommand } from "./provider-probe.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
 import type { RoutineExecutionOverrides } from "./routines/types.js";
+import { type GhAuthTokenReader, readGhAuthToken } from "./gh-auth-token.js";
 import { unitEnvironmentFilePath, userUnitDir } from "./service.js";
 import { resolveStateRoot } from "./state.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
@@ -94,6 +95,9 @@ export type DoctorOptions = {
   // Skip network-backed checks while retaining local executable, profile,
   // and installed-unit checks. Intended for CI and scripted JSON snapshots.
   offline?: boolean;
+  // Reads `gh auth token` when GITHUB_TOKEN is unset. Defaults to the real gh
+  // CLI only when env is process.env; an injected env never shells out.
+  ghAuthToken?: GhAuthTokenReader;
 };
 
 type DoctorLiveCheckReport = {
@@ -528,6 +532,23 @@ export async function runDoctor(
     return report({ configPath, environment, errors, projects, warnings });
   }
 
+  // Start `gh auth token` now so it overlaps the checks below; the token is
+  // only needed once Projects are validated.
+  const ghAuthToken =
+    options.ghAuthToken ??
+    (options.env === undefined ? readGhAuthToken : undefined);
+  const ghTokenRead =
+    ghAuthToken !== undefined &&
+    options.offline !== true &&
+    (env.GITHUB_TOKEN ?? "") === "" &&
+    parsedConfig.projects.some(
+      (project) =>
+        project.tracker !== undefined &&
+        envReferenceName(project.tracker.token) === "GITHUB_TOKEN"
+    )
+      ? ghAuthToken()
+      : undefined;
+
   const [buildMemoryWarnings, configuredEnvironment] = await Promise.all([
     serviceContent !== undefined
       ? checkProviderBuildMemoryCapacity(
@@ -570,12 +591,21 @@ export async function runDoctor(
     );
   }
 
+  const ghToken = await ghTokenRead;
+  const trackerEnv =
+    ghToken === undefined ? env : { ...env, GITHUB_TOKEN: ghToken };
+  if (ghTokenRead !== undefined && ghToken === undefined) {
+    warnings.push(
+      "GITHUB_TOKEN is unset and `gh auth token` returned no token; run `gh auth login` or export GITHUB_TOKEN"
+    );
+  }
+
   for (const project of parsedConfig.projects) {
     const validation = await validateProject(
       project,
       parsedConfig,
       agentProviders,
-      env,
+      trackerEnv,
       errors,
       githubApi
     );
@@ -614,7 +644,11 @@ export async function runDoctor(
         ))
       );
     }
-    const staleIssues = await fetchStaleIssues(project, env, githubIssuesApi);
+    const staleIssues = await fetchStaleIssues(
+      project,
+      trackerEnv,
+      githubIssuesApi
+    );
     projects.push({
       ...validation,
       mode: "dispatch",

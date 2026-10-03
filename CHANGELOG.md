@@ -1,5 +1,18 @@
 # Changelog
 
+# [0.9.0](https://github.com/pmatos/symphonika/compare/v0.8.0...v0.9.0) (2026-10-03)
+
+
+### Bug Fixes
+
+* update pinned claude-code-action SHA in workflow test ([#823](https://github.com/pmatos/symphonika/issues/823)) ([293f52a](https://github.com/pmatos/symphonika/commit/293f52a02d0edbe9bc6546bcd452bf5bd2b8418e))
+
+
+### Features
+
+* fall back to gh auth token in doctor when github_token is unset ([#826](https://github.com/pmatos/symphonika/issues/826)) ([65d716d](https://github.com/pmatos/symphonika/commit/65d716d8725dbded2229bd675a29637ad4043dcc))
+* gate workflow states on a structured final-message claim instead of BLOCKED.md ([#825](https://github.com/pmatos/symphonika/issues/825)) ([e1b9d1a](https://github.com/pmatos/symphonika/commit/e1b9d1a3833c56b4d6010537bac06816637802f2))
+
 # [0.8.0](https://github.com/pmatos/symphonika/compare/v0.7.0...v0.8.0) (2026-09-27)
 
 

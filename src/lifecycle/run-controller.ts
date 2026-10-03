@@ -121,8 +121,8 @@ import {
   buildEdgeBudgetExhaustedReason,
   buildNoProgressReason,
   DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS,
-  parseEdgeBudgetExhaustedReason,
-  parseNoProgressReason,
+  describeProgressGuardPark,
+  isProgressGuardReason,
   progressFingerprint
 } from "./progress-fingerprint.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
@@ -2559,17 +2559,22 @@ export class RunController {
       return;
     }
 
+    const heldByProgressGuard = isProgressGuardReason(
+      row.stateTransitionReason
+    );
+
     if (decision.kind === "stay_waiting") {
       // The guard's own park returns before this branch, so reaching it with a
       // no-progress reason still on the row means the guard has stopped
       // firing: the observation moved on and the state simply has nothing to
       // match now. Clear it, or the manual-attention banner would outlive the
       // condition that raised it.
-      if (
-        parseNoProgressReason(row.stateTransitionReason) !== null ||
-        parseEdgeBudgetExhaustedReason(row.stateTransitionReason) !== null
-      ) {
+      if (heldByProgressGuard) {
         this.runStore.recordWaitingActivity(runId, decision.reason);
+        await this.claimLabels.clearHumanAttention({
+          issueNumber: refreshed.number,
+          repository
+        });
       }
       this.logger?.debug(
         { reason: decision.reason, runId },
@@ -2600,6 +2605,14 @@ export class RunController {
           return;
         }
         this.runStore.updateRunState(runId, "succeeded");
+        // Only a success terminal ends the need for a human; failure and
+        // blocked keep the flag (see the ADR).
+        if (heldByProgressGuard && next.terminal === "success") {
+          await this.claimLabels.clearHumanAttention({
+            issueNumber: refreshed.number,
+            repository
+          });
+        }
         // This park's own signal observation (observeWaitPullRequestSignals,
         // above) already confirmed external resolution before decideNextStep
         // took this edge -- unlike an agent-hop success, which defers this
@@ -2657,12 +2670,21 @@ export class RunController {
             maxEdgeClaims
           );
       if (claim !== "claimed") {
-        this.runStore.recordWaitingActivity(
-          runId,
+        const parkReason =
           claim === "unchanged"
             ? buildNoProgressReason(edge)
-            : buildEdgeBudgetExhaustedReason(edge, maxEdgeClaims)
-        );
+            : buildEdgeBudgetExhaustedReason(edge, maxEdgeClaims);
+        this.runStore.recordWaitingActivity(runId, parkReason);
+        // The persisted reason, not this tick, decides whether the park is
+        // new: a poll re-refuses the same edge every interval, and a restart
+        // loses anything held in memory.
+        if (row.stateTransitionReason !== parkReason) {
+          await this.claimLabels.flagHumanAttention({
+            issueNumber: refreshed.number,
+            reason: describeProgressGuardPark(claim, edge, maxEdgeClaims),
+            repository
+          });
+        }
         this.logger?.warn(
           {
             claim,
@@ -2682,6 +2704,12 @@ export class RunController {
         transitionReason: withNote(decision.reason)
       });
       this.runStore.updateRunState(runId, "succeeded");
+      if (heldByProgressGuard) {
+        await this.claimLabels.clearHumanAttention({
+          issueNumber: refreshed.number,
+          repository
+        });
+      }
 
       if (isParkedAction(next?.action?.kind)) {
         const nextWaitingRunId = this.createRunId();
@@ -2783,6 +2811,12 @@ export class RunController {
         return;
       }
       this.runStore.updateRunState(runId, "succeeded");
+      if (heldByProgressGuard && decision.terminal === "success") {
+        await this.claimLabels.clearHumanAttention({
+          issueNumber: refreshed.number,
+          repository
+        });
+      }
       // See the matching release in the `advance` branch above: this park's
       // own signal observation already confirmed external resolution before
       // decideNextStep took this direct-terminate edge.

@@ -78,6 +78,26 @@ export function parseNoProgressReason(
   return { fromStateId, toStateId };
 }
 
+export function isProgressGuardReason(reason: string | null): boolean {
+  return (
+    parseNoProgressReason(reason) !== null ||
+    parseEdgeBudgetExhaustedReason(reason) !== null
+  );
+}
+
+// The sentence posted on the issue when the guard parks a run, for the same
+// two refusals the dashboard banner distinguishes.
+export function describeProgressGuardPark(
+  claim: "budget_exhausted" | "unchanged",
+  edge: NoProgressEdge,
+  maxClaims: number
+): string {
+  const taking = `${edge.fromStateId} -> ${edge.toStateId}`;
+  return claim === "unchanged"
+    ? `The workflow is parked: taking ${taking} again would repeat work it already did, and nothing it can observe (PR head, checks, review feedback) has changed since that transition last ran. Symphonika will not retry on its own; it resumes once the observation changes, for example after a new push to the PR branch.`
+    : `The workflow is parked: ${taking} reached its edge budget after ${maxClaims} accepted advances without reaching a terminal state.`;
+}
+
 // Everything a park re-evaluation learned this tick, hashed into one value.
 // Two ticks with the same fingerprint observed the same world, so re-taking a
 // transition between them cannot make progress.

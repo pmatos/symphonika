@@ -718,6 +718,184 @@ describe("workflow progress guard", () => {
     }
   });
 
+  describe("escalation to the issue", () => {
+    async function withParkedGuard(
+      getPullRequestFollowupState: NonNullable<
+        GitHubIssuesApi["getPullRequestFollowupState"]
+      >,
+      run: (fixture: {
+        api: ReturnType<typeof labelWritingApi>;
+        controller: RunController;
+        issue: IssueSnapshot;
+        reEvaluate: (runId: string) => Promise<void>;
+        store: ReturnType<typeof openRunStore>;
+      }) => Promise<void>
+    ): Promise<void> {
+      const root = await makeTempRoot();
+      await writeCyclingProject(root);
+      const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+      try {
+        const issue = issueFixture();
+        seedTrackedPr(store, issue);
+        const api = labelWritingApi(issue, getPullRequestFollowupState);
+        const controller = buildController({
+          githubIssuesApi: api,
+          root,
+          runStore: store
+        });
+        await run({
+          api,
+          controller,
+          issue,
+          reEvaluate: async (runId) => {
+            if (store.getRun(runId) === undefined) {
+              seedPark(store, issue, runId);
+            }
+            await controller.reEvaluateWaitingRun(runId);
+          },
+          store
+        });
+      } finally {
+        store.close();
+      }
+    }
+
+    function labelWritingApi(
+      issue: IssueSnapshot,
+      getPullRequestFollowupState: NonNullable<
+        GitHubIssuesApi["getPullRequestFollowupState"]
+      >
+    ) {
+      return {
+        addIssueComment: vi.fn().mockResolvedValue(undefined),
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState,
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      } satisfies GitHubIssuesApi;
+    }
+
+    const pending = prState({
+      statusCheckRollupState: "PENDING",
+      unresolvedReviewThreads: []
+    });
+
+    it("flags sym:human-needed with a comment once per park, without marking the issue blocked", async () => {
+      await withParkedGuard(
+        vi.fn().mockResolvedValue(prState()),
+        async ({ api, reEvaluate, store, issue }) => {
+          await reEvaluate("waiting-1");
+          expect(api.addLabelsToIssue).not.toHaveBeenCalled();
+
+          await reEvaluate("waiting-2");
+          await reEvaluate("waiting-2");
+          await reEvaluate("waiting-2");
+
+          expect(store.getRun("waiting-2")?.state).toBe("waiting");
+          expect(api.addLabelsToIssue).toHaveBeenCalledTimes(1);
+          expect(api.addLabelsToIssue).toHaveBeenCalledWith(
+            expect.objectContaining({
+              issueNumber: issue.number,
+              labels: ["sym:human-needed"]
+            })
+          );
+          expect(api.addIssueComment).toHaveBeenCalledTimes(1);
+          const body = (
+            api.addIssueComment.mock.calls[0]?.[0] as { body: string }
+          ).body;
+          expect(body).toContain("holding -> repair");
+          expect(body).toContain("nothing");
+        }
+      );
+    });
+
+    it("flags the issue when the edge budget is exhausted", async () => {
+      let observation = 0;
+      await withParkedGuard(
+        vi
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve(
+              prState({ headSha: `changed-head-${++observation}` })
+            )
+          ),
+        async ({ api, reEvaluate }) => {
+          for (let claim = 1; claim <= 10; claim += 1) {
+            await reEvaluate(`waiting-${claim}`);
+          }
+          expect(api.addLabelsToIssue).not.toHaveBeenCalled();
+
+          await reEvaluate("waiting-11");
+
+          expect(api.addLabelsToIssue).toHaveBeenCalledTimes(1);
+          expect(api.addLabelsToIssue).toHaveBeenCalledWith(
+            expect.objectContaining({ labels: ["sym:human-needed"] })
+          );
+          expect(api.addIssueComment).toHaveBeenCalledTimes(1);
+        }
+      );
+    });
+
+    it.each([
+      ["the observation moves on", () => pending, "waiting"],
+      [
+        "the head moves and the edge advances",
+        () => prState({ headSha: "pushed-by-a-human" }),
+        "succeeded"
+      ]
+    ] as const)(
+      "removes sym:human-needed once the park resumes: %s",
+      async (_name, resumed, expectedState) => {
+        await withParkedGuard(
+          vi
+            .fn()
+            .mockResolvedValueOnce(prState())
+            .mockResolvedValueOnce(prState())
+            .mockResolvedValue(resumed()),
+          async ({ api, issue, reEvaluate, store }) => {
+            await reEvaluate("waiting-1");
+            await reEvaluate("waiting-2");
+            expect(api.addLabelsToIssue).toHaveBeenCalledTimes(1);
+            expect(api.removeLabelsFromIssue).not.toHaveBeenCalled();
+
+            await reEvaluate("waiting-2");
+
+            expect(store.getRun("waiting-2")?.state).toBe(expectedState);
+            expect(api.removeLabelsFromIssue).toHaveBeenCalledTimes(1);
+            expect(api.removeLabelsFromIssue).toHaveBeenCalledWith(
+              expect.objectContaining({
+                issueNumber: issue.number,
+                labels: ["sym:human-needed"]
+              })
+            );
+          }
+        );
+      }
+    );
+
+    it("keeps parking when the label write fails", async () => {
+      await withParkedGuard(
+        vi.fn().mockResolvedValue(prState()),
+        async ({ api, reEvaluate, store }) => {
+          api.addLabelsToIssue.mockRejectedValue(new Error("boom"));
+
+          await reEvaluate("waiting-1");
+          await reEvaluate("waiting-2");
+
+          const parked = store.getRun("waiting-2");
+          expect(parked?.state).toBe("waiting");
+          expect(parked?.stateTransitionReason).toBe(
+            "no_progress:holding:repair"
+          );
+        }
+      );
+    });
+  });
+
   it("does not treat an unrelated signal change as progress on the has_unresolved_reviews edge", async () => {
     // Mirrors a real recurrence (issue #740): main advances fast enough that
     // checks/mergeable can flip between polls for reasons that have nothing

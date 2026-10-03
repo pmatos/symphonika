@@ -412,3 +412,35 @@ describe("ClaimLabelWriter direct entries", () => {
     expect(body).toContain(`${"x".repeat(999)}😀…`);
   });
 });
+
+describe("human attention without a terminal outcome", () => {
+  it("flags sym:human-needed with the reason and never marks the issue blocked or failed", async () => {
+    const { api, calls, comments } = makeApi();
+    const writer = new ClaimLabelWriter({ api });
+
+    await writer.flagHumanAttention({
+      issueNumber: 7,
+      reason: "parked on purpose",
+      repository
+    });
+
+    expect(calls).toEqual([
+      { issueNumber: 7, labels: ["sym:human-needed"], op: "add" }
+    ]);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("parked on purpose");
+  });
+
+  it("removes only sym:human-needed on clear, and swallows a failed removal", async () => {
+    const { api, calls } = makeApi({ remove: ["sym:human-needed"] });
+    const writer = new ClaimLabelWriter({ api });
+
+    await expect(
+      writer.clearHumanAttention({ issueNumber: 7, repository })
+    ).resolves.toBeUndefined();
+
+    expect(calls).toEqual([
+      { issueNumber: 7, labels: ["sym:human-needed"], op: "remove" }
+    ]);
+  });
+});

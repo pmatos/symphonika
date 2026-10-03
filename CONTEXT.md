@@ -222,7 +222,8 @@ The dual rule that a parked Run may not re-take a transition it already took und
 observation — the projected signals, the artefact probe, the tracked head SHA, and the review
 conversation — or after that directed edge exhausts its Edge Claim Budget. It is the state
 machine's only loop-breaker, and it bounds cycles that pass through a park; a guarded park raises
-manual attention naming the edge and whether observation or budget caused the refusal.
+manual attention naming the edge and whether observation or budget caused the refusal, on the
+dashboard and on the issue (`sym:human-needed` and one comment, without terminalizing the Run).
 _Avoid_: review dispatch cap (that is the markdown-workflow mechanism it replaces for FSM work)
 
 **Edge Claim Budget**:

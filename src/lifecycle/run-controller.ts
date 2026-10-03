@@ -121,6 +121,7 @@ import {
   buildEdgeBudgetExhaustedReason,
   buildNoProgressReason,
   DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS,
+  describeProgressGuardPark,
   parseEdgeBudgetExhaustedReason,
   parseNoProgressReason,
   progressFingerprint
@@ -2559,17 +2560,22 @@ export class RunController {
       return;
     }
 
+    const heldByProgressGuard =
+      parseNoProgressReason(row.stateTransitionReason) !== null ||
+      parseEdgeBudgetExhaustedReason(row.stateTransitionReason) !== null;
+
     if (decision.kind === "stay_waiting") {
       // The guard's own park returns before this branch, so reaching it with a
       // no-progress reason still on the row means the guard has stopped
       // firing: the observation moved on and the state simply has nothing to
       // match now. Clear it, or the manual-attention banner would outlive the
       // condition that raised it.
-      if (
-        parseNoProgressReason(row.stateTransitionReason) !== null ||
-        parseEdgeBudgetExhaustedReason(row.stateTransitionReason) !== null
-      ) {
+      if (heldByProgressGuard) {
         this.runStore.recordWaitingActivity(runId, decision.reason);
+        await this.claimLabels.clearHumanAttention({
+          issueNumber: refreshed.number,
+          repository
+        });
       }
       this.logger?.debug(
         { reason: decision.reason, runId },
@@ -2585,6 +2591,12 @@ export class RunController {
           terminalStateId: next.id,
           transitionReason: withNote(decision.reason)
         });
+        if (heldByProgressGuard && next.terminal !== "blocked") {
+          await this.claimLabels.clearHumanAttention({
+            issueNumber: refreshed.number,
+            repository
+          });
+        }
         // A wait/merge_pr row can advance straight into a workflow-authored
         // `terminal: blocked` node (e.g. a PR follow-up that gives up on
         // merge conflicts). Honor the same RunState/label contract as the
@@ -2657,12 +2669,21 @@ export class RunController {
             maxEdgeClaims
           );
       if (claim !== "claimed") {
-        this.runStore.recordWaitingActivity(
-          runId,
+        const parkReason =
           claim === "unchanged"
             ? buildNoProgressReason(edge)
-            : buildEdgeBudgetExhaustedReason(edge, maxEdgeClaims)
-        );
+            : buildEdgeBudgetExhaustedReason(edge, maxEdgeClaims);
+        this.runStore.recordWaitingActivity(runId, parkReason);
+        // The persisted reason, not this tick, decides whether the park is
+        // new: a poll re-refuses the same edge every interval, and a restart
+        // loses anything held in memory.
+        if (row.stateTransitionReason !== parkReason) {
+          await this.claimLabels.flagHumanAttention({
+            issueNumber: refreshed.number,
+            reason: describeProgressGuardPark(parkReason) ?? parkReason,
+            repository
+          });
+        }
         this.logger?.warn(
           {
             claim,
@@ -2677,6 +2698,12 @@ export class RunController {
         return;
       }
 
+      if (heldByProgressGuard) {
+        await this.claimLabels.clearHumanAttention({
+          issueNumber: refreshed.number,
+          repository
+        });
+      }
       this.runStore.recordWorkflowStateAdvance(runId, {
         nextStateId: decision.to,
         transitionReason: withNote(decision.reason)

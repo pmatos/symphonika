@@ -301,6 +301,29 @@ export class ClaimLabelWriter {
     await this.markTerminalLabel(input, "sym:blocked");
   }
 
+  // A non-terminal human-attention flag: the run stays parked and keeps its
+  // claim, so neither sym:blocked nor sym:failed is added and nothing is
+  // released. Never throws, so the park it reports on is never disturbed.
+  async flagHumanAttention(input: IssueBlockTarget): Promise<void> {
+    await this.markNeedsHuman(input);
+  }
+
+  async clearHumanAttention(input: IssueTarget): Promise<void> {
+    await this.bestEffort(
+      () =>
+        this.api.removeLabelsFromIssue({
+          ...input.repository,
+          issueNumber: input.issueNumber,
+          labels: ["sym:human-needed"]
+        }),
+      {
+        issueNumber: input.issueNumber,
+        label: "sym:human-needed",
+        operation: "removeLabel"
+      }
+    );
+  }
+
   private async markTerminalLabel(
     input: IssueBlockTarget,
     label: "sym:blocked" | "sym:failed"

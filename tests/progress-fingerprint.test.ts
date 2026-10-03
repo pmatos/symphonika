@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildEdgeBudgetExhaustedReason,
   buildNoProgressReason,
+  describeProgressGuardPark,
   parseNoProgressReason,
   progressFingerprint
 } from "../src/lifecycle/progress-fingerprint.js";
@@ -248,5 +250,18 @@ describe("no-progress reason round trip", () => {
     expect(parseNoProgressReason("no_progress:only_one_half")).toBeNull();
     expect(parseNoProgressReason("no_progress:a:b:c")).toBeNull();
     expect(parseNoProgressReason("no_progress::autofix")).toBeNull();
+  });
+});
+
+describe("describeProgressGuardPark", () => {
+  it("describes both guard reasons and nothing else", () => {
+    const edge = { fromStateId: "wait_for_pr", toStateId: "resolve_conflicts" };
+    expect(describeProgressGuardPark(buildNoProgressReason(edge))).toContain(
+      "wait_for_pr -> resolve_conflicts"
+    );
+    expect(
+      describeProgressGuardPark(buildEdgeBudgetExhaustedReason(edge, 10))
+    ).toContain("10 accepted advances");
+    expect(describeProgressGuardPark("holding advanced to done")).toBeNull();
   });
 });

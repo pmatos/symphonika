@@ -34,5 +34,11 @@ the same path while waiting for a merge. `terminalizeBlocked` would release the 
   attention; the label now matches.
 - The label removal can also remove a `sym:human-needed` a person added by hand while the run was
   parked.
+- Delivery is at-most-once. The reason is persisted before the best-effort label/comment write and is
+  the dedup key, so a GitHub failure on the first refusal is logged but not retried, and the dashboard
+  banner is then the only signal.
+- Only a park whose reason is still the guard's is cleaned up. A `merge_pr` refusal or "no pull
+  request tracked" tick that overwrites the reason, or an operator cancel, leaves the label behind.
+- Advancing into a `failure` or `blocked` terminal keeps the label; only `success` removes it.
 - Not addressed here: an agent that claims success without pushing (needs a remote-head-moved
   signal; `branch_advanced_since_attempt_start` is a local diff digest and cannot see a push).

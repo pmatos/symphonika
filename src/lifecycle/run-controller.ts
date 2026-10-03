@@ -1983,6 +1983,13 @@ export class RunController {
     await this.releaseWaitTerminalClaim(input);
   }
 
+  private async clearProgressGuardFlag(
+    issueNumber: number,
+    repository: GitHubIssueRepositoryInput
+  ): Promise<void> {
+    await this.claimLabels.clearHumanAttention({ issueNumber, repository });
+  }
+
   private async terminateMergePrRefusal(input: {
     issueNumber: number;
     message: string;
@@ -2572,10 +2579,7 @@ export class RunController {
       // condition that raised it.
       if (heldByProgressGuard) {
         this.runStore.recordWaitingActivity(runId, decision.reason);
-        await this.claimLabels.clearHumanAttention({
-          issueNumber: refreshed.number,
-          repository
-        });
+        await this.clearProgressGuardFlag(refreshed.number, repository);
       }
       this.logger?.debug(
         { reason: decision.reason, runId },
@@ -2591,12 +2595,6 @@ export class RunController {
           terminalStateId: next.id,
           transitionReason: withNote(decision.reason)
         });
-        if (heldByProgressGuard && next.terminal !== "blocked") {
-          await this.claimLabels.clearHumanAttention({
-            issueNumber: refreshed.number,
-            repository
-          });
-        }
         // A wait/merge_pr row can advance straight into a workflow-authored
         // `terminal: blocked` node (e.g. a PR follow-up that gives up on
         // merge conflicts). Honor the same RunState/label contract as the
@@ -2612,6 +2610,9 @@ export class RunController {
           return;
         }
         this.runStore.updateRunState(runId, "succeeded");
+        if (heldByProgressGuard && next.terminal === "success") {
+          await this.clearProgressGuardFlag(refreshed.number, repository);
+        }
         // This park's own signal observation (observeWaitPullRequestSignals,
         // above) already confirmed external resolution before decideNextStep
         // took this edge -- unlike an agent-hop success, which defers this
@@ -2673,6 +2674,11 @@ export class RunController {
           claim === "unchanged"
             ? buildNoProgressReason(edge)
             : buildEdgeBudgetExhaustedReason(edge, maxEdgeClaims);
+        const parkDescription = describeProgressGuardPark(
+          claim,
+          edge,
+          maxEdgeClaims
+        );
         this.runStore.recordWaitingActivity(runId, parkReason);
         // The persisted reason, not this tick, decides whether the park is
         // new: a poll re-refuses the same edge every interval, and a restart
@@ -2680,7 +2686,7 @@ export class RunController {
         if (row.stateTransitionReason !== parkReason) {
           await this.claimLabels.flagHumanAttention({
             issueNumber: refreshed.number,
-            reason: describeProgressGuardPark(parkReason) ?? parkReason,
+            reason: parkDescription,
             repository
           });
         }
@@ -2698,17 +2704,14 @@ export class RunController {
         return;
       }
 
-      if (heldByProgressGuard) {
-        await this.claimLabels.clearHumanAttention({
-          issueNumber: refreshed.number,
-          repository
-        });
-      }
       this.runStore.recordWorkflowStateAdvance(runId, {
         nextStateId: decision.to,
         transitionReason: withNote(decision.reason)
       });
       this.runStore.updateRunState(runId, "succeeded");
+      if (heldByProgressGuard) {
+        await this.clearProgressGuardFlag(refreshed.number, repository);
+      }
 
       if (isParkedAction(next?.action?.kind)) {
         const nextWaitingRunId = this.createRunId();

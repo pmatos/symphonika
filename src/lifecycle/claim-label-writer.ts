@@ -374,9 +374,9 @@ export class ClaimLabelWriter {
 
   // Independent, best-effort add called as the fallback in both markFailed and
   // markBlocked so a human-attention signal exists regardless of which terminal
-  // path was taken. Its own try/catch keeps a sym:human-needed failure from
-  // suppressing the caller, and vice versa. Never called directly by the
-  // controller, so it stays private. Posts the explanatory comment below even
+  // path was taken, and by flagHumanAttention for a park that is not terminal.
+  // Its own try/catch keeps a sym:human-needed failure from suppressing the
+  // caller, and vice versa. Posts the explanatory comment below even
   // when the label add itself failed -- the label and the comment are two
   // independent human-attention signals, and losing the label write must
   // never also cost the only trace of *why* a human is needed.

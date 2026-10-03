@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  buildEdgeBudgetExhaustedReason,
   buildNoProgressReason,
   describeProgressGuardPark,
   parseNoProgressReason,
@@ -254,14 +253,13 @@ describe("no-progress reason round trip", () => {
 });
 
 describe("describeProgressGuardPark", () => {
-  it("describes both guard reasons and nothing else", () => {
+  it("names the edge for both refusals", () => {
     const edge = { fromStateId: "wait_for_pr", toStateId: "resolve_conflicts" };
-    expect(describeProgressGuardPark(buildNoProgressReason(edge))).toContain(
+    expect(describeProgressGuardPark("unchanged", edge, 10)).toContain(
       "wait_for_pr -> resolve_conflicts"
     );
-    expect(
-      describeProgressGuardPark(buildEdgeBudgetExhaustedReason(edge, 10))
-    ).toContain("10 accepted advances");
-    expect(describeProgressGuardPark("holding advanced to done")).toBeNull();
+    expect(describeProgressGuardPark("budget_exhausted", edge, 10)).toContain(
+      "10 accepted advances"
+    );
   });
 });

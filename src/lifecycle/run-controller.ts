@@ -122,8 +122,7 @@ import {
   buildNoProgressReason,
   DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS,
   describeProgressGuardPark,
-  parseEdgeBudgetExhaustedReason,
-  parseNoProgressReason,
+  isProgressGuardReason,
   progressFingerprint
 } from "./progress-fingerprint.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
@@ -1983,13 +1982,6 @@ export class RunController {
     await this.releaseWaitTerminalClaim(input);
   }
 
-  private async clearProgressGuardFlag(
-    issueNumber: number,
-    repository: GitHubIssueRepositoryInput
-  ): Promise<void> {
-    await this.claimLabels.clearHumanAttention({ issueNumber, repository });
-  }
-
   private async terminateMergePrRefusal(input: {
     issueNumber: number;
     message: string;
@@ -2567,9 +2559,9 @@ export class RunController {
       return;
     }
 
-    const heldByProgressGuard =
-      parseNoProgressReason(row.stateTransitionReason) !== null ||
-      parseEdgeBudgetExhaustedReason(row.stateTransitionReason) !== null;
+    const heldByProgressGuard = isProgressGuardReason(
+      row.stateTransitionReason
+    );
 
     if (decision.kind === "stay_waiting") {
       // The guard's own park returns before this branch, so reaching it with a
@@ -2579,7 +2571,10 @@ export class RunController {
       // condition that raised it.
       if (heldByProgressGuard) {
         this.runStore.recordWaitingActivity(runId, decision.reason);
-        await this.clearProgressGuardFlag(refreshed.number, repository);
+        await this.claimLabels.clearHumanAttention({
+          issueNumber: refreshed.number,
+          repository
+        });
       }
       this.logger?.debug(
         { reason: decision.reason, runId },
@@ -2610,8 +2605,13 @@ export class RunController {
           return;
         }
         this.runStore.updateRunState(runId, "succeeded");
+        // Only a success terminal ends the need for a human; failure and
+        // blocked keep the flag (see the ADR).
         if (heldByProgressGuard && next.terminal === "success") {
-          await this.clearProgressGuardFlag(refreshed.number, repository);
+          await this.claimLabels.clearHumanAttention({
+            issueNumber: refreshed.number,
+            repository
+          });
         }
         // This park's own signal observation (observeWaitPullRequestSignals,
         // above) already confirmed external resolution before decideNextStep
@@ -2674,11 +2674,6 @@ export class RunController {
           claim === "unchanged"
             ? buildNoProgressReason(edge)
             : buildEdgeBudgetExhaustedReason(edge, maxEdgeClaims);
-        const parkDescription = describeProgressGuardPark(
-          claim,
-          edge,
-          maxEdgeClaims
-        );
         this.runStore.recordWaitingActivity(runId, parkReason);
         // The persisted reason, not this tick, decides whether the park is
         // new: a poll re-refuses the same edge every interval, and a restart
@@ -2686,7 +2681,7 @@ export class RunController {
         if (row.stateTransitionReason !== parkReason) {
           await this.claimLabels.flagHumanAttention({
             issueNumber: refreshed.number,
-            reason: parkDescription,
+            reason: describeProgressGuardPark(claim, edge, maxEdgeClaims),
             repository
           });
         }
@@ -2710,7 +2705,10 @@ export class RunController {
       });
       this.runStore.updateRunState(runId, "succeeded");
       if (heldByProgressGuard) {
-        await this.clearProgressGuardFlag(refreshed.number, repository);
+        await this.claimLabels.clearHumanAttention({
+          issueNumber: refreshed.number,
+          repository
+        });
       }
 
       if (isParkedAction(next?.action?.kind)) {
@@ -2813,6 +2811,12 @@ export class RunController {
         return;
       }
       this.runStore.updateRunState(runId, "succeeded");
+      if (heldByProgressGuard && decision.terminal === "success") {
+        await this.claimLabels.clearHumanAttention({
+          issueNumber: refreshed.number,
+          repository
+        });
+      }
       // See the matching release in the `advance` branch above: this park's
       // own signal observation already confirmed external resolution before
       // decideNextStep took this direct-terminate edge.

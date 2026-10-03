@@ -78,6 +78,13 @@ export function parseNoProgressReason(
   return { fromStateId, toStateId };
 }
 
+export function isProgressGuardReason(reason: string | null): boolean {
+  return (
+    parseNoProgressReason(reason) !== null ||
+    parseEdgeBudgetExhaustedReason(reason) !== null
+  );
+}
+
 // The sentence posted on the issue when the guard parks a run, for the same
 // two refusals the dashboard banner distinguishes.
 export function describeProgressGuardPark(

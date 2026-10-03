@@ -106,7 +106,7 @@ function formatReasonForComment(reason: string): string {
   return `${fence}\n${truncated}\n${fence}`;
 }
 
-// markFailed/markBlocked/markNeedsHuman additionally require the human-
+// markFailed/markBlocked/flagHumanAttention additionally require the human-
 // readable reason the run controller already computed for this outcome (its
 // `state_transition_reason`/`terminal_reason` write), so the sym:human-needed
 // comment below never drifts from the DB's own record of why.
@@ -189,20 +189,10 @@ export class ClaimLabelWriter {
             phase: "closed-issue-cleanup"
           }
         );
-        await this.bestEffort(
-          () =>
-            this.api.removeLabelsFromIssue({
-              ...input.repository,
-              issueNumber: input.issueNumber,
-              labels: ["sym:human-needed"]
-            }),
-          {
-            issueNumber: input.issueNumber,
-            label: "sym:human-needed",
-            operation: "removeLabel",
-            phase: "closed-issue-cleanup"
-          }
-        );
+        await this.clearHumanAttention({
+          ...input,
+          phase: "closed-issue-cleanup"
+        });
       }
       return;
     }
@@ -301,14 +291,9 @@ export class ClaimLabelWriter {
     await this.markTerminalLabel(input, "sym:blocked");
   }
 
-  // A non-terminal human-attention flag: the run stays parked and keeps its
-  // claim, so neither sym:blocked nor sym:failed is added and nothing is
-  // released. Never throws, so the park it reports on is never disturbed.
-  async flagHumanAttention(input: IssueBlockTarget): Promise<void> {
-    await this.markNeedsHuman(input);
-  }
-
-  async clearHumanAttention(input: IssueTarget): Promise<void> {
+  async clearHumanAttention(
+    input: IssueTarget & { phase?: ReleaseClaimPhase }
+  ): Promise<void> {
     await this.bestEffort(
       () =>
         this.api.removeLabelsFromIssue({
@@ -319,7 +304,8 @@ export class ClaimLabelWriter {
       {
         issueNumber: input.issueNumber,
         label: "sym:human-needed",
-        operation: "removeLabel"
+        operation: "removeLabel",
+        ...(input.phase === undefined ? {} : { phase: input.phase })
       }
     );
   }
@@ -339,14 +325,14 @@ export class ClaimLabelWriter {
         { err, issueNumber: input.issueNumber },
         `symphonika failed to add ${label} label; sym:claimed left in place`
       );
-      await this.markNeedsHuman(input);
+      await this.flagHumanAttention(input);
       return;
     }
     this.logger?.info(
       { issueNumber: input.issueNumber },
       `symphonika marked issue ${label}`
     );
-    await this.markNeedsHuman(input);
+    await this.flagHumanAttention(input);
   }
 
   async release(
@@ -374,13 +360,15 @@ export class ClaimLabelWriter {
 
   // Independent, best-effort add called as the fallback in both markFailed and
   // markBlocked so a human-attention signal exists regardless of which terminal
-  // path was taken, and by flagHumanAttention for a park that is not terminal.
+  // path was taken, and by the controller for a park that is not terminal.
   // Its own try/catch keeps a sym:human-needed failure from suppressing the
   // caller, and vice versa. Posts the explanatory comment below even
   // when the label add itself failed -- the label and the comment are two
   // independent human-attention signals, and losing the label write must
   // never also cost the only trace of *why* a human is needed.
-  private async markNeedsHuman(input: IssueBlockTarget): Promise<void> {
+  // Also the entry point for a park that is not terminal: the run stays
+  // claimed and neither sym:blocked nor sym:failed is added.
+  async flagHumanAttention(input: IssueBlockTarget): Promise<void> {
     let labelAdded = true;
     try {
       await this.api.addLabelsToIssue({

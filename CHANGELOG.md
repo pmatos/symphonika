@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/pmatos/symphonika/compare/v0.9.0...v0.9.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* flag the issue sym:human-needed when the progress guard parks a run ([#829](https://github.com/pmatos/symphonika/issues/829)) ([6cab8c8](https://github.com/pmatos/symphonika/commit/6cab8c85ae92a8ae82e8a18a569669da77e1e2b8))
+
 # [0.9.0](https://github.com/pmatos/symphonika/compare/v0.8.0...v0.9.0) (2026-10-03)
 
 

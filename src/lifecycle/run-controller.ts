@@ -64,7 +64,7 @@ import {
   type EmailNotificationConfig
 } from "../notifications/config.js";
 import { redactAll, redactValueDeep } from "../redaction.js";
-import type { CancelReason, ProgressEdge, RunStore } from "../run-store.js";
+import type { CancelReason, RunStore } from "../run-store.js";
 import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
 import type {
   IssueWorkspacePreparation,
@@ -98,7 +98,6 @@ import type {
   ExpandedWorkflow,
   ExpandedWorkflowState,
   WorkflowAction,
-  WorkflowActionKind,
   WorkflowPredicateMap
 } from "../workflow/types.js";
 
@@ -118,10 +117,7 @@ import {
 } from "./artifact-probe.js";
 import { probeStateClaim, stateGatesOnClaim } from "./claim-probe.js";
 import {
-  buildEdgeBudgetExhaustedReason,
-  buildNoProgressReason,
   DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS,
-  describeProgressGuardPark,
   isProgressGuardReason,
   progressFingerprint
 } from "./progress-fingerprint.js";
@@ -158,6 +154,10 @@ import {
   type ProviderScratchIdentity
 } from "./provider-scratch.js";
 import { decideNextStep, findWorkflowState } from "./state-machine-dispatch.js";
+import {
+  applyWorkflowDecision,
+  isWorkflowParkedAction
+} from "./workflow-advancement.js";
 import {
   buildCapReachedReason,
   buildMergePrRefusedReason,
@@ -2542,11 +2542,6 @@ export class RunController {
       signals,
       state: waitState
     });
-    // Whichever record* call below ends up persisting transitionReason is
-    // the only write that survives from this tick -- fold any observer note
-    // into it here. See the WaitObservation comment on `note`.
-    const withNote = (reason: string): string =>
-      note === undefined ? reason : `${reason} (${note})`;
 
     // Re-evaluation during shutdown must not mutate rows or arm timers:
     // the scheduler has been cancelled and stop() is closing the store.
@@ -2583,225 +2578,85 @@ export class RunController {
       return;
     }
 
-    if (decision.kind === "advance") {
-      const next = findWorkflowState(loaded.expandedWorkflow, decision.to);
-      if (next?.terminal !== undefined) {
-        this.runStore.recordWorkflowTerminal(runId, {
-          terminalStateId: next.id,
-          transitionReason: withNote(decision.reason)
-        });
-        // A wait/merge_pr row can advance straight into a workflow-authored
-        // `terminal: blocked` node (e.g. a PR follow-up that gives up on
-        // merge conflicts). Honor the same RunState/label contract as the
-        // provider-attempt path (ADR 0058) so the issue doesn't stay
-        // eligible for redispatch under a stale "succeeded" verdict.
-        if (next.terminal === "blocked") {
-          await this.terminalizeBlocked({
-            issueNumber: refreshed.number,
-            reason: "workflow_terminal_blocked",
-            repository,
-            runId
-          });
-          return;
-        }
-        this.runStore.updateRunState(runId, "succeeded");
-        // Only a success terminal ends the need for a human; failure and
-        // blocked keep the flag (see the ADR).
-        if (heldByProgressGuard && next.terminal === "success") {
-          await this.claimLabels.clearHumanAttention({
-            issueNumber: refreshed.number,
-            repository
-          });
-        }
-        // This park's own signal observation (observeWaitPullRequestSignals,
-        // above) already confirmed external resolution before decideNextStep
-        // took this edge -- unlike an agent-hop success, which defers this
-        // same release until pull-request-followup.ts observes the PR itself
-        // resolve (see deferReleaseToScheduler).
-        await this.releaseWaitTerminalClaim({
-          issueNumber: refreshed.number,
-          repository
-        });
-        return;
-      }
-      // The loop-breaker. A park can only make progress on what it observed,
-      // so re-taking the same edge on an identical observation would put the
-      // workflow back where it already was. A changed observation can still
-      // churn forever, so the edge also has an absolute accepted-claim budget.
-      // Stay parked when either half refuses the edge, and say which one did.
-      // Terminal targets are exempt: they end the chain, so they cannot loop.
-      // See issues #616 and #619.
-      const edge: ProgressEdge = {
-        fromStateId: waitState.id,
-        issueNumber: row.issueNumber,
-        projectName: row.project,
-        toStateId: decision.to
-      };
-      const maxEdgeClaims =
-        project.progressGuard?.maxClaimsPerEdge ??
-        DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS;
-      // A content action's observation is always the same shape (constant
-      // signals, no tracked PR to fingerprint) -- there is nothing here for
-      // the guard to catch a genuine loop against. Worse, the persisted key
-      // is (project, issue, from-state, to-state) with no run id, so without
-      // this exemption a second, later walk through this exact edge on a
-      // redispatched Issue -- the reconciliation scenario this action exists
-      // for, see ADR-2026-09-05-0807 -- would be refused as "unchanged" on
-      // its very first tick and park forever, reproducing the same
-      // stuck-issue symptom against the new action instead of fixing it.
-      const claim = isContentAction
-        ? "claimed"
-        : this.runStore.claimProgressEdge(
-            edge,
-            progressFingerprint({
-              artifactExists: waitArtifactExists,
-              pullRequestState,
-              // Scoped to the predicate that actually justified this edge,
-              // not the full projected signal map: `mergeable`/`checks`/
-              // `review_decision` can all churn between polls for reasons
-              // unrelated to review feedback (e.g. a fast-moving base branch
-              // recomputing mergeability) and would otherwise look like
-              // progress on an edge whose own condition never changed,
-              // letting a triaged DEFER thread re-dispatch `autofix`
-              // indefinitely (issue #740).
-              signals: decision.when,
-              state: waitState
-            }),
-            maxEdgeClaims
-          );
-      if (claim !== "claimed") {
-        const parkReason =
-          claim === "unchanged"
-            ? buildNoProgressReason(edge)
-            : buildEdgeBudgetExhaustedReason(edge, maxEdgeClaims);
-        this.runStore.recordWaitingActivity(runId, parkReason);
-        // The persisted reason, not this tick, decides whether the park is
-        // new: a poll re-refuses the same edge every interval, and a restart
-        // loses anything held in memory.
-        if (row.stateTransitionReason !== parkReason) {
-          await this.claimLabels.flagHumanAttention({
-            issueNumber: refreshed.number,
-            reason: describeProgressGuardPark(claim, edge, maxEdgeClaims),
-            repository
-          });
-        }
-        this.logger?.warn(
-          {
-            claim,
-            fromStateId: waitState.id,
-            issueNumber: row.issueNumber,
-            project: row.project,
-            runId,
-            toStateId: decision.to
-          },
-          "symphonika wait re-eval parked: workflow progress guard refused edge"
-        );
-        return;
-      }
+    if (decision.kind === "execute_action") {
+      return;
+    }
 
-      this.runStore.recordWorkflowStateAdvance(runId, {
-        nextStateId: decision.to,
-        transitionReason: withNote(decision.reason)
-      });
-      this.runStore.updateRunState(runId, "succeeded");
-      if (heldByProgressGuard) {
-        await this.claimLabels.clearHumanAttention({
-          issueNumber: refreshed.number,
-          repository
-        });
-      }
-
-      if (isParkedAction(next?.action?.kind)) {
-        const nextWaitingRunId = this.createRunId();
-        this.runStore.createWaitingRun({
+    const maxEdgeClaims =
+      project.progressGuard?.maxClaimsPerEdge ??
+      DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS;
+    const advancement = applyWorkflowDecision(
+      { createRunId: this.createRunId, runStore: this.runStore },
+      {
+        currentState: waitState,
+        decision,
+        mode:
+          decision.kind === "advance" && !isContentAction
+            ? {
+                kind: "waiting",
+                progressGuard: {
+                  fingerprint: progressFingerprint({
+                    artifactExists: waitArtifactExists,
+                    pullRequestState,
+                    // Scope the fingerprint to the predicate that justified
+                    // this edge, not unrelated projected signal churn.
+                    signals: decision.when,
+                    state: waitState
+                  }),
+                  kind: "enabled",
+                  maxClaims: maxEdgeClaims
+                }
+              }
+            : {
+                kind: "waiting",
+                progressGuard: { kind: "exempt" }
+              },
+        ...(note === undefined ? {} : { reasonNote: note }),
+        run: {
           ...(row.branchName.length === 0
             ? {}
             : { branchName: row.branchName }),
-          currentStateId: decision.to,
-          id: nextWaitingRunId,
+          id: runId,
           issue: refreshed,
-          parentRunId: runId,
           projectName: project.name,
           ...(row.workspacePath.length === 0
             ? {}
             : { workspacePath: row.workspacePath })
-        });
-        const scheduled = this.schedule({
-          delayMs: this.lifecyclePolicy.continuation.delayMs,
-          fire: () => this.executeWaitPark({ waitingRunId: nextWaitingRunId }),
-          issueNumber: refreshed.number,
-          kind: "wait_park",
-          projectName: project.name,
-          runId
-        });
-        if (!scheduled) {
-          this.logWaitReevaluationRefused(nextWaitingRunId);
-        }
-        return;
+        },
+        workflow: loaded.expandedWorkflow
       }
+    );
 
-      // Carry the review feedback into the state the park routed to. The
-      // observation is already in hand here, and the target state's prompt is
-      // the only place it can still reach the agent.
-      const reviewInstructions =
-        pullRequestState !== undefined &&
-        pullRequestState.reviewFollowup.unresolvedThreads.length > 0
-          ? renderReviewFollowupInstructions(
-              reviewContextFromState(pullRequestState, pullRequestState.headSha)
-            )
-          : undefined;
-
-      const scheduled = this.schedule({
-        delayMs: this.lifecyclePolicy.continuation.delayMs,
-        fire: () =>
-          this.executeStateAdvance({
-            ...(reviewInstructions === undefined
-              ? {}
-              : { extraInstructions: reviewInstructions }),
-            issue: refreshed,
-            parentRunId: runId,
-            projectName: project.name,
-            toStateId: decision.to
-          }),
-        issueNumber: refreshed.number,
-        kind: "state_advance",
-        onShutdown: () =>
-          this.cancelRunAfterScheduleCleared({
-            issueNumber: refreshed.number,
-            repository,
-            runId
-          }),
-        projectName: project.name,
-        runId
-      });
-      if (!scheduled) {
-        await this.cancelRunAfterScheduleRefused({
+    if (advancement.kind === "progress_guarded") {
+      // The persisted reason, not this tick, decides whether the park is new:
+      // a poll re-refuses the same edge every interval, and a restart loses
+      // anything held in memory.
+      if (row.stateTransitionReason !== advancement.parkReason) {
+        await this.claimLabels.flagHumanAttention({
           issueNumber: refreshed.number,
-          repository,
-          runId
+          reason: advancement.attentionReason,
+          repository
         });
       }
+      this.logger?.warn(
+        {
+          claim: advancement.claim,
+          fromStateId: advancement.edge.fromStateId,
+          issueNumber: advancement.edge.issueNumber,
+          project: advancement.edge.projectName,
+          runId,
+          toStateId: advancement.edge.toStateId
+        },
+        "symphonika wait re-eval parked: workflow progress guard refused edge"
+      );
       return;
     }
 
-    if (decision.kind === "blocked") {
-      this.runStore.recordWorkflowBlocked(runId, {
-        stateId: waitState.id,
-        transitionReason: withNote(decision.reason)
-      });
-      this.runStore.updateRunState(runId, "succeeded");
-      return;
-    }
-
-    if (decision.kind === "terminate") {
-      this.runStore.recordWorkflowTerminal(runId, {
-        terminalStateId: decision.stateId,
-        transitionReason: `entered terminal state ${decision.terminal}`
-      });
-      // See the matching `terminal === "blocked"` handling in the `advance`
-      // branch above — same ADR 0058 contract, reached via a direct
-      // terminate decision instead of an advance-to-terminal one.
-      if (decision.terminal === "blocked") {
+    if (advancement.kind === "terminal") {
+      // A wait/merge_pr row can advance straight into a workflow-authored
+      // `terminal: blocked` node. Honor the same RunState/label contract as
+      // the provider-attempt path (ADR 0058).
+      if (advancement.terminal === "blocked") {
         await this.terminalizeBlocked({
           issueNumber: refreshed.number,
           reason: "workflow_terminal_blocked",
@@ -2811,18 +2666,95 @@ export class RunController {
         return;
       }
       this.runStore.updateRunState(runId, "succeeded");
-      if (heldByProgressGuard && decision.terminal === "success") {
+      // Only a success terminal ends the need for a human; failure and
+      // blocked keep the flag (see the Progress Guard ADR).
+      if (heldByProgressGuard && advancement.terminal === "success") {
         await this.claimLabels.clearHumanAttention({
           issueNumber: refreshed.number,
           repository
         });
       }
-      // See the matching release in the `advance` branch above: this park's
-      // own signal observation already confirmed external resolution before
-      // decideNextStep took this direct-terminate edge.
+      // This park's own observation confirmed external resolution before
+      // decideNextStep took the terminal edge, so release immediately.
       await this.releaseWaitTerminalClaim({
         issueNumber: refreshed.number,
         repository
+      });
+      return;
+    }
+
+    if (advancement.kind === "blocked") {
+      this.runStore.updateRunState(runId, "succeeded");
+      return;
+    }
+
+    if (advancement.kind === "deferred") {
+      return;
+    }
+
+    this.runStore.updateRunState(runId, "succeeded");
+    if (heldByProgressGuard) {
+      await this.claimLabels.clearHumanAttention({
+        issueNumber: refreshed.number,
+        repository
+      });
+    }
+
+    if (advancement.kind === "parked") {
+      const scheduled = this.schedule({
+        delayMs: this.lifecyclePolicy.continuation.delayMs,
+        fire: () =>
+          this.executeWaitPark({ waitingRunId: advancement.waitingRunId }),
+        issueNumber: refreshed.number,
+        kind: "wait_park",
+        projectName: project.name,
+        runId
+      });
+      if (!scheduled) {
+        this.logWaitReevaluationRefused(advancement.waitingRunId);
+      }
+      return;
+    }
+
+    // Carry the review feedback into the state the park routed to. The
+    // observation is already in hand here, and the target state's prompt is
+    // the only place it can still reach the agent.
+    const reviewInstructions =
+      pullRequestState !== undefined &&
+      pullRequestState.reviewFollowup.unresolvedThreads.length > 0
+        ? renderReviewFollowupInstructions(
+            reviewContextFromState(pullRequestState, pullRequestState.headSha)
+          )
+        : undefined;
+
+    const scheduled = this.schedule({
+      delayMs: this.lifecyclePolicy.continuation.delayMs,
+      fire: () =>
+        this.executeStateAdvance({
+          ...(reviewInstructions === undefined
+            ? {}
+            : { extraInstructions: reviewInstructions }),
+          issue: refreshed,
+          parentRunId: runId,
+          projectName: project.name,
+          toStateId: advancement.stateId
+        }),
+      issueNumber: refreshed.number,
+      kind: "state_advance",
+      onShutdown: () =>
+        this.cancelRunAfterScheduleCleared({
+          issueNumber: refreshed.number,
+          repository,
+          runId
+        }),
+      projectName: project.name,
+      runId
+    });
+    if (!scheduled) {
+      await this.cancelRunAfterScheduleRefused({
+        issueNumber: refreshed.number,
+        repository,
+        runId
       });
     }
   }
@@ -4689,7 +4621,7 @@ export class RunController {
         loadedWorkflow.errors.length === 0 &&
         loadedWorkflow.expandedWorkflow.source.kind === "raw_fsm" &&
         currentState !== undefined &&
-        isParkedAction(currentState.action?.kind)
+        isWorkflowParkedAction(currentState.action?.kind)
       ) {
         // A cancel (operator or shutdown) can land during loadWorkflow
         // above, after cancelBeforeAttach was captured. Parking now would
@@ -5360,67 +5292,53 @@ export class RunController {
       state: input.currentState
     });
 
-    if (decision.kind === "advance") {
-      const next = findWorkflowState(input.workflow, decision.to);
-      if (next?.terminal !== undefined) {
-        this.runStore.recordWorkflowTerminal(input.runId, {
-          terminalStateId: next.id,
-          transitionReason: decision.reason
-        });
-        const terminalLabel = narrowTerminalLabel(next.terminal);
-        return {
-          advancedToState: null,
-          advancedToTerminal: true,
-          blocked: false,
-          ...(terminalLabel === undefined ? {} : { terminalLabel })
-        };
-      }
-      if (input.deferRetryableTransientAdvance === true) {
-        return {
-          advancedToState: null,
-          advancedToTerminal: false,
-          blocked: false
-        };
-      }
-      this.runStore.recordWorkflowStateAdvance(input.runId, {
-        nextStateId: decision.to,
-        transitionReason: decision.reason
-      });
-      if (isParkedAction(next?.action?.kind)) {
-        const waitingRunId = this.createRunId();
-        this.runStore.createWaitingRun({
-          ...(input.branchName === undefined
-            ? {}
-            : { branchName: input.branchName }),
-          currentStateId: decision.to,
-          id: waitingRunId,
-          issue: input.issue,
-          parentRunId: input.runId,
-          projectName: input.project.name,
-          ...(input.workspacePath === undefined
-            ? {}
-            : { workspacePath: input.workspacePath })
-        });
-        return {
-          advancedToState: decision.to,
-          advancedToTerminal: false,
-          blocked: false,
-          parkAsWait: true,
-          waitingRunId
-        };
-      }
+    if (
+      decision.kind === "execute_action" ||
+      decision.kind === "stay_waiting"
+    ) {
       return {
-        advancedToState: decision.to,
+        advancedToState: null,
         advancedToTerminal: false,
         blocked: false
       };
     }
 
-    if (decision.kind === "blocked") {
-      this.runStore.recordWorkflowBlocked(input.runId, {
-        stateId: input.currentState.id,
-        transitionReason: decision.reason
-      });
+    const advancement = applyWorkflowDecision(
+      { createRunId: this.createRunId, runStore: this.runStore },
+      {
+        currentState: input.currentState,
+        decision,
+        mode: {
+          deferNonTerminalAdvance:
+            input.deferRetryableTransientAdvance === true,
+          kind: "provider"
+        },
+        run: {
+          ...(input.branchName === undefined
+            ? {}
+            : { branchName: input.branchName }),
+          id: input.runId,
+          issue: input.issue,
+          projectName: input.project.name,
+          ...(input.workspacePath === undefined
+            ? {}
+            : { workspacePath: input.workspacePath })
+        },
+        workflow: input.workflow
+      }
+    );
+
+    if (advancement.kind === "terminal") {
+      const terminalLabel = narrowTerminalLabel(advancement.terminal);
+      return {
+        advancedToState: null,
+        advancedToTerminal: true,
+        blocked: false,
+        ...(terminalLabel === undefined ? {} : { terminalLabel })
+      };
+    }
+
+    if (advancement.kind === "blocked") {
       return {
         advancedToState: null,
         advancedToTerminal: false,
@@ -5428,17 +5346,21 @@ export class RunController {
       };
     }
 
-    if (decision.kind === "terminate") {
-      this.runStore.recordWorkflowTerminal(input.runId, {
-        terminalStateId: decision.stateId,
-        transitionReason: `entered terminal state ${decision.terminal}`
-      });
-      const terminalLabel = narrowTerminalLabel(decision.terminal);
+    if (advancement.kind === "parked") {
       return {
-        advancedToState: null,
-        advancedToTerminal: true,
+        advancedToState: advancement.stateId,
+        advancedToTerminal: false,
         blocked: false,
-        ...(terminalLabel === undefined ? {} : { terminalLabel })
+        parkAsWait: true,
+        waitingRunId: advancement.waitingRunId
+      };
+    }
+
+    if (advancement.kind === "advanced") {
+      return {
+        advancedToState: advancement.stateId,
+        advancedToTerminal: false,
+        blocked: false
       };
     }
 
@@ -6320,20 +6242,6 @@ function normalizeRawIssue(
     updated_at: raw.updated_at ?? "",
     url: raw.html_url ?? raw.url ?? ""
   };
-}
-
-// Diverges deliberately from decideNextStep's own (unrelated) `isParked` set
-// in state-machine-dispatch.ts, which only decides stay_waiting vs blocked on
-// a no-match completeWhen/transition. This one decides park-vs-provider at
-// state-advance time: a close_issue/label_issue/comment action has no prompt
-// to run, so it must park into the wait-park/reEvaluateWaitingRun machinery
-// exactly like wait/merge_pr, even though it never itself "stays waiting".
-// Built on isIssueContentActionKind rather than re-listing the three content
-// kinds so the two never drift out of sync.
-function isParkedAction(kind: WorkflowActionKind | undefined): boolean {
-  return (
-    kind === "wait" || kind === "merge_pr" || isIssueContentActionKind(kind)
-  );
 }
 
 // GitHub documents 405 as "merge cannot be performed" — but gives no

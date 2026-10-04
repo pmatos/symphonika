@@ -1825,6 +1825,60 @@ describe("wait state lifecycle", () => {
     }
   });
 
+  it("cites how the chain's earlier run ended when escalating a waiting run with no tracked pull request (issue #830)", async () => {
+    const root = await makeTempRoot();
+    await writeWaitStateProject(root);
+    const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+    try {
+      const issue = issueFixture();
+      store.createRun({
+        id: "parent-run",
+        issue,
+        projectName: "symphonika",
+        providerCommand: DEFAULT_CODEX_COMMAND,
+        providerName: "codex"
+      });
+      store.recordTerminalReason("parent-run", "no_progress", "deterministic");
+      store.updateRunState("parent-run", "stale");
+      store.createWaitingRun({
+        currentStateId: "holding",
+        id: "waiting-run",
+        issue,
+        parentRunId: "parent-run",
+        projectName: "symphonika"
+      });
+      const githubIssuesApi: GitHubIssuesApi = {
+        addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+        getIssue: vi.fn().mockResolvedValue({
+          ...issue,
+          labels: issue.labels.map((name) => ({ name }))
+        }),
+        getPullRequestFollowupState: vi.fn(),
+        listOpenIssues: vi.fn().mockResolvedValue([]),
+        removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+      };
+      const controller = buildController({
+        githubIssuesApi,
+        project: projectFixture("./workflow.yml"),
+        root,
+        runStore: store
+      });
+      for (let i = 0; i < 119; i += 1) {
+        store.incrementPrUntrackedWaitCount("waiting-run");
+      }
+
+      await controller.reEvaluateWaitingRun("waiting-run");
+
+      expect(store.getRun("waiting-run")?.terminalReason).toBe(
+        buildNoPullRequestTrackedReason("holding", 120, [
+          "latest run in this chain (parent-run) ended stale (no_progress)"
+        ])
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("daemon tick reconciles a waiting run forward when PR predicates become satisfied", async () => {
     const root = await makeTempRoot();
     await writeWaitStateProject(root);

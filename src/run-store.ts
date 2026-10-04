@@ -6151,6 +6151,39 @@ export class RunStore {
     return row === undefined ? undefined : mapTrackedPullRequestRow(row);
   }
 
+  // Most recently created run in runId's continuation chain other than runId
+  // itself, used to cite how the rest of the chain really ended when a
+  // discovery/wait bound escalates (issue #830).
+  findLatestOtherChainRun(runId: string): RunDetail | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "with recursive up(id) as (",
+          "  select @runId as id",
+          "  union all",
+          "  select r.continuation_parent_run_id from runs r",
+          "  join up on r.id = up.id",
+          "  where r.continuation_parent_run_id is not null",
+          "),",
+          "down(id) as (",
+          "  select up.id from up",
+          "  join runs r on r.id = up.id",
+          "  where r.continuation_parent_run_id is null",
+          "  union all",
+          "  select r.id from runs r",
+          "  join down on r.continuation_parent_run_id = down.id",
+          ")",
+          "select runs.id from down",
+          "join runs on runs.id = down.id",
+          "where runs.id <> @runId",
+          "order by runs.created_at desc, runs.rowid desc",
+          "limit 1"
+        ].join(" ")
+      )
+      .get({ runId }) as { id: string } | undefined;
+    return row === undefined ? undefined : this.getRun(row.id);
+  }
+
   // Scopes to this run's own continuation chain rather than branch name
   // (see CONTEXT.md's "Run Chain" entry and ADR-2026-09-10-2031, issue
   // #738). Seeds its own single-run recursive walk from @runId instead of

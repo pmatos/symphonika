@@ -157,6 +157,16 @@ The orchestrator may write these labels for dispatch safety and runtime bookkeep
 labels, comments, PR links, handoff labels, and issue closure are owned by the coding agent and the
 repository workflow.
 
+An Issue carrying any Operational Label is ineligible for dispatch, so removing `sym:human-needed`
+alone does not re-dispatch an Issue that is also `sym:blocked`, `sym:failed`, `sym:stale`, or
+`sym:claimed`; an operator re-queues it by removing every Operational Label the orchestrator left on
+it.
+
+When a bounded wait for a pull request gives up (`pull_request_discovery_exhausted:` or
+`no_pull_request_tracked:`), the reason posted on the Issue states whether the Issue Branch ever
+reached origin ("branch was never pushed to origin" versus "branch exists on origin but has no open
+pull request") and, when a later run in the same Run chain did not succeed, how that run ended.
+
 Operational labels must exist before a Project can dispatch work. Creating missing labels requires
 explicit operator confirmation through `init-project` or a deliberate startup flag. The daemon must
 not silently create labels.

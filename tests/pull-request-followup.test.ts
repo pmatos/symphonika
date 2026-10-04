@@ -1611,6 +1611,131 @@ describe("pull request follow-up", () => {
     }
   });
 
+  describe("discovery-exhausted failure context (issue #830)", () => {
+    async function exhaust(input: {
+      listBranchCommits?: GitHubIssuesApi["listBranchCommits"];
+      seed?: (store: RunStore, root: string) => void;
+    }): Promise<{ addIssueComment: ReturnType<typeof vi.fn>; reason: string }> {
+      const root = await makeTempRoot();
+      await writeProject(root);
+      const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
+      try {
+        seedSucceededRun(store, {
+          branchName: "sym/symphonika/54-ctx",
+          runId: "parent-run",
+          workspacePath: path.join(root, "workspace")
+        });
+        input.seed?.(store, root);
+        for (let i = 0; i < MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS - 1; i += 1) {
+          store.recordPullRequestDiscoveryAttempt("parent-run");
+        }
+        const project = projectConfig();
+        const addIssueComment = vi.fn().mockResolvedValue(undefined);
+        const githubIssuesApi: GitHubIssuesApi = {
+          addIssueComment,
+          addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+          getPullRequestFollowupState: vi.fn(),
+          ...(input.listBranchCommits === undefined
+            ? {}
+            : { listBranchCommits: input.listBranchCommits }),
+          listOpenIssues: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+          removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+        };
+        const controller = runController({
+          githubIssuesApi,
+          project,
+          provider: fakeProvider([]),
+          root,
+          runStore: store,
+          workspacePath: path.join(root, "workspace")
+        });
+        await runPullRequestFollowup({
+          configPath: path.join(root, "symphonika.yml"),
+          env: { GITHUB_TOKEN: "secret-token" },
+          githubIssuesApi,
+          projectsLoader: () =>
+            Promise.resolve(new Map([[project.name, project]])),
+          runController: controller,
+          runStore: store
+        });
+        return {
+          addIssueComment,
+          reason: store.getRun("parent-run")?.terminalReason ?? ""
+        };
+      } finally {
+        store.close();
+      }
+    }
+
+    it("says the branch was never pushed when it is absent on origin", async () => {
+      const { addIssueComment, reason } = await exhaust({
+        listBranchCommits: vi.fn().mockResolvedValue(null)
+      });
+
+      expect(
+        reason.startsWith(
+          buildPullRequestDiscoveryExhaustedReason(
+            "sym/symphonika/54-ctx",
+            MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS
+          )
+        )
+      ).toBe(true);
+      expect(reason).toContain("branch was never pushed to origin");
+      const body = (addIssueComment.mock.calls[0]?.[0] as { body?: string })
+        .body;
+      expect(body).toContain("branch was never pushed to origin");
+    });
+
+    it("says the branch exists when it was pushed but no pull request was opened", async () => {
+      const { reason } = await exhaust({
+        listBranchCommits: vi.fn().mockResolvedValue([{ sha: "abc123" }])
+      });
+
+      expect(reason).toContain(
+        "branch exists on origin but has no open pull request"
+      );
+    });
+
+    it("cites the chain's later run when it died instead of the plan stage's own success", async () => {
+      const { reason } = await exhaust({
+        listBranchCommits: vi.fn().mockResolvedValue(null),
+        seed: (store) => {
+          store.createContinuationRun({
+            id: "child-run",
+            issue: normalizedIssue(),
+            parentRunId: "parent-run",
+            projectName: "symphonika",
+            providerCommand: DEFAULT_CODEX_COMMAND,
+            providerName: "codex"
+          });
+          store.recordTerminalReason(
+            "child-run",
+            "no_progress",
+            "deterministic"
+          );
+          store.updateRunState("child-run", "stale");
+        }
+      });
+
+      expect(reason).toContain(
+        "latest run in this chain (child-run) ended stale"
+      );
+      expect(reason).toContain("no_progress");
+    });
+
+    it("leaves the reason unchanged when the branch lookup is unavailable", async () => {
+      const { reason } = await exhaust({});
+
+      expect(reason).toBe(
+        buildPullRequestDiscoveryExhaustedReason(
+          "sym/symphonika/54-ctx",
+          MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS
+        )
+      );
+    });
+  });
+
   it("does not release the claim while PR discovery attempts remain", async () => {
     const root = await makeTempRoot();
     await writeProject(root);

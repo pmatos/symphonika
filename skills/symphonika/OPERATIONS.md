@@ -107,6 +107,12 @@ A forced update drains active Runs from the daemon's cgroup before cutting over,
 - **A config edit doesn't seem to apply** → confirm it isn't one of the unit-level settings above
   (needs `service install --force` + restart); otherwise force a tick with `symphonika poll-now`
   and check `symphonika status` / `journalctl` for a reported reload error.
+- **An issue stays idle after you removed `sym:human-needed`** → eligibility rejects any issue
+  still carrying an operational label (`sym:blocked`, `sym:failed`, `sym:stale`, `sym:claimed`);
+  remove those too (SPEC.md §4.4). The `sym:human-needed` comment's reason says whether the branch
+  ever reached origin (`pull_request_discovery_exhausted` / `no_pull_request_tracked`); for "never
+  pushed", read the run's `provider.raw.jsonl` for a failed or still-running `git push` (e.g. a slow
+  or broken pre-push hook).
 - **Daemon HTTP port busy** → `symphonika daemon --port <n>`, then pass
   `--daemon-url http://127.0.0.1:<n>` to `status`, `poll-now`, and `cancel`.
 

@@ -112,21 +112,34 @@ function withContext(base: string, context: readonly string[]): string {
   return context.length === 0 ? base : `${base}; ${context.join("; ")}`;
 }
 
-export type BranchRemoteState = "never_pushed" | "pushed_no_pull_request";
+type BranchRemoteState =
+  "never_pushed" | "pushed_no_pull_request" | "removed_after_pull_request";
 
 export function describeBranchRemoteState(state: BranchRemoteState): string {
-  return state === "never_pushed"
-    ? "branch was never pushed to origin"
-    : "branch exists on origin but has no open pull request";
+  switch (state) {
+    case "never_pushed":
+      return "branch was never pushed to origin";
+    case "pushed_no_pull_request":
+      return "branch exists on origin but has no open pull request";
+    case "removed_after_pull_request":
+      return "branch is no longer on origin but a pull request for it exists";
+  }
 }
+
+const MAX_CHAIN_RUN_DETAIL_LENGTH = 200;
 
 export function describeLatestChainRun(run: {
   cancelReason: string | null;
   id: string;
   state: string;
+  terminal: boolean;
   terminalReason: string | null;
 }): string {
-  const detail = run.terminalReason ?? run.cancelReason;
-  const verb = run.state === "waiting" ? "is" : "ended";
-  return `latest run in this chain (${run.id}) ${verb} ${run.state}${detail === null ? "" : ` (${detail})`}`;
+  const raw = (run.terminalReason ?? run.cancelReason)?.replace(/\s+/g, " ");
+  const detail =
+    raw !== undefined && raw.length > MAX_CHAIN_RUN_DETAIL_LENGTH
+      ? `${raw.slice(0, MAX_CHAIN_RUN_DETAIL_LENGTH)}…`
+      : raw;
+  const verb = run.terminal ? "ended" : "is";
+  return `latest run in this chain (${run.id}) ${verb} ${run.state}${detail === undefined ? "" : ` (${detail})`}`;
 }

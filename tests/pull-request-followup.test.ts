@@ -30,7 +30,10 @@ import {
   pullRequestReadyToMerge,
   runPullRequestFollowup
 } from "../src/pull-request-followup.js";
-import { buildPullRequestDiscoveryExhaustedReason } from "../src/lifecycle/terminal-reason.js";
+import {
+  buildPullRequestDiscoveryExhaustedReason,
+  describeLatestChainRun
+} from "../src/lifecycle/terminal-reason.js";
 import { interpretPullRequest } from "../src/pull-request-state.js";
 import {
   MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS,
@@ -1614,6 +1617,7 @@ describe("pull request follow-up", () => {
   describe("discovery-exhausted failure context (issue #830)", () => {
     async function exhaust(input: {
       listBranchCommits?: GitHubIssuesApi["listBranchCommits"];
+      listPullRequestsForBranch?: GitHubIssuesApi["listPullRequestsForBranch"];
       seed?: (store: RunStore, root: string) => void;
     }): Promise<{ addIssueComment: ReturnType<typeof vi.fn>; reason: string }> {
       const root = await makeTempRoot();
@@ -1639,7 +1643,8 @@ describe("pull request follow-up", () => {
             ? {}
             : { listBranchCommits: input.listBranchCommits }),
           listOpenIssues: vi.fn().mockResolvedValue([]),
-          listPullRequestsForBranch: vi.fn().mockResolvedValue([]),
+          listPullRequestsForBranch:
+            input.listPullRequestsForBranch ?? vi.fn().mockResolvedValue([]),
           removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
         };
         const controller = runController({
@@ -1722,6 +1727,36 @@ describe("pull request follow-up", () => {
         "latest run in this chain (child-run) ended stale"
       );
       expect(reason).toContain("no_progress");
+    });
+
+    it("does not claim the branch was never pushed when a pull request for it exists", async () => {
+      const { reason } = await exhaust({
+        listBranchCommits: vi.fn().mockResolvedValue(null),
+        listPullRequestsForBranch: vi
+          .fn()
+          .mockResolvedValue([
+            { merged_at: "2026-10-01T00:00:00Z", number: 7, state: "closed" }
+          ])
+      });
+
+      expect(reason).toContain(
+        "no longer on origin but a pull request for it exists"
+      );
+      expect(reason).not.toContain("never pushed");
+    });
+
+    it("says a live chain run is, not ended, and bounds a long reason", () => {
+      const live = describeLatestChainRun({
+        cancelReason: null,
+        id: "child-run",
+        state: "running",
+        terminal: false,
+        terminalReason: `boom\n${"x".repeat(500)}`
+      });
+
+      expect(live).toContain("(child-run) is running");
+      expect(live).not.toContain("\n");
+      expect(live.length).toBeLessThan(300);
     });
 
     it("leaves the reason unchanged when the branch lookup is unavailable", async () => {

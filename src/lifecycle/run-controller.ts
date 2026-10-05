@@ -30,6 +30,8 @@ import {
   tryGetIssue,
   tryGetIssueDependencies,
   tryGetPullRequestFollowupState,
+  tryListBranchCommits,
+  tryListPullRequestsForBranch,
   tryMergePullRequest
 } from "../issue-polling.js";
 import {
@@ -65,7 +67,10 @@ import {
 } from "../notifications/config.js";
 import { redactAll, redactValueDeep } from "../redaction.js";
 import type { CancelReason, RunStore } from "../run-store.js";
-import { WATCHDOG_TERMINAL_REASONS } from "../run-store.js";
+import {
+  TERMINAL_RUN_STATES,
+  WATCHDOG_TERMINAL_REASONS
+} from "../run-store.js";
 import type {
   IssueWorkspacePreparation,
   PreparedIssueWorkspace,
@@ -163,6 +168,9 @@ import {
   buildMergePrRefusedReason,
   buildNoPullRequestTrackedReason,
   buildPullRequestDiscoveryExhaustedReason,
+  type BranchRemoteState,
+  describeBranchRemoteState,
+  describeLatestChainRun,
   formatCapReachedReason
 } from "./terminal-reason.js";
 
@@ -582,6 +590,7 @@ const NO_RUN_SLOT_DEADLINE: RunSlotDeadline = {
 };
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const BRANCH_LOOKUP_TIMEOUT_MS = 10_000;
 const RUN_SLOT_DEADLINE_ABORT_MESSAGE = "Run slot deadline aborted";
 
 // The single reading of "is the Run wall-clock cap active", in milliseconds.
@@ -1924,7 +1933,12 @@ export class RunController {
   }): Promise<void> {
     const reason = buildPullRequestDiscoveryExhaustedReason(
       input.branchName,
-      input.attempts
+      input.attempts,
+      await this.describeNoPullRequestContext({
+        branchName: input.branchName,
+        repository: input.repository,
+        runId: input.runId
+      })
     );
     this.runStore.recordTerminalReason(input.runId, reason, "deterministic");
     this.runStore.updateRunState(input.runId, "blocked");
@@ -1938,6 +1952,88 @@ export class RunController {
       phase: "pull-request-discovery-exhausted",
       repository: input.repository
     });
+  }
+
+  // Diagnostic clauses for the two "no pull request ever showed up" bounds
+  // (issue #830): whether the branch ever reached origin, and how the rest of
+  // the run chain actually ended. Best-effort -- an unavailable lookup or a
+  // GitHub error just drops that clause rather than delaying escalation.
+  private async describeNoPullRequestContext(input: {
+    branchName: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<string[]> {
+    const context: string[] = [];
+    const latest = this.runStore.findLatestOtherChainRun(input.runId);
+    const branchName =
+      input.branchName !== "" ? input.branchName : (latest?.branchName ?? "");
+    if (branchName !== "") {
+      const remoteState = await this.classifyBranchOnOrigin({
+        branchName,
+        repository: input.repository
+      });
+      if (remoteState !== undefined) {
+        context.push(describeBranchRemoteState(remoteState));
+      }
+    }
+    // A `succeeded` neighbour is the ordinary earlier stage, not a failure
+    // worth citing.
+    if (latest !== undefined && latest.state !== "succeeded") {
+      context.push(
+        describeLatestChainRun(latest, TERMINAL_RUN_STATES.has(latest.state))
+      );
+    }
+    return context;
+  }
+
+  // Bounded so a stalled GitHub call cannot hold up recording the terminal
+  // reason and labeling the issue the escalation exists to do.
+  private async classifyBranchOnOrigin(input: {
+    branchName: string;
+    repository: GitHubIssueRepositoryInput;
+  }): Promise<BranchRemoteState | undefined> {
+    let timer: NodeJS.Timeout | undefined;
+    const lookup = async (): Promise<BranchRemoteState | undefined> => {
+      const commits = await tryListBranchCommits(this.githubIssuesApi, {
+        ...input.repository,
+        branch: input.branchName,
+        perPage: 1
+      });
+      if (commits === undefined) {
+        return undefined;
+      }
+      if (commits !== null && commits.length > 0) {
+        return "pushed_no_pull_request";
+      }
+      // PR discovery lists state "all", so a branch deleted after its pull
+      // request merged or closed is not the same as one never pushed.
+      const pullRequests = await tryListPullRequestsForBranch(
+        this.githubIssuesApi,
+        { ...input.repository, branch: input.branchName }
+      );
+      return pullRequests !== undefined && pullRequests.length > 0
+        ? "removed_after_pull_request"
+        : "never_pushed";
+    };
+    try {
+      return await Promise.race([
+        lookup(),
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(
+            () => resolve(undefined),
+            BRANCH_LOOKUP_TIMEOUT_MS
+          );
+        })
+      ]);
+    } catch (error) {
+      this.logger?.warn(
+        { branch: input.branchName, err: error },
+        "symphonika could not look up the branch on origin for a no-pull-request escalation"
+      );
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // A parked wait/merge_pr run's own re-evaluation reaching a genuine
@@ -2016,7 +2112,12 @@ export class RunController {
   }): Promise<void> {
     const reason = buildNoPullRequestTrackedReason(
       input.stateId,
-      input.attempt
+      input.attempt,
+      await this.describeNoPullRequestContext({
+        branchName: this.runStore.getRun(input.runId)?.branchName ?? "",
+        repository: input.repository,
+        runId: input.runId
+      })
     );
     this.runStore.recordWorkflowTerminal(input.runId, {
       terminalStateId: input.stateId,

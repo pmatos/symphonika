@@ -76,9 +76,13 @@ const NO_PULL_REQUEST_TRACKED_PREFIX = "no_pull_request_tracked:";
 // a silently-stuck issue surfacing is the whole point of the bound.
 export function buildNoPullRequestTrackedReason(
   waitStateId: string,
-  attempts: number
+  attempts: number,
+  context: readonly string[] = []
 ): string {
-  return `${NO_PULL_REQUEST_TRACKED_PREFIX} state "${waitStateId}" never observed a tracked pull request after ${attempts} checks`;
+  return withContext(
+    `${NO_PULL_REQUEST_TRACKED_PREFIX} state "${waitStateId}" never observed a tracked pull request after ${attempts} checks`,
+    context
+  );
 }
 
 const PULL_REQUEST_DISCOVERY_EXHAUSTED_PREFIX =
@@ -92,7 +96,54 @@ const PULL_REQUEST_DISCOVERY_EXHAUSTED_PREFIX =
 // that reason, no reader needs to special-case this one today.
 export function buildPullRequestDiscoveryExhaustedReason(
   branchName: string,
-  attempts: number
+  attempts: number,
+  context: readonly string[] = []
 ): string {
-  return `${PULL_REQUEST_DISCOVERY_EXHAUSTED_PREFIX} branch "${branchName}" never had a discoverable pull request after ${attempts} checks`;
+  return withContext(
+    `${PULL_REQUEST_DISCOVERY_EXHAUSTED_PREFIX} branch "${branchName}" never had a discoverable pull request after ${attempts} checks`,
+    context
+  );
+}
+
+// Diagnostic clauses (issue #830) appended after the stable reason prefix: what
+// the remote actually holds for the branch and how the rest of the run chain
+// ended. A reason with no clauses is byte-identical to the pre-#830 string.
+function withContext(base: string, context: readonly string[]): string {
+  return context.length === 0 ? base : `${base}; ${context.join("; ")}`;
+}
+
+export type BranchRemoteState =
+  "never_pushed" | "pushed_no_pull_request" | "removed_after_pull_request";
+
+export function describeBranchRemoteState(state: BranchRemoteState): string {
+  switch (state) {
+    case "never_pushed":
+      return "branch was never pushed to origin";
+    case "pushed_no_pull_request":
+      return "branch exists on origin but has no open pull request";
+    case "removed_after_pull_request":
+      return "branch is no longer on origin but a pull request for it exists";
+  }
+}
+
+const MAX_CHAIN_RUN_DETAIL_LENGTH = 200;
+
+export function describeLatestChainRun(
+  run: {
+    cancelReason: string | null;
+    id: string;
+    state: string;
+    terminalReason: string | null;
+  },
+  ended: boolean
+): string {
+  const raw = (run.terminalReason ?? run.cancelReason)?.replace(/\s+/g, " ");
+  // Array.from keeps a cut from landing inside a surrogate pair of text
+  // echoed from provider output.
+  const detail =
+    raw !== undefined && raw.length > MAX_CHAIN_RUN_DETAIL_LENGTH
+      ? `${Array.from(raw).slice(0, MAX_CHAIN_RUN_DETAIL_LENGTH).join("")}…`
+      : raw;
+  const verb = ended ? "ended" : "is";
+  return `latest run in this chain (${run.id}) ${verb} ${run.state}${detail === undefined ? "" : ` (${detail})`}`;
 }

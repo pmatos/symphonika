@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/pmatos/symphonika/compare/v0.9.1...v0.9.2) (2026-10-05)
+
+
+### Bug Fixes
+
+* say whether the branch reached origin when pr discovery gives up ([#831](https://github.com/pmatos/symphonika/issues/831)) ([0437de9](https://github.com/pmatos/symphonika/commit/0437de9ebaf88d61add841a5fe8333b959097393))
+
 ## [0.9.1](https://github.com/pmatos/symphonika/compare/v0.9.0...v0.9.1) (2026-10-04)
 
 

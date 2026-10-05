@@ -1746,13 +1746,15 @@ describe("pull request follow-up", () => {
     });
 
     it("says a live chain run is, not ended, and bounds a long reason", () => {
-      const live = describeLatestChainRun({
-        cancelReason: null,
-        id: "child-run",
-        state: "running",
-        terminal: false,
-        terminalReason: `boom\n${"x".repeat(500)}`
-      });
+      const live = describeLatestChainRun(
+        {
+          cancelReason: null,
+          id: "child-run",
+          state: "running",
+          terminalReason: `boom\n${"x".repeat(500)}`
+        },
+        false
+      );
 
       expect(live).toContain("(child-run) is running");
       expect(live).not.toContain("\n");

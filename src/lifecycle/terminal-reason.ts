@@ -112,7 +112,7 @@ function withContext(base: string, context: readonly string[]): string {
   return context.length === 0 ? base : `${base}; ${context.join("; ")}`;
 }
 
-type BranchRemoteState =
+export type BranchRemoteState =
   "never_pushed" | "pushed_no_pull_request" | "removed_after_pull_request";
 
 export function describeBranchRemoteState(state: BranchRemoteState): string {
@@ -128,18 +128,22 @@ export function describeBranchRemoteState(state: BranchRemoteState): string {
 
 const MAX_CHAIN_RUN_DETAIL_LENGTH = 200;
 
-export function describeLatestChainRun(run: {
-  cancelReason: string | null;
-  id: string;
-  state: string;
-  terminal: boolean;
-  terminalReason: string | null;
-}): string {
+export function describeLatestChainRun(
+  run: {
+    cancelReason: string | null;
+    id: string;
+    state: string;
+    terminalReason: string | null;
+  },
+  ended: boolean
+): string {
   const raw = (run.terminalReason ?? run.cancelReason)?.replace(/\s+/g, " ");
+  // Array.from keeps a cut from landing inside a surrogate pair of text
+  // echoed from provider output.
   const detail =
     raw !== undefined && raw.length > MAX_CHAIN_RUN_DETAIL_LENGTH
-      ? `${raw.slice(0, MAX_CHAIN_RUN_DETAIL_LENGTH)}…`
+      ? `${Array.from(raw).slice(0, MAX_CHAIN_RUN_DETAIL_LENGTH).join("")}…`
       : raw;
-  const verb = run.terminal ? "ended" : "is";
+  const verb = ended ? "ended" : "is";
   return `latest run in this chain (${run.id}) ${verb} ${run.state}${detail === undefined ? "" : ` (${detail})`}`;
 }

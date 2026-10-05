@@ -168,6 +168,7 @@ import {
   buildMergePrRefusedReason,
   buildNoPullRequestTrackedReason,
   buildPullRequestDiscoveryExhaustedReason,
+  type BranchRemoteState,
   describeBranchRemoteState,
   describeLatestChainRun,
   formatCapReachedReason
@@ -1979,10 +1980,7 @@ export class RunController {
     // worth citing.
     if (latest !== undefined && latest.state !== "succeeded") {
       context.push(
-        describeLatestChainRun({
-          ...latest,
-          terminal: TERMINAL_RUN_STATES.has(latest.state)
-        })
+        describeLatestChainRun(latest, TERMINAL_RUN_STATES.has(latest.state))
       );
     }
     return context;
@@ -1993,14 +1991,9 @@ export class RunController {
   private async classifyBranchOnOrigin(input: {
     branchName: string;
     repository: GitHubIssueRepositoryInput;
-  }): Promise<
-    | "never_pushed"
-    | "pushed_no_pull_request"
-    | "removed_after_pull_request"
-    | undefined
-  > {
+  }): Promise<BranchRemoteState | undefined> {
     let timer: NodeJS.Timeout | undefined;
-    const lookup = async () => {
+    const lookup = async (): Promise<BranchRemoteState | undefined> => {
       const commits = await tryListBranchCommits(this.githubIssuesApi, {
         ...input.repository,
         branch: input.branchName,
@@ -2010,7 +2003,7 @@ export class RunController {
         return undefined;
       }
       if (commits !== null && commits.length > 0) {
-        return "pushed_no_pull_request" as const;
+        return "pushed_no_pull_request";
       }
       // PR discovery lists state "all", so a branch deleted after its pull
       // request merged or closed is not the same as one never pushed.
@@ -2019,8 +2012,8 @@ export class RunController {
         { ...input.repository, branch: input.branchName }
       );
       return pullRequests !== undefined && pullRequests.length > 0
-        ? ("removed_after_pull_request" as const)
-        : ("never_pushed" as const);
+        ? "removed_after_pull_request"
+        : "never_pushed";
     };
     try {
       return await Promise.race([

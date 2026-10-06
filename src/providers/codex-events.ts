@@ -104,6 +104,28 @@ export function createCodexEventReducer(deps: {
 
     const params = objectField(raw, "params");
 
+    // Codex reports a running command's stdout/stderr, terminal interaction,
+    // and the evolving workspace diff as notifications rather than items. All
+    // three are direct evidence the Run is alive during a long build or test
+    // suite. Only a timestamped marker is normalized; command and terminal
+    // payloads plus the diff stay in the raw log (ADRs 0087 and 0096).
+    if (
+      method === "item/commandExecution/outputDelta" ||
+      method === "item/commandExecution/terminalInteraction" ||
+      method === "turn/diff/updated"
+    ) {
+      return progressMarkerEvent(
+        raw,
+        params,
+        session,
+        method === "turn/diff/updated"
+          ? "workspace_diff"
+          : method === "item/commandExecution/terminalInteraction"
+            ? "terminal_interaction"
+            : "command_output"
+      );
+    }
+
     // Codex multiplexes subagent notifications onto the root stream. Route
     // only result-bearing and terminal notifications here; tool, plan, usage,
     // and reasoning events retain their existing mappings.
@@ -200,28 +222,6 @@ export function createCodexEventReducer(deps: {
         },
         raw
       };
-    }
-
-    // Codex reports a running command's stdout/stderr, terminal interaction,
-    // and the evolving workspace diff as notifications rather than items. All
-    // three are direct evidence the Run is alive during a long build or test
-    // suite. Only a timestamped marker is normalized; command and terminal
-    // payloads plus the diff stay in the raw log (ADRs 0087 and 0096).
-    if (
-      method === "item/commandExecution/outputDelta" ||
-      method === "item/commandExecution/terminalInteraction" ||
-      method === "turn/diff/updated"
-    ) {
-      return progressMarkerEvent(
-        raw,
-        params,
-        session,
-        method === "turn/diff/updated"
-          ? "workspace_diff"
-          : method === "item/commandExecution/terminalInteraction"
-            ? "terminal_interaction"
-            : "command_output"
-      );
     }
 
     if (method === "item/completed") {

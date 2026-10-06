@@ -945,19 +945,50 @@ describe("Codex JSON-RPC provider", () => {
     await mkdir(workspacePath, { recursive: true });
     const transcriptPath = path.join(root, "requests.jsonl");
     const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    const releasePath = path.join(root, "release-root-turn");
     await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
     const provider = createCodexProvider({ processScope: noopProcessScope() });
-
-    const events = await collectProviderEvents(
-      provider.runAttempt({
+    const iterator = provider
+      .runAttempt({
         ...providerInputFixture(),
         provider: {
-          command: `${process.execPath} ${fakeServerPath} --scenario=subagent-completion app-server`,
+          command: `${process.execPath} ${fakeServerPath} --scenario=subagent-completion --release-file=${releasePath} app-server`,
           name: "codex"
         },
         workspacePath
       })
-    );
+      [Symbol.asyncIterator]();
+    const collected = (async (): Promise<ProviderEvent[]> => {
+      const events: ProviderEvent[] = [];
+      while (true) {
+        const event = await nextProviderEvent(iterator);
+        events.push(event);
+        if (objectField(event.raw, "method") === "test/releaseReady") {
+          break;
+        }
+      }
+      await writeFile(releasePath, "");
+      events.push(...(await collectIteratorEvents(iterator)));
+      return events;
+    })();
+    let events: ProviderEvent[];
+    try {
+      // Real child processes cannot use fake timers; this bounds a missing EOF.
+      const deadline = AbortSignal.timeout(5_000);
+      events = await Promise.race([
+        collected,
+        new Promise<never>((_, reject) =>
+          deadline.addEventListener(
+            "abort",
+            () =>
+              reject(new Error("root completion did not stop the app-server")),
+            { once: true }
+          )
+        )
+      ]);
+    } finally {
+      await provider.cancel("run-issue-9");
+    }
 
     expect(
       events.map((event) => event.normalized).filter(Boolean)
@@ -985,7 +1016,7 @@ describe("Codex JSON-RPC provider", () => {
       "thread/start",
       "turn/start"
     ]);
-  });
+  }, 10_000);
 
   it("interrupts and stops the app-server process on cancellation", async () => {
     const root = await makeTempRoot();
@@ -1646,10 +1677,14 @@ async function writeFakeCodexAppServer(
     filePath,
     [
       "import { appendFile, writeFile } from 'node:fs/promises';",
+      "import { existsSync, watch } from 'node:fs';",
       "import readline from 'node:readline';",
+      "import { dirname } from 'node:path';",
       "",
       "const scenarioArg = process.argv.find((arg) => arg.startsWith('--scenario='));",
       "const scenario = scenarioArg ? scenarioArg.slice('--scenario='.length) : 'success';",
+      "const releaseArg = process.argv.find((arg) => arg.startsWith('--release-file='));",
+      "const releasePath = releaseArg?.slice('--release-file='.length);",
       `const pidPath = ${JSON.stringify(pidPath)};`,
       "if (pidPath) { await writeFile(pidPath, String(process.pid), 'utf8'); }",
       "",
@@ -1728,9 +1763,15 @@ async function writeFakeCodexAppServer(
       "      send({ method: 'error', params: { threadId: 'sub-1', turnId: 'sub-turn', error: { message: 'failed' }, willRetry: false } });",
       "      send({ method: 'error', params: { threadId: 'sub-1', turnId: 'sub-turn', error: { message: 'reconnecting' }, willRetry: true } });",
       "      send({ method: 'turn/completed', params: { threadId: 'sub-1', turn: { id: 'sub-turn', status: 'failed' } } });",
-      "      send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'root-msg', delta: 'root result' } });",
-      "      send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
-      "      process.exit(0);",
+      "      if (!releasePath) { throw new Error('release file required'); }",
+      "      const release = watch(dirname(releasePath), () => {",
+      "        if (!existsSync(releasePath)) { return; }",
+      "        release.close();",
+      "        send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'root-msg', delta: 'root result' } });",
+      "        send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
+      "      });",
+      "      send({ method: 'test/releaseReady' });",
+      "      continue;",
       "    }",
       "    if (scenario === 'wait' || scenario === 'term-exit') {",
       "      continue;",

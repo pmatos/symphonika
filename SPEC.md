@@ -1848,6 +1848,11 @@ The final `turn_completed` event may include provider-neutral final-result text 
 output used to parse a Routine Outcome Claim. Provider-specific event shapes do not escape the
 adapter.
 
+Codex multiplexes spawned subagent events into the root app-server stream. Subagent turns and
+non-retry errors do not terminate the Run; their message deltas become payload-free
+`subagent_message` progress markers rather than operator-facing `message` events. Retryable
+subagent errors remain `stream_retry` progress so the Watchdog observes reconnect activity.
+
 ### 11.3 Full-Permission Execution
 
 Symphonika assumes providers run with full local permissions.

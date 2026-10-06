@@ -18,7 +18,11 @@ import {
 const PROGRESS_MARKER_MIN_INTERVAL_MS = 5_000;
 
 type CodexProgressSignal =
-  "command_output" | "stream_retry" | "terminal_interaction" | "workspace_diff";
+  | "command_output"
+  | "stream_retry"
+  | "subagent_message"
+  | "terminal_interaction"
+  | "workspace_diff";
 
 // The thread/turn identity the *provider* owns: written by session/turn setup
 // and read back by `cancel()`. The reducer only ever reads it, so it crosses
@@ -73,6 +77,22 @@ export function createCodexEventReducer(deps: {
     };
   }
 
+  // With multi_agent enabled Codex multiplexes every spawned subagent's
+  // notifications onto the root's stream. Only the root thread's turn ends the
+  // run; a subagent finishing, failing, or speaking must not (and its prose is
+  // not the run's result).
+  function isSubagentThread(
+    params: JsonObject | undefined,
+    session: CodexTurnContext
+  ): boolean {
+    const threadId = stringField(params, "threadId");
+    return (
+      threadId !== undefined &&
+      session.threadId !== undefined &&
+      threadId !== session.threadId
+    );
+  }
+
   function reduce(raw: unknown): ProviderEvent {
     const session = deps.session();
     const method = stringField(raw, "method");
@@ -100,6 +120,9 @@ export function createCodexEventReducer(deps: {
 
     const params = objectField(raw, "params");
     if (method === "item/agentMessage/delta") {
+      if (isSubagentThread(params, session)) {
+        return progressMarkerEvent(raw, params, session, "subagent_message");
+      }
       const delta = stringField(params, "delta") ?? "";
       const itemId = stringField(params, "itemId");
       if (
@@ -203,7 +226,8 @@ export function createCodexEventReducer(deps: {
       const phase = stringField(item, "phase");
       if (
         stringField(item, "type") === "agentMessage" &&
-        (phase === undefined || phase === "final_answer")
+        (phase === undefined || phase === "final_answer") &&
+        !isSubagentThread(params, session)
       ) {
         lastAgentMessage = {
           itemId: stringField(item, "id"),
@@ -236,6 +260,9 @@ export function createCodexEventReducer(deps: {
     }
 
     if (method === "turn/completed") {
+      if (isSubagentThread(params, session)) {
+        return { raw };
+      }
       const turn = objectField(params, "turn");
       const status = stringField(turn, "status");
       const turnId = stringField(turn, "id") ?? session.turnId;
@@ -271,6 +298,10 @@ export function createCodexEventReducer(deps: {
     }
 
     if (method === "error") {
+      const willRetry = booleanField(params, "willRetry") === true;
+      if (isSubagentThread(params, session) && !willRetry) {
+        return { raw };
+      }
       const error = objectField(params, "error");
       const message = stringField(error, "message") ?? "Codex provider error";
       const threadId = stringField(params, "threadId") ?? session.threadId;
@@ -282,7 +313,7 @@ export function createCodexEventReducer(deps: {
       // telling us it was still alive, inside its own
       // stream_idle_timeout_ms x stream_max_retries budget (ADR 0088). Only a
       // retry codex will not make itself ends the turn.
-      if (booleanField(params, "willRetry") === true) {
+      if (willRetry) {
         const signal: CodexProgressSignal = "stream_retry";
         return {
           normalized: {

@@ -77,22 +77,6 @@ export function createCodexEventReducer(deps: {
     };
   }
 
-  // With multi_agent enabled Codex multiplexes every spawned subagent's
-  // notifications onto the root's stream. Only the root thread's turn ends the
-  // run; a subagent finishing, failing, or speaking must not (and its prose is
-  // not the run's result).
-  function isSubagentThread(
-    params: JsonObject | undefined,
-    session: CodexTurnContext
-  ): boolean {
-    const threadId = stringField(params, "threadId");
-    return (
-      threadId !== undefined &&
-      session.threadId !== undefined &&
-      threadId !== session.threadId
-    );
-  }
-
   function reduce(raw: unknown): ProviderEvent {
     const session = deps.session();
     const method = stringField(raw, "method");
@@ -119,10 +103,61 @@ export function createCodexEventReducer(deps: {
     }
 
     const params = objectField(raw, "params");
-    if (method === "item/agentMessage/delta") {
-      if (isSubagentThread(params, session)) {
+
+    // Codex reports a running command's stdout/stderr, terminal interaction,
+    // and the evolving workspace diff as notifications rather than items. All
+    // three are direct evidence the Run is alive during a long build or test
+    // suite. Only a timestamped marker is normalized; command and terminal
+    // payloads plus the diff stay in the raw log (ADRs 0087 and 0096).
+    if (
+      method === "item/commandExecution/outputDelta" ||
+      method === "item/commandExecution/terminalInteraction" ||
+      method === "turn/diff/updated"
+    ) {
+      return progressMarkerEvent(
+        raw,
+        params,
+        session,
+        method === "turn/diff/updated"
+          ? "workspace_diff"
+          : method === "item/commandExecution/terminalInteraction"
+            ? "terminal_interaction"
+            : "command_output"
+      );
+    }
+
+    // Codex multiplexes subagent notifications onto the root stream. Route
+    // only result-bearing and terminal notifications here; tool, plan, usage,
+    // and reasoning events retain their existing mappings.
+    const eventThreadId =
+      method === "item/agentMessage/delta" ||
+      method === "item/completed" ||
+      method === "turn/completed" ||
+      method === "error"
+        ? stringField(params, "threadId")
+        : undefined;
+    const willRetry =
+      method === "error" && booleanField(params, "willRetry") === true;
+    if (
+      eventThreadId !== undefined &&
+      session.threadId !== undefined &&
+      eventThreadId !== session.threadId
+    ) {
+      if (method === "item/agentMessage/delta") {
         return progressMarkerEvent(raw, params, session, "subagent_message");
       }
+      if (
+        method === "turn/completed" ||
+        (method === "item/completed" &&
+          stringField(objectField(params, "item"), "type") ===
+            "agentMessage") ||
+        (method === "error" && !willRetry)
+      ) {
+        return { raw };
+      }
+    }
+
+    if (method === "item/agentMessage/delta") {
       const delta = stringField(params, "delta") ?? "";
       const itemId = stringField(params, "itemId");
       if (
@@ -189,28 +224,6 @@ export function createCodexEventReducer(deps: {
       };
     }
 
-    // Codex reports a running command's stdout/stderr, terminal interaction,
-    // and the evolving workspace diff as notifications rather than items. All
-    // three are direct evidence the Run is alive during a long build or test
-    // suite. Only a timestamped marker is normalized; command and terminal
-    // payloads plus the diff stay in the raw log (ADRs 0087 and 0096).
-    if (
-      method === "item/commandExecution/outputDelta" ||
-      method === "item/commandExecution/terminalInteraction" ||
-      method === "turn/diff/updated"
-    ) {
-      return progressMarkerEvent(
-        raw,
-        params,
-        session,
-        method === "turn/diff/updated"
-          ? "workspace_diff"
-          : method === "item/commandExecution/terminalInteraction"
-            ? "terminal_interaction"
-            : "command_output"
-      );
-    }
-
     if (method === "item/completed") {
       const item = objectField(params, "item");
       if (stringField(item, "type") === "reasoning") {
@@ -226,8 +239,7 @@ export function createCodexEventReducer(deps: {
       const phase = stringField(item, "phase");
       if (
         stringField(item, "type") === "agentMessage" &&
-        (phase === undefined || phase === "final_answer") &&
-        !isSubagentThread(params, session)
+        (phase === undefined || phase === "final_answer")
       ) {
         lastAgentMessage = {
           itemId: stringField(item, "id"),
@@ -260,9 +272,6 @@ export function createCodexEventReducer(deps: {
     }
 
     if (method === "turn/completed") {
-      if (isSubagentThread(params, session)) {
-        return { raw };
-      }
       const turn = objectField(params, "turn");
       const status = stringField(turn, "status");
       const turnId = stringField(turn, "id") ?? session.turnId;
@@ -298,10 +307,6 @@ export function createCodexEventReducer(deps: {
     }
 
     if (method === "error") {
-      const willRetry = booleanField(params, "willRetry") === true;
-      if (isSubagentThread(params, session) && !willRetry) {
-        return { raw };
-      }
       const error = objectField(params, "error");
       const message = stringField(error, "message") ?? "Codex provider error";
       const threadId = stringField(params, "threadId") ?? session.threadId;

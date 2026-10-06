@@ -939,6 +939,85 @@ describe("Codex JSON-RPC provider", () => {
     ]);
   });
 
+  it("keeps the root app-server running across subagent completion and failure", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    const releasePath = path.join(root, "release-root-turn");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
+    const iterator = provider
+      .runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} --scenario=subagent-completion --release-file=${releasePath} app-server`,
+          name: "codex"
+        },
+        workspacePath
+      })
+      [Symbol.asyncIterator]();
+    const collected = (async (): Promise<ProviderEvent[]> => {
+      const events: ProviderEvent[] = [];
+      while (true) {
+        const event = await nextProviderEvent(iterator);
+        events.push(event);
+        if (objectField(event.raw, "method") === "test/releaseReady") {
+          break;
+        }
+      }
+      await writeFile(releasePath, "");
+      events.push(...(await collectIteratorEvents(iterator)));
+      return events;
+    })();
+    let events: ProviderEvent[];
+    try {
+      // Real child processes cannot use fake timers; this bounds a missing EOF.
+      const deadline = AbortSignal.timeout(5_000);
+      events = await Promise.race([
+        collected,
+        new Promise<never>((_, reject) =>
+          deadline.addEventListener(
+            "abort",
+            () =>
+              reject(new Error("root completion did not stop the app-server")),
+            { once: true }
+          )
+        )
+      ]);
+    } finally {
+      await provider.cancel("run-issue-9");
+    }
+
+    expect(
+      events.map((event) => event.normalized).filter(Boolean)
+    ).toMatchObject([
+      { type: "session_started" },
+      { signal: "subagent_message", threadId: "sub-1", type: "progress" },
+      { signal: "stream_retry", threadId: "sub-1", type: "progress" },
+      { message: "root result", threadId: "thread-9", type: "message" },
+      { result: "root result", threadId: "thread-9", type: "turn_completed" },
+      { type: "process_exit" }
+    ]);
+    expect(
+      events.some(
+        (event) =>
+          objectField(event.raw, "method") === "turn/completed" &&
+          objectField(objectField(event.raw, "params"), "threadId") ===
+            "sub-1" &&
+          event.normalized === undefined
+      )
+    ).toBe(true);
+    const requests = readJsonl(await readFile(transcriptPath, "utf8"));
+    expect(requests.map((request) => objectField(request, "method"))).toEqual([
+      "initialize",
+      "initialized",
+      "thread/start",
+      "turn/start"
+    ]);
+  }, 10_000);
+
   it("interrupts and stops the app-server process on cancellation", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1598,10 +1677,14 @@ async function writeFakeCodexAppServer(
     filePath,
     [
       "import { appendFile, writeFile } from 'node:fs/promises';",
+      "import { existsSync, watch } from 'node:fs';",
       "import readline from 'node:readline';",
+      "import { dirname } from 'node:path';",
       "",
       "const scenarioArg = process.argv.find((arg) => arg.startsWith('--scenario='));",
       "const scenario = scenarioArg ? scenarioArg.slice('--scenario='.length) : 'success';",
+      "const releaseArg = process.argv.find((arg) => arg.startsWith('--release-file='));",
+      "const releasePath = releaseArg?.slice('--release-file='.length);",
       `const pidPath = ${JSON.stringify(pidPath)};`,
       "if (pidPath) { await writeFile(pidPath, String(process.pid), 'utf8'); }",
       "",
@@ -1673,6 +1756,22 @@ async function writeFakeCodexAppServer(
       "      send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'item-1', delta: 'recovered' } });",
       "      send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
       "      process.exit(0);",
+      "    }",
+      "    if (scenario === 'subagent-completion') {",
+      "      send({ method: 'item/agentMessage/delta', params: { threadId: 'sub-1', turnId: 'sub-turn', itemId: 'sub-msg', delta: 'internal summary' } });",
+      "      send({ method: 'item/completed', params: { threadId: 'sub-1', turnId: 'sub-turn', item: { id: 'sub-msg', type: 'agentMessage', text: 'internal summary' } } });",
+      "      send({ method: 'error', params: { threadId: 'sub-1', turnId: 'sub-turn', error: { message: 'failed' }, willRetry: false } });",
+      "      send({ method: 'error', params: { threadId: 'sub-1', turnId: 'sub-turn', error: { message: 'reconnecting' }, willRetry: true } });",
+      "      send({ method: 'turn/completed', params: { threadId: 'sub-1', turn: { id: 'sub-turn', status: 'failed' } } });",
+      "      if (!releasePath) { throw new Error('release file required'); }",
+      "      const release = watch(dirname(releasePath), () => {",
+      "        if (!existsSync(releasePath)) { return; }",
+      "        release.close();",
+      "        send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'root-msg', delta: 'root result' } });",
+      "        send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
+      "      });",
+      "      send({ method: 'test/releaseReady' });",
+      "      continue;",
       "    }",
       "    if (scenario === 'wait' || scenario === 'term-exit') {",
       "      continue;",

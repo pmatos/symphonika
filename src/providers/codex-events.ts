@@ -73,6 +73,22 @@ export function createCodexEventReducer(deps: {
     };
   }
 
+  // With multi_agent enabled Codex multiplexes every spawned subagent's
+  // notifications onto the root's stream. Only the root thread's turn ends the
+  // run; a subagent finishing, failing, or speaking must not (and its prose is
+  // not the run's result).
+  function isSubagentThread(
+    params: JsonObject | undefined,
+    session: CodexTurnContext
+  ): boolean {
+    const threadId = stringField(params, "threadId");
+    return (
+      threadId !== undefined &&
+      session.threadId !== undefined &&
+      threadId !== session.threadId
+    );
+  }
+
   function reduce(raw: unknown): ProviderEvent {
     const session = deps.session();
     const method = stringField(raw, "method");
@@ -102,7 +118,9 @@ export function createCodexEventReducer(deps: {
     if (method === "item/agentMessage/delta") {
       const delta = stringField(params, "delta") ?? "";
       const itemId = stringField(params, "itemId");
-      if (
+      if (isSubagentThread(params, session)) {
+        // Observed, but never the root turn's result.
+      } else if (
         lastAgentMessage !== undefined &&
         lastAgentMessage.itemId === itemId
       ) {
@@ -203,7 +221,8 @@ export function createCodexEventReducer(deps: {
       const phase = stringField(item, "phase");
       if (
         stringField(item, "type") === "agentMessage" &&
-        (phase === undefined || phase === "final_answer")
+        (phase === undefined || phase === "final_answer") &&
+        !isSubagentThread(params, session)
       ) {
         lastAgentMessage = {
           itemId: stringField(item, "id"),
@@ -236,6 +255,9 @@ export function createCodexEventReducer(deps: {
     }
 
     if (method === "turn/completed") {
+      if (isSubagentThread(params, session)) {
+        return { raw };
+      }
       const turn = objectField(params, "turn");
       const status = stringField(turn, "status");
       const turnId = stringField(turn, "id") ?? session.turnId;
@@ -271,6 +293,9 @@ export function createCodexEventReducer(deps: {
     }
 
     if (method === "error") {
+      if (isSubagentThread(params, session)) {
+        return { raw };
+      }
       const error = objectField(params, "error");
       const message = stringField(error, "message") ?? "Codex provider error";
       const threadId = stringField(params, "threadId") ?? session.threadId;

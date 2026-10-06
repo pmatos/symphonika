@@ -178,6 +178,32 @@ describe("createCodexEventReducer", () => {
     ).toBeUndefined();
   });
 
+  it("keeps a subagent retry visible as progress without ending the root turn", () => {
+    const reducer = createCodexEventReducer({
+      now: () => 0,
+      session: () => SESSION
+    });
+
+    const retry = reducer.reduce({
+      method: "error",
+      params: {
+        error: { message: "Reconnecting" },
+        threadId: "sub-1",
+        willRetry: true
+      }
+    });
+    expect(retry.normalized).toMatchObject({
+      signal: "stream_retry",
+      threadId: "sub-1",
+      type: "progress"
+    });
+    expect(reducer.reduce(turnCompleted("completed")).normalized).toMatchObject(
+      {
+        type: "turn_completed"
+      }
+    );
+  });
+
   it("does not let a subagent's message become the root turn result", () => {
     const reducer = createCodexEventReducer({
       now: () => 0,
@@ -189,5 +215,24 @@ describe("createCodexEventReducer", () => {
 
     const done = reducer.reduce(turnCompleted("completed"));
     expect(done.normalized).toMatchObject({ result: "root answer" });
+  });
+
+  it("treats subagent prose as progress rather than report text", () => {
+    const reducer = createCodexEventReducer({
+      now: () => 0,
+      session: () => SESSION
+    });
+
+    const subagent = reducer.reduce(
+      agentDelta("sub-msg", "scan summary", "sub-1")
+    );
+    expect(subagent.normalized).toMatchObject({
+      signal: "subagent_message",
+      threadId: "sub-1",
+      type: "progress"
+    });
+    expect(
+      reducer.reduce(turnCompleted("completed")).normalized
+    ).not.toHaveProperty("result");
   });
 });

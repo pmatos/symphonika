@@ -18,7 +18,11 @@ import {
 const PROGRESS_MARKER_MIN_INTERVAL_MS = 5_000;
 
 type CodexProgressSignal =
-  "command_output" | "stream_retry" | "terminal_interaction" | "workspace_diff";
+  | "command_output"
+  | "stream_retry"
+  | "subagent_message"
+  | "terminal_interaction"
+  | "workspace_diff";
 
 // The thread/turn identity the *provider* owns: written by session/turn setup
 // and read back by `cancel()`. The reducer only ever reads it, so it crosses
@@ -116,11 +120,12 @@ export function createCodexEventReducer(deps: {
 
     const params = objectField(raw, "params");
     if (method === "item/agentMessage/delta") {
+      if (isSubagentThread(params, session)) {
+        return progressMarkerEvent(raw, params, session, "subagent_message");
+      }
       const delta = stringField(params, "delta") ?? "";
       const itemId = stringField(params, "itemId");
-      if (isSubagentThread(params, session)) {
-        // Observed, but never the root turn's result.
-      } else if (
+      if (
         lastAgentMessage !== undefined &&
         lastAgentMessage.itemId === itemId
       ) {
@@ -293,7 +298,8 @@ export function createCodexEventReducer(deps: {
     }
 
     if (method === "error") {
-      if (isSubagentThread(params, session)) {
+      const willRetry = booleanField(params, "willRetry") === true;
+      if (isSubagentThread(params, session) && !willRetry) {
         return { raw };
       }
       const error = objectField(params, "error");
@@ -307,7 +313,7 @@ export function createCodexEventReducer(deps: {
       // telling us it was still alive, inside its own
       // stream_idle_timeout_ms x stream_max_retries budget (ADR 0088). Only a
       // retry codex will not make itself ends the turn.
-      if (booleanField(params, "willRetry") === true) {
+      if (willRetry) {
         const signal: CodexProgressSignal = "stream_retry";
         return {
           normalized: {

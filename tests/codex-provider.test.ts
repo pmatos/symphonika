@@ -939,6 +939,54 @@ describe("Codex JSON-RPC provider", () => {
     ]);
   });
 
+  it("keeps the root app-server running across subagent completion and failure", async () => {
+    const root = await makeTempRoot();
+    const workspacePath = path.join(root, "workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const transcriptPath = path.join(root, "requests.jsonl");
+    const fakeServerPath = path.join(root, "fake-codex-app-server.mjs");
+    await writeFakeCodexAppServer(fakeServerPath, transcriptPath);
+    const provider = createCodexProvider({ processScope: noopProcessScope() });
+
+    const events = await collectProviderEvents(
+      provider.runAttempt({
+        ...providerInputFixture(),
+        provider: {
+          command: `${process.execPath} ${fakeServerPath} --scenario=subagent-completion app-server`,
+          name: "codex"
+        },
+        workspacePath
+      })
+    );
+
+    expect(
+      events.map((event) => event.normalized).filter(Boolean)
+    ).toMatchObject([
+      { type: "session_started" },
+      { signal: "subagent_message", threadId: "sub-1", type: "progress" },
+      { signal: "stream_retry", threadId: "sub-1", type: "progress" },
+      { message: "root result", threadId: "thread-9", type: "message" },
+      { result: "root result", threadId: "thread-9", type: "turn_completed" },
+      { type: "process_exit" }
+    ]);
+    expect(
+      events.some(
+        (event) =>
+          objectField(event.raw, "method") === "turn/completed" &&
+          objectField(objectField(event.raw, "params"), "threadId") ===
+            "sub-1" &&
+          event.normalized === undefined
+      )
+    ).toBe(true);
+    const requests = readJsonl(await readFile(transcriptPath, "utf8"));
+    expect(requests.map((request) => objectField(request, "method"))).toEqual([
+      "initialize",
+      "initialized",
+      "thread/start",
+      "turn/start"
+    ]);
+  });
+
   it("interrupts and stops the app-server process on cancellation", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");
@@ -1671,6 +1719,16 @@ async function writeFakeCodexAppServer(
       "    if (scenario === 'retryable-error') {",
       "      send({ method: 'error', params: { threadId: 'thread-9', turnId: 'turn-9', error: { message: 'Reconnecting... 2/5', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } }, additionalDetails: 'request timed out' }, willRetry: true } });",
       "      send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'item-1', delta: 'recovered' } });",
+      "      send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
+      "      process.exit(0);",
+      "    }",
+      "    if (scenario === 'subagent-completion') {",
+      "      send({ method: 'item/agentMessage/delta', params: { threadId: 'sub-1', turnId: 'sub-turn', itemId: 'sub-msg', delta: 'internal summary' } });",
+      "      send({ method: 'item/completed', params: { threadId: 'sub-1', turnId: 'sub-turn', item: { id: 'sub-msg', type: 'agentMessage', text: 'internal summary' } } });",
+      "      send({ method: 'error', params: { threadId: 'sub-1', turnId: 'sub-turn', error: { message: 'failed' }, willRetry: false } });",
+      "      send({ method: 'error', params: { threadId: 'sub-1', turnId: 'sub-turn', error: { message: 'reconnecting' }, willRetry: true } });",
+      "      send({ method: 'turn/completed', params: { threadId: 'sub-1', turn: { id: 'sub-turn', status: 'failed' } } });",
+      "      send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-9', turnId: 'turn-9', itemId: 'root-msg', delta: 'root result' } });",
       "      send({ method: 'turn/completed', params: { threadId: 'thread-9', turn: { id: 'turn-9', status: 'completed' } } });",
       "      process.exit(0);",
       "    }",

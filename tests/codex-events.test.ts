@@ -235,4 +235,103 @@ describe("createCodexEventReducer", () => {
       reducer.reduce(turnCompleted("completed")).normalized
     ).not.toHaveProperty("result");
   });
+
+  it("keeps subagent result events raw while retaining unrelated subagent activity", () => {
+    const reducer = createCodexEventReducer({
+      now: () => 0,
+      session: () => SESSION
+    });
+
+    const subagentMessage = {
+      method: "item/completed",
+      params: {
+        threadId: "sub-1",
+        item: { id: "sub-msg", type: "agentMessage", text: "internal result" }
+      }
+    };
+    expect(reducer.reduce(subagentMessage)).toEqual({ raw: subagentMessage });
+
+    const tool = reducer.reduce({
+      method: "item/started",
+      params: {
+        threadId: "sub-1",
+        turnId: "sub-turn",
+        item: {
+          id: "sub-tool",
+          type: "commandExecution",
+          command: "npm test",
+          cwd: "/workspace",
+          status: "inProgress"
+        }
+      }
+    });
+    expect(tool.normalized).toMatchObject({
+      threadId: "sub-1",
+      type: "tool_call"
+    });
+
+    const plan = reducer.reduce({
+      method: "turn/plan/updated",
+      params: {
+        threadId: "sub-1",
+        turnId: "sub-turn",
+        plan: [{ step: "Inspect", status: "inProgress" }]
+      }
+    });
+    expect(plan.normalized).toMatchObject({
+      plan: [{ step: "Inspect", status: "in_progress" }],
+      threadId: "sub-1",
+      type: "plan_updated"
+    });
+
+    const usage = reducer.reduce({
+      method: "thread/tokenUsage/updated",
+      params: { threadId: "sub-1", tokenUsage: { outputTokens: 7 } }
+    });
+    expect(usage.normalized).toMatchObject({
+      threadId: "sub-1",
+      type: "usage_updated"
+    });
+
+    const failed = turnCompleted("failed", "sub-1");
+    expect(reducer.reduce(failed)).toEqual({ raw: failed });
+    const rootMessage = reducer.reduce(agentDelta("root-msg", "root result"));
+    expect(rootMessage.normalized).toMatchObject({
+      message: "root result",
+      type: "message"
+    });
+    expect(reducer.reduce(turnCompleted("completed")).normalized).toMatchObject(
+      {
+        result: "root result",
+        type: "turn_completed"
+      }
+    );
+  });
+
+  it("treats missing thread IDs as root events while filtering explicit subagent IDs", () => {
+    const reducer = createCodexEventReducer({
+      now: () => 0,
+      session: () => SESSION
+    });
+
+    reducer.reduce(agentDelta("sub-msg", "internal", "sub-1"));
+    const rootDelta = reducer.reduce({
+      method: "item/agentMessage/delta",
+      params: { delta: "fallback result", itemId: "root-msg" }
+    });
+    expect(rootDelta.normalized).toMatchObject({
+      message: "fallback result",
+      type: "message"
+    });
+    const rootDone = reducer.reduce({
+      method: "turn/completed",
+      params: { turn: { status: "completed" } }
+    });
+    expect(rootDone.normalized).toMatchObject({
+      result: "fallback result",
+      threadId: "t1",
+      turnId: "u1",
+      type: "turn_completed"
+    });
+  });
 });

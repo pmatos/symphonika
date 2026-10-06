@@ -50,6 +50,9 @@ npm test
 npm run build
 ```
 
+CI also runs `npm run test:coverage`, uploads `coverage/clover.xml` to Codecov using the
+`CODECOV_TOKEN` repository secret, and retains the coverage directory as a GitHub Actions artifact.
+
 ## Running the daemon
 
 There is no `npm run daemon` script. The `daemon` is a subcommand of the `symphonika` CLI, so run it one of these ways from a clone of this repo:

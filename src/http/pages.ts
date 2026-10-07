@@ -33,7 +33,6 @@ import {
   deriveChainStateRows,
   findWorkflowStateNode,
   groupRunsIntoChains,
-  resolveNearestGraph,
   resolveProviderSource,
   resolveUpcomingTransitions,
   type ChainStateRow,
@@ -4717,6 +4716,7 @@ type IssueRunChainRowView = {
 
 type IssueRunChainView = {
   group: RunChainGroup;
+  leafIsActive: boolean;
   rows: IssueRunChainRowView[];
   trackedPR: TrackedPullRequest | undefined;
   upcoming: WorkflowTransition[] | undefined;
@@ -4757,8 +4757,16 @@ async function loadIssueRunChainViews(
     })
     .map((group) => {
       const stateRows = deriveChainStateRows(group.runs, graphForRun);
+      // One forward pass carrying the nearest graph seen so far, rather than
+      // a backward scan per row — same result as calling resolveNearestGraph
+      // per row, without the O(chain length squared) rescans.
+      let nearestGraphSoFar: ExpandedWorkflow | undefined;
+      const nearestGraphs = group.runs.map((run) => {
+        nearestGraphSoFar = graphForRun(run.id) ?? nearestGraphSoFar;
+        return nearestGraphSoFar;
+      });
       const rows: IssueRunChainRowView[] = stateRows.map((row, index) => {
-        const graph = resolveNearestGraph(group.runs, index, graphForRun);
+        const graph = nearestGraphs[index];
         return {
           actionKind: findWorkflowStateNode(graph, row.stateId)?.action?.kind,
           attempts: runStore.listAttempts(row.run.id),
@@ -4769,12 +4777,12 @@ async function loadIssueRunChainViews(
       });
       const leafIndex = stateRows.length - 1;
       const leafRow: ChainStateRow | undefined = stateRows[leafIndex];
-      const leafGraph = resolveNearestGraph(group.runs, leafIndex, graphForRun);
-      const upcoming =
+      const leafIsActive =
         leafRow?.kind === "current_running" ||
-        leafRow?.kind === "current_waiting"
-          ? resolveUpcomingTransitions(leafGraph, leafRow.stateId)
-          : undefined;
+        leafRow?.kind === "current_waiting";
+      const upcoming = leafIsActive
+        ? resolveUpcomingTransitions(nearestGraphs[leafIndex], leafRow.stateId)
+        : undefined;
       const leafRunId = group.runs[leafIndex]?.id;
       const trackedPR =
         leafRunId === undefined
@@ -4791,6 +4799,7 @@ async function loadIssueRunChainViews(
       );
       return {
         group,
+        leafIsActive,
         rows,
         trackedPR,
         upcoming,
@@ -4865,13 +4874,8 @@ function renderChainRow(view: IssueRunChainRowView): string {
 
 function renderUpcomingSection(
   upcoming: WorkflowTransition[] | undefined,
-  leafRow: ChainStateRow | undefined
+  isActive: boolean
 ): string {
-  if (leafRow === undefined) {
-    return "";
-  }
-  const isActive =
-    leafRow.kind === "current_running" || leafRow.kind === "current_waiting";
   if (!isActive) {
     return "";
   }
@@ -4900,7 +4904,6 @@ function renderUpcomingSection(
 }
 
 function renderIssueRunChainView(view: IssueRunChainView): string {
-  const leafRow = view.rows.at(-1)?.row;
   const rowsHtml = view.rows.map(renderChainRow).join("");
   const table = tableSection(
     "States",
@@ -4919,7 +4922,7 @@ function renderIssueRunChainView(view: IssueRunChainView): string {
     view.trackedPR === undefined
       ? ""
       : `<p class="note">Tracked pull request: ${externalLink(view.trackedPR.prUrl, `#${view.trackedPR.prNumber}`)} (${escapeHtml(view.trackedPR.state)}).</p>`;
-  return `${table}${branchNote}${workflowChangedNote}${prNote}${renderUpcomingSection(view.upcoming, leafRow)}`;
+  return `${table}${branchNote}${workflowChangedNote}${prNote}${renderUpcomingSection(view.upcoming, view.leafIsActive)}`;
 }
 
 function renderIssueRunChainSection(chains: IssueRunChainView[]): string {

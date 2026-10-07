@@ -128,6 +128,23 @@ export function deriveChainStateRows(
   graphForRun: (runId: string) => ExpandedWorkflow | undefined
 ): ChainStateRow[] {
   return chainRuns.map((run, index) => {
+    const row = (
+      kind: ChainStateRowKind,
+      stateId: string | undefined,
+      terminalKind?: string
+    ): ChainStateRow => ({
+      kind,
+      run,
+      stateId,
+      terminalKind,
+      transitionReason: run.stateTransitionReason
+    });
+    // The chain's root has no parent row to recover its own executed state
+    // from, so fall back to the graph it captured — `index === 0` is the
+    // only case where this lookup can apply.
+    const rootInitial = (): string | undefined =>
+      index === 0 ? graphForRun(run.id)?.initial : undefined;
+
     // A Run whose own lifecycle state is still live (queued, running,
     // waiting, or input_required) has not gone through
     // recordWorkflowStateAdvance/Terminal/Blocked yet, so its own
@@ -142,17 +159,7 @@ export function deriveChainStateRows(
     // has a child.
     const liveKind = leafActiveKindOrUndefined(run.state);
     if (liveKind !== undefined) {
-      const rootInitial =
-        index === 0 && run.currentStateId === null
-          ? graphForRun(run.id)?.initial
-          : undefined;
-      return {
-        kind: liveKind,
-        run,
-        stateId: run.currentStateId ?? rootInitial ?? undefined,
-        terminalKind: undefined,
-        transitionReason: run.stateTransitionReason
-      };
+      return row(liveKind, run.currentStateId ?? rootInitial());
     }
 
     const isLeaf = index === chainRuns.length - 1;
@@ -167,36 +174,22 @@ export function deriveChainStateRows(
       parent === undefined ||
       leafActiveKindOrUndefined(parent.state) === undefined;
     if (!isLeaf) {
-      const stateId =
-        index === 0
-          ? graphForRun(run.id)?.initial
-          : parentForwardStamped
-            ? (parent?.currentStateId ?? undefined)
-            : undefined;
       // This Run concluded and has a continuation, full stop — that much is
       // RunState fact, not FSM-position knowledge. An unresolved stateId
       // (rendered as "not recorded" in the State cell) must not downgrade
       // the status pill to "not recorded" too; that would tell an operator
       // a Run that genuinely finished never recorded anything at all.
-      return {
-        kind: "completed",
-        run,
-        stateId,
-        terminalKind: undefined,
-        transitionReason: run.stateTransitionReason
-      };
+      return row(
+        "completed",
+        index === 0
+          ? rootInitial()
+          : parentForwardStamped
+            ? (parent?.currentStateId ?? undefined)
+            : undefined
+      );
     }
 
-    if (run.currentStateId !== null && run.terminalStateId !== null) {
-      return {
-        kind: "blocked",
-        run,
-        stateId: run.terminalStateId,
-        terminalKind: undefined,
-        transitionReason: run.stateTransitionReason
-      };
-    }
-    if (run.currentStateId === null && run.terminalStateId !== null) {
+    if (run.terminalStateId !== null) {
       // recordWorkflowTerminal nulls current_state_id the same way for a
       // genuine FSM terminal and for an escalation
       // (terminateMergePrRefusal / terminateNoPullRequestTracked /
@@ -206,14 +199,8 @@ export function deriveChainStateRows(
       // an earlier genuine success terminal untouched — either way the
       // RunState fact "needs an operator" must win over whatever flavor the
       // borrowed graph node reports.
-      if (run.state === "blocked") {
-        return {
-          kind: "blocked",
-          run,
-          stateId: run.terminalStateId,
-          terminalKind: undefined,
-          transitionReason: run.stateTransitionReason
-        };
+      if (run.currentStateId !== null || run.state === "blocked") {
+        return row("blocked", run.terminalStateId);
       }
       // A terminal reached from a parked wait/merge_pr Run has no graph of
       // its own (it dispatched no provider) — borrow the nearest ancestor's,
@@ -222,13 +209,7 @@ export function deriveChainStateRows(
         resolveNearestGraph(chainRuns, index, graphForRun),
         run.terminalStateId
       );
-      return {
-        kind: "terminal",
-        run,
-        stateId: run.terminalStateId,
-        terminalKind: node?.terminal,
-        transitionReason: run.stateTransitionReason
-      };
+      return row("terminal", run.terminalStateId, node?.terminal);
     }
     // run.state is already known-concluded here (the live check above
     // returned undefined), current_state_id is set, and there is no
@@ -241,43 +222,18 @@ export function deriveChainStateRows(
     // "not recorded" beats a confident-looking but borrowed state id.
     if (run.currentStateId !== null) {
       return parentForwardStamped
-        ? {
-            kind: "pending_handoff",
-            run,
-            stateId: run.currentStateId,
-            terminalKind: undefined,
-            transitionReason: run.stateTransitionReason
-          }
-        : {
-            kind: "not_recorded",
-            run,
-            stateId: undefined,
-            terminalKind: undefined,
-            transitionReason: run.stateTransitionReason
-          };
+        ? row("pending_handoff", run.currentStateId)
+        : row("not_recorded", undefined);
     }
     // Neither field is set: this Run has never recorded reaching any FSM
     // state. For the chain's root — `graph.initial` is ground truth for
     // what it was meant to work on, independent of the current_state_id
     // forward-stamp quirk, so prefer it over an honest-but-unhelpful
     // "not recorded" when the graph is available.
-    const rootInitial = index === 0 ? graphForRun(run.id)?.initial : undefined;
-    if (rootInitial !== undefined) {
-      return {
-        kind: "pending_handoff",
-        run,
-        stateId: rootInitial,
-        terminalKind: undefined,
-        transitionReason: run.stateTransitionReason
-      };
-    }
-    return {
-      kind: "not_recorded",
-      run,
-      stateId: undefined,
-      terminalKind: undefined,
-      transitionReason: run.stateTransitionReason
-    };
+    const initial = rootInitial();
+    return initial === undefined
+      ? row("not_recorded", undefined)
+      : row("pending_handoff", initial);
   });
 }
 
@@ -309,7 +265,7 @@ function leafActiveKindOrUndefined(
 // Nearest-ancestor graph lookup: a waiting/system-action Run dispatches no
 // provider and captures no graph of its own, so its evidence is whatever
 // the closest earlier Run in the same chain captured.
-export function resolveNearestGraph(
+function resolveNearestGraph(
   chainRuns: readonly RunStatus[],
   rowIndex: number,
   graphForRun: (runId: string) => ExpandedWorkflow | undefined

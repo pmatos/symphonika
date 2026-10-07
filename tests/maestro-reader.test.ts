@@ -233,9 +233,20 @@ describe("Maestro evidence reader (#865)", () => {
       }
 
       const reader = createMaestroEvidenceReader(test.runStore);
-      expect(reader.listIssues("symphonika").length).toBeLessThanOrEqual(25);
+      const issues = reader.listIssues("symphonika");
+      expect(issues.length).toBeLessThanOrEqual(25);
       expect(reader.listRuns("symphonika").length).toBeLessThanOrEqual(25);
       expect(reader.listRuns().length).toBeLessThanOrEqual(25);
+
+      // The cap must keep the newest (highest-numbered) issues, not the
+      // oldest — issue 139 is the newest of the 40 seeded above.
+      expect(issues.map((issue) => issue.issueNumber)).not.toContain(100);
+      expect(issues.map((issue) => issue.issueNumber)).toContain(139);
+
+      // get_issue must still find an issue the capped list call excludes
+      // (regression for #874: getIssue used to search the already-capped
+      // listIssues output instead of the full snapshot list).
+      expect(reader.getIssue("symphonika", 139)?.issueNumber).toBe(139);
     } finally {
       test.cleanup();
     }

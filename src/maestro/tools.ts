@@ -38,7 +38,9 @@ export const MAESTRO_TOOLS: MaestroToolSpec[] = [
   {
     description:
       "List the most recently polled Issue snapshot for one Project, with " +
-      "each Issue's eligibility kind/reasons and labels.",
+      "each Issue's eligibility kind/reasons and labels. Capped at the 25 " +
+      "highest-numbered (most recent) Issues; use get_issue for a specific " +
+      "older Issue by number.",
     inputSchema: {
       additionalProperties: false,
       properties: {
@@ -90,7 +92,9 @@ export const MAESTRO_TOOLS: MaestroToolSpec[] = [
   },
   {
     description:
-      "List the most recently polled pull-request snapshot for one Project.",
+      "List the most recently polled pull-request snapshot for one " +
+      "Project. Capped at the 25 highest-numbered (most recent) pull " +
+      "requests.",
     inputSchema: {
       additionalProperties: false,
       properties: {
@@ -251,15 +255,23 @@ export function executeMaestroTool(input: {
     };
   }
 
-  // input.name === "list_pull_requests": the only remaining registered tool.
-  const projectName = stringField(input.input, "project_name");
-  if (projectName === undefined) {
-    return { kind: "refused", reason: "project_name is required" };
+  if (input.name === "list_pull_requests") {
+    const projectName = stringField(input.input, "project_name");
+    if (projectName === undefined) {
+      return { kind: "refused", reason: "project_name is required" };
+    }
+    const pullRequests = input.reader.listPullRequests(projectName);
+    return {
+      citations: pullRequests.map(pullRequestCitation),
+      kind: "ok",
+      output: pullRequests
+    };
   }
-  const pullRequests = input.reader.listPullRequests(projectName);
-  return {
-    citations: pullRequests.map(pullRequestCitation),
-    kind: "ok",
-    output: pullRequests
-  };
+
+  // Unreachable while MAESTRO_TOOL_NAMES.has(input.name) is true above and
+  // every registered name has a matching branch — kept explicit (rather
+  // than an unconditional fallthrough) so a future tool added to
+  // MAESTRO_TOOLS without a matching branch here is refused instead of
+  // silently misdispatched to whichever branch happened to be last.
+  return { kind: "refused", reason: `tool "${input.name}" has no handler` };
 }

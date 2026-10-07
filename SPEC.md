@@ -3283,8 +3283,10 @@ renders the read-only boundary notice and an explanation that Maestro is not con
 form. When configured, it renders the single durable dashboard conversation
 (`RunStore.findDashboardMaestroConversation`/`listMaestroMessages`) and a plain HTML form (no
 client-side JS). `POST /maestro/messages` is CSRF-protected the same way `/api/routines/:id/fire` is
-(ADR 0075) and form-posts back to `/maestro` on both success and refusal, never returning raw JSON to
-a browser submission. It persists the operator's message, then Maestro's reply together with the
+(ADR 0075): a missing or stale CSRF token gets the same bare JSON 403 every other mutating route
+returns in that case, while a refusal past the CSRF check (Maestro not configured, or an empty
+message) form-posts back to `/maestro` with an `?error=` query param instead. It persists the
+operator's message, then Maestro's reply together with the
 citations the reply's tool calls actually produced, to `maestro_conversations`/`maestro_messages` —
 tables RunStore owns alongside, but never joined into, `runs`/`attempts`: a chat message is discussion
 evidence, not Run evidence, and is never counted by `/api/status`, `/runs`, or a notification digest.

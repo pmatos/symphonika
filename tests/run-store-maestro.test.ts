@@ -107,6 +107,36 @@ describe("RunStore Maestro conversation persistence (#865)", () => {
     }
   });
 
+  it("bounds listMaestroMessages to the newest N rows, in chronological order, when limit is given (#874)", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    try {
+      const conversationId = runStore.ensureDashboardMaestroConversation({
+        id: "conv-1"
+      });
+      for (let index = 0; index < 5; index += 1) {
+        runStore.appendMaestroMessage({
+          citations: [],
+          content: `message ${index}`,
+          conversationId,
+          id: `msg-${index}`,
+          role: index % 2 === 0 ? "user" : "assistant"
+        });
+      }
+
+      const limited = runStore.listMaestroMessages(conversationId, 2);
+      expect(limited.map((message) => message.content)).toEqual([
+        "message 3",
+        "message 4"
+      ]);
+
+      const unlimited = runStore.listMaestroMessages(conversationId);
+      expect(unlimited).toHaveLength(5);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("survives a daemon restart: history persists on the same state root across store instances", async () => {
     const stateRoot = await makeTempRoot();
     const firstStore = openRunStore({ stateRoot });

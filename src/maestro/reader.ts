@@ -93,23 +93,41 @@ function runHref(runId: string): string {
   return `/runs/${encodeURIComponent(runId)}`;
 }
 
+function toIssueEvidence(
+  projectName: string,
+  row: {
+    issueNumber: number;
+    kind: string;
+    labels: string[];
+    polledAt: string;
+    reasons: string[];
+    title: string;
+  }
+): MaestroIssueEvidence {
+  return {
+    href: issueHref(projectName, row.issueNumber),
+    issueNumber: row.issueNumber,
+    kind: row.kind,
+    labels: row.labels,
+    observedAt: row.polledAt,
+    projectName,
+    reasons: row.reasons,
+    title: row.title
+  };
+}
+
 export function createMaestroEvidenceReader(
   runStore: RunStore
 ): MaestroEvidenceReader {
+  // listProjectIssueSnapshots returns every snapshot ordered by issue_number
+  // ascending with no limit; slicing from the end (rather than the start)
+  // keeps the newest/highest-numbered issues under the cap instead of
+  // silently keeping only the oldest ones.
   const listIssues = (projectName: string): MaestroIssueEvidence[] =>
     runStore
       .listProjectIssueSnapshots(projectName)
-      .slice(0, MAX_EVIDENCE_ITEMS)
-      .map((row) => ({
-        href: issueHref(projectName, row.issueNumber),
-        issueNumber: row.issueNumber,
-        kind: row.kind,
-        labels: row.labels,
-        observedAt: row.polledAt,
-        projectName,
-        reasons: row.reasons,
-        title: row.title
-      }));
+      .slice(-MAX_EVIDENCE_ITEMS)
+      .map((row) => toIssueEvidence(projectName, row));
 
   const listRuns = (projectName?: string): MaestroRunEvidence[] =>
     runStore
@@ -130,10 +148,16 @@ export function createMaestroEvidenceReader(
       }));
 
   return {
-    getIssue: (projectName, issueNumber) =>
-      listIssues(projectName).find(
-        (issue) => issue.issueNumber === issueNumber
-      ),
+    // Deliberately not listIssues(projectName).find(...): listIssues is
+    // capped to the newest MAX_EVIDENCE_ITEMS, so a lookup by number must
+    // search the full, unsliced snapshot list or it would wrongly report
+    // "not found" for a real issue the cap excluded from a list call.
+    getIssue: (projectName, issueNumber) => {
+      const row = runStore
+        .listProjectIssueSnapshots(projectName)
+        .find((candidate) => candidate.issueNumber === issueNumber);
+      return row === undefined ? undefined : toIssueEvidence(projectName, row);
+    },
     getRun: (runId) => {
       const run = runStore.getRun(runId);
       return run === undefined
@@ -166,10 +190,13 @@ export function createMaestroEvidenceReader(
         projectName: state.projectName,
         validationState: state.validationState
       })),
+    // listProjectPullRequestSnapshots is likewise ordered pr_number
+    // ascending with no limit; slice from the end for the same reason as
+    // listIssues above.
     listPullRequests: (projectName) =>
       runStore
         .listProjectPullRequestSnapshots(projectName)
-        .slice(0, MAX_EVIDENCE_ITEMS)
+        .slice(-MAX_EVIDENCE_ITEMS)
         .map((pr) => ({
           checks: pr.checks,
           draft: pr.draft,

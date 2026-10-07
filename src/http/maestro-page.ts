@@ -6,7 +6,10 @@ import {
   MAESTRO_READ_ONLY_BOUNDARY_NOTICE,
   type MaestroConfig
 } from "../maestro/config.js";
-import { runMaestroTurn } from "../maestro/conversation.js";
+import {
+  MAX_HISTORY_MESSAGES,
+  runMaestroTurn
+} from "../maestro/conversation.js";
 import { createAnthropicMaestroModel } from "../maestro/model.js";
 import type { MaestroModel } from "../maestro/model.js";
 import { createMaestroEvidenceReader } from "../maestro/reader.js";
@@ -97,6 +100,14 @@ function errorQuery(reason: string): string {
 }
 
 export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
+  // Serializes turns on the single dashboard conversation (#865). Without
+  // this, a double-submit or two browser tabs can both pass the
+  // synchronous user-message append below before either's model call
+  // resolves, interleaving the persisted history out of strict
+  // user/assistant order — the next turn would then resend consecutive
+  // same-role messages to the Messages API.
+  let turnInFlight = false;
+
   options.app.get("/maestro", (context) => {
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
     const config = options.getMaestroConfig?.();
@@ -145,37 +156,71 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
       );
     }
 
-    const conversationId = options.runStore.ensureDashboardMaestroConversation({
-      id: randomUUID()
-    });
-    const history = options.runStore.listMaestroMessages(conversationId);
-    options.runStore.appendMaestroMessage({
-      citations: [],
-      content: userMessage,
-      conversationId,
-      id: randomUUID(),
-      role: "user"
-    });
+    if (turnInFlight) {
+      return context.redirect(
+        `/maestro${errorQuery(
+          "Maestro is still answering the previous message. Try again in a moment."
+        )}`,
+        303
+      );
+    }
+    turnInFlight = true;
 
-    const model = (options.createMaestroModel ?? createAnthropicMaestroModel)(
-      config
-    );
-    const reader = createMaestroEvidenceReader(options.runStore);
-    const result = await runMaestroTurn({
-      history,
-      model,
-      reader,
-      userMessage
-    });
+    try {
+      const conversationId =
+        options.runStore.ensureDashboardMaestroConversation({
+          id: randomUUID()
+        });
+      const history = options.runStore.listMaestroMessages(
+        conversationId,
+        MAX_HISTORY_MESSAGES
+      );
+      options.runStore.appendMaestroMessage({
+        citations: [],
+        content: userMessage,
+        conversationId,
+        id: randomUUID(),
+        role: "user"
+      });
 
-    options.runStore.appendMaestroMessage({
-      citations: result.citations,
-      content: result.text,
-      conversationId,
-      id: randomUUID(),
-      role: "assistant"
-    });
+      const model = (options.createMaestroModel ?? createAnthropicMaestroModel)(
+        config
+      );
+      const reader = createMaestroEvidenceReader(options.runStore);
 
-    return context.redirect("/maestro", 303);
+      // Wrapped separately from the user-message append above: a throw
+      // here (a reader/RunStore error, for instance) must not leave the
+      // just-persisted user message with no reply at all — that would
+      // both surface as a bare 500 to the browser and break strict
+      // user/assistant alternation for the next turn's history.
+      try {
+        const result = await runMaestroTurn({
+          history,
+          model,
+          reader,
+          userMessage
+        });
+        options.runStore.appendMaestroMessage({
+          citations: result.citations,
+          content: result.text,
+          conversationId,
+          id: randomUUID(),
+          role: "assistant"
+        });
+      } catch {
+        options.runStore.appendMaestroMessage({
+          citations: [],
+          content:
+            "Maestro hit an unexpected error answering that message. Try again.",
+          conversationId,
+          id: randomUUID(),
+          role: "assistant"
+        });
+      }
+
+      return context.redirect("/maestro", 303);
+    } finally {
+      turnInFlight = false;
+    }
   });
 }

@@ -8005,23 +8005,43 @@ export class RunStore {
       .run(now, input.conversationId);
   }
 
-  listMaestroMessages(conversationId: string): MaestroMessageRow[] {
-    const rows = this.database
-      .prepare(
-        [
-          "select id, role, content, citations_json, created_at",
-          "from maestro_messages where conversation_id = ?",
-          "order by sequence asc"
-        ].join(" ")
-      )
-      .all(conversationId) as Array<{
+  // `limit` bounds the query itself (desc, then reversed back to
+  // chronological order) rather than letting the caller fetch everything
+  // and slice in JS — the dashboard's one durable conversation (#865) is
+  // never rotated, so an unbounded SELECT + JSON.parse of every historical
+  // row's citations grows with the conversation's whole lifetime on every
+  // single turn. Omit `limit` for the full history (the GET /maestro page
+  // render, which must show everything the operator has said).
+  listMaestroMessages(
+    conversationId: string,
+    limit?: number
+  ): MaestroMessageRow[] {
+    const query =
+      limit === undefined
+        ? [
+            "select id, role, content, citations_json, created_at",
+            "from maestro_messages where conversation_id = ?",
+            "order by sequence asc"
+          ]
+        : [
+            "select id, role, content, citations_json, created_at",
+            "from maestro_messages where conversation_id = ?",
+            "order by sequence desc",
+            "limit ?"
+          ];
+    const rows = (
+      limit === undefined
+        ? this.database.prepare(query.join(" ")).all(conversationId)
+        : this.database.prepare(query.join(" ")).all(conversationId, limit)
+    ) as Array<{
       citations_json: string | null;
       content: string;
       created_at: string;
       id: string;
       role: string;
     }>;
-    return rows.map((row) => ({
+    const ordered = limit === undefined ? rows : rows.reverse();
+    return ordered.map((row) => ({
       citations:
         row.citations_json === null
           ? []

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createHttpApp } from "../src/http/app.js";
 import { csrfTokenFor, type CsrfSecret } from "../src/http/csrf.js";
 import type { MaestroConfig } from "../src/maestro/config.js";
-import type { MaestroModel } from "../src/maestro/model.js";
+import type { MaestroModel, MaestroModelTurn } from "../src/maestro/model.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
@@ -141,6 +141,106 @@ describe("Maestro dashboard chat page (#865)", () => {
       ).text();
       expect(html).toContain("What&#39;s eligible?");
       expect(html).toContain("Nothing is eligible right now.");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("still persists a reply (not an orphaned user message) when the turn throws (#874)", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        createMaestroModel: () => ({
+          nextTurn: () => Promise.reject(new Error("boom"))
+        }),
+        csrfSecret: TEST_SECRET,
+        getMaestroConfig: () => MAESTRO_CONFIG,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const response = await app.request("/maestro/messages", {
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          message: "What's eligible?"
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+
+      expect(response.status).toBe(303);
+      expect(response.headers.get("location")).toBe("/maestro");
+
+      const conversation = test.runStore.findDashboardMaestroConversation();
+      expect(conversation).toBeDefined();
+      const messages = test.runStore.listMaestroMessages(conversation!.id);
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("refuses a second overlapping POST while a turn is already in flight (#874)", async () => {
+    const test = await setup();
+    try {
+      let resolveTurn: ((turn: MaestroModelTurn) => void) | undefined;
+      let notifyTurnStarted: (() => void) | undefined;
+      const turnStarted = new Promise<void>((resolve) => {
+        notifyTurnStarted = resolve;
+      });
+
+      const app = createHttpApp({
+        createMaestroModel: () => ({
+          nextTurn: () =>
+            new Promise<MaestroModelTurn>((resolveTurnResult) => {
+              resolveTurn = resolveTurnResult;
+              notifyTurnStarted?.();
+            })
+        }),
+        csrfSecret: TEST_SECRET,
+        getMaestroConfig: () => MAESTRO_CONFIG,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const firstRequest = app.request("/maestro/messages", {
+        body: formBody({ csrf_token: VALID_TOKEN, message: "first" }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+
+      await turnStarted;
+
+      const secondResponse = await app.request("/maestro/messages", {
+        body: formBody({ csrf_token: VALID_TOKEN, message: "second" }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      });
+
+      expect(secondResponse.status).toBe(303);
+      expect(secondResponse.headers.get("location")).toContain(
+        "/maestro?error="
+      );
+
+      resolveTurn?.({ kind: "message", text: "done" });
+      await firstRequest;
     } finally {
       test.cleanup();
     }

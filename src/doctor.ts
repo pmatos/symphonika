@@ -49,6 +49,7 @@ import {
   DEFAULT_GITHUB_ISSUES_API,
   type GitHubIssuesApi
 } from "./issue-polling.js";
+import { maestroConfigSchema } from "./maestro/config.js";
 import { emailNotificationConfigSchema } from "./notifications/config.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 import type { AgentProviderName, AgentProviderRegistry } from "./provider.js";
@@ -441,6 +442,7 @@ const routineExecutionDefaultsSchema = z
 const serviceConfigSchema = z
   .object({
     email: emailNotificationConfigSchema.optional(),
+    maestro: maestroConfigSchema.optional(),
     state: z
       .object({
         root: pathStringSchema.optional()

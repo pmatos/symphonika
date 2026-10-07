@@ -607,6 +607,7 @@ export async function startDaemon(
     // serialize on the same primitive. See ADR 0052.
     dispatchMutex,
     emailConfigLoader: () => runtimeConfig.emailConfig(),
+    maestroConfigLoader: () => runtimeConfig.maestroConfig(),
     githubIssuesApi,
     globalConcurrencyLoader,
     hostPressureGate,

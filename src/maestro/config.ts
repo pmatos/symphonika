@@ -51,6 +51,24 @@ export const maestroConfigSchema = z
     provider: maestro.provider
   }));
 
+// Mirrors src/notifications/config.ts's secretsForEmailConfig: providers
+// inherit the daemon's environment either way (full-permission execution,
+// ADR-2026-10-07-0813), so this API key is echoable back into durable
+// evidence regardless of whether Symphonika itself authenticates with it.
+// Consumed by RunController.redactionInventory and the Routine dispatcher's
+// resolveRedactSecrets so a Maestro-configured key gets scrubbed from Run
+// and Routine evidence the same way the SMTP password already is.
+export function secretsForMaestroConfig(
+  config: MaestroConfig | undefined,
+  env: NodeJS.ProcessEnv
+): string[] {
+  if (config === undefined) {
+    return [];
+  }
+  const secret = env[config.apiKeyEnv];
+  return secret === undefined || secret.length === 0 ? [] : [secret];
+}
+
 // Shown wherever Maestro's read-only boundary needs stating to an operator
 // (the /maestro page and the maestro: config documentation) — the boundary
 // is structural (no mutation tool exists in the registry Maestro is given),

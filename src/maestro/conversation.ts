@@ -18,7 +18,7 @@ const MAX_TOOL_ROUNDS = 4;
 // exchange. Kept well under typical context limits since this is a chat
 // transcript, not a document. See the follow-up issue filed for Maestro
 // Workspace (#867) if proper compaction becomes worth adding.
-const MAX_HISTORY_MESSAGES = 20;
+export const MAX_HISTORY_MESSAGES = 20;
 
 const SYSTEM_PROMPT =
   `You are Maestro, Symphonika's assistant on the operator dashboard. ` +

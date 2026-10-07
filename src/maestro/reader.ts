@@ -8,7 +8,7 @@ import type { RunStore } from "../run-store.js";
 // output. Deliberately excludes every write method (createRun,
 // replaceProjectIssueSnapshots, writeIssueLabels, mergePullRequest, ...) by
 // construction: there is no way to reach a mutation through this type.
-export type MaestroIssueEvidence = {
+type MaestroIssueEvidence = {
   href: string;
   issueNumber: number;
   kind: string;
@@ -19,7 +19,7 @@ export type MaestroIssueEvidence = {
   title: string;
 };
 
-export type MaestroRunEvidence = {
+type MaestroRunEvidence = {
   branchName: string;
   href: string;
   id: string;
@@ -31,7 +31,7 @@ export type MaestroRunEvidence = {
   terminalReason: string | null;
 };
 
-export type MaestroPullRequestEvidence = {
+type MaestroPullRequestEvidence = {
   checks: string | null;
   draft: boolean;
   href: string;

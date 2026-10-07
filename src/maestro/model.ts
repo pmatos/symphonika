@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { MaestroConfig } from "./config.js";
 import type { MaestroToolSpec } from "./tools.js";
 
-export type MaestroToolUseRequest = {
+type MaestroToolUseRequest = {
   id: string;
   input: unknown;
   name: string;

@@ -525,6 +525,17 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
       expect(html).toContain("not recorded");
       expect(html).toContain('href="/runs/adopted-root"');
       expect(html).toContain('href="/runs/adopted-child"');
+
+      // The adopted root genuinely succeeded and advanced — that status
+      // must read as "Completed" even though its specific FSM state id
+      // isn't recoverable (the unresolved state id, not the Run's RunState
+      // fact, is what's honestly unknown here).
+      const rootRowStart = html.indexOf('href="/runs/adopted-root"');
+      const rootRowHtml = html.slice(
+        html.lastIndexOf("<tr>", rootRowStart),
+        html.indexOf("</tr>", rootRowStart)
+      );
+      expect(rootRowHtml).toContain("Completed");
     } finally {
       test.cleanup();
     }
@@ -646,6 +657,159 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
       expect(html).toContain("blocked_state");
       expect(html).toContain("https://github.com/pmatos/alpha/pull/501");
       expect(html).toContain("#501");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("keeps a still-waiting parent 'Waiting' even after a PR review follow-up continuation off it", async () => {
+    const test = await setup();
+    try {
+      seedSnapshot(test.runStore, 95, "Markdown contract awaiting review");
+      const issue = sampleIssue({
+        number: 95,
+        title: "Markdown contract awaiting review"
+      });
+
+      // dispatchReviewFollowup (src/lifecycle/run-controller.ts) parents a
+      // fresh review-followup continuation off `tracked.lastFollowupRunId
+      // ?? tracked.runId` directly — unlike a raw-FSM advance, this never
+      // calls recordWorkflowStateAdvance on the parent first (raw_fsm
+      // workflows own their own review follow-up and never take this
+      // path), so the parent stays genuinely `waiting` throughout.
+      test.runStore.createRun({
+        id: "contract-root",
+        issue,
+        projectName: "alpha",
+        providerCommand: "claude",
+        providerName: "claude"
+      });
+      test.runStore.updateRunState("contract-root", "succeeded");
+      test.runStore.createWaitingRun({
+        currentStateId: "awaiting_review",
+        id: "contract-wait",
+        issue,
+        parentRunId: "contract-root",
+        projectName: "alpha"
+      });
+      test.runStore.createContinuationRun({
+        id: "review-followup",
+        issue,
+        parentRunId: "contract-wait",
+        projectName: "alpha",
+        providerCommand: "claude",
+        providerName: "claude"
+      });
+      test.runStore.updateRunState("review-followup", "succeeded");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/95")).text();
+
+      // The waiting Run is still live and must read as such, not as
+      // "Completed" just because a review-followup continuation exists.
+      const waitRowStart = html.indexOf('href="/runs/contract-wait"');
+      const waitRowHtml = html.slice(
+        html.lastIndexOf("<tr>", waitRowStart),
+        html.indexOf("</tr>", waitRowStart)
+      );
+      expect(waitRowHtml).toContain("Waiting");
+      expect(waitRowHtml).not.toContain("Completed");
+
+      // The follow-up's own position was never recorded by this Run (it
+      // only inherited a still-live parent's park state) — honest
+      // "not recorded" rather than a borrowed "awaiting_review".
+      const followupRowStart = html.indexOf('href="/runs/review-followup"');
+      const followupRowHtml = html.slice(
+        html.lastIndexOf("<tr>", followupRowStart),
+        html.indexOf("</tr>", followupRowStart)
+      );
+      expect(followupRowHtml).toContain("not recorded");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("reflects newly persisted state on a plain refresh, with no graph JavaScript", async () => {
+    const test = await setup();
+    try {
+      seedSnapshot(test.runStore, 96, "Finishes between two page loads");
+      const issue = sampleIssue({
+        number: 96,
+        title: "Finishes between two page loads"
+      });
+      const graphPath = await writeGraph(
+        test.stateRoot,
+        "refresh-root",
+        IMPLEMENT_THEN_WAIT_GRAPH
+      );
+      test.runStore.createRun({
+        id: "refresh-root",
+        issue,
+        projectName: "alpha",
+        providerCommand: "claude",
+        providerName: "claude"
+      });
+      test.runStore.updateRunEvidence("refresh-root", {
+        branchName: "sym/alpha/96",
+        branchRef: "refs/heads/sym/alpha/96",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+      test.runStore.recordWorkflowStateAdvance("refresh-root", {
+        nextStateId: "review_wait",
+        transitionReason: "provider_success"
+      });
+      test.runStore.updateRunState("refresh-root", "succeeded");
+      test.runStore.createWaitingRun({
+        branchName: "sym/alpha/96",
+        currentStateId: "review_wait",
+        id: "refresh-wait",
+        issue,
+        parentRunId: "refresh-root",
+        projectName: "alpha",
+        workspacePath: test.stateRoot
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      const firstHtml = await (await app.request("/issues/alpha/96")).text();
+      const firstSection = firstHtml.slice(
+        firstHtml.indexOf("Run Chain</h2>"),
+        firstHtml.indexOf("</main>")
+      );
+      expect(firstSection).toContain("Waiting");
+      expect(firstSection).not.toContain("Finished");
+      expect(firstSection).not.toContain("<script");
+
+      // The daemon's own re-evaluation persists this between the two page
+      // loads — the test only simulates that persisted outcome.
+      test.runStore.recordWorkflowTerminal("refresh-wait", {
+        terminalStateId: "done",
+        transitionReason: "checks: success"
+      });
+      test.runStore.updateRunState("refresh-wait", "succeeded");
+
+      const secondHtml = await (await app.request("/issues/alpha/96")).text();
+      const secondSection = secondHtml.slice(
+        secondHtml.indexOf("Run Chain</h2>"),
+        secondHtml.indexOf("</main>")
+      );
+      expect(secondSection).toContain("Finished: success");
+      expect(secondSection).not.toContain("Waiting");
+      expect(secondSection).not.toContain("<script");
     } finally {
       test.cleanup();
     }

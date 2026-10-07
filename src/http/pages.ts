@@ -4855,7 +4855,7 @@ function renderChainRow(view: IssueRunChainRowView): string {
       : `${view.attempts.length} attempt${view.attempts.length === 1 ? "" : "s"}`;
   const evidenceCell =
     row.transitionReason === null ? "—" : escapeHtml(row.transitionReason);
-  return `<tr><td>${stateCell}</td><td>${renderChainRowStatusPill(row)}</td><td>${providerCell}</td><td>${attemptsCell}</td><td><code>${renderTimestamp(row.run.updatedAt)}</code></td><td>${evidenceCell}</td><td><a href="/runs/${encodeURIComponent(row.run.id)}"><code>${escapeHtml(row.run.id)}</code></a></td></tr>`;
+  return `<tr><td>${stateCell}</td><td>${renderChainRowStatusPill(row)}</td><td>${providerCell}</td><td>${attemptsCell}</td><td><code>${renderTimestamp(row.run.createdAt)}</code></td><td><code>${renderTimestamp(row.run.updatedAt)}</code></td><td>${evidenceCell}</td><td><a href="/runs/${encodeURIComponent(row.run.id)}"><code>${escapeHtml(row.run.id)}</code></a></td></tr>`;
 }
 
 function renderUpcomingSection(
@@ -4900,7 +4900,7 @@ function renderIssueRunChainView(view: IssueRunChainView): string {
   const table = tableSection(
     "States",
     view.rows.length,
-    "<tr><th>State</th><th>Status</th><th>Provider</th><th>Attempts</th><th>Updated</th><th>Evidence</th><th>Run</th></tr>",
+    "<tr><th>State</th><th>Status</th><th>Provider</th><th>Attempts</th><th>Started</th><th>Updated</th><th>Evidence</th><th>Run</th></tr>",
     rowsHtml
   );
   const branchNote =

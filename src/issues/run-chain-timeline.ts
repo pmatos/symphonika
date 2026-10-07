@@ -127,14 +127,58 @@ export function deriveChainStateRows(
   graphForRun: (runId: string) => ExpandedWorkflow | undefined
 ): ChainStateRow[] {
   return chainRuns.map((run, index) => {
+    // A Run whose own lifecycle state is still live (queued, running,
+    // waiting, or input_required) has not gone through
+    // recordWorkflowStateAdvance/Terminal/Blocked yet, so its own
+    // current_state_id has not been forward-stamped — it still names this
+    // Run's own position, never a handoff. This is true regardless of chain
+    // position: a Markdown Workflow Contract's PR review follow-up can
+    // dispatch a continuation off a Run that is itself still `waiting` (a
+    // raw FSM never does this — "raw_fsm workflow owns its own review
+    // follow-up", src/lifecycle/run-controller.ts's dispatchReviewFollowup
+    // — so this only matters for compatibility-graph chains), which would
+    // otherwise make that still-parked Run look "completed" just because it
+    // has a child.
+    const liveKind = leafActiveKindOrUndefined(run.state);
+    if (liveKind !== undefined) {
+      const rootInitial =
+        index === 0 && run.currentStateId === null
+          ? graphForRun(run.id)?.initial
+          : undefined;
+      return {
+        kind: liveKind,
+        run,
+        stateId: run.currentStateId ?? rootInitial ?? undefined,
+        terminalKind: undefined,
+        transitionReason: run.stateTransitionReason
+      };
+    }
+
     const isLeaf = index === chainRuns.length - 1;
+    const parent = index === 0 ? undefined : chainRuns[index - 1];
+    // A parent's current_state_id is only a genuine forward-stamp once the
+    // parent itself has concluded (recordWorkflowStateAdvance and the
+    // lifecycle write that follows it happen back to back). A still-live
+    // parent (see the comment above) means this Run's inherited value is
+    // just a stable copy of the parent's own position, not evidence of what
+    // *this* Run executed.
+    const parentForwardStamped =
+      parent === undefined ||
+      leafActiveKindOrUndefined(parent.state) === undefined;
     if (!isLeaf) {
       const stateId =
         index === 0
           ? graphForRun(run.id)?.initial
-          : (chainRuns[index - 1]?.currentStateId ?? undefined);
+          : parentForwardStamped
+            ? (parent?.currentStateId ?? undefined)
+            : undefined;
+      // This Run concluded and has a continuation, full stop — that much is
+      // RunState fact, not FSM-position knowledge. An unresolved stateId
+      // (rendered as "not recorded" in the State cell) must not downgrade
+      // the status pill to "not recorded" too; that would tell an operator
+      // a Run that genuinely finished never recorded anything at all.
       return {
-        kind: stateId === undefined ? "not_recorded" : "completed",
+        kind: "completed",
         run,
         stateId,
         terminalKind: undefined,
@@ -152,8 +196,12 @@ export function deriveChainStateRows(
       };
     }
     if (run.currentStateId === null && run.terminalStateId !== null) {
-      const node = graphForRun(run.id)?.states.find(
-        (state) => state.id === run.terminalStateId
+      // A terminal reached from a parked wait/merge_pr Run has no graph of
+      // its own (it dispatched no provider) — borrow the nearest ancestor's,
+      // same as upcoming-transition and provider-source lookups do.
+      const node = findWorkflowStateNode(
+        resolveNearestGraph(chainRuns, index, graphForRun),
+        run.terminalStateId
       );
       return {
         kind: "terminal",
@@ -163,25 +211,41 @@ export function deriveChainStateRows(
         transitionReason: run.stateTransitionReason
       };
     }
+    // run.state is already known-concluded here (the live check above
+    // returned undefined), current_state_id is set, and there is no
+    // terminal_state_id and no child on the primary path: handed off to a
+    // continuation that was never created (crash between the two writes),
+    // or genuinely never advanced past its own start. But if this Run was
+    // itself created by inheriting a still-live parent's position (the same
+    // non-FSM continuation this function's first branch documents), that
+    // inherited value was never a handoff *this* Run authored — honest
+    // "not recorded" beats a confident-looking but borrowed state id.
     if (run.currentStateId !== null) {
-      return {
-        kind: leafActiveKind(run.state),
-        run,
-        stateId: run.currentStateId,
-        terminalKind: undefined,
-        transitionReason: run.stateTransitionReason
-      };
+      return parentForwardStamped
+        ? {
+            kind: "pending_handoff",
+            run,
+            stateId: run.currentStateId,
+            terminalKind: undefined,
+            transitionReason: run.stateTransitionReason
+          }
+        : {
+            kind: "not_recorded",
+            run,
+            stateId: undefined,
+            terminalKind: undefined,
+            transitionReason: run.stateTransitionReason
+          };
     }
     // Neither field is set: this Run has never recorded reaching any FSM
-    // state. For the chain's root that's still its very first attempt,
-    // dispatched but not yet advanced out of — `graph.initial` is ground
-    // truth for what it's working on, independent of the current_state_id
+    // state. For the chain's root — `graph.initial` is ground truth for
+    // what it was meant to work on, independent of the current_state_id
     // forward-stamp quirk, so prefer it over an honest-but-unhelpful
     // "not recorded" when the graph is available.
     const rootInitial = index === 0 ? graphForRun(run.id)?.initial : undefined;
     if (rootInitial !== undefined) {
       return {
-        kind: leafActiveKind(run.state),
+        kind: "pending_handoff",
         run,
         stateId: rootInitial,
         terminalKind: undefined,
@@ -198,16 +262,15 @@ export function deriveChainStateRows(
   });
 }
 
-// A leaf with no FSM terminal and `current_state_id` set is "current" only
-// while its own execution is still moving (queued/preparing/running) or
-// durably parked (waiting). A lifecycle-terminal RunState (succeeded,
-// failed, cancelled, stale, blocked with no terminal_state_id) that still
-// holds a forward-stamped current_state_id handed off to a continuation
-// that was never created (crash between the two writes, or a daemon that
-// never got to it) — shown as "pending_handoff" rather than claimed as
-// still executing. `input_required` gets its own label: an operator
-// decision is pending, not a stranded handoff.
-function leafActiveKind(state: RunStatus["state"]): ChainStateRowKind {
+// A Run is "current" — still moving (queued/preparing/running) or durably
+// parked (waiting), or needs an operator decision (input_required) — purely
+// from its own lifecycle RunState, independent of chain position. Returns
+// undefined once that lifecycle has concluded (succeeded, failed, cancelled,
+// stale, or blocked), leaving the caller to interpret current_state_id /
+// terminal_state_id for what concluding meant.
+function leafActiveKindOrUndefined(
+  state: RunStatus["state"]
+): ChainStateRowKind | undefined {
   if (state === "waiting") {
     return "current_waiting";
   }
@@ -221,7 +284,7 @@ function leafActiveKind(state: RunStatus["state"]): ChainStateRowKind {
   ) {
     return "current_running";
   }
-  return "pending_handoff";
+  return undefined;
 }
 
 // Nearest-ancestor graph lookup: a waiting/system-action Run dispatches no

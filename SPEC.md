@@ -2823,11 +2823,12 @@ The UI is primarily read-only. It shows:
 Above everything else, the dashboard (`/`) renders a **Work overview** section
 (`buildWorkOverview`/`renderWorkOverviewSection`, `src/http/work-overview.ts`): every Issue a
 Dispatch Project's persisted poll snapshot (ADR 0073) or Run history currently knows about, grouped
-into exactly one of four operator-facing buckets by this precedence (highest first): a scheduled
-retry/continuation/state-advance/wait-park callback for the Issue (its backing Run row may already
-be terminal — the callback is the only remaining liveness signal, the same evidence
-`resolveScheduledClaimantRunId` reads); a `waiting` Run the Progress Guard has flagged for operator
-attention without terminalizing it (CONTEXT.md); any other live Run state
+into exactly one of four operator-facing buckets by this precedence (highest first): a `waiting` Run
+the Progress Guard has flagged for operator attention without terminalizing it (CONTEXT.md) — checked
+before a scheduled callback because a guarded park can itself carry a pending `wait_park` recheck
+timer; a scheduled retry/continuation/state-advance/wait-park callback for the Issue (its backing Run
+row may already be terminal — the callback is the only remaining liveness signal, the same evidence
+`resolveScheduledClaimantRunId` reads); any other live Run state
 (`queued`/`preparing_workspace`/`running`/`waiting`); an open tracked pull request; a `candidate`
 snapshot row (an operator re-queue — clearing Operational Labels per §4.4 — wins over a stale
 terminal Run left over from a prior attempt, since dispatch itself does not consult Run history to

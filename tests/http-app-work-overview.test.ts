@@ -581,4 +581,73 @@ describe("GET / work overview (#856)", () => {
       test.cleanup();
     }
   });
+
+  it("keeps a Progress-Guard-flagged waiting Run in needs-attention even with a pending wait_park recheck", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      // A guarded park can itself carry a pending wait_park recheck timer
+      // (pages.ts: "wait_park can name the terminal parent while a waiting
+      // row owns the reservation") -- the attention label must still win,
+      // not the schedule.
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-01T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 81,
+            kind: "filtered",
+            labels: ["sym:human-needed", "sym:claimed"],
+            priority: 1,
+            reasons: ["has operational label sym:human-needed"],
+            title: "Guarded park with a pending recheck"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-guarded-scheduled",
+        issue: sampleIssue({
+          number: 81,
+          title: "Guarded park with a pending recheck"
+        }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-guarded-scheduled", "waiting");
+
+      const app = createHttpApp({
+        getScheduled: () => [
+          {
+            dueAt: Date.now() + 10_000,
+            issueNumber: 81,
+            kind: "wait_park",
+            projectName: "alpha",
+            runId: "run-guarded-scheduled"
+          }
+        ],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/")).text();
+
+      const attentionSection = extractSection(
+        html,
+        "work-overview-needs-attention"
+      );
+      expect(attentionSection).toContain("Guarded park with a pending recheck");
+
+      const ongoingSection = extractSection(html, "work-overview-ongoing");
+      expect(ongoingSection).not.toContain(
+        "Guarded park with a pending recheck"
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
 });

@@ -12,12 +12,14 @@
 // snapshot `kind`, because a claimed issue's snapshot row is "filtered" with
 // a "claimed by run" reason (ADR 0073's own join precedent):
 //
-//   1. a scheduled retry/continuation/state_advance/wait_park callback for
+//   1. a `waiting` Run the Progress Guard has flagged for operator attention
+//      (sym:human-needed etc. without terminalizing the Run — CONTEXT.md);
+//      checked before a scheduled callback because a guarded park can
+//      itself carry a pending wait_park recheck timer
+//   2. a scheduled retry/continuation/state_advance/wait_park callback for
 //      this issue — its backing Run row may already be terminal (the
 //      callback is the only remaining liveness signal; see pages.ts's
 //      resolveScheduledClaimantRunId)
-//   2. a `waiting` Run the Progress Guard has flagged for operator attention
-//      (sym:human-needed etc. without terminalizing the Run — CONTEXT.md)
 //   3. any other live Run state (queued/preparing_workspace/running/waiting)
 //   4. an open tracked pull request
 //   5. a `candidate` snapshot — an operator re-queue (clearing Operational
@@ -248,20 +250,16 @@ export function buildWorkOverview(input: {
         title: snapshot?.title ?? run?.issueTitle ?? `issue #${issueNumber}`
       };
 
-      // 1. A scheduled callback outlives its own backing Run row going
-      // terminal — it is the only remaining liveness signal (pages.ts's
-      // resolveScheduledClaimantRunId carries the identical rationale).
-      if (scheduled !== undefined) {
-        ongoing.push({
-          ...base,
-          group: "ongoing",
-          reasonText: `scheduled ${scheduled.kind.replace("_", " ")}`
-        });
-        continue;
-      }
-      // 2. A parked wait Run the Progress Guard flagged for attention
+      // 1. A parked wait Run the Progress Guard flagged for attention
       // without terminalizing it (CONTEXT.md's Progress Guard) must not
-      // read as merely "ongoing".
+      // read as merely "ongoing" — even though a guarded park can itself
+      // carry a pending wait_park recheck timer (pages.ts: "wait_park can
+      // name the terminal parent while a waiting row owns the
+      // reservation"), which would otherwise satisfy step 2 below first.
+      // The Claim Label Writer suppresses sym:failed/sym:blocked when a
+      // retry or continuation follows (CONTEXT.md), so an attention label
+      // surviving next to a schedule is a genuine operator-attention case,
+      // not a false positive from checking this before step 2.
       if (
         run !== undefined &&
         run.state === "waiting" &&
@@ -271,6 +269,17 @@ export function buildWorkOverview(input: {
           ...base,
           group: "needsAttention",
           reasonText: attentionLabel
+        });
+        continue;
+      }
+      // 2. A scheduled callback outlives its own backing Run row going
+      // terminal — it is the only remaining liveness signal (pages.ts's
+      // resolveScheduledClaimantRunId carries the identical rationale).
+      if (scheduled !== undefined) {
+        ongoing.push({
+          ...base,
+          group: "ongoing",
+          reasonText: `scheduled ${scheduled.kind.replace("_", " ")}`
         });
         continue;
       }

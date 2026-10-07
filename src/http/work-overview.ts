@@ -24,11 +24,14 @@
 //   4. an open tracked pull request
 //   5. a `candidate` snapshot — an operator re-queue (clearing Operational
 //      Labels) must win over a stale terminal Run from a prior attempt
-//   6. a terminal attention Run state, or a filtered snapshot's own
-//      attention label
+//   6. a terminal attention Run state *with a snapshot row* (an issue
+//      missing from the last successful poll is closed, ADR 0073's
+//      replace-on-success — a closed issue's stale Run history must not
+//      resurrect it), or a filtered snapshot's own attention label
 //   7. any other filtered snapshot
-//   8. otherwise omitted — a terminal Run with no snapshot and no tracked PR
-//      has nothing left to say (ADR 0073's "drops off the table" rule)
+//   8. otherwise omitted — a terminal Run with no snapshot, no tracked PR,
+//      and no schedule has nothing left to say (ADR 0073's "drops off the
+//      table" rule); this is also where a closed issue's stale Run lands
 import {
   type ProjectIssueSnapshotRow,
   type ProjectSnapshotRepository,
@@ -309,9 +312,17 @@ export function buildWorkOverview(input: {
         continue;
       }
       // 6. A durable terminal attention outcome, or a filtered snapshot's
-      // own attention label.
+      // own attention label. The run-state half requires a snapshot row:
+      // an issue missing from the last successful poll is closed (ADR
+      // 0073's replace-on-success drops its row), and listRuns returns
+      // full history regardless of the issue's current open/closed state
+      // -- without this guard, a closed issue whose final Run happened to
+      // end blocked/failed/stale/input_required would stay in Needs
+      // attention forever.
       if (
-        (run !== undefined && ATTENTION_RUN_STATES.has(run.state)) ||
+        (run !== undefined &&
+          snapshot !== undefined &&
+          ATTENTION_RUN_STATES.has(run.state)) ||
         attentionLabel !== undefined
       ) {
         needsAttention.push({

@@ -215,6 +215,21 @@ describe("GET / work overview (#856)", () => {
             priority: 1,
             reasons: ["has excluded label needs-human"],
             title: "Missing the ready label"
+          },
+          // Still open (it has a snapshot row -- a closed issue's row
+          // would have aged out of the last successful poll per ADR
+          // 0073) and the Claim Label Writer wrote sym:blocked alongside
+          // the Run's own blocked state, the way it actually happens in
+          // production (CONTEXT.md's Claim Label Writer).
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 31,
+            kind: "filtered",
+            labels: ["sym:blocked"],
+            priority: 1,
+            reasons: ["has operational label sym:blocked"],
+            title: "Stuck for review"
           }
         ]
       });
@@ -646,6 +661,77 @@ describe("GET / work overview (#856)", () => {
       expect(ongoingSection).not.toContain(
         "Guarded park with a pending recheck"
       );
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("omits a closed issue whose last Run ended blocked and has no snapshot row (AC1)", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.recordProjectPollOutcome({
+        candidateIssues: 1,
+        error: null,
+        fetchedIssues: 1,
+        filteredIssues: 0,
+        ok: true,
+        projectName: "alpha"
+      });
+      // Only issue 90 survived the last successful poll -- issue 91 is
+      // absent because it closed and aged out of the snapshot (ADR
+      // 0073's replace-on-success), even though its last Run is still
+      // sitting in the runs table as "blocked".
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-01T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 90,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "Still open and ready"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-closed-issue",
+        issue: sampleIssue({ number: 91, title: "Closed after a blocked run" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-closed-issue", "blocked");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/")).text();
+
+      const readySection = extractSection(html, "work-overview-ready");
+      expect(readySection).toContain("Still open and ready");
+
+      // extractSection assumes sibling, not nested, <section> tags, so each
+      // group is checked on its own rather than slicing the outer
+      // "work-overview" wrapper (which stops at the first nested group).
+      for (const anchor of [
+        "work-overview-needs-attention",
+        "work-overview-ready",
+        "work-overview-ongoing",
+        "work-overview-not-ready"
+      ]) {
+        expect(extractSection(html, anchor)).not.toContain(
+          "Closed after a blocked run"
+        );
+      }
     } finally {
       test.cleanup();
     }

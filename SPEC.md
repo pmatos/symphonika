@@ -2832,11 +2832,14 @@ row may already be terminal — the callback is the only remaining liveness sign
 (`queued`/`preparing_workspace`/`running`/`waiting`); an open tracked pull request; a `candidate`
 snapshot row (an operator re-queue — clearing Operational Labels per §4.4 — wins over a stale
 terminal Run left over from a prior attempt, since dispatch itself does not consult Run history to
-decide eligibility); a terminal `blocked`/`failed`/`stale`/`input_required` Run state or a filtered
-snapshot row carrying `sym:human-needed`/`sym:blocked`/`sym:failed`/`sym:stale`; any other filtered
-snapshot row; otherwise the Issue is omitted (a terminal `succeeded`/`cancelled` Run with no
-snapshot row, no tracked pull request, and no schedule has nothing left to say, mirroring the
-"drops off the table" rule ADR 0073 already applies to `/projects/:name`'s own issue-keyed table).
+decide eligibility); a terminal `blocked`/`failed`/`stale`/`input_required` Run state *paired with a
+snapshot row* (an Issue missing from the last successful poll is closed, ADR 0073's
+replace-on-success — a closed Issue's stale Run history must not resurrect it into this bucket
+forever) or a filtered snapshot row carrying `sym:human-needed`/`sym:blocked`/`sym:failed`/
+`sym:stale`; any other filtered snapshot row; otherwise the Issue is omitted (a terminal
+`succeeded`/`cancelled`/`blocked`/`failed`/`stale`/`input_required` Run with no snapshot row, no
+tracked pull request, and no schedule has nothing left to say, mirroring the "drops off the table"
+rule ADR 0073 already applies to `/projects/:name`'s own issue-keyed table).
 The four buckets this sorts into are **Needs attention**, **Ready** (ordered by configured priority
 then issue age via the same `compareCandidateIssues`, `src/issue-priority.ts`, the dispatch path
 itself uses), **Ongoing / in review**, and **Not ready** (showing its persisted reasons verbatim).

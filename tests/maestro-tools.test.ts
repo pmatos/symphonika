@@ -47,6 +47,48 @@ async function setup(): Promise<{ cleanup: () => void; runStore: RunStore }> {
       }
     ]
   });
+  runStore.replaceProjectPullRequestSnapshots({
+    polledAt: "2026-10-06T12:05:00.000Z",
+    projectName: "symphonika",
+    rows: [
+      {
+        branchOrigin: "issue_branch",
+        checks: "success",
+        draft: false,
+        headRef: "sym/symphonika/42-add-feature-x",
+        headSha: "abc123",
+        labels: [],
+        mergeable: "mergeable",
+        merged: false,
+        open: true,
+        prNumber: 7,
+        reviewDecision: null,
+        stateAvailable: true,
+        title: "feat: add feature X",
+        trackingState: null,
+        unresolvedReviewThreads: 0,
+        url: "https://github.com/pmatos/symphonika/pull/7"
+      }
+    ]
+  });
+  runStore.createRun({
+    id: "run-1",
+    issue: {
+      body: "",
+      created_at: "2026-10-06T11:00:00Z",
+      id: 1,
+      labels: ["agent-ready"],
+      number: 42,
+      priority: 0,
+      state: "open",
+      title: "Add feature X",
+      updated_at: "2026-10-06T11:00:00Z",
+      url: "https://example.invalid/42"
+    },
+    projectName: "symphonika",
+    providerCommand: "codex",
+    providerName: "codex"
+  });
 
   return { cleanup: () => runStore.close(), runStore };
 }
@@ -127,6 +169,164 @@ describe("Maestro tool registry (#865)", () => {
         reader
       });
       expect(outcome.kind).toBe("refused");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("refuses a tool call whose input is not an object at all", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const outcome = executeMaestroTool({
+        input: "not-an-object",
+        name: "get_issue",
+        reader
+      });
+      expect(outcome).toEqual({
+        kind: "refused",
+        reason: "project_name and issue_number are required"
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("refuses get_issue when issue_number is missing", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const outcome = executeMaestroTool({
+        input: { project_name: "symphonika" },
+        name: "get_issue",
+        reader
+      });
+      expect(outcome).toEqual({
+        kind: "refused",
+        reason: "project_name and issue_number are required"
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("answers list_runs with run evidence and a citation", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const outcome = executeMaestroTool({
+        input: { project_name: "symphonika" },
+        name: "list_runs",
+        reader
+      });
+      expect(outcome.kind).toBe("ok");
+      if (outcome.kind !== "ok") {
+        throw new Error("expected ok outcome");
+      }
+      expect(outcome.citations).toEqual([
+        expect.objectContaining({ href: "/runs/run-1", kind: "run" })
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("answers get_run with run evidence and a citation", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const outcome = executeMaestroTool({
+        input: { run_id: "run-1" },
+        name: "get_run",
+        reader
+      });
+      expect(outcome.kind).toBe("ok");
+      if (outcome.kind !== "ok") {
+        throw new Error("expected ok outcome");
+      }
+      expect(outcome.citations).toEqual([
+        expect.objectContaining({ href: "/runs/run-1", kind: "run" })
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("answers get_run for an unknown run id with no citation", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const outcome = executeMaestroTool({
+        input: { run_id: "no-such-run" },
+        name: "get_run",
+        reader
+      });
+      expect(outcome).toEqual({
+        citations: [],
+        kind: "ok",
+        output: { found: false }
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("refuses get_run without a run_id", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const outcome = executeMaestroTool({
+        input: {},
+        name: "get_run",
+        reader
+      });
+      expect(outcome).toEqual({
+        kind: "refused",
+        reason: "run_id is required"
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("answers list_pull_requests with pull-request evidence and a citation", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const outcome = executeMaestroTool({
+        input: { project_name: "symphonika" },
+        name: "list_pull_requests",
+        reader
+      });
+      expect(outcome.kind).toBe("ok");
+      if (outcome.kind !== "ok") {
+        throw new Error("expected ok outcome");
+      }
+      expect(outcome.citations).toEqual([
+        expect.objectContaining({
+          href: "/prs/symphonika/7",
+          kind: "pull_request",
+          label: "symphonika#7"
+        })
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("refuses list_pull_requests without a project_name", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const outcome = executeMaestroTool({
+        input: {},
+        name: "list_pull_requests",
+        reader
+      });
+      expect(outcome).toEqual({
+        kind: "refused",
+        reason: "project_name is required"
+      });
     } finally {
       test.cleanup();
     }

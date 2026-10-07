@@ -2820,7 +2820,43 @@ The UI is primarily read-only. It shows:
   24-hour skip counts, and discovered PR numbers
 - a per-run interactive workflow graph
 
-The dashboard (`/`) leads with an **active-now band**: every in-flight Run and Routine Firing,
+Above everything else, the dashboard (`/`) renders a **Work overview** section
+(`buildWorkOverview`/`renderWorkOverviewSection`, `src/http/work-overview.ts`): every Issue a
+Dispatch Project's persisted poll snapshot (ADR 0073) or Run history currently knows about, grouped
+into exactly one of four operator-facing buckets by this precedence (highest first): a `waiting` Run
+the Progress Guard has flagged for operator attention without terminalizing it (CONTEXT.md) — checked
+before a scheduled callback because a guarded park can itself carry a pending `wait_park` recheck
+timer; a scheduled retry/continuation/state-advance/wait-park callback for the Issue (its backing Run
+row may already be terminal — the callback is the only remaining liveness signal, the same evidence
+`resolveScheduledClaimantRunId` reads); any other live Run state
+(`queued`/`preparing_workspace`/`running`/`waiting`); an open tracked pull request; a `candidate`
+snapshot row (an operator re-queue — clearing Operational Labels per §4.4 — wins over a stale
+terminal Run left over from a prior attempt, since dispatch itself does not consult Run history to
+decide eligibility); a terminal `blocked`/`failed`/`stale`/`input_required` Run state *paired with a
+snapshot row* (an Issue missing from the last successful poll is closed, ADR 0073's
+replace-on-success — a closed Issue's stale Run history must not resurrect it into this bucket
+forever) or a filtered snapshot row carrying `sym:human-needed`/`sym:blocked`/`sym:failed`/
+`sym:stale`; any other filtered snapshot row; otherwise the Issue is omitted (a terminal
+`succeeded`/`cancelled`/`blocked`/`failed`/`stale`/`input_required` Run with no snapshot row, no
+tracked pull request, and no schedule has nothing left to say, mirroring the "drops off the table"
+rule ADR 0073 already applies to `/projects/:name`'s own issue-keyed table).
+The four buckets this sorts into are **Needs attention**, **Ready** (ordered by configured priority
+then issue age via the same `compareCandidateIssues`, `src/issue-priority.ts`, the dispatch path
+itself uses), **Ongoing / in review**, and **Not ready** (showing its persisted reasons verbatim).
+Each entry links its Project (`/projects/:name`), its Issue detail page
+(`/issues/:project/:number`, only when a snapshot row exists for it — a Run-only row has none), its
+newest Run (`/runs/:id`), and any tracked pull request (`/prs/:project/:number`). A separate
+poll-provenance table lists, for every Project that has attempted at least one issue poll — pushed
+independently of whether that Project currently has any issue-level rows to show, so a Project whose
+every poll has failed still surfaces its failure — its last successful poll age, a `(pre-restart)`
+marker when that poll predates the current process (mirroring the capacity strip's own check), and a
+failing-poll pill with the raw error text
+— the same durable `project_states` fields the capacity strip reads, never a live-looking
+projection. This section is not wired into the dashboard's SSE live-fragment refresh (ADR 0074); an
+explicit "Assembled at `<timestamp>` — not live; reload to refresh" note is what keeps a stale page
+load from being mistaken for current state in the meantime.
+
+The dashboard (`/`) also leads with an **active-now band**: every in-flight Run and Routine Firing,
 labelled by kind. Active means `queued`, `preparing_workspace`, or `running` — a `waiting` Run
 (parked for external state, such as PR review) or one in `input_required` has no provider process
 running and is not active right now, though both still appear on `/runs`. Below the band, Routines

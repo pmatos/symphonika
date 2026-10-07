@@ -211,6 +211,46 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("persists the GitHub issue's own created_at onto the issue poll snapshot (#856)", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 50,
+          title: "Carries its own created_at"
+        })
+      ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    try {
+      await fetch(`${daemon.url}/projects/symphonika`);
+      const { stateRoot } = resolveStateRoot({ cwd: root });
+      const runStore = openRunStore({ stateRoot });
+      try {
+        const rows = runStore.listProjectIssueSnapshots("symphonika");
+        const row = rows.find((candidate) => candidate.issueNumber === 50);
+        // issueFixture's own fixed created_at, threaded unmodified through
+        // daemon.ts's projectIssueSnapshotRows into the persisted snapshot
+        // -- the #856 work overview's ready-group age ordering depends on
+        // this surviving a restart (ADR 0073), not just the in-memory tick.
+        expect(row?.issueCreatedAt).toBe("2026-04-20T10:00:00Z");
+      } finally {
+        runStore.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("shows a tracker-less Routine Host targeted by a git Routine as invalid on the live dashboard", async () => {
     const root = await makeTempRoot();
     await writeTrackerLessGitRoutineHost(root);

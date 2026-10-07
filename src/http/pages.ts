@@ -124,6 +124,10 @@ import {
   isAgentProviderName
 } from "../human-resume-command.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
+import {
+  buildWorkOverview,
+  renderWorkOverviewSection
+} from "./work-overview.js";
 
 // Shared by RegisterPagesOptions.getScheduled and buildProjectIssueRow's
 // input — one shape, matching HttpAppOptions.getScheduled's own (src/http/
@@ -619,6 +623,14 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderDaemonStaleBanner(tickAgeMs, pollingIntervalMs),
         renderHeader(options.version, snapshot),
         DASHBOARD_STREAM_BANNER,
+        renderWorkOverviewSection(
+          buildWorkOverview({
+            nowMs,
+            runStore: options.runStore,
+            scheduled: options.getScheduled?.() ?? [],
+            startedAtMs: options.startedAtMs
+          })
+        ),
         `<div id="active-now-band">${renderActiveNowBand(activeRuns, activeFirings, watchdogByRun, nowMs)}</div>`,
         renderRoutinesSection(routineGroups, includeInactive),
         `<div id="projects-section">${renderProjectsSection(snapshot, options.issuePollStatus, activeRuns, activeFirings, lastRunByProject, nowMs)}</div>`,

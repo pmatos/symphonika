@@ -372,6 +372,12 @@ export type ProjectIssueSnapshotRow = {
   // the label-write route's snapshot-backed gate sees it too, not just the
   // daemon's live IssueSnapshot.
   blockedByTruncated: boolean;
+  // The GitHub issue's own `created_at`, for the #856 work overview's
+  // priority-then-age ready-group ordering (compareCandidateIssues,
+  // src/issue-priority.ts). Absent on rows persisted before this column
+  // existed, and never backfilled — ADR 0073's replace-on-success rule
+  // means the next successful poll repopulates it anyway.
+  issueCreatedAt?: string;
   issueNumber: number;
   kind: ProjectIssueSnapshotKind;
   labels: string[];
@@ -409,6 +415,7 @@ export type ReplaceProjectIssueSnapshotsInput = {
   rows: Array<{
     blockedBy: RawGitHubIssueDependencyRef[];
     blockedByTruncated: boolean;
+    issueCreatedAt?: string;
     issueNumber: number;
     kind: ProjectIssueSnapshotKind;
     labels: string[];
@@ -972,6 +979,7 @@ type ProjectStateRow = {
 type ProjectIssueSnapshotDbRow = {
   blocked_by: string | null;
   blocked_by_truncated: number;
+  issue_created_at: string | null;
   issue_number: number;
   kind: ProjectIssueSnapshotKind;
   labels: string | null;
@@ -2627,12 +2635,12 @@ export class RunStore {
         [
           "insert into project_issue_snapshots (",
           "project_name, issue_number, kind, title, priority, reasons, labels,",
-          "blocked_by, blocked_by_truncated, parent_issue_number,",
+          "blocked_by, blocked_by_truncated, parent_issue_number, issue_created_at,",
           "repository_owner, repository_name, polled_at,",
           "created_at, updated_at",
           ") values (",
           "@project_name, @issue_number, @kind, @title, @priority, @reasons, @labels,",
-          "@blocked_by, @blocked_by_truncated, @parent_issue_number,",
+          "@blocked_by, @blocked_by_truncated, @parent_issue_number, @issue_created_at,",
           "@repository_owner, @repository_name, @polled_at,",
           "@created_at, @updated_at",
           ")"
@@ -2643,6 +2651,7 @@ export class RunStore {
           blocked_by: encodeJsonArrayColumn(row.blockedBy),
           blocked_by_truncated: row.blockedByTruncated ? 1 : 0,
           created_at: now,
+          issue_created_at: row.issueCreatedAt ?? null,
           issue_number: row.issueNumber,
           kind: row.kind,
           labels: encodeJsonArrayColumn(row.labels),
@@ -2680,7 +2689,7 @@ export class RunStore {
       .prepare(
         [
           "select issue_number, kind, title, priority, reasons, labels,",
-          "blocked_by, blocked_by_truncated, parent_issue_number, polled_at",
+          "blocked_by, blocked_by_truncated, parent_issue_number, issue_created_at, polled_at",
           "from project_issue_snapshots where project_name = ?",
           "order by issue_number asc"
         ].join(" ")
@@ -7325,6 +7334,7 @@ export class RunStore {
         "integer not null default 0"
       ],
       ["project_issue_snapshots", "parent_issue_number", "integer"],
+      ["project_issue_snapshots", "issue_created_at", "text"],
       ["project_issue_snapshots", "repository_owner", "text"],
       ["project_issue_snapshots", "repository_name", "text"],
       ["project_pull_request_snapshots", "labels", "text"],
@@ -8215,6 +8225,9 @@ function mapProjectIssueSnapshotRow(
       row.blocked_by
     ),
     blockedByTruncated: row.blocked_by_truncated === 1,
+    ...(row.issue_created_at === null
+      ? {}
+      : { issueCreatedAt: row.issue_created_at }),
     issueNumber: row.issue_number,
     kind: row.kind,
     labels: decodeJsonArrayColumn<string>(row.labels),

@@ -1951,6 +1951,7 @@ export async function startDaemon(
       };
     },
     getPullRequestFollowupPolicy: () => runtimeConfig.pullRequestPolicy(),
+    getMaestroConfig: () => runtimeConfig.maestroConfig(),
     getConfigPath: () => state.configPath,
     getProjectWorkflowPath: (projectName) => {
       const workflow = runtimeConfig

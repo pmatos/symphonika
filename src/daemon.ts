@@ -2538,6 +2538,7 @@ function projectIssueSnapshotRows(
 ): Array<{
   blockedBy: import("./issue-polling.js").RawGitHubIssueDependencyRef[];
   blockedByTruncated: boolean;
+  issueCreatedAt?: string;
   issueNumber: number;
   kind: "candidate" | "filtered";
   labels: string[];
@@ -2555,6 +2556,9 @@ function projectIssueSnapshotRows(
     .map((entry) => ({
       blockedBy: entry.issue.blockedBy ?? [],
       blockedByTruncated: entry.issue.blockedByTruncated === true,
+      ...(entry.issue.created_at.length === 0
+        ? {}
+        : { issueCreatedAt: entry.issue.created_at }),
       issueNumber: entry.issue.number,
       kind: "candidate" as const,
       labels: entry.issue.labels,
@@ -2574,6 +2578,9 @@ function projectIssueSnapshotRows(
     .map((entry) => ({
       blockedBy: entry.issue.blockedBy ?? [],
       blockedByTruncated: entry.issue.blockedByTruncated === true,
+      ...(entry.issue.created_at.length === 0
+        ? {}
+        : { issueCreatedAt: entry.issue.created_at }),
       issueNumber: entry.issue.number,
       kind: "filtered" as const,
       labels: entry.issue.labels,

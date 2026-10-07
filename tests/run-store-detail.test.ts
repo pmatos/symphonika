@@ -1413,6 +1413,50 @@ describe("RunStore detail queries", () => {
       store.close();
     }
   });
+
+  it("replaceProjectIssueSnapshots round-trips issueCreatedAt, absent when not supplied (#856)", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-07T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueCreatedAt: "2026-01-02T03:04:05.000Z",
+            issueNumber: 401,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "Has a created-at"
+          },
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 402,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "No created-at"
+          }
+        ]
+      });
+
+      const rows = store.listProjectIssueSnapshots("alpha");
+      expect(rows.find((row) => row.issueNumber === 401)?.issueCreatedAt).toBe(
+        "2026-01-02T03:04:05.000Z"
+      );
+      expect(
+        rows.find((row) => row.issueNumber === 402)?.issueCreatedAt
+      ).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
 });
 
 async function streamText(

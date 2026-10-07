@@ -174,12 +174,12 @@ describe("Maestro tool registry (#865)", () => {
     }
   });
 
-  it("refuses a tool call whose input is not an object at all", async () => {
+  it("refuses a tool call whose input is null rather than an object", async () => {
     const test = await setup();
     try {
       const reader = createMaestroEvidenceReader(test.runStore);
       const outcome = executeMaestroTool({
-        input: "not-an-object",
+        input: null,
         name: "get_issue",
         reader
       });

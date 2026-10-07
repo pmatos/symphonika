@@ -1385,6 +1385,27 @@ type SettledRoutineWatchdogTermination = {
   routineName: string;
 };
 
+// Maestro conversation persistence (#865). A citation is built server-side
+// from a tool result's own records, never from model-authored text — see
+// src/maestro/conversation.ts — so it is safe to render as a link without
+// re-validating here.
+export type MaestroCitation = {
+  href: string;
+  kind: string;
+  label: string;
+  observedAt: string;
+};
+
+export type MaestroMessageRole = "user" | "assistant";
+
+export type MaestroMessageRow = {
+  citations: MaestroCitation[];
+  content: string;
+  createdAt: string;
+  id: string;
+  role: MaestroMessageRole;
+};
+
 export class RunStore {
   private readonly changeListeners = new Set<(event: ChangeEvent) => void>();
   private readonly database: SqliteDatabase;
@@ -7202,6 +7223,37 @@ export class RunStore {
       );
     `);
 
+    // Maestro conversation history (#865). Deliberately separate tables
+    // from `runs`/`attempts`/etc.: a chat message is discussion evidence,
+    // never Run evidence, and must never be mistaken for completed work. A
+    // `scope`/`project_name` pair identifies one durable conversation;
+    // dashboard scope (this slice) always has project_name null. Project
+    // scope (#866) will use the same tables with project_name set.
+    this.database.exec(`
+      create table if not exists maestro_conversations (
+        id text primary key,
+        scope text not null,
+        project_name text,
+        created_at text not null,
+        updated_at text not null,
+        unique(scope, project_name)
+      );
+
+      create table if not exists maestro_messages (
+        id text primary key,
+        conversation_id text not null references maestro_conversations(id),
+        sequence integer not null,
+        role text not null,
+        content text not null,
+        citations_json text,
+        created_at text not null,
+        unique(conversation_id, sequence)
+      );
+
+      create index if not exists maestro_messages_conversation_idx
+        on maestro_messages(conversation_id, sequence);
+    `);
+
     const additions: Array<[string, string, string]> = [
       ["runs", "is_continuation", "integer not null default 0"],
       ["runs", "evidence_ignore_json", "text not null default '[]'"],
@@ -7887,6 +7939,99 @@ export class RunStore {
     }
     return filePath;
   }
+
+  // Maestro conversation persistence (#865). Deliberately not surfaced on
+  // `listRuns`/`getRun`/status counts — a chat message is discussion
+  // evidence, never Run evidence (CONTEXT.md's Maestro boundary). The
+  // dashboard scope has exactly one durable conversation, identified by
+  // `scope = 'dashboard' and project_name is null`; project scope (#866)
+  // will reuse these tables keyed by project_name instead.
+  findDashboardMaestroConversation(): { id: string } | undefined {
+    const row = this.database
+      .prepare(
+        "select id from maestro_conversations where scope = 'dashboard' and project_name is null"
+      )
+      .get() as { id: string } | undefined;
+    return row === undefined ? undefined : { id: row.id };
+  }
+
+  ensureDashboardMaestroConversation(input: { id: string }): string {
+    const existing = this.findDashboardMaestroConversation();
+    if (existing !== undefined) {
+      return existing.id;
+    }
+    const now = timestamp();
+    this.database
+      .prepare(
+        "insert into maestro_conversations (id, scope, project_name, created_at, updated_at) values (@id, 'dashboard', null, @now, @now)"
+      )
+      .run({ id: input.id, now });
+    return input.id;
+  }
+
+  appendMaestroMessage(input: {
+    citations: MaestroCitation[];
+    content: string;
+    conversationId: string;
+    id: string;
+    role: MaestroMessageRole;
+  }): void {
+    const now = timestamp();
+    const sequence = nextMaestroMessageSequence(
+      this.database,
+      input.conversationId
+    );
+    this.database
+      .prepare(
+        [
+          "insert into maestro_messages (",
+          "id, conversation_id, sequence, role, content, citations_json, created_at",
+          ") values (",
+          "@id, @conversation_id, @sequence, @role, @content, @citations_json, @created_at",
+          ")"
+        ].join(" ")
+      )
+      .run({
+        citations_json: JSON.stringify(input.citations),
+        content: input.content,
+        conversation_id: input.conversationId,
+        created_at: now,
+        id: input.id,
+        role: input.role,
+        sequence
+      });
+    this.database
+      .prepare("update maestro_conversations set updated_at = ? where id = ?")
+      .run(now, input.conversationId);
+  }
+
+  listMaestroMessages(conversationId: string): MaestroMessageRow[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, role, content, citations_json, created_at",
+          "from maestro_messages where conversation_id = ?",
+          "order by sequence asc"
+        ].join(" ")
+      )
+      .all(conversationId) as Array<{
+      citations_json: string | null;
+      content: string;
+      created_at: string;
+      id: string;
+      role: string;
+    }>;
+    return rows.map((row) => ({
+      citations:
+        row.citations_json === null
+          ? []
+          : (JSON.parse(row.citations_json) as MaestroCitation[]),
+      content: row.content,
+      createdAt: row.created_at,
+      id: row.id,
+      role: row.role as MaestroMessageRole
+    }));
+  }
 }
 
 export function openRunStore(options: OpenRunStoreOptions): RunStore {
@@ -7912,6 +8057,19 @@ function nextTransitionSequence(
       "select coalesce(max(sequence), 0) + 1 as next_sequence from run_state_transitions where run_id = ?"
     )
     .get(runId) as { next_sequence?: number } | undefined;
+
+  return row?.next_sequence ?? 1;
+}
+
+function nextMaestroMessageSequence(
+  database: SqliteDatabase,
+  conversationId: string
+): number {
+  const row = database
+    .prepare(
+      "select coalesce(max(sequence), 0) + 1 as next_sequence from maestro_messages where conversation_id = ?"
+    )
+    .get(conversationId) as { next_sequence?: number } | undefined;
 
   return row?.next_sequence ?? 1;
 }

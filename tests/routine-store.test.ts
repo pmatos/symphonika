@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   databasePath,
   openRunStore,
+  RunStore,
   RoutineFanoutInvariantError
 } from "../src/run-store.js";
 
@@ -1703,6 +1704,105 @@ describe("RunStore routines", () => {
       expect(store.listRoutines()).toEqual([
         expect.objectContaining({ pullRequestNumbers: [17, 18] })
       ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("hydrates listed Routine Firings with a bounded number of pull-request reads", async () => {
+    const stateRoot = await makeTempRoot();
+    const statements: string[] = [];
+    const database = new Database(databasePath(stateRoot), {
+      verbose: (statement) => statements.push(String(statement))
+    });
+    const store = new RunStore(database, { stateRoot });
+    try {
+      store.syncRoutines([
+        {
+          kind: "git",
+          name: "dependency-update",
+          prompt: "Update dependencies.",
+          provider: "codex",
+          schedule: { at: "2026-05-22T10:00:00.000Z" },
+          sourcePath: "/tmp/dependency-update.md",
+          projectName: "alpha"
+        }
+      ]);
+      for (const id of ["fire-1", "fire-2", "fire-3"]) {
+        store.createRoutineFiring({
+          id,
+          projectName: "alpha",
+          providerCommand: "codex fake",
+          providerName: "codex",
+          routineName: "dependency-update"
+        });
+      }
+      for (const [firingId, prNumber] of [
+        ["fire-1", 18],
+        ["fire-2", 17],
+        ["fire-1", 17]
+      ] as const) {
+        store.recordRoutinePullRequest({
+          firingId,
+          headSha: `${firingId}-${prNumber}`,
+          prNumber,
+          prUrl: `https://github.com/example/alpha/pull/${prNumber}`,
+          projectName: "alpha",
+          routineName: "dependency-update"
+        });
+      }
+
+      statements.length = 0;
+      const firings = store.listRoutineFirings({ project: "alpha" });
+      expect(firings.map((firing) => firing.id)).toEqual([
+        "fire-3",
+        "fire-2",
+        "fire-1"
+      ]);
+      expect(
+        firings.map((firing) => firing.pullRequests.map((pr) => pr.prNumber))
+      ).toEqual([[], [17], [17, 18]]);
+      expect(
+        statements.filter((statement) =>
+          statement.includes("from routine_pull_requests")
+        )
+      ).toHaveLength(1);
+
+      statements.length = 0;
+      expect(store.listRoutineFirings({ limit: 0 })).toEqual([]);
+      expect(
+        statements.filter((statement) =>
+          statement.includes("from routine_pull_requests")
+        )
+      ).toHaveLength(0);
+
+      for (const id of ["fire-1", "fire-2", "fire-3"]) {
+        store.completeRoutineFiring({
+          commitsAhead: false,
+          id,
+          state: "succeeded",
+          workspacePath: `/workspaces/${id}`
+        });
+      }
+      statements.length = 0;
+      const prunable = store.listRoutineWorkspacePruneCandidates({
+        cancelledBefore: "9999-12-31T23:59:59.999Z",
+        failedBefore: "9999-12-31T23:59:59.999Z",
+        succeededBefore: "9999-12-31T23:59:59.999Z"
+      });
+      expect(
+        Object.fromEntries(
+          prunable.map((firing) => [
+            firing.id,
+            firing.pullRequests.map((pr) => pr.prNumber)
+          ])
+        )
+      ).toEqual({ "fire-1": [17, 18], "fire-2": [17], "fire-3": [] });
+      expect(
+        statements.filter((statement) =>
+          statement.includes("from routine_pull_requests")
+        )
+      ).toHaveLength(1);
     } finally {
       store.close();
     }

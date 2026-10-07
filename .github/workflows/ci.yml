@@ -19,8 +19,34 @@ env:
   NPM_CONFIG_AUDIT: "false"
 
 jobs:
+  changes:
+    name: Detect docs-only change
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          docs_only=false
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qvE '\.md$|^docs/'; then
+              docs_only=true
+            fi
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
   lint:
     name: Lint
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -51,6 +77,8 @@ jobs:
 
   knip:
     name: Knip
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -66,6 +94,8 @@ jobs:
 
   typecheck:
     name: Typecheck
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -100,6 +130,8 @@ jobs:
 
   coverage:
     name: Coverage
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -129,6 +161,8 @@ jobs:
 
   build:
     name: Build
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -29,6 +29,17 @@ import {
   type ProviderStreamStatus
 } from "../provider-stream-status.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
+import {
+  deriveChainStateRows,
+  findWorkflowStateNode,
+  groupRunsIntoChains,
+  resolveProviderSource,
+  resolveUpcomingTransitions,
+  type ChainStateRow,
+  type ChainStateRowKind,
+  type ProviderSource,
+  type RunChainGroup
+} from "../issues/run-chain-timeline.js";
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
 import { loadRoutineDeclaration } from "../routines/declaration-loader.js";
 import { formatPullRequestReference } from "../notifications/message.js";
@@ -103,7 +114,11 @@ import {
   type WatchdogIdleStatus,
   type WatchdogStatus
 } from "../watchdog-status.js";
-import type { ExpandedWorkflow } from "../workflow/types.js";
+import type {
+  ExpandedWorkflow,
+  WorkflowActionKind,
+  WorkflowTransition
+} from "../workflow/types.js";
 import {
   buildHumanResumeCommand,
   isAgentProviderName
@@ -869,7 +884,7 @@ export function registerPages(options: RegisterPagesOptions): void {
     return context.html(html);
   });
 
-  options.app.get("/issues/:project/:number", (context) => {
+  options.app.get("/issues/:project/:number", async (context) => {
     const projectName = context.req.param("project");
     const issueNumber = Number.parseInt(context.req.param("number"), 10);
     const detail = loadIssueDetail(
@@ -885,10 +900,16 @@ export function registerPages(options: RegisterPagesOptions): void {
       );
     }
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const chains = await loadIssueRunChainViews(
+      options.runStore,
+      projectName,
+      issueNumber
+    );
     const html = layout(
       `#${issueNumber} ${detail.snapshot.title}`,
       renderIssueDetailPage({
         banner: undefined,
+        chains,
         csrfToken,
         detail,
         pollNowAvailable: options.pollNow !== undefined
@@ -990,10 +1011,16 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
 
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const chains = await loadIssueRunChainViews(
+      options.runStore,
+      projectName,
+      issueNumber
+    );
     const html = layout(
       `#${issueNumber} ${detail.snapshot.title}`,
       renderIssueDetailPage({
         banner,
+        chains,
         csrfToken,
         detail,
         pollNowAvailable: options.pollNow !== undefined
@@ -1183,10 +1210,16 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
 
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const chains = await loadIssueRunChainViews(
+      options.runStore,
+      projectName,
+      issueNumber
+    );
     const html = layout(
       `#${issueNumber} ${detail.snapshot.title}`,
       renderIssueDetailPage({
         banner,
+        chains,
         csrfToken,
         detail,
         pollNowAvailable: options.pollNow !== undefined
@@ -4671,8 +4704,248 @@ function renderIssueLabelsSection(input: {
   return `<section><h2>Labels</h2><p class="note"><code>sym:*</code> labels are how Symphonika tracks dispatch state (ADR 0002/0024) — removing one by hand can trigger a double dispatch or silently block an issue, so they render here but can't be edited.</p>${list}${addForm}</section>`;
 }
 
+// #859: one row per Run in the chain's primary walk, enriched with the
+// evidence (graph, attempts, provider source) needed to render it honestly.
+type IssueRunChainRowView = {
+  actionKind: WorkflowActionKind | undefined;
+  attempts: AttemptStatus[];
+  graphAvailable: boolean;
+  providerSource: ProviderSource;
+  row: ChainStateRow;
+};
+
+type IssueRunChainView = {
+  group: RunChainGroup;
+  leafIsActive: boolean;
+  rows: IssueRunChainRowView[];
+  trackedPR: TrackedPullRequest | undefined;
+  upcoming: WorkflowTransition[] | undefined;
+  workflowChangedMidChain: boolean;
+};
+
+// Fetches every Run on this (project, issue) and the workflow graph each one
+// captured, then hands the pure grouping/derivation in
+// src/issues/run-chain-timeline.ts the plain data it needs. One query plus
+// one getWorkflowGraph per Run — an issue's Run history is small enough that
+// this stays cheap, and the Run Store has no bulk graph-fetch to batch it
+// into.
+async function loadIssueRunChainViews(
+  runStore: RunStore,
+  projectName: string,
+  issueNumber: number
+): Promise<IssueRunChainView[]> {
+  const runs = runStore.listRuns({ issueNumber, project: projectName });
+  if (runs.length === 0) {
+    return [];
+  }
+  const graphByRunId = new Map<string, ExpandedWorkflow | undefined>();
+  await Promise.all(
+    runs.map(async (run) => {
+      graphByRunId.set(run.id, await runStore.getWorkflowGraph(run.id));
+    })
+  );
+  const graphForRun = (id: string): ExpandedWorkflow | undefined =>
+    graphByRunId.get(id);
+
+  const groups = groupRunsIntoChains(runs);
+  return groups
+    .slice()
+    .sort((a, b) => {
+      const aLeaf = a.runs[a.runs.length - 1];
+      const bLeaf = b.runs[b.runs.length - 1];
+      return (bLeaf?.createdAt ?? "").localeCompare(aLeaf?.createdAt ?? "");
+    })
+    .map((group) => {
+      const stateRows = deriveChainStateRows(group.runs, graphForRun);
+      // One forward pass carrying the nearest graph seen so far, rather than
+      // a backward scan per row — same result as calling resolveNearestGraph
+      // per row, without the O(chain length squared) rescans.
+      let nearestGraphSoFar: ExpandedWorkflow | undefined;
+      const nearestGraphs = group.runs.map((run) => {
+        nearestGraphSoFar = graphForRun(run.id) ?? nearestGraphSoFar;
+        return nearestGraphSoFar;
+      });
+      const rows: IssueRunChainRowView[] = stateRows.map((row, index) => {
+        const graph = nearestGraphs[index];
+        return {
+          actionKind: findWorkflowStateNode(graph, row.stateId)?.action?.kind,
+          attempts: runStore.listAttempts(row.run.id),
+          graphAvailable: graph !== undefined,
+          providerSource: resolveProviderSource(graph, row.stateId),
+          row
+        };
+      });
+      const leafIndex = stateRows.length - 1;
+      const leafRow: ChainStateRow | undefined = stateRows[leafIndex];
+      const leafIsActive =
+        leafRow?.kind === "current_running" ||
+        leafRow?.kind === "current_waiting";
+      const upcoming = leafIsActive
+        ? resolveUpcomingTransitions(nearestGraphs[leafIndex], leafRow.stateId)
+        : undefined;
+      const leafRunId = group.runs[leafIndex]?.id;
+      const trackedPR =
+        leafRunId === undefined
+          ? undefined
+          : runStore.findTrackedPullRequestForRunChain({
+              issueNumber,
+              projectName,
+              runId: leafRunId
+            });
+      const distinctHashes = new Set(
+        group.runs
+          .map((run) => graphForRun(run.id)?.contentHash)
+          .filter((hash): hash is string => hash !== undefined)
+      );
+      return {
+        group,
+        leafIsActive,
+        rows,
+        trackedPR,
+        upcoming,
+        workflowChangedMidChain: distinctHashes.size > 1
+      };
+    });
+}
+
+const CHAIN_ROW_KIND_LABELS: Record<
+  ChainStateRowKind,
+  { family: "ok" | "fail" | "blocked" | "progress" | "neutral"; text: string }
+> = {
+  blocked: { family: "blocked", text: "Blocked" },
+  completed: { family: "ok", text: "Completed" },
+  current_running: { family: "progress", text: "Running now" },
+  current_waiting: { family: "progress", text: "Waiting" },
+  input_required: { family: "blocked", text: "Needs operator input" },
+  not_recorded: { family: "neutral", text: "Not recorded" },
+  pending_handoff: {
+    family: "blocked",
+    text: "Handed off, not yet dispatched"
+  },
+  terminal: { family: "ok", text: "Finished" }
+};
+
+function renderChainRowStatusPill(row: ChainStateRow): string {
+  const label = CHAIN_ROW_KIND_LABELS[row.kind];
+  const text =
+    row.kind === "terminal"
+      ? `Finished: ${row.terminalKind ?? "terminal"}`
+      : label.text;
+  return labelPill(text, label.family);
+}
+
+function describeProviderSource(
+  source: ProviderSource,
+  graphAvailable: boolean
+): string {
+  switch (source.kind) {
+    case "no_provider":
+      return "—";
+    case "not_recorded":
+      return graphAvailable
+        ? "not recorded (state not found in the captured workflow graph)"
+        : "not recorded (workflow graph unavailable for this Run)";
+    case "project_default":
+      return "project default";
+    case "workflow_state":
+      return `workflow state (${escapeHtml(source.declaredProvider)})`;
+  }
+}
+
+function renderChainRow(view: IssueRunChainRowView): string {
+  const { row } = view;
+  const stateCell =
+    row.stateId === undefined
+      ? `<em>not recorded</em>`
+      : `<code>${escapeHtml(row.stateId)}</code>${view.actionKind === undefined ? "" : ` <span class="muted">(${escapeHtml(view.actionKind)})</span>`}`;
+  const effectiveProvider = view.attempts.at(-1)?.providerName;
+  const providerCell =
+    effectiveProvider === undefined
+      ? "—"
+      : `${escapeHtml(effectiveProvider)} <span class="muted">— ${describeProviderSource(view.providerSource, view.graphAvailable)}</span>`;
+  const attemptsCell =
+    view.attempts.length === 0
+      ? "—"
+      : `${view.attempts.length} attempt${view.attempts.length === 1 ? "" : "s"}`;
+  const evidenceCell =
+    row.transitionReason === null ? "—" : escapeHtml(row.transitionReason);
+  return `<tr><td>${stateCell}</td><td>${renderChainRowStatusPill(row)}</td><td>${providerCell}</td><td>${attemptsCell}</td><td><code>${renderTimestamp(row.run.createdAt)}</code></td><td><code>${renderTimestamp(row.run.updatedAt)}</code></td><td>${evidenceCell}</td><td><a href="/runs/${encodeURIComponent(row.run.id)}"><code>${escapeHtml(row.run.id)}</code></a></td></tr>`;
+}
+
+function renderUpcomingSection(
+  upcoming: WorkflowTransition[] | undefined,
+  isActive: boolean
+): string {
+  if (!isActive) {
+    return "";
+  }
+  if (upcoming === undefined) {
+    return `<p class="note">Upcoming states: not recorded (no workflow graph captured for this Run).</p>`;
+  }
+  if (upcoming.length === 0) {
+    return `<p class="note">No further transitions declared from this state — the workflow walk stops here unless the contract changes.</p>`;
+  }
+  const items = upcoming
+    .map((transition) => {
+      const predicates = Object.entries(transition.when);
+      const when =
+        predicates.length === 0
+          ? "always"
+          : predicates
+              .map(
+                ([key, value]) =>
+                  `${key}: ${Array.isArray(value) ? value.join("/") : String(value)}`
+              )
+              .join(", ");
+      return `<li><code>${escapeHtml(transition.to)}</code> — when ${escapeHtml(when)}</li>`;
+    })
+    .join("");
+  return `<p class="note">Upcoming (one hop, predicates decide at run time — not a guaranteed path):</p><ul>${items}</ul>`;
+}
+
+function renderIssueRunChainView(view: IssueRunChainView): string {
+  const rowsHtml = view.rows.map(renderChainRow).join("");
+  const table = tableSection(
+    "States",
+    view.rows.length,
+    "<tr><th>State</th><th>Status</th><th>Provider</th><th>Attempts</th><th>Started</th><th>Updated</th><th>Evidence</th><th>Run</th></tr>",
+    rowsHtml
+  );
+  const branchNote =
+    view.group.otherRunIds.length === 0
+      ? ""
+      : `<p class="note">${view.group.otherRunIds.length} additional Run(s) branched off this chain and are not shown in the primary walk: ${view.group.otherRunIds.map((id) => `<a href="/runs/${encodeURIComponent(id)}"><code>${escapeHtml(id)}</code></a>`).join(", ")}.</p>`;
+  const workflowChangedNote = view.workflowChangedMidChain
+    ? `<p class="note">The workflow definition changed partway through this chain — captured graphs differ in content hash across its Runs.</p>`
+    : "";
+  const prNote =
+    view.trackedPR === undefined
+      ? ""
+      : `<p class="note">Tracked pull request: ${externalLink(view.trackedPR.prUrl, `#${view.trackedPR.prNumber}`)} (${escapeHtml(view.trackedPR.state)}).</p>`;
+  return `${table}${branchNote}${workflowChangedNote}${prNote}${renderUpcomingSection(view.upcoming, view.leafIsActive)}`;
+}
+
+function renderIssueRunChainSection(chains: IssueRunChainView[]): string {
+  if (chains.length === 0) {
+    return `<section><h2>Run Chain</h2><p class="muted">No Run Chain recorded yet for this Issue.</p></section>`;
+  }
+  const [latest, ...older] = chains;
+  const latestHtml =
+    latest === undefined
+      ? ""
+      : `<section><h2>Run Chain</h2>${renderIssueRunChainView(latest)}</section>`;
+  const olderHtml = older
+    .map(
+      (chain, index) =>
+        `<details><summary>Earlier Run Chain #${older.length - index}</summary>${renderIssueRunChainView(chain)}</details>`
+    )
+    .join("");
+  return `${latestHtml}${olderHtml}`;
+}
+
 function renderIssueDetailPage(input: {
   banner: IssueActionBanner | undefined;
+  chains: IssueRunChainView[];
   csrfToken: string;
   detail: IssueDetail;
   pollNowAvailable: boolean;
@@ -4687,7 +4960,7 @@ function renderIssueDetailPage(input: {
     input.banner === undefined
       ? ""
       : `${renderIssueActionBanner(input.banner)}${offerPollNow && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
-  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
+  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueRunChainSection(input.chains)}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,
       issueNumber: detail.issueNumber,

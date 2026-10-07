@@ -3193,6 +3193,36 @@ as-is (a narrow, deliberately un-generalized addition — see ADR 0077).
 
 Label creation and workspace cleanup remain CLI-only; stale-claim reset no longer is.
 
+`GET /issues/:project/:number` (`#859`) also renders that issue's Run Chain history as a readable
+FSM timeline, server-rendered with no graph JavaScript required. Every Run on the (Project, issue)
+pair is grouped into Run Chains by walking `continuation_parent_run_id`; two Runs that share no such
+link (e.g. an earlier dispatch that failed, followed by a fresh one after re-labeling) render as
+separate chain sections rather than one merged walk — the newest chain's section is open, older ones
+collapse into `<details>`. Within a chain, each Run becomes one state row: completed rows for every
+earlier Run, then the current chain leaf — running, durably waiting, blocked, reached an FSM
+terminal, awaiting operator input (`input_required`), or handed off to a continuation that was never
+created (a crash between the forward-stamp write and the continuation's own row). The leaf's state
+also gets a one-hop "upcoming" list of its declared transitions and their `when` predicates — never a
+multi-hop guess, since predicates decide branching only at run time.
+
+The tricky part this surface accounts for: `runs.current_state_id` is forward-stamped onto a Run's
+*own* row with the state it handed off to, before the continuation that actually executes that state
+is created (`src/lifecycle/workflow-advancement.ts`, `recordWorkflowStateAdvance`). So a Run's
+`current_state_id`, once it has a continuation, names the *next* Run's state, never its own — the
+state a non-leaf Run executed is recovered from its parent's row instead (or, for a chain's root,
+from that root's own captured `workflow-graph.json`, via `ExpandedWorkflow.initial`). Provider and
+provider-source ("workflow state" vs. "project default") are likewise read from each Run's *own*
+captured graph, never the chain's newest one, so a workflow edit mid-chain cannot misattribute an
+older Run's provider choice. A waiting or system-action Run dispatches no provider and so captures no
+graph of its own; it borrows the nearest ancestor's. Evidence that genuinely cannot be recovered (an
+adopted Run's own executed state, once advanced past, or a missing workflow graph) renders as an
+explicit "not recorded" rather than a guess. The grouping, per-row state derivation, and one-hop
+lookahead are pure functions in `src/issues/run-chain-timeline.ts`; `src/http/pages.ts` does the
+Run Store/file I/O and HTML rendering around them. Tracked pull-request evidence, when present, is
+resolved per chain via `findTrackedPullRequestForRunChain`, scoped to that chain's own ancestry rather
+than any Run sharing the issue number. The existing Run-detail page and its logs remain reachable and
+unchanged — every state row links out to `/runs/:id` for attempt-level detail.
+
 `GET /issues` also lets an operator select several rows and add or remove labels across all of them
 in one action (ADR 0080) — a checkbox per row plus a header "select all," a label-picker toolbar with
 autocomplete drawn from the labels already present in the currently-rendered rows (no new

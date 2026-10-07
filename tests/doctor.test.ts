@@ -411,6 +411,31 @@ describe("doctor", () => {
     );
   });
 
+  it("rejects a malformed maestro: block instead of passing it through unvalidated (#874)", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, {
+      globalLines: ["maestro:", '  api_key_env: "ANTHROPIC_API_KEY"']
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}} for {{project.name}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toContainEqual(
+      expect.stringContaining("maestro.model")
+    );
+  });
+
   it.skipIf(process.platform === "win32")(
     "distinguishes an unset PATH from an explicitly empty PATH",
     async () => {

@@ -3001,7 +3001,7 @@ export const RESUME_COPY_CLIENT_JS = `(function () {
   });
 })();`;
 
-function renderTimestamp(
+export function renderTimestamp(
   value: string | null | undefined,
   fallback = "-"
 ): string {
@@ -3012,7 +3012,7 @@ function renderTimestamp(
   return `<time datetime="${escaped}" data-local-time>${escaped}</time>`;
 }
 
-function layout(title: string, body: string): string {
+export function layout(title: string, body: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -3025,7 +3025,7 @@ function layout(title: string, body: string): string {
 <body>
 <header class="topbar">
   <div class="brand"><a href="/">Symphonika</a></div>
-  <nav class="nav" aria-label="Primary"><a href="/">Dashboard</a><a href="/runs">Runs</a><a href="/issues">Issues</a><a href="/prs">Pull requests</a><a href="/config/edit">Config</a></nav>
+  <nav class="nav" aria-label="Primary"><a href="/">Dashboard</a><a href="/runs">Runs</a><a href="/issues">Issues</a><a href="/prs">Pull requests</a><a href="/maestro">Maestro</a><a href="/config/edit">Config</a></nav>
 </header>
 <main>
 ${body}
@@ -7509,7 +7509,7 @@ export const WORKFLOW_GRAPH_CLIENT_JS = `(function () {
   }
 })();`;
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

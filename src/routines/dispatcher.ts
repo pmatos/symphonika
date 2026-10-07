@@ -39,6 +39,10 @@ import type {
   RunControllerProvidersConfig
 } from "../lifecycle/run-controller.js";
 import {
+  secretsForMaestroConfig,
+  type MaestroConfig
+} from "../maestro/config.js";
+import {
   secretsForEmailConfig,
   type EmailNotificationConfig
 } from "../notifications/config.js";
@@ -121,6 +125,11 @@ export type DispatchDueRoutinesInput = {
   hostPressure?: HostPressureVerdict;
   inspectWorkspaceCommitsAhead?: typeof inspectWorkspaceCommitsAhead;
   logger?: Logger;
+  // Mirrors RunController's maestroConfigLoader (src/lifecycle/run-controller.ts):
+  // Routine evidence/notification redaction needs the same Maestro API key
+  // scrub Run evidence already gets, resolved live rather than at dispatch
+  // time so a mid-firing config reload is honored (see resolveRedactSecrets).
+  maestroConfigLoader?: () => MaestroConfig | undefined;
   notification?: RoutineNotificationDelivery;
   now?: Date;
   prepareRoutineWorkspace?: (
@@ -2004,6 +2013,7 @@ type ClaimedRoutineFiringInput = {
     | "githubIssuesApi"
     | "inspectWorkspaceCommitsAhead"
     | "logger"
+    | "maestroConfigLoader"
     | "notification"
     | "prepareRoutineWorkspace"
     | "runStore"
@@ -2053,7 +2063,12 @@ function startClaimedRoutineFiring(
     providerName: input.providerName,
     // Resolve again on every evidence write so a mid-firing config reload
     // changes redaction immediately instead of leaving a dispatch-time snapshot.
-    redactSecrets: () => resolveRedactSecrets(runtime.notification, env),
+    redactSecrets: () =>
+      resolveRedactSecrets(
+        runtime.notification,
+        runtime.maestroConfigLoader,
+        env
+      ),
     routine: input.routine,
     runStore: runtime.runStore,
     stateRoot: runtime.stateRoot
@@ -2077,7 +2092,7 @@ function startClaimedRoutineFiring(
 function enqueueRoutineFiringNotification(
   input: Pick<
     DispatchDueRoutinesInput,
-    "env" | "logger" | "notification" | "runStore"
+    "env" | "logger" | "maestroConfigLoader" | "notification" | "runStore"
   >,
   firingId: string,
   project: RunControllerProjectConfig,
@@ -2091,6 +2106,7 @@ function enqueueRoutineFiringNotification(
           env: input.env ?? process.env,
           firingId,
           logger: input.logger,
+          maestroConfigLoader: input.maestroConfigLoader,
           notification: input.notification,
           project,
           routine,
@@ -2108,6 +2124,7 @@ async function recordRoutineFiringNotification(
     env: NodeJS.ProcessEnv;
     firingId: string;
     logger: Logger | undefined;
+    maestroConfigLoader: (() => MaestroConfig | undefined) | undefined;
     notification: RoutineNotificationDelivery | undefined;
     project: RunControllerProjectConfig;
     routine: RoutineStatus & { prompt: string };
@@ -2140,7 +2157,11 @@ async function recordRoutineFiringNotification(
   // does: this text leaves the machine, so it is the last place a leaked
   // credential can still be caught.
   const redactSecrets = [
-    ...resolveRedactSecrets(input.notification, input.env),
+    ...resolveRedactSecrets(
+      input.notification,
+      input.maestroConfigLoader,
+      input.env
+    ),
     ...routineTrackerTokens(input.project, input.env)
   ];
   const outcome = await deliverRoutineFiringNotification({
@@ -3398,12 +3419,15 @@ function routineTrackerTokens(
 
 function resolveRedactSecrets(
   notification: DispatchDueRoutinesInput["notification"],
+  maestroConfigLoader: DispatchDueRoutinesInput["maestroConfigLoader"],
   env: NodeJS.ProcessEnv
 ): string[] {
-  if (notification === undefined) {
-    return [];
-  }
-  return secretsForEmailConfig(notification.resolveConfig(), env);
+  return [
+    ...(notification === undefined
+      ? []
+      : secretsForEmailConfig(notification.resolveConfig(), env)),
+    ...secretsForMaestroConfig(maestroConfigLoader?.(), env)
+  ];
 }
 
 function stringField(value: unknown, key: string): string | undefined {

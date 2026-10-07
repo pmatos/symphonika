@@ -1086,7 +1086,12 @@ describe("daemon dispatch", () => {
     const root = await makeTempRoot();
     const trackerToken = "tracker-token-that-must-never-leak";
     const smtpPassword = "smtp-password-that-must-never-leak";
+    // #874: Maestro's API key is a daemon-env secret spawned providers
+    // inherit the same way the SMTP password is, independent of whether
+    // this Run's own provider ever calls Maestro's model.
+    const maestroApiKey = "maestro-api-key-that-must-never-leak";
     await writeValidProject(root, {
+      maestroApiKeyEnv: "MAESTRO_TEST_API_KEY",
       smtpPasswordEnv: "SMTP_TEST_PASSWORD"
     });
 
@@ -1110,7 +1115,9 @@ describe("daemon dispatch", () => {
       ): AsyncGenerator<ProviderEvent> {
         handedStderrRedactSecrets = input.stderrRedactSecrets;
         await Promise.resolve();
-        const leaked = `provider leaked ${trackerToken} and ${smtpPassword}`;
+        const leaked =
+          `provider leaked ${trackerToken} and ${smtpPassword} and ` +
+          maestroApiKey;
         yield {
           normalized: {
             message: leaked,
@@ -1132,6 +1139,7 @@ describe("daemon dispatch", () => {
       cwd: root,
       env: {
         GITHUB_TOKEN: trackerToken,
+        MAESTRO_TEST_API_KEY: maestroApiKey,
         SMTP_TEST_PASSWORD: smtpPassword
       },
       githubIssuesApi,
@@ -1148,7 +1156,7 @@ describe("daemon dispatch", () => {
       await waitForRun(daemon.url, "failed");
 
       expect(handedStderrRedactSecrets).toEqual(
-        expect.arrayContaining([trackerToken, smtpPassword])
+        expect.arrayContaining([trackerToken, smtpPassword, maestroApiKey])
       );
       const rawLog = await fetchRunArtifact(
         daemon.url,
@@ -1165,7 +1173,7 @@ describe("daemon dispatch", () => {
 
       const databaseFile = path.join(root, ".symphonika", "symphonika.db");
       const databaseBytes = await readFile(databaseFile);
-      for (const secret of [trackerToken, smtpPassword]) {
+      for (const secret of [trackerToken, smtpPassword, maestroApiKey]) {
         expect(rawLog).not.toContain(secret);
         expect(normalizedLog).not.toContain(secret);
         expect(databaseBytes.includes(Buffer.from(secret))).toBe(false);
@@ -1178,7 +1186,8 @@ describe("daemon dispatch", () => {
             .prepare("select terminal_reason from runs where id = ?")
             .get("run-redacted-evidence")
         ).toEqual({
-          terminal_reason: "provider leaked [REDACTED] and [REDACTED]"
+          terminal_reason:
+            "provider leaked [REDACTED] and [REDACTED] and [REDACTED]"
         });
       } finally {
         database.close();
@@ -4792,6 +4801,7 @@ async function writeValidProject(
   root: string,
   options: {
     globalMaxInFlight?: number;
+    maestroApiKeyEnv?: string;
     pollingIntervalMs?: number;
     smtpPasswordEnv?: string;
   } = {}
@@ -4817,6 +4827,13 @@ async function writeValidProject(
             // still inherited by the provider, so it belongs in the
             // redaction inventory whether or not SMTP auth uses it.
             `  smtp_password_env: "${options.smtpPasswordEnv}"`
+          ]),
+      ...(options.maestroApiKeyEnv === undefined
+        ? []
+        : [
+            "maestro:",
+            '  model: "claude-sonnet-5"',
+            `  api_key_env: "${options.maestroApiKeyEnv}"`
           ]),
       "providers:",
       "  codex:",

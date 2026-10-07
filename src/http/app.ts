@@ -55,6 +55,9 @@ import {
   registerPages,
   type ScheduledCallback
 } from "./pages.js";
+import { registerMaestroPage } from "./maestro-page.js";
+import type { MaestroConfig } from "../maestro/config.js";
+import type { MaestroModel } from "../maestro/model.js";
 
 type CancelRunFn = (
   runId: string,
@@ -223,6 +226,14 @@ export type HttpAppOptions = {
       projectName: string;
     }>;
   };
+  // #865's dashboard Maestro chat: overrides how the HTTP layer builds a
+  // MaestroModel for a given config. Production defaults to the real
+  // Anthropic-backed adapter (src/maestro/model.ts); tests inject a
+  // deterministic fake so no test ever makes a network call.
+  createMaestroModel?: (config: MaestroConfig) => MaestroModel;
+  // #865: current Maestro config, or undefined when the `maestro:` Service
+  // Config block is absent (Maestro not configured, not merely disabled).
+  getMaestroConfig?: () => MaestroConfig | undefined;
   // Host pressure-stall admission state (ADR 0088): the current verdict plus
   // the sample behind it, so an operator can tell a deferred dispatch from an
   // idle one without reading the journal.
@@ -930,6 +941,18 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.writeIssueLabels === undefined
         ? {}
         : { writeIssueLabels: options.writeIssueLabels })
+    });
+
+    registerMaestroPage({
+      app,
+      csrfSecret,
+      ...(options.createMaestroModel === undefined
+        ? {}
+        : { createMaestroModel: options.createMaestroModel }),
+      ...(options.getMaestroConfig === undefined
+        ? {}
+        : { getMaestroConfig: options.getMaestroConfig }),
+      runStore
     });
   }
 

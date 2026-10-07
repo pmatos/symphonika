@@ -60,6 +60,10 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
+import {
+  secretsForMaestroConfig,
+  type MaestroConfig
+} from "../maestro/config.js";
 import type { WatchdogConfig } from "../reload.js";
 import {
   secretsForEmailConfig,
@@ -314,6 +318,12 @@ export type RunControllerOptions = {
   emailConfigLoader: () => EmailNotificationConfig | undefined;
   env?: NodeJS.ProcessEnv;
   githubIssuesApi: GitHubIssuesApi;
+  // Optional (unlike emailConfigLoader above): Maestro (#865) predates no
+  // existing caller, so requiring this would mean updating every
+  // RunController construction site in the repo for a secret that, when
+  // omitted, simply isn't redacted (same as Maestro being unconfigured).
+  // Defaults to "no Maestro key configured" when omitted.
+  maestroConfigLoader?: () => MaestroConfig | undefined;
   // Returns the global concurrency cap (undefined = unbounded). Per-project
   // caps are read from the project config inside the picker. See ADR 0053.
   globalConcurrencyLoader?: () => Promise<{ maxInFlight: number | undefined }>;
@@ -673,6 +683,7 @@ export class RunController {
   private readonly hostPressureGate: HostPressureGate | undefined;
   private readonly lifecyclePolicy: LifecyclePolicy;
   private readonly logger?: Logger;
+  private readonly maestroConfigLoader: () => MaestroConfig | undefined;
   private readonly onWatchdogTerminated:
     WatchdogTerminationObserver | undefined;
   private readonly prepareIssueWorkspace: (
@@ -712,6 +723,7 @@ export class RunController {
     this.dispatchMutex = options.dispatchMutex ?? createAsyncMutex();
     this.emailConfigLoader = options.emailConfigLoader;
     this.env = options.env ?? process.env;
+    this.maestroConfigLoader = options.maestroConfigLoader ?? (() => undefined);
     this.fileOverlapGuard = new DispatchFileOverlapGuard({
       activeRuns: options.activeRuns,
       configDir: options.configDir,
@@ -5770,7 +5782,11 @@ export class RunController {
     // already collapses duplicates.
     return [
       repositoryToken,
-      ...secretsForEmailConfig(this.emailConfigLoader(), this.env)
+      ...secretsForEmailConfig(this.emailConfigLoader(), this.env),
+      // Maestro's API key (#865) is a daemon-env secret the same way the
+      // SMTP password is: full-permission providers inherit this process's
+      // env regardless of whether this Run's own provider uses it.
+      ...secretsForMaestroConfig(this.maestroConfigLoader(), this.env)
     ];
   }
 

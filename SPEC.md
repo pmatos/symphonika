@@ -439,6 +439,18 @@ providers:
   omp:
     command: "omp --mode rpc --auto-approve"
 
+# Optional. Enables the dashboard Maestro chat (§14) when present; absent
+# means Maestro is not configured, not merely disabled. Independent of
+# `providers.*` above: this selects the model Maestro's read-only
+# conversation runtime calls, never a Coding Agent. `api_key_env` defaults to
+# SYMPHONIKA_MAESTRO_API_KEY, deliberately not ANTHROPIC_API_KEY, so enabling
+# Maestro cannot change which credential a spawned `claude` Coding Agent
+# authenticates with (both inherit the daemon's environment).
+maestro:
+  model: "claude-sonnet-5"
+  # api_key_env: "SYMPHONIKA_MAESTRO_API_KEY"
+  # max_output_tokens: 4096
+
 projects:
   - name: symphonika
     mode: dispatch
@@ -2987,7 +2999,9 @@ The v1 mutating local HTTP API actions are explicit active-run cancellation, a m
 trigger that uses the normal daemon scheduler path, daemon-owned manual Routine firing, and a
 manual self-update trigger that uses the normal update-coordinator path (ADR 0087). The
 server-rendered dashboard exposes only cancellation and poll-now controls; manual Routine firing and
-the manual self-update trigger are CLI/API actions (ADR 0067).
+the manual self-update trigger are CLI/API actions (ADR 0067). `POST /maestro/messages` (`#865`) is
+the one exception limited to dashboard scope: it writes only `maestro_conversations`/
+`maestro_messages` rows — never a Run, an Issue label, or a GitHub mutation of any kind.
 
 Every mutating route — those above and every one a later slice adds — requires the request to
 either carry no browser fetch-metadata (`Origin`/`Sec-Fetch-Site` both absent, the CLI's own bare
@@ -3328,6 +3342,51 @@ Pull Request State and renders that fresh result in the outcome banner, never as
 failure implies a particular state. Every attempt that reaches GitHub (successful or refused) is
 recorded as a durable evidence row, independent of any Run — the `#259` orphan case that motivates
 this feature has no Run to key evidence off of.
+
+`GET /maestro` (`#865`, part of epic `#844`) is a dashboard-scope read-only chat with **Maestro**,
+linked from every page's primary navigation. When no `maestro:` Service Config block is present it
+renders the read-only boundary notice and an explanation that Maestro is not configured, with no chat
+form. When configured, it renders the single durable dashboard conversation
+(`RunStore.findDashboardMaestroConversation`/`listMaestroMessages`) and a plain HTML form (no
+client-side JS). `POST /maestro/messages` is CSRF-protected the same way `/api/routines/:id/fire` is
+(ADR 0075): a missing or stale CSRF token gets the same bare JSON 403 every other mutating route
+returns in that case, while a refusal past the CSRF check (Maestro not configured, or an empty
+message) form-posts back to `/maestro` with an `?error=` query param instead. It persists the
+operator's message, then Maestro's reply together with the
+citations the reply's tool calls actually produced, to `maestro_conversations`/`maestro_messages` —
+tables RunStore owns alongside, but never joined into, `runs`/`attempts`: a chat message is discussion
+evidence, not Run evidence, and is never counted by `/api/status`, `/runs`, or a notification digest.
+History survives a daemon restart because it is RunStore-backed, the same durability every other
+RunStore table has.
+
+Maestro's model-facing tool surface (`MAESTRO_TOOLS`, `src/maestro/tools.ts`) is a fixed, hand-written
+list of read-only lookups over already-persisted Project/Issue-snapshot/Run/PR-snapshot evidence —
+`list_projects` (each Project's poll validation state, last successful poll time, and last poll
+ok/error outcome — the same provenance `/projects/:name`'s capacity strip shows), `list_issues`,
+`get_issue`, `list_runs`, `get_run`, `list_pull_requests` in this slice. No tool in that list writes
+to GitHub, runs a shell command, or touches a local workspace, and `executeMaestroTool` refuses any
+tool name outside that list without executing anything; see ADR-2026-10-07-0813 for why this is a
+structural boundary rather than a prompt instruction. Every citation attached to a reply
+(Project/Issue/Run/PR, an internal href, and an observed/polled timestamp) is built server-side from
+the record a tool call actually returned, never from model-authored text, so a rendered link can
+never be attacker-controlled. Every list-shaped tool call and the persisted history resent to the
+model each turn are both capped, and citations are deduplicated by href, so one large Project or a
+long-lived conversation cannot flood a single request or reply (`MAX_EVIDENCE_ITEMS`/
+`MAX_HISTORY_MESSAGES`). The tool-calling loop (`runMaestroTurn`, `src/maestro/conversation.ts`) is
+capped at a small fixed number of rounds per chat message.
+
+This slice is dashboard scope only: Maestro understands every configured Project's evidence, but there
+is no Project-focused chat yet (`#866`), no grounding in repository content via a Maestro Workspace
+(`#867`), and no rolling 7/30-day evidence-linked briefings (`#868`) — all three are separate issues
+under epic `#844`'s own split of its original Maestro slice (`#852`). No tool in this slice calls
+GitHub live; every tool reads only persisted RunStore snapshots from the daemon's normal poll cadence.
+
+Maestro's model configuration lives under the optional `maestro:` Service Config block (§5.1),
+independent of `providers.codex/claude/omp`: selecting or changing Maestro's model never selects or
+spawns a Coding Agent, and vice versa. `model` is required (no default is guessed); `api_key_env`
+defaults to `SYMPHONIKA_MAESTRO_API_KEY` and `max_output_tokens` to `4096`. The configured provider
+receives whatever Issue/PR content a tool call returns — the boundary notice shown on `/maestro` when
+Maestro is configured states this plainly.
 
 ## 15. Bootstrap Acceptance Bar
 

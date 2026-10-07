@@ -607,6 +607,7 @@ export async function startDaemon(
     // serialize on the same primitive. See ADR 0052.
     dispatchMutex,
     emailConfigLoader: () => runtimeConfig.emailConfig(),
+    maestroConfigLoader: () => runtimeConfig.maestroConfig(),
     githubIssuesApi,
     globalConcurrencyLoader,
     hostPressureGate,
@@ -1179,6 +1180,7 @@ export async function startDaemon(
             githubIssuesApi,
             hostPressure: hostPressureGate.current(),
             logger,
+            maestroConfigLoader: () => runtimeConfig.maestroConfig(),
             notification: {
               createSink: (config) =>
                 options.notificationSink ??
@@ -1868,6 +1870,7 @@ export async function startDaemon(
         githubIssuesApi,
         hostPressure,
         logger,
+        maestroConfigLoader: () => runtimeConfig.maestroConfig(),
         notification: {
           createSink: (config) =>
             options.notificationSink ??
@@ -1951,6 +1954,7 @@ export async function startDaemon(
       };
     },
     getPullRequestFollowupPolicy: () => runtimeConfig.pullRequestPolicy(),
+    getMaestroConfig: () => runtimeConfig.maestroConfig(),
     getConfigPath: () => state.configPath,
     getProjectWorkflowPath: (projectName) => {
       const workflow = runtimeConfig

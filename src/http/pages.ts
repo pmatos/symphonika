@@ -4822,15 +4822,20 @@ function renderChainRowStatusPill(row: ChainStateRow): string {
     row.kind === "terminal"
       ? `Finished: ${row.terminalKind ?? "terminal"}`
       : label.text;
-  return `<span class="pill pill--${label.family}"><span class="pill-dot" aria-hidden="true"></span>${escapeHtml(text)}</span>`;
+  return labelPill(text, label.family);
 }
 
-function describeProviderSource(source: ProviderSource): string {
+function describeProviderSource(
+  source: ProviderSource,
+  graphAvailable: boolean
+): string {
   switch (source.kind) {
     case "no_provider":
       return "—";
     case "not_recorded":
-      return "not recorded (workflow graph unavailable for this Run)";
+      return graphAvailable
+        ? "not recorded (state not found in the captured workflow graph)"
+        : "not recorded (workflow graph unavailable for this Run)";
     case "project_default":
       return "project default";
     case "workflow_state":
@@ -4848,7 +4853,7 @@ function renderChainRow(view: IssueRunChainRowView): string {
   const providerCell =
     effectiveProvider === undefined
       ? "—"
-      : `${escapeHtml(effectiveProvider)} <span class="muted">— ${describeProviderSource(view.providerSource)}</span>`;
+      : `${escapeHtml(effectiveProvider)} <span class="muted">— ${describeProviderSource(view.providerSource, view.graphAvailable)}</span>`;
   const attemptsCell =
     view.attempts.length === 0
       ? "—"

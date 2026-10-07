@@ -386,6 +386,140 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
     }
   });
 
+  it("renders a Run escalated to blocked via recordWorkflowTerminal as blocked, not finished", async () => {
+    const test = await setup();
+    try {
+      // Mirrors terminateMergePrRefusal/terminateNoPullRequestTracked's
+      // shape: recordWorkflowTerminal nulls current_state_id like any other
+      // terminal write, but RunState becomes "blocked" (escalation), never a
+      // graph-declared terminal node -- so the borrowed wait/merge_pr state
+      // has no `terminal` field at all.
+      seedSnapshot(test.runStore, 94, "Merge PR refused, escalated");
+      const issue = sampleIssue({
+        number: 94,
+        title: "Merge PR refused, escalated"
+      });
+      const graphPath = await writeGraph(test.stateRoot, "escalated-root", {
+        contentHash: `sha256:${"d".repeat(64)}`,
+        initial: "merge_wait",
+        name: "merge_then_done",
+        source: { kind: "raw_fsm", path: "/repo/workflow.yml" },
+        states: [
+          {
+            action: { kind: "merge_pr" },
+            completeWhen: {},
+            id: "merge_wait",
+            transitions: [{ to: "done", when: { merged: true } }]
+          },
+          { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+        ]
+      });
+      test.runStore.createRun({
+        id: "escalated-root",
+        issue,
+        projectName: "alpha",
+        providerCommand: "claude",
+        providerName: "claude"
+      });
+      test.runStore.updateRunEvidence("escalated-root", {
+        branchName: "sym/alpha/94",
+        branchRef: "refs/heads/sym/alpha/94",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+      test.runStore.recordWorkflowTerminal("escalated-root", {
+        terminalStateId: "merge_wait",
+        transitionReason: "merge PR refused"
+      });
+      test.runStore.updateRunState("escalated-root", "blocked");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/94")).text();
+
+      expect(html).not.toContain("Finished");
+      expect(html).toContain("Blocked");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders a Run reusing an earlier success terminal, then escalated to blocked, as blocked", async () => {
+    const test = await setup();
+    try {
+      // Mirrors terminalizePullRequestDiscoveryExhausted's shape: the Run
+      // already recorded a genuine success terminal; only RunState and the
+      // claim labels change afterward. terminal_state_id/current_state_id
+      // are deliberately left untouched, so this Run's leaf row reaches the
+      // "currentStateId === null && terminalStateId !== null" branch with a
+      // real success terminal node -- the RunState fact "needs an operator"
+      // must still win over that reused "success" flavor.
+      seedSnapshot(test.runStore, 95, "Succeeded, but no PR ever appeared");
+      const issue = sampleIssue({
+        number: 95,
+        title: "Succeeded, but no PR ever appeared"
+      });
+      const graphPath = await writeGraph(test.stateRoot, "exhausted-root", {
+        contentHash: `sha256:${"e".repeat(64)}`,
+        initial: "implement",
+        name: "implement_then_terminal",
+        source: { kind: "raw_fsm", path: "/repo/workflow.yml" },
+        states: [
+          {
+            action: { kind: "agent", provider: "claude", prompt: "x.md" },
+            completeWhen: {},
+            id: "implement",
+            transitions: [{ to: "done", when: {} }]
+          },
+          { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+        ]
+      });
+      test.runStore.createRun({
+        id: "exhausted-root",
+        issue,
+        projectName: "alpha",
+        providerCommand: "claude",
+        providerName: "claude"
+      });
+      test.runStore.updateRunEvidence("exhausted-root", {
+        branchName: "sym/alpha/95",
+        branchRef: "refs/heads/sym/alpha/95",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+      test.runStore.recordWorkflowTerminal("exhausted-root", {
+        terminalStateId: "done",
+        transitionReason: "entered terminal state success"
+      });
+      test.runStore.updateRunState("exhausted-root", "blocked");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/95")).text();
+
+      expect(html).not.toContain("Finished: success");
+      expect(html).toContain("Blocked");
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("shows a retried Run's full attempt count on its one state row", async () => {
     const test = await setup();
     try {
@@ -536,6 +670,59 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
         html.indexOf("</tr>", rootRowStart)
       );
       expect(rootRowHtml).toContain("Completed");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("does not crash when a Run's captured workflow graph is missing states", async () => {
+    const test = await setup();
+    try {
+      // readJsonArtifact only catches JSON.parse syntax errors, not shape --
+      // a graph captured under an older/incompatible schema reaches the
+      // page handler as valid JSON missing `states`.
+      seedSnapshot(
+        test.runStore,
+        97,
+        "Captured graph predates a schema change"
+      );
+      const issue = sampleIssue({
+        number: 97,
+        title: "Captured graph predates a schema change"
+      });
+      const graphPath = await writeGraph(test.stateRoot, "malformed-root", {});
+      test.runStore.createRun({
+        id: "malformed-root",
+        issue,
+        projectName: "alpha",
+        providerCommand: "claude",
+        providerName: "claude"
+      });
+      test.runStore.updateRunEvidence("malformed-root", {
+        branchName: "sym/alpha/97",
+        branchRef: "refs/heads/sym/alpha/97",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+      test.runStore.recordWorkflowTerminal("malformed-root", {
+        terminalStateId: "done",
+        transitionReason: "entered terminal state success"
+      });
+      test.runStore.updateRunState("malformed-root", "succeeded");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const response = await app.request("/issues/alpha/97");
+
+      expect(response.status).toBe(200);
     } finally {
       test.cleanup();
     }
@@ -728,6 +915,97 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
         html.indexOf("</tr>", followupRowStart)
       );
       expect(followupRowHtml).toContain("not recorded");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("distinguishes a captured-but-unrecoverable state from no graph at all", async () => {
+    const test = await setup();
+    try {
+      // Same still-waiting-parent shape as above, but this time the
+      // follow-up Run has its own captured graph -- "not recorded" must not
+      // claim the graph itself is unavailable when it's the state id that's
+      // unrecoverable.
+      seedSnapshot(test.runStore, 98, "Markdown contract, graph captured");
+      const issue = sampleIssue({
+        number: 98,
+        title: "Markdown contract, graph captured"
+      });
+      test.runStore.createRun({
+        id: "graph-root",
+        issue,
+        projectName: "alpha",
+        providerCommand: "claude",
+        providerName: "claude"
+      });
+      test.runStore.updateRunState("graph-root", "succeeded");
+      test.runStore.createWaitingRun({
+        currentStateId: "review_wait",
+        id: "graph-wait",
+        issue,
+        parentRunId: "graph-root",
+        projectName: "alpha"
+      });
+      test.runStore.createContinuationRun({
+        id: "graph-followup",
+        issue,
+        parentRunId: "graph-wait",
+        projectName: "alpha",
+        providerCommand: "claude",
+        providerName: "claude"
+      });
+      const graphPath = await writeGraph(
+        test.stateRoot,
+        "graph-followup",
+        IMPLEMENT_THEN_WAIT_GRAPH
+      );
+      test.runStore.createAttempt({
+        attemptNumber: 1,
+        branchName: "sym/alpha/98",
+        branchRef: "refs/heads/sym/alpha/98",
+        id: "graph-followup-attempt-1",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        providerCommand: "claude",
+        providerName: "claude",
+        rawLogPath: "",
+        runId: "graph-followup",
+        state: "succeeded",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+      test.runStore.updateRunEvidence("graph-followup", {
+        branchName: "sym/alpha/98",
+        branchRef: "refs/heads/sym/alpha/98",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        rawLogPath: "",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+      test.runStore.updateRunState("graph-followup", "succeeded");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/98")).text();
+
+      const followupRowStart = html.indexOf('href="/runs/graph-followup"');
+      const followupRowHtml = html.slice(
+        html.lastIndexOf("<tr>", followupRowStart),
+        html.indexOf("</tr>", followupRowStart)
+      );
+      expect(followupRowHtml).toContain(
+        "state not found in the captured workflow graph"
+      );
+      expect(followupRowHtml).not.toContain("workflow graph unavailable");
     } finally {
       test.cleanup();
     }

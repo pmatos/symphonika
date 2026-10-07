@@ -14,6 +14,7 @@
 // executed is only recoverable from its *parent's* row (or, for a chain's
 // root, from that root's own captured graph's `initial`).
 
+import { findWorkflowState } from "../lifecycle/state-machine-dispatch.js";
 import type { AgentProviderName } from "../provider.js";
 import type { RunStatus } from "../run-store.js";
 import type {
@@ -196,6 +197,24 @@ export function deriveChainStateRows(
       };
     }
     if (run.currentStateId === null && run.terminalStateId !== null) {
+      // recordWorkflowTerminal nulls current_state_id the same way for a
+      // genuine FSM terminal and for an escalation
+      // (terminateMergePrRefusal / terminateNoPullRequestTracked /
+      // terminalizePullRequestDiscoveryExhausted all call it, then set
+      // RunState to "blocked"). The escalation cases either terminalStateId
+      // at a wait/merge_pr state with no `terminal` field at all, or reuse
+      // an earlier genuine success terminal untouched — either way the
+      // RunState fact "needs an operator" must win over whatever flavor the
+      // borrowed graph node reports.
+      if (run.state === "blocked") {
+        return {
+          kind: "blocked",
+          run,
+          stateId: run.terminalStateId,
+          terminalKind: undefined,
+          transitionReason: run.stateTransitionReason
+        };
+      }
       // A terminal reached from a parked wait/merge_pr Run has no graph of
       // its own (it dispatched no provider) — borrow the nearest ancestor's,
       // same as upcoming-transition and provider-source lookups do.
@@ -312,10 +331,19 @@ export function findWorkflowStateNode(
   graph: ExpandedWorkflow | undefined,
   stateId: string | undefined
 ): ExpandedWorkflowState | undefined {
-  if (graph === undefined || stateId === undefined) {
+  // A captured workflow-graph.json is read back with no runtime shape
+  // validation (run-store.ts's readJsonArtifact only catches JSON.parse
+  // syntax errors) — an old or incompatible graph can reach here with
+  // `states` missing or non-array, so this guards the same way
+  // renderWorkflowGraphSummary does before delegating to the shared lookup.
+  if (
+    graph === undefined ||
+    stateId === undefined ||
+    !Array.isArray(graph.states)
+  ) {
     return undefined;
   }
-  return graph.states.find((state) => state.id === stateId);
+  return findWorkflowState(graph, stateId);
 }
 
 export type ProviderSource =

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createAnthropicMaestroModel } from "../src/maestro/model.js";
 import { MAESTRO_TOOLS } from "../src/maestro/tools.js";
@@ -242,9 +242,16 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     }
   });
 
-  it("constructs without an explicit fetch override", () => {
-    expect(() =>
-      createAnthropicMaestroModel(
+  it("falls back to the real global fetch when no override is given", async () => {
+    let called = false;
+    vi.stubGlobal("fetch", () => {
+      called = true;
+      return Promise.resolve(
+        jsonResponse(anthropicMessage([{ text: "hi", type: "text" }]))
+      );
+    });
+    try {
+      const model = createAnthropicMaestroModel(
         {
           apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
           maxOutputTokens: 1024,
@@ -252,8 +259,19 @@ describe("Anthropic-backed Maestro model (#865)", () => {
           provider: "anthropic"
         },
         { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" } }
-      )
-    ).not.toThrow();
+      );
+
+      const turn = await model.nextTurn({
+        history: [{ content: "What's eligible?", role: "user" }],
+        systemPrompt: "You are Maestro.",
+        tools: MAESTRO_TOOLS
+      });
+
+      expect(called).toBe(true);
+      expect(turn).toEqual({ kind: "message", text: "hi" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("serializes assistant, assistant_tool_use, and tool_result history turns", async () => {

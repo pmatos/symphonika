@@ -2,23 +2,31 @@
 //
 // Groups every Issue a Dispatch Project currently knows about (from the
 // persisted poll snapshot, ADR 0073) together with current Run/PR evidence
-// into exactly one of four operator-facing buckets:
+// into exactly one of four operator-facing buckets: needsAttention, ready
+// (the orchestrator's actual dispatch queue, ordered by configured priority
+// then issue age via compareCandidateIssues, src/issue-priority.ts), ongoing
+// (an in-progress Issue must never be mistaken for untouched backlog), and
+// notReady (showing the persisted filter reasons verbatim).
 //
-//   - needsAttention: a Run stuck in blocked/failed/stale/input_required, or
-//     a filtered snapshot row carrying an Operational attention label.
-//   - ready: a candidate snapshot row with none of the above — the
-//     orchestrator's actual dispatch queue, ordered by configured priority
-//     then issue age (compareCandidateIssues, src/issue-priority.ts).
-//   - ongoing: an active/parked Run, or an open tracked pull request awaiting
-//     review — "in progress" must never be mistaken for untouched backlog.
-//   - notReady: a filtered snapshot row with no attention label, showing the
-//     persisted filter reasons verbatim.
+// Classification precedence (highest first) — Run/PR/schedule-first, then
+// snapshot `kind`, because a claimed issue's snapshot row is "filtered" with
+// a "claimed by run" reason (ADR 0073's own join precedent):
 //
-// Classification is Run/PR-first, then snapshot `kind` — a claimed issue's
-// snapshot row is "filtered" with a "claimed by run" reason (ADR 0073's own
-// join precedent), so checking the Run before the snapshot kind is what
-// keeps an in-progress Issue out of notReady.
-
+//   1. a scheduled retry/continuation/state_advance/wait_park callback for
+//      this issue — its backing Run row may already be terminal (the
+//      callback is the only remaining liveness signal; see pages.ts's
+//      resolveScheduledClaimantRunId)
+//   2. a `waiting` Run the Progress Guard has flagged for operator attention
+//      (sym:human-needed etc. without terminalizing the Run — CONTEXT.md)
+//   3. any other live Run state (queued/preparing_workspace/running/waiting)
+//   4. an open tracked pull request
+//   5. a `candidate` snapshot — an operator re-queue (clearing Operational
+//      Labels) must win over a stale terminal Run from a prior attempt
+//   6. a terminal attention Run state, or a filtered snapshot's own
+//      attention label
+//   7. any other filtered snapshot
+//   8. otherwise omitted — a terminal Run with no snapshot and no tracked PR
+//      has nothing left to say (ADR 0073's "drops off the table" rule)
 import {
   type ProjectIssueSnapshotRow,
   type ProjectSnapshotRepository,
@@ -31,6 +39,7 @@ import {
 import { compareCandidateIssues } from "../issue-priority.js";
 import { escapeHtml } from "../notifications/message.js";
 import { formatAge } from "../watchdog-status.js";
+import type { ScheduledCallback } from "./pages.js";
 
 const ATTENTION_LABELS: ReadonlySet<string> = new Set([
   "sym:human-needed",
@@ -134,6 +143,7 @@ export function buildWorkOverview(input: {
   nowMs: number;
   projectNames: readonly string[];
   runStore: RunStore;
+  scheduled: readonly ScheduledCallback[];
   startedAtMs: number | undefined;
 }): WorkOverviewData {
   const { nowMs, runStore, startedAtMs } = input;
@@ -145,6 +155,13 @@ export function buildWorkOverview(input: {
       tracked
     );
   }
+  const scheduledByIssue = new Map<string, ScheduledCallback>();
+  for (const callback of input.scheduled) {
+    scheduledByIssue.set(
+      trackedPullRequestKey(callback.projectName, callback.issueNumber),
+      callback
+    );
+  }
 
   const needsAttention: WorkOverviewEntry[] = [];
   const ready: WorkOverviewEntry[] = [];
@@ -153,22 +170,16 @@ export function buildWorkOverview(input: {
   const projects: WorkOverviewProjectProvenance[] = [];
 
   for (const projectName of input.projectNames) {
-    const snapshots = runStore.listProjectIssueSnapshots(projectName);
-    const runs = runStore.listRuns({ project: projectName });
-    // A Project with neither Runs nor a persisted issue snapshot has nothing
-    // actionable to show — this is how a Routine Host (never issue-polled,
-    // ADR 0062) and a Dispatch Project that has never completed a poll are
-    // both naturally absent from the issue-level groups below.
-    if (snapshots.length === 0 && runs.length === 0) {
-      continue;
-    }
-
     const projectState: ProjectState | undefined =
       projectStates.get(projectName);
     // lastPollOk stays null until a Project's first issue-poll attempt, the
     // same signal ADR 0073's capacity strip reads — this is what keeps a
     // Routine Host (which never attempts one) out of the provenance list
     // even when it happens to share this loop with a real Dispatch Project.
+    // Pushed unconditionally (not gated on having any issue data below) so
+    // a Project whose poll has been failing since its very first attempt —
+    // and so has zero snapshot rows — still surfaces its failure here
+    // instead of silently vanishing from the overview.
     if (projectState !== undefined && projectState.lastPollOk !== null) {
       projects.push({
         lastPollError: projectState.lastPollError,
@@ -180,6 +191,15 @@ export function buildWorkOverview(input: {
         ),
         projectName
       });
+    }
+
+    const snapshots = runStore.listProjectIssueSnapshots(projectName);
+    const runs = runStore.listRuns({ project: projectName });
+    // A Project with neither Runs nor a persisted issue snapshot has nothing
+    // actionable to show in the issue-level groups below — this is how a
+    // Routine Host (never issue-polled, ADR 0062) stays absent from them.
+    if (snapshots.length === 0 && runs.length === 0) {
+      continue;
     }
 
     const latestRunByIssue = new Map<number, RunStatus>();
@@ -204,6 +224,12 @@ export function buildWorkOverview(input: {
       const tracked = trackedByIssue.get(
         trackedPullRequestKey(projectName, issueNumber)
       );
+      const scheduled = scheduledByIssue.get(
+        trackedPullRequestKey(projectName, issueNumber)
+      );
+      const attentionLabel = snapshot?.labels.find((label) =>
+        ATTENTION_LABELS.has(label)
+      );
       const repository =
         runStore.getProjectIssueSnapshotRepository(projectName, issueNumber) ??
         undefined;
@@ -222,6 +248,33 @@ export function buildWorkOverview(input: {
         title: snapshot?.title ?? run?.issueTitle ?? `issue #${issueNumber}`
       };
 
+      // 1. A scheduled callback outlives its own backing Run row going
+      // terminal — it is the only remaining liveness signal (pages.ts's
+      // resolveScheduledClaimantRunId carries the identical rationale).
+      if (scheduled !== undefined) {
+        ongoing.push({
+          ...base,
+          group: "ongoing",
+          reasonText: `scheduled ${scheduled.kind.replace("_", " ")}`
+        });
+        continue;
+      }
+      // 2. A parked wait Run the Progress Guard flagged for attention
+      // without terminalizing it (CONTEXT.md's Progress Guard) must not
+      // read as merely "ongoing".
+      if (
+        run !== undefined &&
+        run.state === "waiting" &&
+        attentionLabel !== undefined
+      ) {
+        needsAttention.push({
+          ...base,
+          group: "needsAttention",
+          reasonText: attentionLabel
+        });
+        continue;
+      }
+      // 3. Any other live Run state.
       if (run !== undefined && ONGOING_RUN_STATES.has(run.state)) {
         ongoing.push({
           ...base,
@@ -230,14 +283,7 @@ export function buildWorkOverview(input: {
         });
         continue;
       }
-      if (run !== undefined && ATTENTION_RUN_STATES.has(run.state)) {
-        needsAttention.push({
-          ...base,
-          group: "needsAttention",
-          reasonText: describeAttentionRun(run)
-        });
-        continue;
-      }
+      // 4. An open tracked pull request awaiting review.
       if (tracked !== undefined) {
         ongoing.push({
           ...base,
@@ -246,32 +292,39 @@ export function buildWorkOverview(input: {
         });
         continue;
       }
-      if (snapshot === undefined) {
-        // A terminal Run (succeeded/cancelled) with no snapshot row and no
-        // tracked PR has nothing left to say — same "drops off the table"
-        // rule ADR 0073 already applies to /projects/:name's issue table.
-        continue;
-      }
-      if (snapshot.kind === "candidate") {
+      // 5. An operator re-queue (clearing Operational Labels, SPEC §4.4)
+      // wins over a stale terminal Run from a prior attempt — dispatch
+      // itself does not consult Run history to decide eligibility.
+      if (snapshot?.kind === "candidate") {
         ready.push({ ...base, group: "ready", reasonText: "eligible" });
         continue;
       }
-      const attentionLabel = snapshot.labels.find((label) =>
-        ATTENTION_LABELS.has(label)
-      );
-      if (attentionLabel !== undefined) {
+      // 6. A durable terminal attention outcome, or a filtered snapshot's
+      // own attention label.
+      if (
+        (run !== undefined && ATTENTION_RUN_STATES.has(run.state)) ||
+        attentionLabel !== undefined
+      ) {
         needsAttention.push({
           ...base,
           group: "needsAttention",
-          reasonText: attentionLabel
+          reasonText: attentionLabel ?? describeAttentionRun(run!)
         });
         continue;
       }
-      notReady.push({
-        ...base,
-        group: "notReady",
-        reasonText: snapshot.reasons.join("; ")
-      });
+      // 7. Any other filtered snapshot row.
+      if (snapshot !== undefined) {
+        notReady.push({
+          ...base,
+          group: "notReady",
+          reasonText: snapshot.reasons.join("; ")
+        });
+        continue;
+      }
+      // 8. A terminal Run (succeeded/cancelled) with no snapshot row, no
+      // tracked PR, and no schedule has nothing left to say — same
+      // "drops off the table" rule ADR 0073 applies to /projects/:name's
+      // issue table.
     }
   }
 
@@ -457,5 +510,5 @@ export function renderWorkOverviewSection(data: WorkOverviewData): string {
     const entries = data[heading.group];
     return `<section id="${heading.anchor}"><div class="section-head"><h2>${escapeHtml(heading.title)}</h2><span class="count">${entries.length}</span></div><p class="note">${escapeHtml(heading.description)}</p>${renderGroupTable(entries, nowMs)}</section>`;
   }).join("");
-  return `<section id="work-overview"><div class="section-head"><h2>Work overview</h2></div><p class="note">Assembled at ${escapeHtml(new Date(nowMs).toISOString())} — not live; reload to refresh. <nav aria-label="Work overview groups">${nav}</nav></p>${renderProvenanceList(data.projects, nowMs)}${groups}</section>`;
+  return `<section id="work-overview"><div class="section-head"><h2>Work overview</h2></div><p class="note">Assembled at ${escapeHtml(new Date(nowMs).toISOString())} — not live; reload to refresh.</p><nav aria-label="Work overview groups" class="note">${nav}</nav>${renderProvenanceList(data.projects, nowMs)}${groups}</section>`;
 }

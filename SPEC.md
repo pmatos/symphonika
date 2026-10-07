@@ -2823,24 +2823,30 @@ The UI is primarily read-only. It shows:
 Above everything else, the dashboard (`/`) renders a **Work overview** section
 (`buildWorkOverview`/`renderWorkOverviewSection`, `src/http/work-overview.ts`): every Issue a
 Dispatch Project's persisted poll snapshot (ADR 0073) or Run history currently knows about, grouped
-into exactly one of four operator-facing buckets — **Needs attention** (a Run stuck in
-`blocked`/`failed`/`stale`/`input_required`, or a filtered snapshot row carrying `sym:human-needed`,
-`sym:blocked`, `sym:failed`, or `sym:stale`), **Ready** (a candidate snapshot row with none of the
-above, ordered by configured priority then issue age via the same `compareCandidateIssues`,
-`src/issue-priority.ts`, the dispatch path itself uses), **Ongoing / in review** (an active or
-parked Run — `queued`/`preparing_workspace`/`running`/`waiting` — or an open tracked pull request
-awaiting review), and **Not ready** (every other filtered snapshot row, showing its persisted
-reasons verbatim). Classification checks a Run or tracked pull request before the snapshot's own
-`kind`, so an issue a Run has already claimed — persisted as a *filtered* row naming the claim label
-as its reason, same as any other filtered reason — renders under Ongoing rather than Not ready; a
-terminal Run (`succeeded`/`cancelled`) with no snapshot row and no tracked pull request has nothing
-left to say and is omitted, mirroring the "drops off the table" rule ADR 0073 already applies to
-`/projects/:name`'s own issue-keyed table. Each entry links its Project (`/projects/:name`), its
-Issue detail page (`/issues/:project/:number`, only when a snapshot row exists for it — a Run-only
-row has none), its newest Run (`/runs/:id`), and any tracked pull request (`/prs/:project/:number`).
-A separate poll-provenance table lists, for every Project that has attempted at least one issue
-poll, its last successful poll age, a `(pre-restart)` marker when that poll predates the current
-process (mirroring the capacity strip's own check), and a failing-poll pill with the raw error text
+into exactly one of four operator-facing buckets by this precedence (highest first): a scheduled
+retry/continuation/state-advance/wait-park callback for the Issue (its backing Run row may already
+be terminal — the callback is the only remaining liveness signal, the same evidence
+`resolveScheduledClaimantRunId` reads); a `waiting` Run the Progress Guard has flagged for operator
+attention without terminalizing it (CONTEXT.md); any other live Run state
+(`queued`/`preparing_workspace`/`running`/`waiting`); an open tracked pull request; a `candidate`
+snapshot row (an operator re-queue — clearing Operational Labels per §4.4 — wins over a stale
+terminal Run left over from a prior attempt, since dispatch itself does not consult Run history to
+decide eligibility); a terminal `blocked`/`failed`/`stale`/`input_required` Run state or a filtered
+snapshot row carrying `sym:human-needed`/`sym:blocked`/`sym:failed`/`sym:stale`; any other filtered
+snapshot row; otherwise the Issue is omitted (a terminal `succeeded`/`cancelled` Run with no
+snapshot row, no tracked pull request, and no schedule has nothing left to say, mirroring the
+"drops off the table" rule ADR 0073 already applies to `/projects/:name`'s own issue-keyed table).
+The four buckets this sorts into are **Needs attention**, **Ready** (ordered by configured priority
+then issue age via the same `compareCandidateIssues`, `src/issue-priority.ts`, the dispatch path
+itself uses), **Ongoing / in review**, and **Not ready** (showing its persisted reasons verbatim).
+Each entry links its Project (`/projects/:name`), its Issue detail page
+(`/issues/:project/:number`, only when a snapshot row exists for it — a Run-only row has none), its
+newest Run (`/runs/:id`), and any tracked pull request (`/prs/:project/:number`). A separate
+poll-provenance table lists, for every Project that has attempted at least one issue poll — pushed
+independently of whether that Project currently has any issue-level rows to show, so a Project whose
+every poll has failed still surfaces its failure — its last successful poll age, a `(pre-restart)`
+marker when that poll predates the current process (mirroring the capacity strip's own check), and a
+failing-poll pill with the raw error text
 — the same durable `project_states` fields the capacity strip reads, never a live-looking
 projection. This section is not wired into the dashboard's SSE live-fragment refresh (ADR 0074); an
 explicit "Assembled at `<timestamp>` — not live; reload to refresh" note is what keeps a stale page

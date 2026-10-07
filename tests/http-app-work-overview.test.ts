@@ -365,4 +365,220 @@ describe("GET / work overview (#856)", () => {
       test.cleanup();
     }
   });
+
+  it("surfaces a failing poll with zero issues of its own in provenance (AC3)", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      // A Project whose very first poll attempt failed: zero candidate or
+      // filtered rows were ever persisted, and zero Runs exist. It must
+      // still surface its failure rather than silently vanish.
+      test.runStore.recordProjectPollOutcome({
+        candidateIssues: 0,
+        error: "token revoked before the first poll",
+        fetchedIssues: 0,
+        filteredIssues: 0,
+        ok: false,
+        projectName: "alpha"
+      });
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/")).text();
+      const overviewSection = extractSection(html, "work-overview");
+
+      expect(overviewSection).toContain("failing");
+      expect(overviewSection).toContain("token revoked before the first poll");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("puts a scheduled retry callback in ongoing, not needs-attention, even though its Run is failed (AC1)", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-01T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 60,
+            kind: "filtered",
+            labels: ["sym:claimed"],
+            priority: 1,
+            reasons: ["has operational label sym:claimed"],
+            title: "Claimed during retry backoff"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-scheduled-retry",
+        issue: sampleIssue({
+          number: 60,
+          title: "Claimed during retry backoff"
+        }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      // resolveScheduledClaimantRunId's own rationale: a retry timer has
+      // already unregistered its slot and moved the Run row to a terminal
+      // state -- the scheduled callback is the only remaining ownership
+      // signal, same as /issues already relies on.
+      test.runStore.updateRunState("run-scheduled-retry", "failed");
+
+      const app = createHttpApp({
+        getScheduled: () => [
+          {
+            dueAt: Date.now() + 10_000,
+            issueNumber: 60,
+            kind: "retry",
+            projectName: "alpha",
+            runId: "run-scheduled-retry"
+          }
+        ],
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/")).text();
+
+      const ongoingSection = extractSection(html, "work-overview-ongoing");
+      expect(ongoingSection).toContain("Claimed during retry backoff");
+
+      const attentionSection = extractSection(
+        html,
+        "work-overview-needs-attention"
+      );
+      expect(attentionSection).not.toContain("Claimed during retry backoff");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("puts a re-queued candidate issue in ready even though its newest Run is failed (AC2)", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      // An operator cleared the Operational Labels after a failed attempt:
+      // the next poll re-persists this issue as a fresh candidate, but its
+      // newest Run row from the earlier attempt is still "failed". Dispatch
+      // itself does not consult Run history to decide eligibility, and
+      // neither should this overview.
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-05T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueCreatedAt: "2026-09-01T00:00:00.000Z",
+            issueNumber: 70,
+            kind: "candidate",
+            labels: [],
+            priority: 1,
+            reasons: [],
+            title: "Re-queued after a failed attempt"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-stale-failure",
+        issue: sampleIssue({
+          number: 70,
+          title: "Re-queued after a failed attempt"
+        }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-stale-failure", "failed");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/")).text();
+
+      const readySection = extractSection(html, "work-overview-ready");
+      expect(readySection).toContain("Re-queued after a failed attempt");
+
+      const attentionSection = extractSection(
+        html,
+        "work-overview-needs-attention"
+      );
+      expect(attentionSection).not.toContain(
+        "Re-queued after a failed attempt"
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("puts a Progress-Guard-flagged waiting Run in needs-attention, not ongoing", async () => {
+    const test = await setup();
+    try {
+      test.runStore.syncProjectStates([
+        { name: "alpha", validationState: "valid", weight: 1 }
+      ]);
+      // The Progress Guard applies sym:human-needed without terminalizing
+      // the Run (CONTEXT.md) -- the Run itself stays parked at "waiting".
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-01T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 80,
+            kind: "filtered",
+            labels: ["sym:human-needed", "sym:claimed"],
+            priority: 1,
+            reasons: ["has operational label sym:human-needed"],
+            title: "Progress guard parked this"
+          }
+        ]
+      });
+      test.runStore.createRun({
+        id: "run-guarded",
+        issue: sampleIssue({ number: 80, title: "Progress guard parked this" }),
+        projectName: "alpha",
+        providerCommand: "x",
+        providerName: "codex"
+      });
+      test.runStore.updateRunState("run-guarded", "waiting");
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/")).text();
+
+      const attentionSection = extractSection(
+        html,
+        "work-overview-needs-attention"
+      );
+      expect(attentionSection).toContain("Progress guard parked this");
+      expect(attentionSection).toContain("sym:human-needed");
+
+      const ongoingSection = extractSection(html, "work-overview-ongoing");
+      expect(ongoingSection).not.toContain("Progress guard parked this");
+    } finally {
+      test.cleanup();
+    }
+  });
 });

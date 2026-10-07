@@ -613,6 +613,7 @@ export function registerPages(options: RegisterPagesOptions): void {
             nowMs,
             projectNames: options.runStore.listActiveProjectNames(),
             runStore: options.runStore,
+            scheduled: options.getScheduled?.() ?? [],
             startedAtMs: options.startedAtMs
           })
         ),

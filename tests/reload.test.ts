@@ -267,6 +267,108 @@ describe("RuntimeConfigReloader workflow validation", () => {
     });
   });
 
+  it("has no Maestro config when the maestro: block is omitted", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {});
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus().errors).toEqual([]);
+    expect(reloader.maestroConfig()).toBeUndefined();
+  });
+
+  it("loads service-level Maestro model configuration with defaults", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["maestro:", '  model: "claude-sonnet-5"']
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus().errors).toEqual([]);
+    expect(reloader.maestroConfig()).toEqual({
+      apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
+      maxOutputTokens: 4096,
+      model: "claude-sonnet-5",
+      provider: "anthropic"
+    });
+  });
+
+  it("loads an explicit Maestro api_key_env and max_output_tokens override", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "maestro:",
+        '  model: "claude-opus-5"',
+        '  api_key_env: "MAESTRO_ANTHROPIC_KEY"',
+        "  max_output_tokens: 2048"
+      ]
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus().errors).toEqual([]);
+    expect(reloader.maestroConfig()).toEqual({
+      apiKeyEnv: "MAESTRO_ANTHROPIC_KEY",
+      maxOutputTokens: 2048,
+      model: "claude-opus-5",
+      provider: "anthropic"
+    });
+  });
+
+  it("rejects a maestro block missing model", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: ["maestro:", '  api_key_env: "ANTHROPIC_API_KEY"']
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      errors: [expect.stringContaining("maestro.model")],
+      ok: false
+    });
+    expect(reloader.getSnapshot()).toBeUndefined();
+  });
+
+  it("rejects a maestro api_key_env that isn't a bare environment variable name", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "maestro:",
+        '  model: "claude-sonnet-5"',
+        '  api_key_env: "$ANTHROPIC_API_KEY"'
+      ]
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      errors: [expect.stringContaining("maestro.api_key_env")],
+      ok: false
+    });
+  });
+
   it("loads an OMP Project while keeping the provider command optional globally", async () => {
     const root = await makeTempRoot();
     await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");

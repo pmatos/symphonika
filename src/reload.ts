@@ -24,6 +24,7 @@ import {
   emailNotificationConfigSchema,
   type EmailNotificationConfig
 } from "./notifications/config.js";
+import { maestroConfigSchema, type MaestroConfig } from "./maestro/config.js";
 import type {
   RunControllerProjectConfig,
   RunControllerProvidersConfig,
@@ -67,6 +68,10 @@ export type RuntimeConfigSnapshot = {
   // Global concurrency cap snapshot. `maxInFlight: undefined` means
   // unbounded. See ADR 0053.
   globalConcurrency: { maxInFlight: number | undefined };
+  // Read-only Maestro conversation runtime config (SPEC.md §14, dashboard
+  // chat). Independent of `providers.*`'s Coding Agent selection.
+  // `undefined` means Maestro is not configured, not merely disabled.
+  maestro: MaestroConfig | undefined;
   // Host pressure-stall admission policy (ADR 0088). Sits beside the count
   // cap because both answer "may another run start now?" — one from the
   // daemon's own bookkeeping, the other from the kernel's.
@@ -422,6 +427,7 @@ const serviceRoutineSchema = z
 const serviceConfigSchema = z
   .object({
     email: emailNotificationConfigSchema.optional(),
+    maestro: maestroConfigSchema.optional(),
     // Mirrors src/state.ts's own resolveStateRoot schema so a malformed
     // `state:` block is rejected here, at save/reload time, instead of only
     // surfacing at startup via resolveStateRoot's throw.
@@ -544,6 +550,10 @@ export class RuntimeConfigReloader {
 
   emailConfig(): EmailNotificationConfig | undefined {
     return this.snapshot?.email;
+  }
+
+  maestroConfig(): MaestroConfig | undefined {
+    return this.snapshot?.maestro;
   }
 
   watchdogServiceConfig(): WatchdogServiceConfig | undefined {
@@ -987,6 +997,7 @@ async function loadRuntimeConfigSnapshot(input: {
     snapshot: {
       configPath: input.configPath,
       email: parsed.data.email,
+      maestro: parsed.data.maestro,
       globalConcurrency: {
         maxInFlight: parsed.data.global?.max_in_flight
       },

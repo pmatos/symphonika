@@ -2696,18 +2696,51 @@ export class RunStore {
     return snapshotRepository(row);
   }
 
-  listProjectIssueSnapshots(projectName: string): ProjectIssueSnapshotRow[] {
+  // `limit` bounds the query itself (desc, then reversed back to
+  // issue_number-ascending order) rather than letting the caller fetch
+  // every row and slice in JS -- Maestro's listIssues tool (#865) needs
+  // only the newest MAX_EVIDENCE_ITEMS, and an unbounded SELECT would scan
+  // and JSON-decode every snapshot in the project just to discard most of
+  // them. Omit `limit` for the full snapshot (every other caller).
+  listProjectIssueSnapshots(
+    projectName: string,
+    limit?: number
+  ): ProjectIssueSnapshotRow[] {
+    const params = limit === undefined ? [projectName] : [projectName, limit];
     const rows = this.database
       .prepare(
         [
           "select issue_number, kind, title, priority, reasons, labels,",
           "blocked_by, blocked_by_truncated, parent_issue_number, polled_at",
           "from project_issue_snapshots where project_name = ?",
-          "order by issue_number asc"
+          `order by issue_number ${limit === undefined ? "asc" : "desc"}`,
+          limit === undefined ? "" : "limit ?"
         ].join(" ")
       )
-      .all(projectName) as ProjectIssueSnapshotDbRow[];
-    return rows.map((row) => mapProjectIssueSnapshotRow(row));
+      .all(...params) as ProjectIssueSnapshotDbRow[];
+    const ordered = limit === undefined ? rows : rows.reverse();
+    return ordered.map((row) => mapProjectIssueSnapshotRow(row));
+  }
+
+  // Single-row sibling of listProjectIssueSnapshots -- Maestro's getIssue
+  // tool (src/maestro/reader.ts) needs a point lookup by number, and the
+  // table's own primary key (project_name, issue_number) makes that an
+  // indexed lookup instead of a full per-project scan. Mirrors
+  // getProjectPullRequestSnapshot's shape for the PR side.
+  getProjectIssueSnapshot(
+    projectName: string,
+    issueNumber: number
+  ): ProjectIssueSnapshotRow | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select issue_number, kind, title, priority, reasons, labels,",
+          "blocked_by, blocked_by_truncated, parent_issue_number, polled_at",
+          "from project_issue_snapshots where project_name = ? and issue_number = ?"
+        ].join(" ")
+      )
+      .get(projectName, issueNumber) as ProjectIssueSnapshotDbRow | undefined;
+    return row === undefined ? undefined : mapProjectIssueSnapshotRow(row);
   }
 
   replaceProjectPullRequestSnapshots(
@@ -2819,9 +2852,14 @@ export class RunStore {
         };
   }
 
+  // `limit` bounds the query itself the same way listProjectIssueSnapshots
+  // does, for the same Maestro-evidence-cap reason (#865). Omit `limit` for
+  // the full snapshot (every other caller).
   listProjectPullRequestSnapshots(
-    projectName: string
+    projectName: string,
+    limit?: number
   ): ProjectPullRequestSnapshotRow[] {
+    const params = limit === undefined ? [projectName] : [projectName, limit];
     const rows = this.database
       .prepare(
         [
@@ -2829,11 +2867,13 @@ export class RunStore {
           "head_sha, labels, branch_origin, state_available, mergeable, checks,",
           "review_decision, tracking_state, unresolved_review_threads, polled_at",
           "from project_pull_request_snapshots where project_name = ?",
-          "order by pr_number asc"
+          `order by pr_number ${limit === undefined ? "asc" : "desc"}`,
+          limit === undefined ? "" : "limit ?"
         ].join(" ")
       )
-      .all(projectName) as ProjectPullRequestSnapshotDbRow[];
-    return rows.map((row) => mapProjectPullRequestSnapshotRow(row));
+      .all(...params) as ProjectPullRequestSnapshotDbRow[];
+    const ordered = limit === undefined ? rows : rows.reverse();
+    return ordered.map((row) => mapProjectPullRequestSnapshotRow(row));
   }
 
   recordPullRequestMergeAttempt(
@@ -8016,24 +8056,18 @@ export class RunStore {
     conversationId: string,
     limit?: number
   ): MaestroMessageRow[] {
-    const query =
-      limit === undefined
-        ? [
-            "select id, role, content, citations_json, created_at",
-            "from maestro_messages where conversation_id = ?",
-            "order by sequence asc"
-          ]
-        : [
-            "select id, role, content, citations_json, created_at",
-            "from maestro_messages where conversation_id = ?",
-            "order by sequence desc",
-            "limit ?"
-          ];
-    const rows = (
-      limit === undefined
-        ? this.database.prepare(query.join(" ")).all(conversationId)
-        : this.database.prepare(query.join(" ")).all(conversationId, limit)
-    ) as Array<{
+    const params =
+      limit === undefined ? [conversationId] : [conversationId, limit];
+    const rows = this.database
+      .prepare(
+        [
+          "select id, role, content, citations_json, created_at",
+          "from maestro_messages where conversation_id = ?",
+          `order by sequence ${limit === undefined ? "asc" : "desc"}`,
+          limit === undefined ? "" : "limit ?"
+        ].join(" ")
+      )
+      .all(...params) as Array<{
       citations_json: string | null;
       content: string;
       created_at: string;

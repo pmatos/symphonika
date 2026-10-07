@@ -7495,6 +7495,126 @@ describe("RoutineFiringDispatcher", () => {
     }
   });
 
+  it("redacts the Maestro API key from persisted provider evidence and a delivered notification", async () => {
+    // Mirrors the SMTP-password test above: run-controller.ts's
+    // redactionInventory already scrubs this key from Run evidence, but
+    // dispatcher.ts's resolveRedactSecrets composed only the email secret —
+    // this proves the maestroConfigLoader wiring closes that gap for
+    // Routine evidence too.
+    const root = await makeTempRoot();
+    const stateRoot = path.join(root, ".symphonika");
+    const workspacePath = path.join(root, "workspace");
+    const secret = "maestro-api-key-that-must-never-leak";
+    const runStore = openRunStore({ stateRoot });
+    const delivered: NotificationMessage[] = [];
+    const provider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        yield {
+          normalized: { message: "starting", type: "message" },
+          raw: { delta: "starting" }
+        };
+        throw new Error(`provider crashed while holding ${secret}`);
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    } satisfies AgentProvider;
+
+    try {
+      await dispatchDueRoutinesAndDrain({
+        activeRuns: new ActiveRunRegistry(),
+        agentProviders: { codex: provider },
+        configDir: root,
+        createFiringId: () => "fire-redact-maestro-key",
+        env: {
+          MAESTRO_TEST_KEY: secret
+        },
+        globalConcurrency: { maxInFlight: undefined },
+        maestroConfigLoader: () => ({
+          apiKeyEnv: "MAESTRO_TEST_KEY",
+          maxOutputTokens: 4096,
+          model: "claude-test",
+          provider: "anthropic"
+        }),
+        notification: {
+          createSink: () => ({
+            deliver(message: NotificationMessage) {
+              delivered.push(message);
+              return Promise.resolve();
+            }
+          }),
+          resolveConfig: () => ({
+            from: "symphonika@example.com",
+            on: "always",
+            smtpHost: "smtp.example.com",
+            smtpPasswordEnv: "SMTP_TEST_PASSWORD_UNSET",
+            smtpPort: 587,
+            smtpSecurity: "starttls",
+            smtpUsername: "server-token",
+            sources: {
+              daemonHealth: true,
+              issueRuns: true,
+              routineFanouts: false,
+              routineFirings: true
+            },
+            to: "operator@example.com"
+          })
+        },
+        now: new Date("2026-05-22T10:00:01.000Z"),
+        prepareRoutineWorkspace: () =>
+          Promise.resolve({
+            branchName: "main",
+            branchRef: "refs/remotes/origin/main",
+            cachePath: path.join(root, ".cache", "repo.git"),
+            reused: false,
+            workspacePath
+          }),
+        projects: new Map([
+          [
+            "alpha",
+            {
+              ...runStoreProjectFixture(),
+              routines: [
+                {
+                  kind: "report",
+                  name: "daily-report",
+                  prompt: "Report.",
+                  provider: null,
+                  schedule: { at: "2026-05-22T10:00:00.000Z" },
+                  sourcePath: path.join(root, "daily-report.md"),
+                  projectName: "alpha"
+                }
+              ]
+            }
+          ]
+        ]),
+        providersConfig: {
+          claude: { command: "claude fake" },
+          codex: { command: "codex fake" }
+        },
+        runStore,
+        stateRoot
+      });
+
+      const firing = runStore.getRoutineFiring("fire-redact-maestro-key");
+      expect(firing?.state).toBe("failed");
+      expect(firing?.terminalReason).toBe(
+        "provider crashed while holding [REDACTED]"
+      );
+      expect(firing?.terminalReason).not.toContain(secret);
+
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]?.text).not.toContain(secret);
+      expect(delivered[0]?.html).not.toContain(secret);
+
+      const database = await readFile(path.join(stateRoot, "symphonika.db"));
+      expect(database.includes(Buffer.from(secret))).toBe(false);
+    } finally {
+      runStore.close();
+    }
+  });
+
   it("redacts the SMTP password from a provider's structured outcome claim before persistence and notification", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

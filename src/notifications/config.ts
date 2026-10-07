@@ -32,7 +32,11 @@ const DEFAULT_SMTP_PORT: Record<SmtpSecurity, number> = {
 };
 
 const LOOPBACK_SMTP_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
-const ENVIRONMENT_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Shared with maestro/config.ts's api_key_env: both name an env var the
+// daemon reads a secret from, so both validate it the same way.
+export const ENVIRONMENT_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const ENVIRONMENT_VARIABLE_NAME_MESSAGE =
+  "must name an environment variable without a leading $";
 
 export const emailNotificationConfigSchema = z
   .object({
@@ -52,10 +56,7 @@ export const emailNotificationConfigSchema = z
     smtp_password_env: z
       .string()
       .trim()
-      .regex(
-        ENVIRONMENT_VARIABLE_NAME,
-        "must name an environment variable without a leading $"
-      )
+      .regex(ENVIRONMENT_VARIABLE_NAME, ENVIRONMENT_VARIABLE_NAME_MESSAGE)
       .default(DEFAULT_SMTP_PASSWORD_ENV),
     smtp_port: z.number().int().min(1).max(65_535).optional(),
     smtp_security: z.enum(["starttls", "ssl", "none"]).default("starttls"),

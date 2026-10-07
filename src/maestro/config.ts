@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  ENVIRONMENT_VARIABLE_NAME,
+  ENVIRONMENT_VARIABLE_NAME_MESSAGE
+} from "../notifications/config.js";
+
 // Maestro's model/provider configuration is deliberately independent of
 // `providers.codex/claude/omp` (src/reload.ts) — those select and spawn a
 // full-permission Coding Agent subprocess; this selects the model a
@@ -20,7 +25,6 @@ export type MaestroConfig = {
 // SYMPHONIKA_SMTP_PASSWORD, not SMTP_PASSWORD.
 const DEFAULT_API_KEY_ENV = "SYMPHONIKA_MAESTRO_API_KEY";
 const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
-const ENVIRONMENT_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export const maestroConfigSchema = z
   .object({
@@ -31,10 +35,7 @@ export const maestroConfigSchema = z
     api_key_env: z
       .string()
       .trim()
-      .regex(
-        ENVIRONMENT_VARIABLE_NAME,
-        "must name an environment variable without a leading $"
-      )
+      .regex(ENVIRONMENT_VARIABLE_NAME, ENVIRONMENT_VARIABLE_NAME_MESSAGE)
       .default(DEFAULT_API_KEY_ENV),
     max_output_tokens: z
       .number()

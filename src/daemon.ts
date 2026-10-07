@@ -1180,6 +1180,7 @@ export async function startDaemon(
             githubIssuesApi,
             hostPressure: hostPressureGate.current(),
             logger,
+            maestroConfigLoader: () => runtimeConfig.maestroConfig(),
             notification: {
               createSink: (config) =>
                 options.notificationSink ??
@@ -1869,6 +1870,7 @@ export async function startDaemon(
         githubIssuesApi,
         hostPressure,
         logger,
+        maestroConfigLoader: () => runtimeConfig.maestroConfig(),
         notification: {
           createSink: (config) =>
             options.notificationSink ??

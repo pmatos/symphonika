@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { Hono } from "hono";
 
+import { createAsyncMutex } from "../lifecycle/async-mutex.js";
 import {
   MAESTRO_READ_ONLY_BOUNDARY_NOTICE,
   type MaestroConfig
@@ -21,7 +22,7 @@ import {
   ensureSession,
   type CsrfSecret
 } from "./csrf.js";
-import { escapeHtml, layout } from "./pages.js";
+import { escapeHtml, layout, renderTimestamp } from "./pages.js";
 
 export type RegisterMaestroPageOptions = {
   app: Hono;
@@ -42,7 +43,7 @@ function renderMessage(message: MaestroMessageRow): string {
             // tool actually returned (src/maestro/tools.ts) — never from
             // model-authored text — so it is safe to render as a link.
             (citation) =>
-              `<li><a href="${escapeHtml(citation.href)}">${escapeHtml(citation.label)}</a> (observed ${escapeHtml(citation.observedAt)})</li>`
+              `<li><a href="${escapeHtml(citation.href)}">${escapeHtml(citation.label)}</a> (observed ${renderTimestamp(citation.observedAt)})</li>`
           )
           .join("")}</ul>`;
   return (
@@ -106,7 +107,7 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
   // resolves, interleaving the persisted history out of strict
   // user/assistant order — the next turn would then resend consecutive
   // same-role messages to the Messages API.
-  let turnInFlight = false;
+  const turnMutex = createAsyncMutex();
 
   options.app.get("/maestro", (context) => {
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
@@ -156,7 +157,7 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
       );
     }
 
-    if (turnInFlight) {
+    if (!turnMutex.tryAcquire()) {
       return context.redirect(
         `/maestro${errorQuery(
           "Maestro is still answering the previous message. Try again in a moment."
@@ -164,7 +165,6 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
         303
       );
     }
-    turnInFlight = true;
 
     try {
       const conversationId =
@@ -220,7 +220,7 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
 
       return context.redirect("/maestro", 303);
     } finally {
-      turnInFlight = false;
+      turnMutex.release();
     }
   });
 }

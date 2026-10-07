@@ -93,6 +93,29 @@ function runHref(runId: string): string {
   return `/runs/${encodeURIComponent(runId)}`;
 }
 
+function toRunEvidence(run: {
+  branchName: string;
+  id: string;
+  issueNumber: number;
+  issueTitle: string;
+  project: string;
+  state: string;
+  terminalReason: string | null;
+  updatedAt: string;
+}): MaestroRunEvidence {
+  return {
+    branchName: run.branchName,
+    href: runHref(run.id),
+    id: run.id,
+    issueNumber: run.issueNumber,
+    issueTitle: run.issueTitle,
+    observedAt: run.updatedAt,
+    projectName: run.project,
+    state: run.state,
+    terminalReason: run.terminalReason
+  };
+}
+
 function toIssueEvidence(
   projectName: string,
   row: {
@@ -119,14 +142,9 @@ function toIssueEvidence(
 export function createMaestroEvidenceReader(
   runStore: RunStore
 ): MaestroEvidenceReader {
-  // listProjectIssueSnapshots returns every snapshot ordered by issue_number
-  // ascending with no limit; slicing from the end (rather than the start)
-  // keeps the newest/highest-numbered issues under the cap instead of
-  // silently keeping only the oldest ones.
   const listIssues = (projectName: string): MaestroIssueEvidence[] =>
     runStore
-      .listProjectIssueSnapshots(projectName)
-      .slice(-MAX_EVIDENCE_ITEMS)
+      .listProjectIssueSnapshots(projectName, MAX_EVIDENCE_ITEMS)
       .map((row) => toIssueEvidence(projectName, row));
 
   const listRuns = (projectName?: string): MaestroRunEvidence[] =>
@@ -135,44 +153,20 @@ export function createMaestroEvidenceReader(
         limit: MAX_EVIDENCE_ITEMS,
         ...(projectName === undefined ? {} : { project: projectName })
       })
-      .map((run) => ({
-        branchName: run.branchName,
-        href: runHref(run.id),
-        id: run.id,
-        issueNumber: run.issueNumber,
-        issueTitle: run.issueTitle,
-        observedAt: run.updatedAt,
-        projectName: run.project,
-        state: run.state,
-        terminalReason: run.terminalReason
-      }));
+      .map(toRunEvidence);
 
   return {
-    // Deliberately not listIssues(projectName).find(...): listIssues is
-    // capped to the newest MAX_EVIDENCE_ITEMS, so a lookup by number must
-    // search the full, unsliced snapshot list or it would wrongly report
-    // "not found" for a real issue the cap excluded from a list call.
+    // Indexed point lookup (the table's primary key is (project_name,
+    // issue_number)) rather than scanning listIssues' capped output or the
+    // full unsliced snapshot list -- a lookup by number must not report
+    // "not found" for a real issue a MAX_EVIDENCE_ITEMS cap excluded.
     getIssue: (projectName, issueNumber) => {
-      const row = runStore
-        .listProjectIssueSnapshots(projectName)
-        .find((candidate) => candidate.issueNumber === issueNumber);
+      const row = runStore.getProjectIssueSnapshot(projectName, issueNumber);
       return row === undefined ? undefined : toIssueEvidence(projectName, row);
     },
     getRun: (runId) => {
       const run = runStore.getRun(runId);
-      return run === undefined
-        ? undefined
-        : {
-            branchName: run.branchName,
-            href: runHref(run.id),
-            id: run.id,
-            issueNumber: run.issueNumber,
-            issueTitle: run.issueTitle,
-            observedAt: run.updatedAt,
-            projectName: run.project,
-            state: run.state,
-            terminalReason: run.terminalReason
-          };
+      return run === undefined ? undefined : toRunEvidence(run);
     },
     listIssues,
     // Project status evidence (AC1): poll provenance, age, and failure
@@ -190,13 +184,9 @@ export function createMaestroEvidenceReader(
         projectName: state.projectName,
         validationState: state.validationState
       })),
-    // listProjectPullRequestSnapshots is likewise ordered pr_number
-    // ascending with no limit; slice from the end for the same reason as
-    // listIssues above.
     listPullRequests: (projectName) =>
       runStore
-        .listProjectPullRequestSnapshots(projectName)
-        .slice(-MAX_EVIDENCE_ITEMS)
+        .listProjectPullRequestSnapshots(projectName, MAX_EVIDENCE_ITEMS)
         .map((pr) => ({
           checks: pr.checks,
           draft: pr.draft,

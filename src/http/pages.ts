@@ -2956,7 +2956,7 @@ export const RESUME_COPY_CLIENT_JS = `(function () {
   });
 })();`;
 
-function renderTimestamp(
+export function renderTimestamp(
   value: string | null | undefined,
   fallback = "-"
 ): string {

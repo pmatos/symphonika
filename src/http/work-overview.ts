@@ -75,10 +75,14 @@ const ATTENTION_RUN_STATES: ReadonlySet<RunState> = new Set([
 // have none at all), matching issue-polling's own unmapped-label default.
 const DEFAULT_PRIORITY = 99;
 
+// A far-future sentinel so a snapshot row with no issue_created_at (never
+// backfilled for pre-migration rows, run-store.ts) sorts as the least
+// urgent by age rather than the most urgent.
+const MISSING_ISSUE_CREATED_AT = "9999-12-31T23:59:59.999Z";
+
 type WorkOverviewGroup = "needsAttention" | "notReady" | "ongoing" | "ready";
 
 type WorkOverviewEntry = {
-  group: WorkOverviewGroup;
   hasSnapshot: boolean;
   issueCreatedAt: string | undefined;
   issueNumber: number;
@@ -144,6 +148,24 @@ function trackedPullRequestKey(
   return `${projectName}#${issueNumber}`;
 }
 
+// Shared by the Needs attention and Not ready groups, which use the same
+// priority-then-issue-number tie-break.
+function comparePriorityThenIssueNumber(
+  a: WorkOverviewEntry,
+  b: WorkOverviewEntry
+): number {
+  return (
+    (a.priority ?? DEFAULT_PRIORITY) - (b.priority ?? DEFAULT_PRIORITY) ||
+    a.issueNumber - b.issueNumber
+  );
+}
+
+// A missing runUpdatedAt must sort as the oldest, not rely on Date.parse's
+// non-standard lenient handling of a non-ISO fallback string.
+function runUpdatedAtMs(runUpdatedAt: string | undefined): number {
+  return runUpdatedAt === undefined ? 0 : Date.parse(runUpdatedAt);
+}
+
 export function buildWorkOverview(input: {
   nowMs: number;
   projectNames: readonly string[];
@@ -155,10 +177,16 @@ export function buildWorkOverview(input: {
   const projectStates = runStore.getProjectStatesByName();
   const trackedByIssue = new Map<string, TrackedPullRequest>();
   for (const tracked of runStore.listOpenTrackedPullRequests()) {
-    trackedByIssue.set(
-      trackedPullRequestKey(tracked.projectName, tracked.issueNumber),
-      tracked
-    );
+    const key = trackedPullRequestKey(tracked.projectName, tracked.issueNumber);
+    const existing = trackedByIssue.get(key);
+    // An issue can have more than one open tracked PR at once (e.g.
+    // redispatch onto a renamed branch while an earlier PR stays open --
+    // run-store.ts's own listOpenTrackedPullRequests note); keep the most
+    // recently created one by id rather than depending on this method's
+    // row order.
+    if (existing === undefined || tracked.id > existing.id) {
+      trackedByIssue.set(key, tracked);
+    }
   }
   const scheduledByIssue = new Map<string, ScheduledCallback>();
   for (const callback of input.scheduled) {
@@ -218,6 +246,19 @@ export function buildWorkOverview(input: {
       snapshotByIssue.set(row.issueNumber, row);
     }
 
+    // replaceProjectIssueSnapshots writes the same project.repository to
+    // every row of a poll batch, so one lookup per project (via any one of
+    // its snapshot rows) stands in for the per-issue query, saving an
+    // extra SQL round trip per issue on every dashboard load.
+    const firstSnapshot = snapshots[0];
+    const projectRepository: ProjectSnapshotRepository | undefined =
+      firstSnapshot === undefined
+        ? undefined
+        : (runStore.getProjectIssueSnapshotRepository(
+            projectName,
+            firstSnapshot.issueNumber
+          ) ?? undefined);
+
     const issueNumbers = new Set<number>([
       ...snapshotByIssue.keys(),
       ...latestRunByIssue.keys()
@@ -235,9 +276,7 @@ export function buildWorkOverview(input: {
       const attentionLabel = snapshot?.labels.find((label) =>
         ATTENTION_LABELS.has(label)
       );
-      const repository =
-        runStore.getProjectIssueSnapshotRepository(projectName, issueNumber) ??
-        undefined;
+      const repository = snapshot === undefined ? undefined : projectRepository;
       const base = {
         hasSnapshot: snapshot !== undefined,
         issueCreatedAt: snapshot?.issueCreatedAt,
@@ -270,7 +309,6 @@ export function buildWorkOverview(input: {
       ) {
         needsAttention.push({
           ...base,
-          group: "needsAttention",
           reasonText: attentionLabel
         });
         continue;
@@ -281,7 +319,6 @@ export function buildWorkOverview(input: {
       if (scheduled !== undefined) {
         ongoing.push({
           ...base,
-          group: "ongoing",
           reasonText: `scheduled ${scheduled.kind.replace("_", " ")}`
         });
         continue;
@@ -290,7 +327,6 @@ export function buildWorkOverview(input: {
       if (run !== undefined && ONGOING_RUN_STATES.has(run.state)) {
         ongoing.push({
           ...base,
-          group: "ongoing",
           reasonText: describeOngoingRun(run)
         });
         continue;
@@ -299,7 +335,6 @@ export function buildWorkOverview(input: {
       if (tracked !== undefined) {
         ongoing.push({
           ...base,
-          group: "ongoing",
           reasonText: `PR #${tracked.prNumber} awaiting review`
         });
         continue;
@@ -308,7 +343,7 @@ export function buildWorkOverview(input: {
       // wins over a stale terminal Run from a prior attempt — dispatch
       // itself does not consult Run history to decide eligibility.
       if (snapshot?.kind === "candidate") {
-        ready.push({ ...base, group: "ready", reasonText: "eligible" });
+        ready.push({ ...base, reasonText: "eligible" });
         continue;
       }
       // 6. A durable terminal attention outcome, or a filtered snapshot's
@@ -318,17 +353,21 @@ export function buildWorkOverview(input: {
       // full history regardless of the issue's current open/closed state
       // -- without this guard, a closed issue whose final Run happened to
       // end blocked/failed/stale/input_required would stay in Needs
-      // attention forever.
+      // attention forever. Checked as two sequential conditions (rather
+      // than one `||`) so the run-state branch can narrow `run` on its own
+      // instead of asserting it is defined.
+      if (attentionLabel !== undefined) {
+        needsAttention.push({ ...base, reasonText: attentionLabel });
+        continue;
+      }
       if (
-        (run !== undefined &&
-          snapshot !== undefined &&
-          ATTENTION_RUN_STATES.has(run.state)) ||
-        attentionLabel !== undefined
+        run !== undefined &&
+        snapshot !== undefined &&
+        ATTENTION_RUN_STATES.has(run.state)
       ) {
         needsAttention.push({
           ...base,
-          group: "needsAttention",
-          reasonText: attentionLabel ?? describeAttentionRun(run!)
+          reasonText: describeAttentionRun(run)
         });
         continue;
       }
@@ -336,7 +375,6 @@ export function buildWorkOverview(input: {
       if (snapshot !== undefined) {
         notReady.push({
           ...base,
-          group: "notReady",
           reasonText: snapshot.reasons.join("; ")
         });
         continue;
@@ -352,33 +390,29 @@ export function buildWorkOverview(input: {
     compareCandidateIssues(
       {
         issue: {
-          created_at: a.issueCreatedAt ?? "",
+          // A pre-migration snapshot row's issue_created_at is never
+          // backfilled (run-store.ts), so a missing value must not sort as
+          // the earliest/most-urgent issue — fall back to the latest
+          // possible age instead, which self-corrects on the next poll.
+          created_at: a.issueCreatedAt ?? MISSING_ISSUE_CREATED_AT,
           number: a.issueNumber,
           priority: a.priority ?? DEFAULT_PRIORITY
         }
       },
       {
         issue: {
-          created_at: b.issueCreatedAt ?? "",
+          created_at: b.issueCreatedAt ?? MISSING_ISSUE_CREATED_AT,
           number: b.issueNumber,
           priority: b.priority ?? DEFAULT_PRIORITY
         }
       }
     )
   );
-  notReady.sort(
-    (a, b) =>
-      (a.priority ?? DEFAULT_PRIORITY) - (b.priority ?? DEFAULT_PRIORITY) ||
-      a.issueNumber - b.issueNumber
-  );
-  needsAttention.sort(
-    (a, b) =>
-      (a.priority ?? DEFAULT_PRIORITY) - (b.priority ?? DEFAULT_PRIORITY) ||
-      a.issueNumber - b.issueNumber
-  );
+  notReady.sort(comparePriorityThenIssueNumber);
+  needsAttention.sort(comparePriorityThenIssueNumber);
   ongoing.sort(
     (a, b) =>
-      Date.parse(b.runUpdatedAt ?? "0") - Date.parse(a.runUpdatedAt ?? "0") ||
+      runUpdatedAtMs(b.runUpdatedAt) - runUpdatedAtMs(a.runUpdatedAt) ||
       a.issueNumber - b.issueNumber
   );
   projects.sort((a, b) => a.projectName.localeCompare(b.projectName));

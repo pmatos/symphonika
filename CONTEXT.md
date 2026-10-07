@@ -633,6 +633,20 @@ _Avoid_: sandboxing, approval policy when referring to this PID-visibility bound
 A coding-agent run expected to proceed without asking the operator for interactive input.
 _Avoid_: chat session
 
+**Maestro**:
+The operator-facing, read-only conversational assistant on the dashboard (`GET /maestro`). It answers
+from persisted Issue, Run, and pull-request evidence RunStore already holds, citing the Project,
+Issue/Run/PR, and observed timestamp behind every claim. Its model-facing tool surface is a fixed,
+hand-written list of read-only lookups (`MAESTRO_TOOLS`); no GitHub-write, shell, or local-workspace
+tool is ever offered to it, a structural boundary independent of which model is configured (ADR
+2026-10-07-0813). A Maestro reply is a proposal for the operator, never completed work, and is never
+counted as a Run. This bootstrap slice is dashboard-scope only, over configured Projects' own evidence
+— Project-focused chat, grounding in repository content via a Maestro Workspace, and evidence-linked
+briefings are separate, not-yet-built slices of epic #844.
+_Avoid_: Orchestrator, Coding Agent — Maestro never dispatches, claims, or executes issue work, and has
+no provider-execution posture of its own; chat session, which names an Autonomous Run's own property
+of needing no interactive input, not this assistant
+
 ## Relationships
 
 - A **Service Config** lists one or more **Projects** and zero or more **Routines**
@@ -736,6 +750,8 @@ _Avoid_: chat session
 - **Provider PID Isolation** bounds what an **Agent Provider** can see and signal without changing
   **Full-Permission Agent Execution**
 - An **Autonomous Run** fails if the provider requests interactive input
+- **Maestro** reads the same persisted **Issue**, **Run**, and pull-request evidence an operator can
+  see elsewhere on the dashboard, and proposes rather than executes
 
 ## Example dialogue
 

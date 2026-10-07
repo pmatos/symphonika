@@ -85,6 +85,18 @@ self_update: false
 #   smtp_username: "<postmark-server-token>"
 #   smtp_password_env: "SYMPHONIKA_SMTP_PASSWORD"
 
+# Optional dashboard Maestro chat (SPEC.md §14, ADR 2026-10-07-0813).
+# Independent of `providers:` below — this selects the model Maestro's
+# read-only conversation runtime calls, never a Coding Agent. Omit this
+# whole block to leave Maestro unconfigured. api_key_env deliberately
+# defaults to SYMPHONIKA_MAESTRO_API_KEY rather than ANTHROPIC_API_KEY, so
+# enabling Maestro can't change which credential a spawned `claude` Coding
+# Agent authenticates with.
+# maestro:
+#   model: "claude-sonnet-5"
+#   api_key_env: "SYMPHONIKA_MAESTRO_API_KEY"
+#   max_output_tokens: 4096
+
 # Optional Routine execution defaults. A Routine's Markdown front matter wins;
 # when both levels omit a value, the provider command below stays as authored.
 # routine_defaults:

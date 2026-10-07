@@ -8,6 +8,14 @@ Symphonika is a fresh orchestrator for turning tracked project work into isolate
 A long-running service that claims eligible issues and dispatches them into isolated coding-agent runs.
 _Avoid_: workflow engine, agent
 
+**Maestro**:
+An operator-facing assistant that helps a person understand and prioritize work across Projects using traceable evidence. It is distinct from the Orchestrator that executes work.
+_Avoid_: Orchestrator, coding agent
+
+**Maestro Workspace**:
+A read-only view of GitHub repository content available to Maestro, distinct from a Coding Agent's Workspace and arbitrary local files.
+_Avoid_: Workspace, local Project directory
+
 **Issue Tracker**:
 The external system that provides issues, states, and metadata used for dispatch and reconciliation.
 _Avoid_: Linear when speaking tracker-generically

@@ -236,4 +236,52 @@ describe("Maestro dashboard chat page (#865)", () => {
       test.cleanup();
     }
   });
+
+  it("survives a daemon restart at the HTTP layer: a new app on the same state root sees the history", async () => {
+    const test = await setup();
+    {
+      const firstApp = createHttpApp({
+        createMaestroModel: () => fakeModel("Nothing is eligible right now."),
+        csrfSecret: TEST_SECRET,
+        getMaestroConfig: () => MAESTRO_CONFIG,
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+
+      await firstApp.request("/maestro/messages", {
+        body: formBody({
+          csrf_token: VALID_TOKEN,
+          message: "What's eligible?"
+        }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST"
+      });
+      test.runStore.close();
+
+      const reopenedStore = openRunStore({ stateRoot: test.stateRoot });
+      try {
+        const secondApp = createHttpApp({
+          csrfSecret: TEST_SECRET,
+          getMaestroConfig: () => MAESTRO_CONFIG,
+          runStore: reopenedStore,
+          stateRoot: test.stateRoot,
+          version: "0.1.0"
+        });
+        const html = await (
+          await secondApp.request("/maestro", { headers: browserHeaders() })
+        ).text();
+        expect(html).toContain("What&#39;s eligible?");
+        expect(html).toContain("Nothing is eligible right now.");
+      } finally {
+        reopenedStore.close();
+      }
+    }
+    // test.runStore was already closed above (simulating the restart), so
+    // test.cleanup() is deliberately not called here — closing a RunStore
+    // twice throws. afterEach still removes the temp state root either way.
+  });
 });

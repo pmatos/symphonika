@@ -10,7 +10,11 @@ import type {
   MaestroModelTurn
 } from "../src/maestro/model.js";
 import { createMaestroEvidenceReader } from "../src/maestro/reader.js";
-import { openRunStore, type RunStore } from "../src/run-store.js";
+import {
+  openRunStore,
+  type MaestroMessageRow,
+  type RunStore
+} from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -216,6 +220,89 @@ describe("Maestro conversation turn orchestrator (#865)", () => {
       });
 
       expect(result.text).toMatch(/tool-call budget/i);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("caps persisted history sent to the model and starts the window on a user message", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const history: MaestroMessageRow[] = Array.from(
+        { length: 25 },
+        (_unused, index) => ({
+          citations: [],
+          content: `message-${index}`,
+          createdAt: "2026-10-06T12:00:00.000Z",
+          id: `msg-${index}`,
+          role: index % 2 === 0 ? "user" : "assistant"
+        })
+      );
+      const { calls, model } = scriptedModel([{ kind: "message", text: "ok" }]);
+
+      await runMaestroTurn({
+        history,
+        model,
+        reader,
+        userMessage: "latest question"
+      });
+
+      const sentHistory = calls[0];
+      if (sentHistory === undefined) {
+        throw new Error("expected one model call");
+      }
+      expect(sentHistory[0]?.role).toBe("user");
+      expect(
+        sentHistory.some(
+          (turn) => turn.role === "user" && turn.content === "message-0"
+        )
+      ).toBe(false);
+      expect(sentHistory.length).toBeLessThanOrEqual(20);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("deduplicates citations across repeated tool calls to the same evidence", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const { model } = scriptedModel([
+        {
+          kind: "tool_use",
+          toolUses: [
+            {
+              id: "toolu_1",
+              input: { issue_number: 42, project_name: "symphonika" },
+              name: "get_issue"
+            }
+          ]
+        },
+        {
+          kind: "tool_use",
+          toolUses: [
+            {
+              id: "toolu_2",
+              input: { issue_number: 42, project_name: "symphonika" },
+              name: "get_issue"
+            }
+          ]
+        },
+        { kind: "message", text: "symphonika#42 is eligible." }
+      ]);
+
+      const result = await runMaestroTurn({
+        history: [],
+        model,
+        reader,
+        userMessage: "Tell me about symphonika#42 twice."
+      });
+
+      expect(result.citations).toHaveLength(1);
+      expect(result.citations[0]).toMatchObject({
+        href: "/issues/symphonika/42"
+      });
     } finally {
       test.cleanup();
     }

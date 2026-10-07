@@ -8,6 +8,26 @@ import type { RunStore } from "../run-store.js";
 // output. Deliberately excludes every write method (createRun,
 // replaceProjectIssueSnapshots, writeIssueLabels, mergePullRequest, ...) by
 // construction: there is no way to reach a mutation through this type.
+//
+// Every list method is capped at MAX_EVIDENCE_ITEMS: a single Project's
+// issue/PR snapshot, or an unfiltered Run listing, has no inherent upper
+// bound, and sending thousands of rows to the model on one chat message
+// would both inflate the request and flood the rendered reply with
+// citations. The cap is a defensive bound on response size, not a claim
+// that the omitted rows don't exist — a reply that needs more should ask a
+// narrower question (e.g. one Project at a time).
+const MAX_EVIDENCE_ITEMS = 25;
+
+type MaestroProjectEvidence = {
+  href: string;
+  lastPollError: string | null;
+  lastPollOk: boolean | null;
+  lastSuccessfulPollAt: string | null;
+  observedAt: string;
+  projectName: string;
+  validationState: string;
+};
+
 type MaestroIssueEvidence = {
   href: string;
   issueNumber: number;
@@ -52,10 +72,14 @@ export type MaestroEvidenceReader = {
   ): MaestroIssueEvidence | undefined;
   getRun(runId: string): MaestroRunEvidence | undefined;
   listIssues(projectName: string): MaestroIssueEvidence[];
-  listProjects(): string[];
+  listProjects(): MaestroProjectEvidence[];
   listPullRequests(projectName: string): MaestroPullRequestEvidence[];
   listRuns(projectName?: string): MaestroRunEvidence[];
 };
+
+function projectHref(projectName: string): string {
+  return `/projects/${encodeURIComponent(projectName)}`;
+}
 
 function issueHref(projectName: string, issueNumber: number): string {
   return `/issues/${encodeURIComponent(projectName)}/${issueNumber}`;
@@ -73,22 +97,26 @@ export function createMaestroEvidenceReader(
   runStore: RunStore
 ): MaestroEvidenceReader {
   const listIssues = (projectName: string): MaestroIssueEvidence[] =>
-    runStore.listProjectIssueSnapshots(projectName).map((row) => ({
-      href: issueHref(projectName, row.issueNumber),
-      issueNumber: row.issueNumber,
-      kind: row.kind,
-      labels: row.labels,
-      observedAt: row.polledAt,
-      projectName,
-      reasons: row.reasons,
-      title: row.title
-    }));
+    runStore
+      .listProjectIssueSnapshots(projectName)
+      .slice(0, MAX_EVIDENCE_ITEMS)
+      .map((row) => ({
+        href: issueHref(projectName, row.issueNumber),
+        issueNumber: row.issueNumber,
+        kind: row.kind,
+        labels: row.labels,
+        observedAt: row.polledAt,
+        projectName,
+        reasons: row.reasons,
+        title: row.title
+      }));
 
   const listRuns = (projectName?: string): MaestroRunEvidence[] =>
     runStore
-      .listRuns(
-        projectName === undefined ? undefined : { project: projectName }
-      )
+      .listRuns({
+        limit: MAX_EVIDENCE_ITEMS,
+        ...(projectName === undefined ? {} : { project: projectName })
+      })
       .map((run) => ({
         branchName: run.branchName,
         href: runHref(run.id),
@@ -123,21 +151,38 @@ export function createMaestroEvidenceReader(
           };
     },
     listIssues,
-    listProjects: () => runStore.listActiveProjectNames(),
-    listPullRequests: (projectName) =>
-      runStore.listProjectPullRequestSnapshots(projectName).map((pr) => ({
-        checks: pr.checks,
-        draft: pr.draft,
-        href: pullRequestHref(projectName, pr.prNumber),
-        merged: pr.merged,
-        observedAt: pr.polledAt,
-        open: pr.open,
-        prNumber: pr.prNumber,
-        projectName,
-        reviewDecision: pr.reviewDecision,
-        title: pr.title,
-        url: pr.url
+    // Project status evidence (AC1): poll provenance, age, and failure
+    // state — the same ProjectState fields /projects/:name's capacity
+    // strip reads — not just a bare name. Scoped to active Projects by
+    // listProjectStates()'s own default, matching the prior
+    // listActiveProjectNames() behavior this replaced.
+    listProjects: () =>
+      runStore.listProjectStates().map((state) => ({
+        href: projectHref(state.projectName),
+        lastPollError: state.lastPollError,
+        lastPollOk: state.lastPollOk,
+        lastSuccessfulPollAt: state.lastSuccessfulPollAt,
+        observedAt: state.lastSuccessfulPollAt ?? state.updatedAt,
+        projectName: state.projectName,
+        validationState: state.validationState
       })),
+    listPullRequests: (projectName) =>
+      runStore
+        .listProjectPullRequestSnapshots(projectName)
+        .slice(0, MAX_EVIDENCE_ITEMS)
+        .map((pr) => ({
+          checks: pr.checks,
+          draft: pr.draft,
+          href: pullRequestHref(projectName, pr.prNumber),
+          merged: pr.merged,
+          observedAt: pr.polledAt,
+          open: pr.open,
+          prNumber: pr.prNumber,
+          projectName,
+          reviewDecision: pr.reviewDecision,
+          title: pr.title,
+          url: pr.url
+        })),
     listRuns
   };
 }

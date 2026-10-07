@@ -147,9 +147,14 @@ export function createAnthropicMaestroModel(
   // ANTHROPIC_AUTH_TOKEN/ant-profile credential fallback — Maestro's key
   // must come only from the configured api_key_env, never from whatever
   // credential a spawned Coding Agent happens to have inherited (AC4).
+  // baseURL is pinned the same way: the SDK otherwise falls back to
+  // ANTHROPIC_BASE_URL, which an operator may have pointed at a proxy for
+  // the `claude` Coding Agent — Maestro's traffic must not silently follow
+  // that redirection.
   const client = new Anthropic({
     apiKey,
     authToken: null,
+    baseURL: "https://api.anthropic.com",
     ...(options.fetch === undefined ? {} : { fetch: options.fetch })
   });
 

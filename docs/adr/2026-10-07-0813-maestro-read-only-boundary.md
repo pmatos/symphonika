@@ -64,3 +64,9 @@ tools in this slice call GitHub live — every tool reads only already-persisted
 - The tool-calling loop (`runMaestroTurn`, `src/maestro/conversation.ts`) is capped at a small fixed
   number of rounds, so a model nudged toward repeatedly retrying a refused or malformed tool call is
   bounded rather than spending unbounded requests on one chat message.
+- Every evidence list a tool returns is capped (`MAX_EVIDENCE_ITEMS`, `src/maestro/reader.ts`), and
+  citations are deduplicated by href, so a large Project's issue/PR snapshot or an unfiltered Run
+  listing cannot flood a single model request or a single rendered reply. Persisted conversation
+  history resent to the model each turn is capped the same way (`MAX_HISTORY_MESSAGES`,
+  `src/maestro/conversation.ts`); neither cap claims the omitted rows don't exist, only that answering
+  "all of them" at once is out of scope for a single chat message.

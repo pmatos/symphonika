@@ -25,8 +25,8 @@ export type MaestroToolOutcome =
 export const MAESTRO_TOOLS: MaestroToolSpec[] = [
   {
     description:
-      "List every configured Project Maestro has evidence for (the Projects " +
-      "a successful poll has recorded issue/PR snapshots for).",
+      "List every configured Project's poll status: validation state, " +
+      "last successful poll time, and the last poll's ok/error outcome.",
     inputSchema: {
       additionalProperties: false,
       properties: {},
@@ -107,6 +107,19 @@ const MAESTRO_TOOL_NAMES: ReadonlySet<string> = new Set(
   MAESTRO_TOOLS.map((tool) => tool.name)
 );
 
+function projectCitation(project: {
+  href: string;
+  observedAt: string;
+  projectName: string;
+}): MaestroCitation {
+  return {
+    href: project.href,
+    kind: "project",
+    label: project.projectName,
+    observedAt: project.observedAt
+  };
+}
+
 function issueCitation(issue: {
   href: string;
   issueNumber: number;
@@ -181,7 +194,12 @@ export function executeMaestroTool(input: {
   }
 
   if (input.name === "list_projects") {
-    return { citations: [], kind: "ok", output: input.reader.listProjects() };
+    const projects = input.reader.listProjects();
+    return {
+      citations: projects.map(projectCitation),
+      kind: "ok",
+      output: projects
+    };
   }
 
   if (input.name === "list_issues") {

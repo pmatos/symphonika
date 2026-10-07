@@ -45,7 +45,7 @@ function renderMessage(message: MaestroMessageRow): string {
   return (
     `<article class="maestro-message maestro-message-${escapeHtml(message.role)}">` +
     `<p class="maestro-message-role">${escapeHtml(roleLabel)}</p>` +
-    `<p class="maestro-message-content">${escapeHtml(message.content)}</p>` +
+    `<p class="maestro-message-content" style="white-space:pre-wrap">${escapeHtml(message.content)}</p>` +
     `${citationsHtml}` +
     `</article>`
   );

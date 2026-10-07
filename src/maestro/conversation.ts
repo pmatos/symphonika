@@ -12,6 +12,14 @@ import { executeMaestroTool, MAESTRO_TOOLS } from "./tools.js";
 // real multi-step investigation needs only a handful of rounds.
 const MAX_TOOL_ROUNDS = 4;
 
+// Bounds how much persisted history is resent to the model on every turn.
+// The API is stateless, so without a cap, cost (and eventually the context
+// window) grows with the conversation's whole lifetime instead of with one
+// exchange. Kept well under typical context limits since this is a chat
+// transcript, not a document. See the follow-up issue filed for Maestro
+// Workspace (#867) if proper compaction becomes worth adding.
+const MAX_HISTORY_MESSAGES = 20;
+
 const SYSTEM_PROMPT =
   `You are Maestro, Symphonika's assistant on the operator dashboard. ` +
   MAESTRO_READ_ONLY_BOUNDARY_NOTICE +
@@ -32,10 +40,26 @@ export type MaestroTurnResult = {
 function historyToTurns(
   history: MaestroMessageRow[]
 ): MaestroConversationTurn[] {
-  return history.map((message) => ({
+  const recent = history.slice(-MAX_HISTORY_MESSAGES);
+  // The Messages API requires the first message to have role "user"; a cap
+  // can start the window on a leftover assistant message, so drop any
+  // leading ones.
+  const firstUserIndex = recent.findIndex((message) => message.role === "user");
+  const windowed = firstUserIndex === -1 ? [] : recent.slice(firstUserIndex);
+  return windowed.map((message) => ({
     content: message.content,
     role: message.role
   }));
+}
+
+function dedupeCitations(citations: MaestroCitation[]): MaestroCitation[] {
+  const seen = new Map<string, MaestroCitation>();
+  for (const citation of citations) {
+    if (!seen.has(citation.href)) {
+      seen.set(citation.href, citation);
+    }
+  }
+  return Array.from(seen.values());
 }
 
 export async function runMaestroTurn(input: {
@@ -58,7 +82,7 @@ export async function runMaestroTurn(input: {
     });
 
     if (modelTurn.kind === "message") {
-      return { citations, text: modelTurn.text };
+      return { citations: dedupeCitations(citations), text: modelTurn.text };
     }
 
     turns.push({ role: "assistant_tool_use", toolUses: modelTurn.toolUses });
@@ -91,7 +115,7 @@ export async function runMaestroTurn(input: {
   }
 
   return {
-    citations,
+    citations: dedupeCitations(citations),
     text:
       "Maestro reached its tool-call budget for this turn without a " +
       "final answer. Try narrowing the question."

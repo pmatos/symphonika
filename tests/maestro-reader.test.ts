@@ -89,11 +89,16 @@ async function setup(): Promise<{ cleanup: () => void; runStore: RunStore }> {
 }
 
 describe("Maestro evidence reader (#865)", () => {
-  it("lists only active projects", async () => {
+  it("lists active projects with poll status evidence and a citation href", async () => {
     const test = await setup();
     try {
       const reader = createMaestroEvidenceReader(test.runStore);
-      expect(reader.listProjects()).toEqual(["symphonika"]);
+      expect(reader.listProjects()).toEqual([
+        expect.objectContaining({
+          href: "/projects/symphonika",
+          projectName: "symphonika"
+        })
+      ]);
     } finally {
       test.cleanup();
     }
@@ -184,6 +189,53 @@ describe("Maestro evidence reader (#865)", () => {
           "listRuns"
         ].sort()
       );
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("caps a single list call at a bounded number of items", async () => {
+    const test = await setup();
+    try {
+      test.runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-06T12:00:00.000Z",
+        projectName: "symphonika",
+        rows: Array.from({ length: 40 }, (_unused, index) => ({
+          blockedBy: [],
+          blockedByTruncated: false,
+          issueNumber: index + 100,
+          kind: "candidate" as const,
+          labels: [],
+          priority: 0,
+          reasons: [],
+          title: `Issue ${index + 100}`
+        }))
+      });
+      for (let index = 0; index < 40; index += 1) {
+        test.runStore.createRun({
+          id: `run-cap-${index}`,
+          issue: {
+            body: "",
+            created_at: "2026-10-06T11:00:00Z",
+            id: index,
+            labels: [],
+            number: index + 200,
+            priority: 0,
+            state: "open",
+            title: `Issue ${index + 200}`,
+            updated_at: "2026-10-06T11:00:00Z",
+            url: "https://example.invalid"
+          },
+          projectName: "symphonika",
+          providerCommand: "codex",
+          providerName: "codex"
+        });
+      }
+
+      const reader = createMaestroEvidenceReader(test.runStore);
+      expect(reader.listIssues("symphonika").length).toBeLessThanOrEqual(25);
+      expect(reader.listRuns("symphonika").length).toBeLessThanOrEqual(25);
+      expect(reader.listRuns().length).toBeLessThanOrEqual(25);
     } finally {
       test.cleanup();
     }

@@ -35,7 +35,6 @@
 import {
   type ProjectIssueSnapshotRow,
   type ProjectSnapshotRepository,
-  type ProjectState,
   type RunState,
   type RunStatus,
   type RunStore,
@@ -166,9 +165,24 @@ function runUpdatedAtMs(runUpdatedAt: string | undefined): number {
   return runUpdatedAt === undefined ? 0 : Date.parse(runUpdatedAt);
 }
 
+// A pre-migration snapshot row's issue_created_at is never backfilled
+// (run-store.ts), so a missing value must not sort as the earliest/most-
+// urgent issue — fall back to the latest possible age instead, which
+// self-corrects on the next poll.
+function toCandidateIssue(entry: WorkOverviewEntry): {
+  issue: { created_at: string; number: number; priority: number };
+} {
+  return {
+    issue: {
+      created_at: entry.issueCreatedAt ?? MISSING_ISSUE_CREATED_AT,
+      number: entry.issueNumber,
+      priority: entry.priority ?? DEFAULT_PRIORITY
+    }
+  };
+}
+
 export function buildWorkOverview(input: {
   nowMs: number;
-  projectNames: readonly string[];
   runStore: RunStore;
   scheduled: readonly ScheduledCallback[];
   startedAtMs: number | undefined;
@@ -202,9 +216,8 @@ export function buildWorkOverview(input: {
   const notReady: WorkOverviewEntry[] = [];
   const projects: WorkOverviewProjectProvenance[] = [];
 
-  for (const projectName of input.projectNames) {
-    const projectState: ProjectState | undefined =
-      projectStates.get(projectName);
+  for (const projectName of projectStates.keys()) {
+    const projectState = projectStates.get(projectName);
     // lastPollOk stays null until a Project's first issue-poll attempt, the
     // same signal ADR 0073's capacity strip reads — this is what keeps a
     // Routine Host (which never attempts one) out of the provenance list
@@ -254,10 +267,10 @@ export function buildWorkOverview(input: {
     const projectRepository: ProjectSnapshotRepository | undefined =
       firstSnapshot === undefined
         ? undefined
-        : (runStore.getProjectIssueSnapshotRepository(
+        : runStore.getProjectIssueSnapshotRepository(
             projectName,
             firstSnapshot.issueNumber
-          ) ?? undefined);
+          );
 
     const issueNumbers = new Set<number>([
       ...snapshotByIssue.keys(),
@@ -267,12 +280,9 @@ export function buildWorkOverview(input: {
     for (const issueNumber of issueNumbers) {
       const run = latestRunByIssue.get(issueNumber);
       const snapshot = snapshotByIssue.get(issueNumber);
-      const tracked = trackedByIssue.get(
-        trackedPullRequestKey(projectName, issueNumber)
-      );
-      const scheduled = scheduledByIssue.get(
-        trackedPullRequestKey(projectName, issueNumber)
-      );
+      const key = trackedPullRequestKey(projectName, issueNumber);
+      const tracked = trackedByIssue.get(key);
+      const scheduled = scheduledByIssue.get(key);
       const attentionLabel = snapshot?.labels.find((label) =>
         ATTENTION_LABELS.has(label)
       );
@@ -387,26 +397,7 @@ export function buildWorkOverview(input: {
   }
 
   ready.sort((a, b) =>
-    compareCandidateIssues(
-      {
-        issue: {
-          // A pre-migration snapshot row's issue_created_at is never
-          // backfilled (run-store.ts), so a missing value must not sort as
-          // the earliest/most-urgent issue — fall back to the latest
-          // possible age instead, which self-corrects on the next poll.
-          created_at: a.issueCreatedAt ?? MISSING_ISSUE_CREATED_AT,
-          number: a.issueNumber,
-          priority: a.priority ?? DEFAULT_PRIORITY
-        }
-      },
-      {
-        issue: {
-          created_at: b.issueCreatedAt ?? MISSING_ISSUE_CREATED_AT,
-          number: b.issueNumber,
-          priority: b.priority ?? DEFAULT_PRIORITY
-        }
-      }
-    )
+    compareCandidateIssues(toCandidateIssue(a), toCandidateIssue(b))
   );
   notReady.sort(comparePriorityThenIssueNumber);
   needsAttention.sort(comparePriorityThenIssueNumber);

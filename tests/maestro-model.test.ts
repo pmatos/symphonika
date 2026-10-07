@@ -237,20 +237,23 @@ describe("Anthropic-backed Maestro model (#865)", () => {
 
     expect(called).toBe(false);
     expect(turn.kind).toBe("message");
+    if (turn.kind === "message") {
+      expect(turn.text).toContain("SYMPHONIKA_MAESTRO_API_KEY");
+    }
   });
 
   it("constructs without an explicit fetch override", () => {
-    const model = createAnthropicMaestroModel(
-      {
-        apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
-        maxOutputTokens: 1024,
-        model: "claude-sonnet-5",
-        provider: "anthropic"
-      },
-      { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" } }
-    );
-
-    expect(typeof model.nextTurn).toBe("function");
+    expect(() =>
+      createAnthropicMaestroModel(
+        {
+          apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
+          maxOutputTokens: 1024,
+          model: "claude-sonnet-5",
+          provider: "anthropic"
+        },
+        { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" } }
+      )
+    ).not.toThrow();
   });
 
   it("serializes assistant, assistant_tool_use, and tool_result history turns", async () => {

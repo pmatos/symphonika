@@ -274,6 +274,9 @@ describe("dispatch continuation cap", () => {
         .find((call) => call.body.includes("no commits on issue branch"));
       expect(capComment).toBeDefined();
       expect(capComment?.body).not.toContain("cap_reached:no_commits");
+      expect(capComment?.body).toMatch(
+        /\*\*Run:\*\* `(run-cont-\d+)`\n\*\*Logs:\*\* `[^`]*logs\/runs\/\1`/
+      );
 
       // This is a non-raw-FSM (markdown) workflow, so every one of the 3
       // successful runs above (1 fresh + 2 continuations) is a

@@ -43,6 +43,7 @@ export type ApplyLabelsInput = {
   issueNumber: number;
   outcome: ClassifiedTerminal;
   repository: GitHubIssueRepositoryInput;
+  runId?: string;
   willRetry: boolean;
 };
 
@@ -88,16 +89,27 @@ type IssueTarget = {
 // that without altering the reason string callers see elsewhere
 // (terminal_reason, logs).
 const MAX_REASON_COMMENT_CHARS = 1000;
+// The agent's last message is the explanation of what it was doing when the
+// run stopped, so it earns more room than the one-line reason.
+const MAX_LAST_MESSAGE_COMMENT_CHARS = 1500;
 
-function formatReasonForComment(reason: string): string {
+function fenceForComment(
+  text: string,
+  maxChars: number,
+  keep: "head" | "tail"
+): string {
   // Array.from splits on code points, not UTF-16 code units, so a truncation
   // cut can never land inside a surrogate pair the way String#slice's raw
   // code-unit indexing could (mangling an astral character echoed from
   // provider stdout/stderr into an unpaired-surrogate replacement glyph).
-  const truncated =
-    reason.length > MAX_REASON_COMMENT_CHARS
-      ? `${Array.from(reason).slice(0, MAX_REASON_COMMENT_CHARS).join("")}…`
-      : reason;
+  const codePoints = Array.from(text);
+  let truncated = text;
+  if (codePoints.length > maxChars) {
+    truncated =
+      keep === "head"
+        ? `${codePoints.slice(0, maxChars).join("")}…`
+        : `…${codePoints.slice(codePoints.length - maxChars).join("")}`;
+  }
   const longestBacktickRun = (truncated.match(/`+/g) ?? []).reduce(
     (max, run) => Math.max(max, run.length),
     0
@@ -106,11 +118,28 @@ function formatReasonForComment(reason: string): string {
   return `${fence}\n${truncated}\n${fence}`;
 }
 
+function formatReasonForComment(reason: string): string {
+  return fenceForComment(reason, MAX_REASON_COMMENT_CHARS, "head");
+}
+
+// What the comment adds beyond the reason so an operator can find the run's
+// evidence without digging through the database. Both fields are best-effort:
+// a run that never reached a provider has no logs and no message.
+export type RunDiagnostics = {
+  lastAgentMessage?: string;
+  logDirectory?: string;
+};
+
+export type ResolveRunDiagnostics = (input: {
+  repository: GitHubIssueRepositoryInput;
+  runId: string;
+}) => Promise<RunDiagnostics | undefined>;
+
 // markFailed/markBlocked/flagHumanAttention additionally require the human-
 // readable reason the run controller already computed for this outcome (its
 // `state_transition_reason`/`terminal_reason` write), so the sym:human-needed
 // comment below never drifts from the DB's own record of why.
-type IssueBlockTarget = IssueTarget & { reason: string };
+type IssueBlockTarget = IssueTarget & { reason: string; runId?: string };
 
 // Owns the orchestrator-owned terminal-outcome operational labels: the
 // sym:running removal, the sym:failed/sym:blocked add-then-sym:human-needed
@@ -122,9 +151,17 @@ type IssueBlockTarget = IssueTarget & { reason: string };
 export class ClaimLabelWriter {
   private readonly api: LabelWritingApi;
   private readonly logger?: Logger;
+  private readonly resolveRunDiagnostics?: ResolveRunDiagnostics;
 
-  constructor(input: { api: LabelWritingApi; logger?: Logger }) {
+  constructor(input: {
+    api: LabelWritingApi;
+    logger?: Logger;
+    resolveRunDiagnostics?: ResolveRunDiagnostics;
+  }) {
     this.api = input.api;
+    if (input.resolveRunDiagnostics !== undefined) {
+      this.resolveRunDiagnostics = input.resolveRunDiagnostics;
+    }
     if (input.logger !== undefined) {
       this.logger = input.logger;
     }
@@ -219,7 +256,8 @@ export class ClaimLabelWriter {
       await this.markFailed({
         issueNumber: input.issueNumber,
         reason: input.outcome.reason,
-        repository: input.repository
+        repository: input.repository,
+        ...(input.runId === undefined ? {} : { runId: input.runId })
       });
     } else if (
       input.outcome.kind === "failed" &&
@@ -230,13 +268,15 @@ export class ClaimLabelWriter {
         await this.markBlocked({
           issueNumber: input.issueNumber,
           reason: input.outcome.reason,
-          repository: input.repository
+          repository: input.repository,
+          ...(input.runId === undefined ? {} : { runId: input.runId })
         });
       } else {
         await this.markFailed({
           issueNumber: input.issueNumber,
           reason: input.outcome.reason,
-          repository: input.repository
+          repository: input.repository,
+          ...(input.runId === undefined ? {} : { runId: input.runId })
         });
       }
     }
@@ -409,9 +449,10 @@ export class ClaimLabelWriter {
       : "Symphonika could not add the `sym:human-needed` label, but is flagging this issue for human attention.";
     await this.bestEffort(
       async () => {
+        const diagnostics = await this.runDiagnosticsSection(input);
         const posted = await tryAddIssueComment(this.api, {
           ...input.repository,
-          body: `${intro}\n\n**Reason:**\n\n${formatReasonForComment(input.reason)}`,
+          body: `${intro}\n\n**Reason:**\n\n${formatReasonForComment(input.reason)}${diagnostics}`,
           issueNumber: input.issueNumber
         });
         if (!posted) {
@@ -423,6 +464,37 @@ export class ClaimLabelWriter {
       },
       { issueNumber: input.issueNumber, operation: "addIssueComment" }
     );
+  }
+
+  // Appended after the reason, which stays the comment's first block
+  // unchanged. A lookup failure degrades to the run id alone (or nothing
+  // without a run) rather than costing the reason comment.
+  private async runDiagnosticsSection(
+    input: IssueBlockTarget
+  ): Promise<string> {
+    if (input.runId === undefined) {
+      return "";
+    }
+    let diagnostics: RunDiagnostics | undefined;
+    try {
+      diagnostics = await this.resolveRunDiagnostics?.({
+        repository: input.repository,
+        runId: input.runId
+      });
+    } catch (err) {
+      this.logger?.warn(
+        { err, issueNumber: input.issueNumber, runId: input.runId },
+        "symphonika failed to resolve run diagnostics for sym:human-needed comment"
+      );
+    }
+    let section = `\n\n**Run:** \`${input.runId}\``;
+    if (diagnostics?.logDirectory !== undefined) {
+      section += `\n**Logs:** \`${diagnostics.logDirectory}\``;
+    }
+    if (diagnostics?.lastAgentMessage !== undefined) {
+      section += `\n\n**Last agent message:**\n\n${fenceForComment(diagnostics.lastAgentMessage, MAX_LAST_MESSAGE_COMMENT_CHARS, "tail")}`;
+    }
+    return section;
   }
 
   private async bestEffort(

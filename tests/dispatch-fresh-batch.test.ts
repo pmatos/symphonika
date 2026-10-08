@@ -335,6 +335,49 @@ describe("RunController.dispatchFresh", () => {
     expect(body).toContain("token [REDACTED]");
   });
 
+  it("posts the run's last agent message, with the repository token redacted, in the human-needed comment", async () => {
+    const addIssueComment = vi
+      .fn<(input: GitHubIssueCommentInput) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const harness = await createHarness([{ name: "alpha" }], {
+      addIssueComment
+    });
+    const lifecycles: Promise<void>[] = [];
+    await harness.controller.dispatchFresh(
+      pollStatus([{ issueNumber: 1, project: "alpha" }]),
+      { onLifecycle: (lifecycle) => lifecycles.push(lifecycle) }
+    );
+    await Promise.all(lifecycles);
+    const location = harness.runStore.getRunLogLocation("run-1");
+    expect(location?.normalizedLogPath).toBeDefined();
+    await writeFile(
+      location?.normalizedLogPath ?? "",
+      [
+        { type: "message", message: "earlier turn" },
+        { type: "tool_call", name: "bash" },
+        { type: "message", message: "push rejected for token secret" }
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n")
+    );
+    addIssueComment.mockClear();
+
+    await harness.controller.terminalizePullRequestDiscoveryExhausted({
+      attempts: 3,
+      branchName: "sym/alpha/1-candidate",
+      issueNumber: 1,
+      repository: { owner: "o", repo: "r", token: "secret" },
+      runId: "run-1"
+    });
+
+    const body = (addIssueComment.mock.calls[0]?.[0] as { body: string }).body;
+    expect(body).toContain("**Run:** `run-1`");
+    expect(body).toContain(`**Logs:** \`${location?.logDirectory ?? ""}\``);
+    expect(body).toContain("push rejected for token [REDACTED]");
+    expect(body).not.toContain("secret");
+    expect(body).not.toContain("earlier turn");
+  });
+
   it("stops claiming once the global cap is reached, leaving later candidates untouched", async () => {
     const harness = await createHarness([{ name: "alpha" }, { name: "beta" }], {
       globalConcurrencyLoader: () => Promise.resolve({ maxInFlight: 1 })

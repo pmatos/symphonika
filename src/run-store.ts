@@ -5739,6 +5739,24 @@ export class RunStore {
     });
   }
 
+  // Where a Run's evidence lives, for pointing an operator at it. The
+  // normalized log is the latest attempt's (updateRunEvidence overwrites it per
+  // attempt); undefined when the run never reached a provider.
+  getRunLogLocation(
+    runId: string
+  ):
+    | { logDirectory: string; normalizedLogPath: string | undefined }
+    | undefined {
+    const row = this.getRunArtifactRow(runId);
+    if (row === undefined) {
+      return undefined;
+    }
+    return {
+      logDirectory: path.join(this.stateRoot, "logs", "runs", runId),
+      normalizedLogPath: this.safeArtifactPath(runId, row.normalized_log_path)
+    };
+  }
+
   async getIssueSnapshot(runId: string): Promise<IssueSnapshot | undefined> {
     const row = this.getRunArtifactRow(runId);
     if (row === undefined) {

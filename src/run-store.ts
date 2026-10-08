@@ -4635,10 +4635,43 @@ export class RunStore {
     if (row === undefined) {
       return undefined;
     }
-    return {
+    return this.hydrateRoutineFirings([row])[0];
+  }
+
+  // The public readers select and order their own parent rows. Hydrate the
+  // selected Routine Firings together so associated Pull Requests do not add
+  // one SQLite read per row on dashboard and retention lists.
+  private hydrateRoutineFirings(
+    rows: readonly RoutineFiringRow[]
+  ): RoutineFiringStatus[] {
+    const pullRequestsByFiringId = new Map<
+      string,
+      RoutinePullRequestStatus[]
+    >();
+    // Stay below SQLite's parameter limit even for an unbounded list.
+    for (let offset = 0; offset < rows.length; offset += 900) {
+      const ids = rows.slice(offset, offset + 900).map((row) => row.id);
+      const placeholders = ids.map(() => "?").join(", ");
+      const pullRequests = this.database
+        .prepare(
+          [
+            "select project_name, routine_name, firing_id, pr_number, pr_url, head_sha",
+            "from routine_pull_requests",
+            `where firing_id in (${placeholders})`,
+            "order by firing_id asc, pr_number asc"
+          ].join(" ")
+        )
+        .all(...ids) as RoutinePullRequestRow[];
+      for (const row of pullRequests) {
+        const forFiring = pullRequestsByFiringId.get(row.firing_id) ?? [];
+        forFiring.push(mapRoutinePullRequestRow(row));
+        pullRequestsByFiringId.set(row.firing_id, forFiring);
+      }
+    }
+    return rows.map((row) => ({
       ...mapRoutineFiringRow(row),
-      pullRequests: this.listRoutinePullRequests({ firingId: row.id })
-    };
+      pullRequests: pullRequestsByFiringId.get(row.id) ?? []
+    }));
   }
 
   recordRoutineFiringNotification(input: {
@@ -4806,10 +4839,7 @@ export class RunStore {
           .join(" ")
       )
       .all(params) as RoutineFiringRow[];
-    return rows.map((row) => ({
-      ...mapRoutineFiringRow(row),
-      pullRequests: this.listRoutinePullRequests({ firingId: row.id })
-    }));
+    return this.hydrateRoutineFirings(rows);
   }
 
   listRoutineTargetProjects(routineName: string): string[] {
@@ -4856,10 +4886,7 @@ export class RunStore {
         failed_before: input.failedBefore,
         succeeded_before: input.succeededBefore
       }) as RoutineFiringRow[];
-    return rows.map((row) => ({
-      ...mapRoutineFiringRow(row),
-      pullRequests: this.listRoutinePullRequests({ firingId: row.id })
-    }));
+    return this.hydrateRoutineFirings(rows);
   }
 
   markRoutineWorkspacePruned(input: { id: string; prunedAt: string }): boolean {
@@ -7241,6 +7268,9 @@ export class RunStore {
         foreign key (project_name, routine_name) references routines(project_name, name),
         foreign key (firing_id) references routine_firings(id)
       );
+
+      create index if not exists routine_pull_requests_by_firing
+      on routine_pull_requests(firing_id, pr_number);
 
       create table if not exists routine_fanouts (
         id text primary key,

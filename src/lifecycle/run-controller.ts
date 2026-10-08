@@ -468,7 +468,7 @@ type RetryPayload = {
   // on codex and produce inconsistent prompts/evidence.
   providerCommand: string;
   providerName: AgentProviderName;
-  // When false (raw FSM mid-walk runs), executeRetry skips the labels_all /
+  // When false (raw FSM mid-walk runs), executeRetry skips the ready_label /
   // labels_none re-check so a transient provider failure stays recoverable
   // even when labels drift during the FSM walk. CLOSED_ISSUE still cancels.
   // See ADR 0046.

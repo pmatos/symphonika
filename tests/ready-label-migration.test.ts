@@ -1,7 +1,8 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import type { Logger } from "pino";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { issueFiltersSchema } from "../src/config-schemas.js";
 import { RuntimeConfigReloader } from "../src/reload.js";
@@ -16,7 +17,10 @@ afterEach(async () => {
   );
 });
 
-async function loadWithFilterLines(filterLines: string[]) {
+async function loadWithFilterLines(
+  filterLines: string[],
+  options: { logger?: Pick<Logger, "debug" | "warn"> } = {}
+) {
   const root = await mkdtemp(path.join(tmpdir(), "symphonika-ready-label-"));
   tempRoots.push(root);
   await mkdir(root, { recursive: true });
@@ -59,7 +63,10 @@ async function loadWithFilterLines(filterLines: string[]) {
     ].join("\n")
   );
   const reloader = new RuntimeConfigReloader({
-    configPath: path.join(root, "symphonika.yml")
+    configPath: path.join(root, "symphonika.yml"),
+    ...(options.logger === undefined
+      ? {}
+      : { logger: options.logger as unknown as Logger })
   });
   await reloader.reload();
   return reloader;
@@ -130,5 +137,24 @@ describe("ready_label config migration", () => {
 
     expect(second).toEqual(first);
     expect(second.migrated_from_labels_all).toEqual(["a", "b"]);
+  });
+});
+
+describe("ready_label broadening log", () => {
+  it("warns once across repeated reloads of the same multi-label config", async () => {
+    const warn = vi.fn();
+    const reloader = await loadWithFilterLines(
+      ['      labels_all: ["ship-it", "backend"]'],
+      { logger: { debug: vi.fn(), warn } }
+    );
+    await reloader.reload();
+    await reloader.reload();
+
+    const migrationWarnings = warn.mock.calls.filter(
+      ([, message]) =>
+        message === "symphonika config migrated legacy labels_all"
+    );
+    expect(migrationWarnings).toHaveLength(1);
+    expect(JSON.stringify(migrationWarnings[0])).toContain("backend");
   });
 });

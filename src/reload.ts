@@ -590,11 +590,15 @@ export class RuntimeConfigReloader {
       this.status.ok = result.errors.length === 0;
       this.status.routineErrors = result.routineErrors;
       this.status.usingLastKnownGood = result.usingLastKnownGood;
+      const previousWarnings = this.status.warnings;
       this.status.warnings = (this.snapshot?.polling.projects ?? []).flatMap(
         (project) =>
           readyLabelBroadeningWarning(project.name, project.issue_filters) ?? []
       );
-      if (this.status.warnings.length > 0) {
+      if (
+        this.status.warnings.length > 0 &&
+        this.status.warnings.join("\n") !== previousWarnings.join("\n")
+      ) {
         this.logger?.warn(
           { warnings: this.status.warnings },
           "symphonika config migrated legacy labels_all"

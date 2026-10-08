@@ -479,7 +479,7 @@ projects:
       token: "$GITHUB_TOKEN"
     issue_filters:
       states: ["open"]
-      ready_label: "ready-for-agent"
+      ready_label: "agent-ready"
       labels_none: ["blocked", "needs-human", "sym:stale"]
     priority:
       labels:

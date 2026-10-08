@@ -305,10 +305,10 @@ Work in {{workspace.path}} on branch {{branch.name}}.
 3. Run the repository's lint, typecheck, test, and build commands.
 4. Commit and push {{branch.name}}.
 5. Open a non-draft PR with `gh pr create`.
-6. Remove `agent-ready` with:
+6. Remove `ready-for-agent` with:
 
    ```sh
-   gh issue edit {{issue.number}} --remove-label agent-ready
+   gh issue edit {{issue.number}} --remove-label ready-for-agent
    ```
 
 7. If blocked, leave an explanatory `gh issue comment` and exit cleanly.
@@ -351,7 +351,7 @@ Common first-run errors:
 
 ## 8. Make one issue eligible
 
-Choose a small, self-contained open issue and apply `agent-ready`. Symphonika does not own that
+Choose a small, self-contained open issue and apply `ready-for-agent`. Symphonika does not own that
 label; it is simply the eligibility gate configured above.
 
 With multiple eligible issues, lower `priority` numbers run first. Ties break by creation time and
@@ -576,7 +576,7 @@ implementation state requires commits ahead of base. `action.provider` overrides
 default for that state and is honored on both initial and later states.
 
 Raw-FSM state advances remain part of one in-flight graph even if the agent removes
-`agent-ready`. Mid-walk label drift does not cancel them; issue closure and operator cancellation
+`ready-for-agent`. Mid-walk label drift does not cancel them; issue closure and operator cancellation
 still do.
 
 ## 15. Level 3: wait, repair, and merge

@@ -152,7 +152,7 @@ projects:
       token: "$GITHUB_TOKEN"
     issue_filters:
       states: ["open"]
-      labels_all: ["agent-ready"]
+      ready_label: "agent-ready"
       labels_none: ["blocked", "needs-human", "sym:stale"]
     priority:
       labels:
@@ -193,7 +193,7 @@ projects:
   #     token: "$GITHUB_TOKEN"
   #   issue_filters:
   #     states: ["open"]
-  #     labels_all: ["refactor-ready"]
+  #     ready_label: "refactor-ready"
   #     labels_none: ["blocked", "needs-human", "sym:stale"]
   #   priority:
   #     labels:

@@ -22,7 +22,11 @@ const env = {
 function project(name: string, token: string): PollingProjectConfig {
   return {
     agent: { provider: "codex" },
-    issue_filters: { labels_none: [], ready_label: "agent-ready", states: ["open"] },
+    issue_filters: {
+      labels_none: [],
+      ready_label: "agent-ready",
+      states: ["open"]
+    },
     name,
     priority: { default: 99, labels: {} },
     tracker: { kind: "github", owner: "pmatos", repo: name, token }

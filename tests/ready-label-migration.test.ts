@@ -67,7 +67,9 @@ async function loadWithFilterLines(filterLines: string[]) {
 
 describe("ready_label config migration", () => {
   it("keeps a single legacy labels_all value unchanged without a warning", async () => {
-    const reloader = await loadWithFilterLines(['      labels_all: ["ship-it"]']);
+    const reloader = await loadWithFilterLines([
+      '      labels_all: ["ship-it"]'
+    ]);
 
     const filters = reloader.getSnapshot()?.polling.projects[0]?.issue_filters;
     expect(filters?.ready_label).toBe("ship-it");

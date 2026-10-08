@@ -125,7 +125,10 @@ describe("doctor", () => {
     await writeValidConfig(configPath, {
       issueReadyLines: ['      labels_all: ["agent-ready", "backend"]']
     });
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
     process.env.GITHUB_TOKEN = "test-secret-token";
 
     const report = await runDoctor({
@@ -151,18 +154,24 @@ describe("doctor", () => {
       "both set"
     ],
     ["neither key", [], "ready_label"]
-  ])("rejects %s as a Project validation error", async (_name, lines, message) => {
-    const root = await makeTempRoot();
-    const configPath = path.join(root, "symphonika.yml");
-    await writeValidConfig(configPath, { issueReadyLines: lines });
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work on {{issue.title}}.\n");
-    process.env.GITHUB_TOKEN = "test-secret-token";
+  ])(
+    "rejects %s as a Project validation error",
+    async (_name, lines, message) => {
+      const root = await makeTempRoot();
+      const configPath = path.join(root, "symphonika.yml");
+      await writeValidConfig(configPath, { issueReadyLines: lines });
+      await writeFile(
+        path.join(root, "WORKFLOW.md"),
+        "Work on {{issue.title}}.\n"
+      );
+      process.env.GITHUB_TOKEN = "test-secret-token";
 
-    const output = await runDoctorCommand(configPath);
+      const output = await runDoctorCommand(configPath);
 
-    expect(process.exitCode).toBe(1);
-    expect(output.stderr).toContain(message);
-  });
+      expect(process.exitCode).toBe(1);
+      expect(output.stderr).toContain(message);
+    }
+  );
 
   it("reports clear errors for a missing Projects list", async () => {
     const root = await makeTempRoot();

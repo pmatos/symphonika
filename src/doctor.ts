@@ -2402,7 +2402,8 @@ async function collectProjectSettings(input: {
       await promptController.ask({
         defaultValue: DEFAULT_READY_LABEL,
         key: "readyLabel",
-        message: "Ready label (single label that marks an issue ready for dispatch)"
+        message:
+          "Ready label (single label that marks an issue ready for dispatch)"
       })
     ).trim();
     if (readyLabel.length === 0) {

@@ -126,7 +126,7 @@ export type WorkflowReference = z.infer<typeof workflowReferenceSchema>;
 
 export const DEFAULT_READY_LABEL = "ready-for-agent";
 
-// ADR 2026-10-08-1200: a Dispatch Project has exactly one Ready Label. Legacy
+// ADR-2026-10-08-1426: a Dispatch Project has exactly one Ready Label. Legacy
 // `labels_all` is migrated here, at load time, so no consumer ever sees it.
 // Several legacy labels collapse to the first; the full original list is kept
 // in `migrated_from_labels_all` so doctor, the startup log, and the UI can
@@ -181,7 +181,10 @@ export const issueFiltersSchema = z
 
 export function readyLabelBroadeningWarning(
   projectName: string,
-  filters: { ready_label: string; migrated_from_labels_all?: string[] | undefined }
+  filters: {
+    ready_label: string;
+    migrated_from_labels_all?: string[] | undefined;
+  }
 ): string | undefined {
   const legacy = filters.migrated_from_labels_all;
   if (legacy === undefined || legacy.length < 2) {
@@ -190,5 +193,7 @@ export function readyLabelBroadeningWarning(
   return `project ${projectName}: legacy issue_filters.labels_all [${legacy.join(", ")}] was migrated to ready_label "${filters.ready_label}"; issues no longer need ${legacy
     .slice(1)
     .map((label) => `"${label}"`)
-    .join(" or ")} to be eligible, so eligibility is broader than before. Set issue_filters.ready_label explicitly and remove labels_all`;
+    .join(
+      " or "
+    )} to be eligible, so eligibility is broader than before. Set issue_filters.ready_label explicitly and remove labels_all`;
 }

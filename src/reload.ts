@@ -592,8 +592,7 @@ export class RuntimeConfigReloader {
       this.status.usingLastKnownGood = result.usingLastKnownGood;
       this.status.warnings = (this.snapshot?.polling.projects ?? []).flatMap(
         (project) =>
-          readyLabelBroadeningWarning(project.name, project.issue_filters) ??
-          []
+          readyLabelBroadeningWarning(project.name, project.issue_filters) ?? []
       );
       if (this.status.warnings.length > 0) {
         this.logger?.warn(

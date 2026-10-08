@@ -131,12 +131,13 @@ re-evaluation (issue #731 lineage). It is the I/O-and-credential resolution the 
 build on, not the questions themselves.
 _Avoid_: Dispatch Eligibility (the label/state predicate) when referring to this resolution
 
-**Required Eligibility Label**:
-A repository-owned GitHub issue label configured in a Dispatch Project's `issue_filters.labels_all`.
-Every configured Required Eligibility Label must exist in the Dispatch Project's repository before
-the Dispatch Project can dispatch; unlike an Operational Label, Symphonika reads but does not own
-its workflow meaning.
-_Avoid_: operational label
+**Ready Label**:
+The single, nonempty, repository-owned GitHub issue label configured as a Dispatch Project's
+`issue_filters.ready_label`; it is the Project's dispatch-intent label. It must exist in the Dispatch
+Project's repository before the Dispatch Project can dispatch; unlike an Operational Label,
+Symphonika reads but does not own its workflow meaning. Replaces the former jointly-required
+`labels_all` list ("Required Eligibility Label"); legacy `labels_all` is migrated at load time.
+_Avoid_: Required Eligibility Label, operational label
 
 **Operational Label**:
 A GitHub issue label owned by the orchestrator for dispatch safety and runtime bookkeeping; v1 labels are `sym:claimed`, `sym:running`, `sym:failed`, `sym:blocked`, `sym:stale`, and `sym:human-needed`.
@@ -681,7 +682,7 @@ of needing no interactive input, not this assistant
 - **Dispatch Eligibility** and **Continuation Eligibility** are separate questions over the same
   Issue predicate family
 - An **Orchestrator** dispatches zero or more **Issues** across one or more **Dispatch Projects**
-- A **Dispatch Project**'s **Required Eligibility Labels** must exist in its Issue Tracker before dispatch
+- A **Dispatch Project**'s **Ready Label** must exist in its Issue Tracker before dispatch
 - An **Orchestrator** may write **Operational Labels**
 - A **Stale Claim** blocks automatic dispatch until explicitly cleared in v1
 - A newest `blocked / no_workspace_changes` **Run** suppresses fresh dispatch for the same

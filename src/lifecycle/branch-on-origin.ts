@@ -11,7 +11,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-const ORIGIN_TIP_WINDOW = 30;
+const ORIGIN_COMMIT_WINDOW = 30;
 
 export type BranchPublication =
   | { kind: "published" }
@@ -62,7 +62,7 @@ async function lookup(
   const commits = await tryListBranchCommits(input.api, {
     ...input.repository,
     branch: input.branch,
-    perPage: ORIGIN_TIP_WINDOW
+    perPage: ORIGIN_COMMIT_WINDOW
   });
   if (commits === undefined) {
     return { kind: "unverified" };

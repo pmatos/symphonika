@@ -1,3 +1,5 @@
+import type { BranchPublication } from "./branch-on-origin.js";
+
 export type CapReachedKind = "no_commits" | "no_pr" | "work_landed" | "unknown";
 
 const CAP_REACHED_PREFIX = "cap_reached:";
@@ -83,6 +85,20 @@ export function buildNoPullRequestTrackedReason(
     `${NO_PULL_REQUEST_TRACKED_PREFIX} state "${waitStateId}" never observed a tracked pull request after ${attempts} checks`,
     context
   );
+}
+
+// Written (as a transient failure, so the retry budget applies) when a run
+// exits 0 with commits ahead of base but the Issue Branch is missing from
+// origin or sits at a different commit than the workspace head (issue #833).
+export function buildBranchNotPushedReason(
+  branchName: string,
+  publication: Extract<BranchPublication, { kind: "missing" | "stale" }>
+): string {
+  const detail =
+    publication.kind === "missing"
+      ? "branch does not exist on origin"
+      : `origin is at ${publication.originSha.slice(0, 12)}, workspace head is ${publication.localSha.slice(0, 12)}`;
+  return `branch_not_pushed: branch "${branchName}" has commits but never reached origin (${detail})`;
 }
 
 const PULL_REQUEST_DISCOVERY_EXHAUSTED_PREFIX =

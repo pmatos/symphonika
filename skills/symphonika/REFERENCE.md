@@ -122,7 +122,7 @@ design leans on the exact details:
 - Agent owns (from inside an `agent` state's prompt): PR creation, `agent-ready` removal, conventional commit messages, closing the loop with the user.
 - Orchestrator can act directly via `comment` / `label_issue` / `close_issue` states without an agent run at all.
 - Orchestrator always owns: workspace prep, branch creation, dispatch safety, success/failure marking, continuations, retries, PR follow-up polling.
-- A Run succeeds when the provider exits 0 AND the issue branch has commits ahead of base. No commits = `failed` with `no_workspace_changes`.
+- A Run succeeds when the provider exits 0 AND the issue branch has commits ahead of base. No commits = `failed` with `no_workspace_changes`. Commits that never reached origin (checked against GitHub) = transient `branch_not_pushed`, retried; skipped for a state that hands off to another `agent` state.
 - `needs-human` (or any handoff label) as an agent's own exit strategy is forbidden by the autonomy preamble — the agent must comment and exit cleanly instead. A workflow's own `close_issue`/`label_issue` states are an explicit authored decision, not the agent improvising an exit, and aren't restricted by the preamble.
 
 ## Validation and inspection

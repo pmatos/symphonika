@@ -423,6 +423,14 @@ failing commit status, keeps the whole rollup an ordinary `failure`.
 attempt started from. It is a property of the branch, not of the attempt: in a multi-state walk it
 stays `true` for every later state once any earlier state has committed.
 
+A clean agent exit with commits ahead of base is also checked against origin: Symphonika compares
+the workspace `HEAD` with the Issue Branch's recent commits on GitHub, and a branch that is missing or
+does not contain it (typically a `git push` still running or failed when the provider exited) turns the attempt into
+a transient failure with reason `branch_not_pushed`, so `provider_success` reads `false` and the retry
+budget applies. The check fails open when GitHub cannot answer, and is skipped for a state with a
+transition into another `agent` state, since those states share the workspace and a later one is
+expected to publish. See ADR-2026-10-08-1425.
+
 `branch_advanced_since_attempt_start` is attempt-local. Symphonika snapshots a digest of
 `git diff origin/<base_branch>...HEAD` after Workspace preparation and before the provider runs. The
 signal is true whenever the completion digest differs from that snapshot. Diff content, not `HEAD`'s

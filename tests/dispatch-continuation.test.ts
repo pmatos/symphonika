@@ -17,7 +17,10 @@ import {
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import { openRunStore } from "../src/run-store.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
-import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
+import {
+  createGitWorkspaceAhead,
+  gitHeadSha
+} from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -164,6 +167,7 @@ describe("dispatch continuation cap", () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await createGitWorkspaceAhead(prepared);
+    const headSha = await gitHeadSha(prepared.workspacePath);
     await writeProject(root);
 
     const provider: AgentProvider = {
@@ -186,7 +190,14 @@ describe("dispatch continuation cap", () => {
       getIssue: vi
         .fn()
         .mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
-      listBranchCommits: vi.fn().mockResolvedValue([]),
+      // Each run's commits are on origin; once those are consumed, lookups (the
+      // cap-reached classifier) see no branch.
+      listBranchCommits: vi
+        .fn()
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
@@ -403,6 +414,7 @@ describe("dispatch continuation cap", () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await createGitWorkspaceAhead(prepared);
+    const headSha = await gitHeadSha(prepared.workspacePath);
     await writeProject(root);
 
     const provider: AgentProvider = {
@@ -433,7 +445,14 @@ describe("dispatch continuation cap", () => {
           title: getIssueCalls === 1 ? baseIssue.title : renamedTitle
         });
       }),
-      listBranchCommits: vi.fn().mockResolvedValue([]),
+      // Each run's commits are on origin; once those are consumed, lookups (the
+      // cap-reached classifier) see no branch.
+      listBranchCommits: vi
+        .fn()
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])

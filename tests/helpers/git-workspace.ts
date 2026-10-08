@@ -222,3 +222,7 @@ async function git(args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args);
   return stdout.trim();
 }
+
+export async function gitHeadSha(workspacePath: string): Promise<string> {
+  return git(["-C", workspacePath, "rev-parse", "HEAD"]);
+}

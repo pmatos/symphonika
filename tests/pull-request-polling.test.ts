@@ -43,7 +43,11 @@ type TestProject = PollingServiceConfig["projects"][number];
 function project(overrides: Partial<TestProject> = {}): TestProject {
   return {
     agent: { provider: "codex" },
-    issue_filters: { labels_all: [], labels_none: [], states: ["open"] },
+    issue_filters: {
+      labels_none: [],
+      ready_label: "agent-ready",
+      states: ["open"]
+    },
     name: "alpha",
     priority: { default: 0, labels: {} },
     tracker: {

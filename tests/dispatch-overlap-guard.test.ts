@@ -434,7 +434,7 @@ async function createHarness(
     agent: { provider: "codex" },
     dispatch: { overlap_guard: true },
     issue_filters: {
-      labels_all: ["agent-ready"],
+      ready_label: "agent-ready",
       labels_none: [],
       states: ["open"]
     },

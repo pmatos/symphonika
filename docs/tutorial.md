@@ -123,7 +123,7 @@ symphonika init-project
 
 `init-project` reads the current repository's `origin`, prompts for Project settings, appends a
 Dispatch Project, creates a starter Markdown `WORKFLOW.md` when the selected path is absent, and
-creates missing `sym:*` Operational Labels plus required eligibility labels.
+creates missing `sym:*` Operational Labels plus the Ready Label.
 
 Pass `--yes` to accept displayed defaults. `init --force` replaces the global config;
 `init-project --force` replaces only a Project with the same name.
@@ -169,7 +169,7 @@ projects:
       token: "$GITHUB_TOKEN"
     issue_filters:
       states: ["open"]
-      labels_all: ["agent-ready"]
+      ready_label: "ready-for-agent"
       labels_none: ["blocked", "needs-human", "sym:stale"]
     priority:
       labels:
@@ -194,9 +194,12 @@ The important boundaries are:
   SQLite run store.
 - `name: my-app` is the Symphonika Project name, not a GitHub Projects board. Commands such as
   `symphonika clear-stale my-app 42` use it.
-- `labels_all` controls eligibility. An issue must have every listed label before dispatch.
+- `ready_label` is the single label that marks an issue ready for dispatch (new Projects default to
+  `ready-for-agent`). The legacy `labels_all` list is still read at load time and migrated: one
+  element becomes the `ready_label`; several take the first and `doctor`, the daemon log, and the
+  dashboard warn that eligibility broadened; an empty list, or both keys, is rejected.
 - `labels_none` excludes issues. `sym:stale` prevents automatic re-claim after a stale Run.
-- `sym:*` labels belong to the orchestrator. Workflow labels such as `agent-ready` belong to the
+- `sym:*` labels belong to the orchestrator. Workflow labels such as `ready-for-agent` belong to the
   repository.
 - `workspace.root` should be absolute. Relative paths resolve from the Service Config directory,
   and `~` is not expanded.
@@ -302,10 +305,10 @@ Work in {{workspace.path}} on branch {{branch.name}}.
 3. Run the repository's lint, typecheck, test, and build commands.
 4. Commit and push {{branch.name}}.
 5. Open a non-draft PR with `gh pr create`.
-6. Remove `agent-ready` with:
+6. Remove `ready-for-agent` with:
 
    ```sh
-   gh issue edit {{issue.number}} --remove-label agent-ready
+   gh issue edit {{issue.number}} --remove-label ready-for-agent
    ```
 
 7. If blocked, leave an explanatory `gh issue comment` and exit cleanly.
@@ -344,11 +347,11 @@ Common first-run errors:
   `command -v <name>`. For a Bun-installed OMP, confirm `~/.bun/bin` is on the launching shell's
   `PATH`.
 - **Codex profile missing:** add the profile from the previous section.
-- **Required label missing:** rerun `init-project` or create the configured eligibility label.
+- **Ready Label missing:** rerun `init-project` or create the configured `ready_label` in the repository.
 
 ## 8. Make one issue eligible
 
-Choose a small, self-contained open issue and apply `agent-ready`. Symphonika does not own that
+Choose a small, self-contained open issue and apply `ready-for-agent`. Symphonika does not own that
 label; it is simply the eligibility gate configured above.
 
 With multiple eligible issues, lower `priority` numbers run first. Ties break by creation time and
@@ -573,7 +576,7 @@ implementation state requires commits ahead of base. `action.provider` overrides
 default for that state and is honored on both initial and later states.
 
 Raw-FSM state advances remain part of one in-flight graph even if the agent removes
-`agent-ready`. Mid-walk label drift does not cancel them; issue closure and operator cancellation
+`ready-for-agent`. Mid-walk label drift does not cancel them; issue closure and operator cancellation
 still do.
 
 ## 15. Level 3: wait, repair, and merge
@@ -786,7 +789,7 @@ refactor: `red_team`, `refactoring`, and `verifying` agent states over `prompts/
 `prompts/refactor.md`, and `prompts/verify.md`. It is an issue Workflow, not a risk scanner. The
 repository also ships `routines/refactor-audit.md` as a bounded weekly scanner that files at most
 three ranked issues. Register that Routine only after declaring a Dispatch Project whose raw-FSM
-Workflow is that refactor workflow and whose Required Eligibility Label is `refactor-ready`; a
+Workflow is that refactor workflow and whose Ready Label is `refactor-ready`; a
 separate label keeps those issues out of a different Workflow used for ordinary repository work.
 Adjust the Routine's labels and batching policy when copying it to another repository.
 
@@ -1184,7 +1187,7 @@ Run `symphonika init`, then register at least one Project with `init-project`.
 
 ### No eligible issue
 
-Confirm the issue is open, has every `labels_all` label, and has no `labels_none` label. Check
+Confirm the issue is open, has the Project's `ready_label`, and has no `labels_none` label. Check
 `symphonika status`.
 
 ### `input_required`

@@ -199,7 +199,7 @@ function projectFixture(): RunControllerProjectConfig {
     mode: "dispatch",
     agent: { provider: "codex" },
     issue_filters: {
-      labels_all: ["agent-ready"],
+      ready_label: "agent-ready",
       labels_none: [],
       states: ["open"]
     },

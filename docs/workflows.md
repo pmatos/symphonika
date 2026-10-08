@@ -596,7 +596,7 @@ state-advance Run in the same workflow walk. A transition to `wait` or `merge_pr
 waiting Run. Transitions into terminals end the walk.
 
 Raw-FSM state advances are not ordinary issue continuations. While the graph is in flight,
-`labels_all` and `labels_none` drift does not cancel it; the FSM owns advancement. Issue closure and
+`ready_label` and `labels_none` drift does not cancel it; the FSM owns advancement. Issue closure and
 operator cancellation still apply.
 
 ### Provider routing

@@ -291,7 +291,7 @@ export type HttpAppOptions = {
   getProjectRepo?: (
     projectName: string
   ) => { owner: string; repo: string } | undefined;
-  // The project's configured issue_filters.labels_all -- the label-write
+  // The project's configured issue_filters.ready_label -- the label-write
   // dependency gate (src/http/pages.ts's handleIssueLabelWrite) only blocks
   // adding a label in this set, never a hardcoded "agent-ready" string,
   // since which label actually gates dispatch is per-project config. Absent
@@ -966,7 +966,8 @@ function emptyReloadStatus(): RuntimeReloadStatus {
     lastLoadedAt: null,
     ok: true,
     routineErrors: [],
-    usingLastKnownGood: false
+    usingLastKnownGood: false,
+    warnings: []
   };
 }
 

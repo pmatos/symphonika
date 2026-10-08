@@ -194,7 +194,7 @@ export type RegisterPagesOptions = {
   // HttpAppOptions.getProjectRepoAliases (src/http/app.ts) — the resolver
   // itself needs runtimeConfig.projectsByName(), which only daemon.ts has.
   getProjectRepoAliases?: (projectName: string) => string[];
-  // The project's configured issue_filters.labels_all — handleIssueLabelWrite's
+  // The project's configured issue_filters.ready_label — handleIssueLabelWrite's
   // dependency gate only blocks adding a label in this set. See
   // HttpAppOptions.getProjectRequiredLabels (src/http/app.ts).
   getProjectRequiredLabels?: (projectName: string) => string[];
@@ -621,6 +621,7 @@ export function registerPages(options: RegisterPagesOptions): void {
       [
         `<h1 class="page-title">Dashboard</h1>`,
         renderDaemonStaleBanner(tickAgeMs, pollingIntervalMs),
+        renderConfigWarningsBanner(snapshot?.reload.warnings ?? []),
         renderHeader(options.version, snapshot),
         DASHBOARD_STREAM_BANNER,
         renderWorkOverviewSection(
@@ -6634,6 +6635,16 @@ function renderDaemonStaleBanner(
   }
   const minutes = Math.floor(tickAgeMs / 60_000);
   return `<section class="banner banner--attention"><p class="banner-title">Daemon may be unresponsive</p><p class="banner-reason">The daemon has stopped ticking — its last successful poll/reconcile cycle was ${minutes} minute${minutes === 1 ? "" : "s"} ago. Issue polling and run dispatch are likely stalled. If a systemd watchdog is configured, it will restart the daemon automatically; otherwise restart it manually.</p></section>`;
+}
+
+function renderConfigWarningsBanner(warnings: readonly string[]): string {
+  if (warnings.length === 0) {
+    return "";
+  }
+  const items = warnings
+    .map((warning) => `<li>${escapeHtml(warning)}</li>`)
+    .join("");
+  return `<section class="banner banner--attention"><p class="banner-title">Config migrated; eligibility broadened</p><ul class="banner-reason">${items}</ul></section>`;
 }
 
 function renderPullRequestFollowupAttention(

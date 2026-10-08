@@ -110,7 +110,7 @@ snapshots for evidence and reproduction.
 An issue is eligible when all are true:
 
 - it is open
-- it has every configured `labels_all` label
+- it has the Project's configured `ready_label`
 - it has none of the configured `labels_none` labels
 - it does not have blocking operational labels
 - it is not already running, claimed, failed, blocked, or stale according to the orchestrator
@@ -135,12 +135,22 @@ Eligibility. It does not revoke an already-admitted raw-FSM walk: State Advances
 rechecks, and FSM-owned retries ignore later label and dependency drift while the Issue remains
 open. Issue closure and explicit operator cancellation still stop the walk. See ADR-0082.
 
-The configured `labels_all` values are Required Eligibility Labels. Every Required Eligibility
-Label must exist in the Project repository before the Project can dispatch work. `doctor` reports
-missing Required Eligibility Labels as validation errors, and `init-project` offers to create them
-after confirmation (or creates them under `--yes`). They remain repository-owned workflow labels;
-provisioning them does not make them Operational Labels or give the orchestrator authority to apply
-them to issues.
+Each Dispatch Project has exactly one Ready Label, configured as `issue_filters.ready_label`: a
+singular, nonempty string that marks an issue as ready for dispatch. The Ready Label must exist in
+the Project repository before the Project can dispatch work. `doctor` reports a missing Ready Label
+as a validation error, and `init-project` offers to create it after confirmation (or creates it
+under `--yes`). It remains a repository-owned workflow label; provisioning it does not make it an
+Operational Label or give the orchestrator authority to apply it to issues. See
+ADR-2026-10-08-1426.
+
+Legacy `issue_filters.labels_all` is migrated at config load time and never reaches dispatch,
+polling, the HTTP surfaces, or `doctor`'s label checks: a one-element list keeps its value as the
+Ready Label; a longer list takes its first element and reports the resulting broadening of
+eligibility (a `doctor` warning, a warning in the daemon log when a load first produces it or its
+content changes, and a dashboard banner); an empty list is a validation error; setting both `labels_all` and `ready_label`, or
+neither, is a validation error. A new Dispatch Project written by `init-project` defaults its
+`ready_label` to `ready-for-agent`; an existing config that sets neither key is not silently
+defaulted.
 
 ### 4.4 Operational Labels
 
@@ -380,11 +390,11 @@ required to replace an existing user config.
 `symphonika init-project` runs inside a Git repository with an `origin` remote and requires an
 existing selected Service Config. It accepts `--mode <dispatch|routine-host>` (default `dispatch`).
 In `dispatch` mode it derives repository defaults from `origin`, prompts for the Project name, Agent
-Provider, base branch, issue-label filters, priority-label mapping, and Workflow Contract path, and
+Provider, base branch, Ready Label (default `ready-for-agent`), excluded issue labels, priority-label mapping, and Workflow Contract path, and
 appends the Project without discarding unrelated Projects or hand-authored config. A duplicate
 Project name is refused unless `--force`, which replaces only that sequence entry. The command
 creates a starter Workflow Contract only when the selected path is absent, prints the created path
-on success, and then creates missing Operational Labels and configured Required Eligibility Labels
+on success, and then creates missing Operational Labels and the configured Ready Label
 in the newly registered repository. The starter contract is Markdown; the command refuses to
 scaffold a selected path that resolves to the `raw_fsm` format (a `.yaml`, `.yml`, or `.json`
 extension, or an explicit `format: raw_fsm`), since writing Markdown prose into a raw FSM file would
@@ -469,7 +479,7 @@ projects:
       token: "$GITHUB_TOKEN"
     issue_filters:
       states: ["open"]
-      labels_all: ["agent-ready"]
+      ready_label: "agent-ready"
       labels_none: ["blocked", "needs-human", "sym:stale"]
     priority:
       labels:
@@ -511,8 +521,8 @@ empty `projects` sequence and is not daemon-ready until a Project is registered.
 
 Each Project declares a `mode` of `"dispatch"` (the default when omitted) or `"routine_host"`. A
 Dispatch Project requires `tracker`, `issue_filters`, `priority`, `workflow`, `workspace`, and
-`agent`; it is polled for issues and its dispatch validity gates on repo access and Operational /
-Eligibility Labels. A Routine Host requires only `name`, `workspace`, `agent`, and `mode`; it is
+`agent`; it is polled for issues and its dispatch validity gates on repo access and Operational
+Labels and the Ready Label. A Routine Host requires only `name`, `workspace`, `agent`, and `mode`; it is
 never polled for issues and exists only to host Routine Firings. A Routine Host must declare
 `tracker` when any routine targeting it is `kind: git` — a `kind: git` routine on a tracker-less
 host is a declaration-time validation error. See ADR 0062. `symphonika init-project --mode
@@ -1625,9 +1635,9 @@ The GitHub tracker adapter supports:
 
 - validating repository access
 - validating operational labels
-- validating configured Required Eligibility Labels
+- validating the Ready Label
 - creating operational labels after explicit confirmation
-- creating configured Required Eligibility Labels after explicit confirmation
+- creating the Ready Label after explicit confirmation
 - fetching candidate issues
 - fetching current issue state for reconciliation
 - applying and removing operational labels
@@ -1646,7 +1656,7 @@ Each Project may configure these.
 Fresh dispatch also consults durable Run evidence after label-based tracker filtering. When the
 newest Run for the same `(Project, repository, Issue)` is `blocked` with `terminal_reason =
 "no_workspace_changes"`, the Issue is not claimed again even if an operator clears its `sym:*`
-labels while leaving every Required Eligibility Label in place. This guard uses the classified Run
+labels while leaving the Ready Label in place. This guard uses the classified Run
 outcome rather than parsing free-form issue comments, and it does not remove repository-owned
 labels or close the Issue. Its dispatch effect applies only to fresh dispatch: retries,
 label-controlled Continuations, raw-FSM State Advances, waiting rows, and PR Follow-up retain their
@@ -2412,7 +2422,7 @@ head SHA from that successful observation. Symphonika does not refresh only the 
 because pairing a newer REST head with GraphQL readiness evaluated for another commit would break
 the commit-identity guarantee while adding another polling call.
 
-Review follow-up Runs ignore `labels_all` and `labels_none` from the moment their in-flight slot is
+Review follow-up Runs ignore `ready_label` and `labels_none` from the moment their in-flight slot is
 reserved, including workspace preparation and provider validation. Every raw FSM state advance has
 the same immunity from the same moment, decided at the claim rather than after the attempt's
 workflow reload — a raw FSM legitimately removes its own eligibility label as it works, so a
@@ -2495,7 +2505,7 @@ Lifecycle:
    the cancel reason; the next re-evaluation tick observes the cancel-requested flag and
    transitions the Run to `cancelled`.
 7. Label or dependency drift does not cancel a waiting Run. Mid-walk runs are immune to
-   `labels_all`, `labels_none`, and Dependency Gate re-checks; the FSM owns transitions while the
+   `ready_label`, `labels_none`, and Dependency Gate re-checks; the FSM owns transitions while the
    walk is in flight (ADR 0046 and ADR 0082, carried over to wait states by ADR 0047).
 
 Mergeability `UNKNOWN`/`null` is intentionally projected as the predicate key omitted — workflow
@@ -2664,8 +2674,8 @@ config path and points the operator to `symphonika init`.
 
 - config parse
 - Project shape, including the declared `mode`
-- Dispatch Projects: GitHub auth, repository access, Operational Labels, and Required Eligibility
-  Labels (`issue_filters.labels_all`)
+- Dispatch Projects: GitHub auth, repository access, Operational Labels, and the Ready Label
+  (`issue_filters.ready_label`)
 - Routine Hosts: provider command + adapter + workspace resolvable (no GitHub access, no label
   checks); `validForHosting` rather than `validForDispatch`
 - provider commands for Codex, Claude, and OMP when selected by a Project or Routine
@@ -2727,7 +2737,7 @@ the existing config/workflow validations. See ADR 0085.
 `init` writes only the user Service Config and never inspects or mutates a repository or GitHub.
 
 `init-project` registers the current repository. In `dispatch` mode it creates a missing starter
-Workflow Contract and creates missing Operational Labels and configured Required Eligibility Labels
+Workflow Contract and creates missing Operational Labels and the configured Ready Label
 after the interactive review or explicit `--yes` selection. In `routine-host` mode it creates no
 Workflow Contract and no labels. See §5.1 and ADR 0062.
 
@@ -3410,9 +3420,9 @@ The bootstrap slice is accepted when:
 - `init-project` can append a Dispatch Project without losing existing config and create its starter
   Workflow Contract
 - `doctor` validates service config, GitHub auth, operational labels, selected Codex, Claude, and
-  OMP provider commands, workflow file, database path, workspace root, and configured Required
-  Eligibility Labels for Dispatch Projects; Routine Hosts validate provider + workspace only
-- `init-project` can create missing operational and Required Eligibility Labels for a Dispatch
+  OMP provider commands, workflow file, database path, workspace root, and configured Ready
+  Label for Dispatch Projects; Routine Hosts validate provider + workspace only
+- `init-project` can create missing operational labels and the Ready Label for a Dispatch
   Project after interactive review or `--yes`; `init-project --mode routine-host` creates none
 - `daemon` can claim one `agent-ready` issue in this repository
 - daemon prepares the deterministic issue worktree and branch

@@ -1966,9 +1966,11 @@ export async function startDaemon(
       return { format: workflow.format, path: workflow.path };
     },
     getProjectRepoAliases: resolveProjectRepoAliases,
-    getProjectRequiredLabels: (projectName) =>
-      runtimeConfig.projectsByName().get(projectName)?.issue_filters
-        ?.labels_all ?? [],
+    getProjectRequiredLabels: (projectName) => {
+      const readyLabel = runtimeConfig.projectsByName().get(projectName)
+        ?.issue_filters?.ready_label;
+      return readyLabel === undefined ? [] : [readyLabel];
+    },
     getProjectRepo: (projectName) => {
       const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
       return tracker === undefined

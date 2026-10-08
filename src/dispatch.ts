@@ -3,6 +3,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 import {
+  issueFiltersSchema,
   projectDispatchSchema,
   projectWorkspaceSchema,
   workflowReferenceSchema
@@ -76,13 +77,7 @@ const dispatchProjectSchema = z
         token: z.string().trim().min(1)
       })
       .passthrough(),
-    issue_filters: z
-      .object({
-        states: z.array(z.literal("open")).min(1),
-        labels_all: z.array(z.string().trim().min(1)),
-        labels_none: z.array(z.string().trim().min(1))
-      })
-      .passthrough(),
+    issue_filters: issueFiltersSchema,
     priority: z
       .object({
         labels: z.record(z.string(), z.number().int().nonnegative()),

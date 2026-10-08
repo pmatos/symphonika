@@ -29,7 +29,7 @@ async function makeTempRoot(): Promise<string> {
 const baseProject: PollingProjectConfig = {
   agent: { provider: "codex" },
   issue_filters: {
-    labels_all: ["agent-ready"],
+    ready_label: "agent-ready",
     labels_none: ["blocked", "needs-human"],
     states: ["open"]
   },

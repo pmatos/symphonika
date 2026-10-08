@@ -119,6 +119,60 @@ describe("doctor", () => {
     expect(output.stdout).toContain("1 project");
   });
 
+  it("warns, without failing, when several legacy labels_all collapse to the first", async () => {
+    const root = await makeTempRoot();
+    const configPath = path.join(root, "symphonika.yml");
+    await writeValidConfig(configPath, {
+      issueReadyLines: ['      labels_all: ["agent-ready", "backend"]']
+    });
+    await writeFile(
+      path.join(root, "WORKFLOW.md"),
+      "Work on {{issue.title}}.\n"
+    );
+    process.env.GITHUB_TOKEN = "test-secret-token";
+
+    const report = await runDoctor({
+      agentProviders: fakeAgentProviders(),
+      configPath,
+      githubApi: successfulGitHubApi(),
+      homeDir: root
+    });
+
+    expect(report.errors).toEqual([]);
+    const warning = report.warnings.find((entry) =>
+      entry.includes("labels_all")
+    );
+    expect(warning).toContain('ready_label "agent-ready"');
+    expect(warning).toContain('"backend"');
+  });
+
+  it.each([
+    ["an empty labels_all", ["      labels_all: []"], "labels_all"],
+    [
+      "both labels_all and ready_label",
+      ['      labels_all: ["a"]', '      ready_label: "b"'],
+      "both set"
+    ],
+    ["neither key", [], "ready_label"]
+  ])(
+    "rejects %s as a Project validation error",
+    async (_name, lines, message) => {
+      const root = await makeTempRoot();
+      const configPath = path.join(root, "symphonika.yml");
+      await writeValidConfig(configPath, { issueReadyLines: lines });
+      await writeFile(
+        path.join(root, "WORKFLOW.md"),
+        "Work on {{issue.title}}.\n"
+      );
+      process.env.GITHUB_TOKEN = "test-secret-token";
+
+      const output = await runDoctorCommand(configPath);
+
+      expect(process.exitCode).toBe(1);
+      expect(output.stderr).toContain(message);
+    }
+  );
+
   it("reports clear errors for a missing Projects list", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");
@@ -3166,6 +3220,7 @@ async function writeValidConfig(
     claudeCommand?: string;
     codexCommand?: string;
     globalLines?: string[];
+    issueReadyLines?: string[];
     ompCommand?: string;
     projectLines?: string[];
     routineDefaultLines?: string[];
@@ -3218,7 +3273,7 @@ async function writeValidConfig(
       `      token: "${overrides.token ?? "$GITHUB_TOKEN"}"`,
       "    issue_filters:",
       '      states: ["open"]',
-      '      labels_all: ["agent-ready"]',
+      ...(overrides.issueReadyLines ?? ['      ready_label: "agent-ready"']),
       '      labels_none: ["blocked", "needs-human", "sym:stale"]',
       "    priority:",
       "      labels:",

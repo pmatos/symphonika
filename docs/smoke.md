@@ -11,7 +11,7 @@ not retry, and does not schedule continuations after a successful run.
 
 1. Validates `symphonika.example.yml` and `WORKFLOW.md` via `symphonika doctor`. If any
    doctor error is reported, smoke aborts before touching the issue tracker.
-2. Polls GitHub once for issues that match the Project's `labels_all` /
+2. Polls GitHub once for issues that match the Project's `ready_label` /
    `labels_none` filters.
 3. If at least one eligible issue is found, claims it (adds `sym:claimed`,
    then `sym:running`), prepares a deterministic Git worktree under

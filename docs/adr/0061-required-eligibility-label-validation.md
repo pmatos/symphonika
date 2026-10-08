@@ -1,6 +1,6 @@
 # Validate and provision Required Eligibility Labels
 
-Status: Accepted
+Status: Accepted (amended by ADR-2026-10-08-1426: the Required Eligibility Label set is now the single Ready Label, `issue_filters.ready_label`)
 
 ## Decision
 

@@ -6891,7 +6891,7 @@ describe("RoutineFiringDispatcher", () => {
               agent: { provider: "codex" },
               disabled: false,
               issue_filters: {
-                labels_all: ["agent-ready"],
+                ready_label: "agent-ready",
                 labels_none: ["blocked"],
                 states: ["open"]
               },
@@ -11487,7 +11487,7 @@ function runStoreProjectFixture() {
     agent: { provider: "codex" as const },
     disabled: false,
     issue_filters: {
-      labels_all: ["agent-ready"],
+      ready_label: "agent-ready",
       labels_none: ["blocked"],
       states: ["open" as const]
     },

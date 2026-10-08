@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -729,10 +729,22 @@ describe("workflow progress guard", () => {
         issue: IssueSnapshot;
         reEvaluate: (runId: string) => Promise<void>;
         store: ReturnType<typeof openRunStore>;
-      }) => Promise<void>
+      }) => Promise<void>,
+      scheduled: ScheduledWorkInput[] = [],
+      holdingKind: "merge_pr" | "wait" = "wait"
     ): Promise<void> {
       const root = await makeTempRoot();
       await writeCyclingProject(root);
+      if (holdingKind === "merge_pr") {
+        const workflowPath = path.join(root, "workflow.yml");
+        await writeFile(
+          workflowPath,
+          (await readFile(workflowPath, "utf8")).replace(
+            "        kind: wait",
+            "        kind: merge_pr"
+          )
+        );
+      }
       const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
       try {
         const issue = issueFixture();
@@ -741,7 +753,11 @@ describe("workflow progress guard", () => {
         const controller = buildController({
           githubIssuesApi: api,
           root,
-          runStore: store
+          runStore: store,
+          schedule: (item) => {
+            scheduled.push(item);
+            return true;
+          }
         });
         await run({
           api,
@@ -876,6 +892,114 @@ describe("workflow progress guard", () => {
         );
       }
     );
+
+    describe("checks that never started", () => {
+      const neverStarted = prState({
+        neverStartedChecks: ["static", "unit"],
+        statusCheckRollupState: "FAILURE",
+        unresolvedReviewThreads: []
+      });
+
+      it("stays parked without routing to repair, and flags the issue once with the infrastructure cause", async () => {
+        const scheduled: ScheduledWorkInput[] = [];
+        await withParkedGuard(
+          vi.fn().mockResolvedValue(neverStarted),
+          async ({ api, issue, reEvaluate, store }) => {
+            await reEvaluate("waiting-1");
+            await reEvaluate("waiting-1");
+            await reEvaluate("waiting-1");
+
+            const parked = store.getRun("waiting-1");
+            expect(parked?.state).toBe("waiting");
+            expect(parked?.currentStateId).toBe("holding");
+            expect(parked?.stateTransitionReason).toBe("checks_not_started");
+            expect(
+              scheduled.filter((item) => item.kind === "state_advance")
+            ).toEqual([]);
+            expect(api.addLabelsToIssue).toHaveBeenCalledTimes(1);
+            expect(api.addLabelsToIssue).toHaveBeenCalledWith(
+              expect.objectContaining({
+                issueNumber: issue.number,
+                labels: ["sym:human-needed"]
+              })
+            );
+            expect(api.addIssueComment).toHaveBeenCalledTimes(1);
+            const body = (
+              api.addIssueComment.mock.calls[0]?.[0] as { body: string }
+            ).body;
+            expect(body).toContain("never started");
+            expect(body).toContain("static, unit");
+            expect(body).toContain("billing");
+          },
+          scheduled
+        );
+      });
+
+      it("flags once and keeps the dedup key on a merge_pr wait whose observation rewrites the reason every tick", async () => {
+        await withParkedGuard(
+          vi.fn().mockResolvedValue(neverStarted),
+          async ({ api, reEvaluate, store }) => {
+            await reEvaluate("waiting-1");
+            await reEvaluate("waiting-1");
+            await reEvaluate("waiting-1");
+            await reEvaluate("waiting-1");
+
+            expect(store.getRun("waiting-1")?.stateTransitionReason).toBe(
+              "checks_not_started"
+            );
+            expect(api.addLabelsToIssue).toHaveBeenCalledTimes(1);
+            expect(api.addIssueComment).toHaveBeenCalledTimes(1);
+          },
+          [],
+          "merge_pr"
+        );
+      });
+
+      it("removes sym:human-needed once the checks start and settle", async () => {
+        await withParkedGuard(
+          vi
+            .fn()
+            .mockResolvedValueOnce(neverStarted)
+            .mockResolvedValue(pending),
+          async ({ api, reEvaluate, store }) => {
+            await reEvaluate("waiting-1");
+            expect(api.addLabelsToIssue).toHaveBeenCalledTimes(1);
+
+            await reEvaluate("waiting-1");
+
+            expect(store.getRun("waiting-1")?.stateTransitionReason).not.toBe(
+              "checks_not_started"
+            );
+            expect(api.removeLabelsFromIssue).toHaveBeenCalledTimes(1);
+            expect(api.removeLabelsFromIssue).toHaveBeenCalledWith(
+              expect.objectContaining({ labels: ["sym:human-needed"] })
+            );
+          }
+        );
+      });
+
+      it("still routes an ordinary failing rollup to repair", async () => {
+        const scheduled: ScheduledWorkInput[] = [];
+        await withParkedGuard(
+          vi.fn().mockResolvedValue(
+            prState({
+              statusCheckRollupState: "FAILURE",
+              unresolvedReviewThreads: []
+            })
+          ),
+          async ({ api, reEvaluate, store }) => {
+            await reEvaluate("waiting-1");
+
+            expect(store.getRun("waiting-1")?.state).toBe("succeeded");
+            expect(
+              scheduled.filter((item) => item.kind === "state_advance")
+            ).toHaveLength(1);
+            expect(api.addLabelsToIssue).not.toHaveBeenCalled();
+          },
+          scheduled
+        );
+      });
+    });
 
     it("keeps parking when the label write fails", async () => {
       await withParkedGuard(

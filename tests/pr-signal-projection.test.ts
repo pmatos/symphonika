@@ -11,6 +11,7 @@ function makePullRequestState(
 ): PullRequestState {
   return {
     checks: "unknown",
+    checksNeverStarted: [],
     draft: false,
     headSha: "deadbeef",
     mergeable: "unknown",

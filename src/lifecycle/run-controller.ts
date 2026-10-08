@@ -133,6 +133,10 @@ import {
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import {
+  CHECKS_NOT_STARTED_REASON,
+  describeChecksNotStarted
+} from "./checks-not-started.js";
+import {
   evaluateConcurrencyCapacity,
   isGlobalCapReached,
   isProjectCapReached
@@ -2673,17 +2677,36 @@ export class RunController {
       return;
     }
 
-    const heldByProgressGuard = isProgressGuardReason(
-      row.stateTransitionReason
-    );
+    const heldForHumanAttention =
+      isProgressGuardReason(row.stateTransitionReason) ||
+      row.stateTransitionReason === CHECKS_NOT_STARTED_REASON;
 
     if (decision.kind === "stay_waiting") {
+      const neverStartedChecks = pullRequestState?.checksNeverStarted ?? [];
+      if (neverStartedChecks.length > 0) {
+        // Deduped on the persisted reason (a restart loses memory). Rewritten
+        // every tick because a merge_pr observation overwrites the reason
+        // with its own "deferred" note before this point.
+        this.runStore.recordWaitingActivity(runId, CHECKS_NOT_STARTED_REASON);
+        if (row.stateTransitionReason !== CHECKS_NOT_STARTED_REASON) {
+          await this.claimLabels.flagHumanAttention({
+            issueNumber: refreshed.number,
+            reason: describeChecksNotStarted(neverStartedChecks),
+            repository
+          });
+        }
+        this.logger?.warn(
+          { checks: neverStartedChecks, runId },
+          "symphonika wait re-eval parked: checks never started"
+        );
+        return;
+      }
       // The guard's own park returns before this branch, so reaching it with a
       // no-progress reason still on the row means the guard has stopped
       // firing: the observation moved on and the state simply has nothing to
       // match now. Clear it, or the manual-attention banner would outlive the
       // condition that raised it.
-      if (heldByProgressGuard) {
+      if (heldForHumanAttention) {
         this.runStore.recordWaitingActivity(runId, decision.reason);
         await this.claimLabels.clearHumanAttention({
           issueNumber: refreshed.number,
@@ -2788,7 +2811,7 @@ export class RunController {
       this.runStore.updateRunState(runId, "succeeded");
       // Only a success terminal ends the need for a human; failure and
       // blocked keep the flag (see the Progress Guard ADR).
-      if (heldByProgressGuard && advancement.terminal === "success") {
+      if (heldForHumanAttention && advancement.terminal === "success") {
         await this.claimLabels.clearHumanAttention({
           issueNumber: refreshed.number,
           repository
@@ -2813,7 +2836,7 @@ export class RunController {
     }
 
     this.runStore.updateRunState(runId, "succeeded");
-    if (heldByProgressGuard) {
+    if (heldForHumanAttention) {
       await this.claimLabels.clearHumanAttention({
         issueNumber: refreshed.number,
         repository

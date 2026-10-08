@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { Logger } from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GitHubIssuesApi } from "../src/issue-polling.js";
@@ -118,5 +119,34 @@ describe("verifyBranchPublished", () => {
     await expect(check(api, "/nonexistent/workspace")).resolves.toEqual({
       kind: "unverified"
     });
+  });
+
+  it("fails open when origin returns a commit without a sha", async () => {
+    const ws = await workspaceWithHead();
+    const api = {
+      ...baseApi,
+      listBranchCommits: vi.fn().mockResolvedValue([{}])
+    };
+    await expect(check(api, ws.path)).resolves.toEqual({ kind: "unverified" });
+  });
+
+  it("logs a warning when the lookup throws", async () => {
+    const ws = await workspaceWithHead();
+    const warn = vi.fn();
+    const api = {
+      ...baseApi,
+      listBranchCommits: vi.fn().mockRejectedValue(new Error("502"))
+    };
+    await expect(
+      verifyBranchPublished({
+        api,
+        branch,
+        logger: { warn } as unknown as Logger,
+        repository,
+        timeoutMs: 1000,
+        workspacePath: ws.path
+      })
+    ).resolves.toEqual({ kind: "unverified" });
+    expect(warn).toHaveBeenCalledOnce();
   });
 });

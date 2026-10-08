@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildBranchNotPushedReason,
   buildCapReachedReason,
   formatCapReachedReason,
   parseCapReachedReason
@@ -61,6 +62,26 @@ describe("formatCapReachedReason", () => {
   it("renders unknown", () => {
     expect(formatCapReachedReason("unknown", 4)).toBe(
       "continuation cap reached after 4 continuations: branch state could not be determined"
+    );
+  });
+});
+
+describe("buildBranchNotPushedReason", () => {
+  it("names a branch that is absent from origin", () => {
+    expect(buildBranchNotPushedReason("sym/x", { kind: "missing" })).toBe(
+      'branch_not_pushed: branch "sym/x" has commits but never reached origin (branch does not exist on origin)'
+    );
+  });
+
+  it("names the diverging shas for a stale branch", () => {
+    expect(
+      buildBranchNotPushedReason("sym/x", {
+        kind: "stale",
+        localSha: "b".repeat(40),
+        originSha: "a".repeat(40)
+      })
+    ).toBe(
+      'branch_not_pushed: branch "sym/x" has commits but never reached origin (origin is at aaaaaaaaaaaa, workspace head is bbbbbbbbbbbb)'
     );
   });
 });

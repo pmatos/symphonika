@@ -2406,9 +2406,6 @@ async function collectProjectSettings(input: {
           "Ready label (single label that marks an issue ready for dispatch)"
       })
     ).trim();
-    if (readyLabel.length === 0) {
-      throw new Error("ready label must not be empty");
-    }
     if (readyLabel.includes(",")) {
       throw new Error(
         "ready label must be a single label; a Project has exactly one Ready Label, so remove the comma"

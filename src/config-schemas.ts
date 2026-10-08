@@ -169,7 +169,7 @@ export const issueFiltersSchema = z
   })
   .transform(({ labels_all, ready_label, ...rest }) => {
     if (labels_all === undefined) {
-      return { ...rest, ready_label: ready_label ?? DEFAULT_READY_LABEL };
+      return { ...rest, ready_label: ready_label as string };
     }
     const distinct = [...new Set(labels_all)];
     const [first = DEFAULT_READY_LABEL] = distinct;

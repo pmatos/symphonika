@@ -39,6 +39,7 @@ import type {
   RoutineStatus,
   TargetedRoutineDeclaration
 } from "./routines/types.js";
+import { runEvidenceDirectoryPath } from "./workflow/evidence-paths.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
 
 export type RunState =
@@ -5752,7 +5753,7 @@ export class RunStore {
       return undefined;
     }
     return {
-      logDirectory: path.join(this.stateRoot, "logs", "runs", runId),
+      logDirectory: runEvidenceDirectoryPath(this.stateRoot, runId),
       normalizedLogPath: this.safeArtifactPath(runId, row.normalized_log_path)
     };
   }

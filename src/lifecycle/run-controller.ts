@@ -5783,11 +5783,6 @@ export class RunController {
     return input.event.normalized;
   }
 
-  // The Project credential inventory for one execution: the effective tracker
-  // token plus the resolved SMTP password when an email sink is configured
-  // (SPEC.md §6). Resolved once per attempt (see RunRuntime.redactSecrets) so
-  // every evidence boundary scrubs the same execution-time credentials even
-  // if a Service Config reload changes the inventory mid-attempt.
   private async resolveRunDiagnostics(input: {
     repository: GitHubIssueRepositoryInput;
     runId: string;
@@ -5815,6 +5810,11 @@ export class RunController {
     };
   }
 
+  // The Project credential inventory for one execution: the effective tracker
+  // token plus the resolved SMTP password when an email sink is configured
+  // (SPEC.md §6). Resolved once per attempt (see RunRuntime.redactSecrets) so
+  // every evidence boundary scrubs the same execution-time credentials even
+  // if a Service Config reload changes the inventory mid-attempt.
   private redactionInventory(repositoryToken: string): string[] {
     // Not deduped here: every consumer funnels through secretSpans, which
     // already collapses duplicates.

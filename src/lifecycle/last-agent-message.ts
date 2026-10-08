@@ -65,10 +65,20 @@ async function readTail(filePath: string): Promise<string> {
     const { size } = await handle.stat();
     const start = Math.max(0, size - TAIL_BYTES);
     const buffer = Buffer.alloc(size - start);
-    await handle.read(buffer, 0, buffer.length, start);
-    const text = buffer.toString("utf8");
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    const text = buffer.toString("utf8", 0, bytesRead);
+    if (start === 0) {
+      return text;
+    }
     // A tail that starts mid-file begins inside a line; drop that fragment.
-    return start === 0 ? text : text.slice(text.indexOf("\n") + 1);
+    // Byte start-1 tells whether the window opened on a line boundary.
+    const prior = Buffer.alloc(1);
+    await handle.read(prior, 0, 1, start - 1);
+    if (prior[0] === 0x0a) {
+      return text;
+    }
+    const newline = text.indexOf("\n");
+    return newline === -1 ? "" : text.slice(newline + 1);
   } finally {
     await handle.close();
   }

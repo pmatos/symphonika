@@ -80,4 +80,36 @@ describe("readLastAgentMessage", () => {
     await writeFile(file, `${filler}\n`, "utf8");
     expect(await readLastAgentMessage(file)).toBe("the end");
   });
+
+  it("keeps the first line when the tail window opens on a line boundary", async () => {
+    const tailBytes = 256 * 1024;
+    const head = `${JSON.stringify({ type: "message", message: "ignored" })}\n`;
+    const first = `${JSON.stringify({ type: "message", message: "A" })}\n`;
+    const second = `${JSON.stringify({ type: "message", message: "B" })}\n`;
+    const padOverhead = Buffer.byteLength(
+      `${JSON.stringify({ type: "usage_updated", pad: "" })}\n`
+    );
+    const pad = `${JSON.stringify({
+      type: "usage_updated",
+      pad: "x".repeat(
+        tailBytes -
+          Buffer.byteLength(first) -
+          Buffer.byteLength(second) -
+          padOverhead
+      )
+    })}\n`;
+    const file = path.join(dir, "provider.normalized.jsonl");
+    await writeFile(file, head + first + second + pad, "utf8");
+    expect(await readLastAgentMessage(file)).toBe("AB");
+  });
+
+  it("returns undefined when the tail window holds no complete line", async () => {
+    const file = path.join(dir, "provider.normalized.jsonl");
+    await writeFile(
+      file,
+      `${JSON.stringify({ type: "message", message: "x".repeat(300 * 1024) })}\n`,
+      "utf8"
+    );
+    expect(await readLastAgentMessage(file)).toBeUndefined();
+  });
 });

@@ -130,7 +130,7 @@ export type RunDiagnostics = {
   logDirectory?: string;
 };
 
-export type ResolveRunDiagnostics = (input: {
+type ResolveRunDiagnostics = (input: {
   repository: GitHubIssueRepositoryInput;
   runId: string;
 }) => Promise<RunDiagnostics | undefined>;

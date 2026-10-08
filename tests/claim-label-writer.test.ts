@@ -329,6 +329,93 @@ describe("ClaimLabelWriter direct entries", () => {
     expect(comments[0]?.body).toContain("sym:human-needed");
   });
 
+  it("appends the run id, log directory, and fenced last agent message after the unchanged reason block", async () => {
+    const { api, comments } = makeApi();
+    const resolveRunDiagnostics = vi.fn(() =>
+      Promise.resolve({
+        lastAgentMessage: "git push failed: ``` fence @octocat",
+        logDirectory: "/logs/runs/run-1"
+      })
+    );
+    await new ClaimLabelWriter({ api, resolveRunDiagnostics }).markBlocked({
+      issueNumber: 7,
+      reason: "workflow_terminal_blocked",
+      repository,
+      runId: "run-1"
+    });
+    expect(resolveRunDiagnostics).toHaveBeenCalledWith({
+      repository,
+      runId: "run-1"
+    });
+    expect(comments[0]?.body).toBe(
+      [
+        "Symphonika marked this issue `sym:human-needed`.",
+        "",
+        "**Reason:**",
+        "",
+        "```",
+        "workflow_terminal_blocked",
+        "```",
+        "",
+        "**Run:** `run-1`",
+        "**Logs:** `/logs/runs/run-1`",
+        "",
+        "**Last agent message:**",
+        "",
+        "````",
+        "git push failed: ``` fence @octocat",
+        "````"
+      ].join("\n")
+    );
+  });
+
+  it("keeps the tail of an over-long last agent message", async () => {
+    const { api, comments } = makeApi();
+    const lastAgentMessage = `${"a".repeat(5000)}THE END`;
+    await new ClaimLabelWriter({
+      api,
+      resolveRunDiagnostics: () => Promise.resolve({ lastAgentMessage })
+    }).markFailed({
+      issueNumber: 7,
+      reason: "r",
+      repository,
+      runId: "run-1"
+    });
+    const body = comments[0]?.body ?? "";
+    expect(body).toContain("…aaa");
+    expect(body).toContain("THE END");
+    expect(body.length).toBeLessThan(2500);
+  });
+
+  it("still posts the reason and run id when diagnostics resolution throws", async () => {
+    const { api, comments } = makeApi();
+    await new ClaimLabelWriter({
+      api,
+      resolveRunDiagnostics: () => Promise.reject(new Error("db gone"))
+    }).markFailed({
+      issueNumber: 7,
+      reason: "provider_error: exit code 1",
+      repository,
+      runId: "run-1"
+    });
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("provider_error: exit code 1");
+    expect(comments[0]?.body).toContain("**Run:** `run-1`");
+    expect(comments[0]?.body).not.toContain("Last agent message");
+  });
+
+  it("omits the run section when the caller has no run id", async () => {
+    const { api, comments } = makeApi();
+    const resolveRunDiagnostics = vi.fn(() => Promise.resolve({}));
+    await new ClaimLabelWriter({ api, resolveRunDiagnostics }).markFailed({
+      issueNumber: 7,
+      reason: "r",
+      repository
+    });
+    expect(resolveRunDiagnostics).not.toHaveBeenCalled();
+    expect(comments[0]?.body).not.toContain("**Run:**");
+  });
+
   it("markFailed's comment carries the failed-path reason too", async () => {
     const { api, comments } = makeApi();
     await new ClaimLabelWriter({ api }).markFailed({

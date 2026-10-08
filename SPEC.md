@@ -162,6 +162,12 @@ alone does not re-dispatch an Issue that is also `sym:blocked`, `sym:failed`, `s
 `sym:claimed`; an operator re-queues it by removing every Operational Label the orchestrator left on
 it.
 
+When the orchestrator adds `sym:human-needed` it also comments on the Issue with the fenced, truncated
+reason. When the flagging run is known, the comment then appends that run's id, its evidence log
+directory (`<state_root>/logs/runs/<run_id>`), and the agent's last assistant message from the
+normalized provider log, redacted and truncated. The last message is omitted for a run that never
+reached a provider.
+
 When a bounded wait for a pull request gives up (`pull_request_discovery_exhausted:` or
 `no_pull_request_tracked:`), the reason posted on the Issue states whether the Issue Branch ever
 reached origin ("branch was never pushed to origin" versus "branch exists on origin but has no open

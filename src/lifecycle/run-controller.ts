@@ -139,8 +139,10 @@ import {
 } from "./concurrency-capacity.js";
 import {
   ClaimLabelWriter,
-  type ApplyLabelsInput
+  type ApplyLabelsInput,
+  type RunDiagnostics
 } from "./claim-label-writer.js";
+import { readLastAgentMessage } from "./last-agent-message.js";
 import {
   classifyFailure,
   inspectWorkspaceContentDigest,
@@ -716,7 +718,8 @@ export class RunController {
     this.agentProviders = options.agentProviders;
     this.claimLabels = new ClaimLabelWriter({
       api: options.githubIssuesApi as LabelWritingGitHubIssuesApi,
-      ...(options.logger === undefined ? {} : { logger: options.logger })
+      ...(options.logger === undefined ? {} : { logger: options.logger }),
+      resolveRunDiagnostics: (input) => this.resolveRunDiagnostics(input)
     });
     this.configDir = options.configDir;
     this.createRunId = options.createRunId ?? randomUUID;
@@ -1409,6 +1412,7 @@ export class RunController {
           reason: input.reason
         },
         repository: input.repository,
+        runId: input.runId,
         willRetry: false
       });
     } finally {
@@ -1957,7 +1961,8 @@ export class RunController {
     await this.claimLabels.markBlocked({
       issueNumber: input.issueNumber,
       reason,
-      repository: input.repository
+      repository: input.repository,
+      runId: input.runId
     });
     await this.claimLabels.release({
       issueNumber: input.issueNumber,
@@ -2085,7 +2090,8 @@ export class RunController {
     await this.claimLabels.markBlocked({
       issueNumber: input.issueNumber,
       reason: input.reason,
-      repository: input.repository
+      repository: input.repository,
+      runId: input.runId
     });
     await this.releaseWaitTerminalClaim(input);
   }
@@ -2748,7 +2754,8 @@ export class RunController {
         await this.claimLabels.flagHumanAttention({
           issueNumber: refreshed.number,
           reason: advancement.attentionReason,
-          repository
+          repository,
+          runId
         });
       }
       this.logger?.warn(
@@ -3387,6 +3394,7 @@ export class RunController {
         reason: input.reason
       },
       repository: input.repository,
+      runId: input.runId,
       willRetry: false
     });
   }
@@ -3490,6 +3498,7 @@ export class RunController {
         issueNumber: input.issue.number,
         outcome,
         repository: input.repository,
+        runId: input.runId,
         willRetry: false
       });
     } finally {
@@ -4115,6 +4124,7 @@ export class RunController {
       issueNumber: input.issue.number,
       outcome: terminal,
       repository: input.repository,
+      runId: input.runId,
       willRetry
     });
     try {
@@ -5217,6 +5227,7 @@ export class RunController {
             issueNumber: input.issue.number,
             outcome: effectiveOutcome,
             repository: input.repository,
+            runId: input.runId,
             willRetry
           };
           if (cancelReason !== undefined) {
@@ -5772,6 +5783,33 @@ export class RunController {
     return input.event.normalized;
   }
 
+  private async resolveRunDiagnostics(input: {
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<RunDiagnostics | undefined> {
+    const location = this.runStore.getRunLogLocation(input.runId);
+    if (location === undefined) {
+      return undefined;
+    }
+    const lastAgentMessage =
+      location.normalizedLogPath === undefined
+        ? undefined
+        : await readLastAgentMessage(location.normalizedLogPath);
+    return {
+      logDirectory: location.logDirectory,
+      ...(lastAgentMessage === undefined
+        ? {}
+        : {
+            // Provider output headed for a public comment: same scrub the
+            // evidence boundaries apply (SPEC.md §6).
+            lastAgentMessage: redactAll(
+              lastAgentMessage,
+              this.redactionInventory(input.repository.token)
+            )
+          })
+    };
+  }
+
   // The Project credential inventory for one execution: the effective tracker
   // token plus the resolved SMTP password when an email sink is configured
   // (SPEC.md §6). Resolved once per attempt (see RunRuntime.redactSecrets) so
@@ -5905,13 +5943,15 @@ export class RunController {
           await this.claimLabels.markBlocked({
             issueNumber: input.issue.number,
             reason: input.outcome.reason,
-            repository: input.repository
+            repository: input.repository,
+            runId: input.runId
           });
         } else {
           await this.claimLabels.markFailed({
             issueNumber: input.issue.number,
             reason: input.outcome.reason,
-            repository: input.repository
+            repository: input.repository,
+            runId: input.runId
           });
         }
         return;
@@ -6121,7 +6161,8 @@ export class RunController {
         // reads back for cli.ts/http/pages.ts; the public comment needs the
         // human-readable sentence those same call sites render from it.
         reason: formatCapReachedReason(kind, succeededContinuations),
-        repository: input.repository
+        repository: input.repository,
+        runId: input.runId
       });
       // The continuation loop stops here -- no further continuation will be
       // scheduled -- so this is the point a deferred non-raw-FSM success

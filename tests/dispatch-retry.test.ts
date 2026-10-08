@@ -6,10 +6,14 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startDaemon } from "../src/daemon.js";
+import type { GitHubIssuesApi } from "../src/issue-polling.js";
 import type { LifecyclePolicy } from "../src/lifecycle/active-runs.js";
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
-import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
+import {
+  createGitWorkspaceAhead,
+  gitHeadSha
+} from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -736,6 +740,138 @@ describe("dispatch retry policy", () => {
     }
   });
 
+  // Issue #833: a run that exits 0 with commits ahead of base whose branch
+  // never reached origin (a backgrounded or failed `git push`) must not read
+  // as a success -- it is a transient failure, so the retry budget gives the
+  // next attempt a chance to push.
+  async function startUnpushedBranchDaemon(input: {
+    lifecyclePolicy: LifecyclePolicy;
+    originCommits: (
+      headSha: string
+    ) => NonNullable<GitHubIssuesApi["listBranchCommits"]>;
+    root: string;
+  }) {
+    const prepared = preparedWorkspaceFixture(input.root);
+    await createGitWorkspaceAhead(prepared);
+    const headSha = await gitHeadSha(prepared.workspacePath);
+    await writeProject(input.root);
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    let listCalls = 0;
+    const claimedIssue = {
+      ...baseIssue,
+      labels: ["agent-ready", "sym:claimed"]
+    };
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(claimedIssue),
+      listBranchCommits: input.originCommits(headSha),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        return Promise.resolve(
+          listCalls === 1
+            ? [{ ...baseIssue, labels: ["agent-ready"] }]
+            : [claimedIssue]
+        );
+      }),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => "run-unpushed",
+      cwd: input.root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: input.lifecyclePolicy,
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: vi.fn((): Promise<PreparedIssueWorkspace> =>
+        Promise.resolve(prepared)
+      )
+    });
+    return { daemon, githubIssuesApi };
+  }
+
+  it("retries a clean exit whose branch never reached origin and succeeds once it is pushed", async () => {
+    const root = await makeTempRoot();
+    const { daemon, githubIssuesApi } = await startUnpushedBranchDaemon({
+      lifecyclePolicy: fastRetryPolicy,
+      originCommits: (headSha) =>
+        vi
+          .fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValue([{ sha: headSha }]),
+      root
+    });
+
+    try {
+      const status = await waitForCondition(
+        daemon.url,
+        ({ runs }) => runs.some((run) => run["state"] === "succeeded"),
+        { timeoutMs: 30_000 }
+      );
+      const run = status.runs.find((entry) => entry["state"] === "succeeded");
+      expect(run?.["retryCount"]).toBe(1);
+      expect(githubIssuesApi.listBranchCommits).toHaveBeenCalledTimes(2);
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const attemptRows = database
+          .prepare(
+            "select attempt_number, state from attempts order by attempt_number"
+          )
+          .all() as { attempt_number: number; state: string }[];
+        expect(attemptRows).toEqual([
+          { attempt_number: 1, state: "failed" },
+          { attempt_number: 2, state: "succeeded" }
+        ]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("fails the run with a branch_not_pushed reason once the retry budget is spent", async () => {
+    const root = await makeTempRoot();
+    const { daemon } = await startUnpushedBranchDaemon({
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 0 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      originCommits: () => vi.fn().mockResolvedValue([{ sha: "0".repeat(40) }]),
+      root
+    });
+
+    try {
+      const status = await waitForCondition(
+        daemon.url,
+        ({ runs }) => runs.some((run) => run["state"] === "failed"),
+        { timeoutMs: 30_000 }
+      );
+      const run = status.runs.find((entry) => entry["state"] === "failed");
+      expect(run?.["terminalReason"]).toMatch(
+        /^branch_not_pushed: branch "sym\/symphonika\/8-lifecycle-test-issue" has commits but never reached origin \(origin is at 000000000000, workspace head is /
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("cancels a scheduled retry when the issue closes during backoff", async () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
@@ -819,6 +955,82 @@ describe("dispatch retry policy", () => {
       expect(removeCalls.some((call) => call.labels[0] === "sym:claimed")).toBe(
         true
       );
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  // Issue #833 exemption: an intermediate raw-FSM agent state hands its
+  // workspace to a later agent state, so its unpushed commits are expected;
+  // only the final, publishing state is held to the branch-on-origin check.
+  it("lets an intermediate raw-FSM state advance with unpushed commits but fails the final one", async () => {
+    const root = await makeTempRoot();
+    const prepared = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(prepared);
+    await writeMultiStateRawFsmProject(root);
+
+    const provider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async *runAttempt(): AsyncGenerator<ProviderEvent> {
+        yield {
+          normalized: { exitCode: 0, type: "process_exit" },
+          raw: { code: 0, kind: "exit" }
+        };
+      },
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+
+    let listCalls = 0;
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue({
+        ...baseIssue,
+        labels: ["agent-ready", "sym:claimed"]
+      }),
+      listBranchCommits: vi.fn().mockResolvedValue(null),
+      listOpenIssues: vi.fn(() => {
+        listCalls += 1;
+        return Promise.resolve(
+          listCalls === 1 ? [{ ...baseIssue, labels: ["agent-ready"] }] : []
+        );
+      }),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { codex: provider },
+      createRunId: () => `run-fsm-unpushed-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 0, delaysMs: [], maxBackoffMs: 0 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: vi.fn((): Promise<PreparedIssueWorkspace> =>
+        Promise.resolve(prepared)
+      )
+    });
+
+    try {
+      const status = await waitForCondition(
+        daemon.url,
+        ({ runs }) => runs.some((run) => run["state"] === "failed"),
+        { timeoutMs: 15_000 }
+      );
+      const byId = new Map(status.runs.map((run) => [run["id"], run]));
+      expect(byId.get("run-fsm-unpushed-1")?.["state"]).toBe("succeeded");
+      expect(byId.get("run-fsm-unpushed-2")?.["state"]).toBe("failed");
+      expect(byId.get("run-fsm-unpushed-2")?.["terminalReason"]).toMatch(
+        /^branch_not_pushed:/
+      );
+      // Only the final state's check hits GitHub: planning is exempt.
+      expect(githubIssuesApi.listBranchCommits).toHaveBeenCalledTimes(1);
     } finally {
       await daemon.stop();
     }

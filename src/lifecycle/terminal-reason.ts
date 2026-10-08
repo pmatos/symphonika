@@ -85,6 +85,21 @@ export function buildNoPullRequestTrackedReason(
   );
 }
 
+// Written (as a transient failure, so the retry budget applies) when a run
+// exits 0 with commits ahead of base but the Issue Branch is missing from
+// origin or sits at a different commit than the workspace head (issue #833).
+export function buildBranchNotPushedReason(
+  branchName: string,
+  publication:
+    { kind: "missing" } | { kind: "stale"; localSha: string; originSha: string }
+): string {
+  const detail =
+    publication.kind === "missing"
+      ? "branch does not exist on origin"
+      : `origin is at ${publication.originSha.slice(0, 12)}, workspace head is ${publication.localSha.slice(0, 12)}`;
+  return `branch_not_pushed: branch "${branchName}" has commits but never reached origin (${detail})`;
+}
+
 const PULL_REQUEST_DISCOVERY_EXHAUSTED_PREFIX =
   "pull_request_discovery_exhausted:";
 

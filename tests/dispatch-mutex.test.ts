@@ -9,7 +9,10 @@ import type { LifecyclePolicy } from "../src/lifecycle/active-runs.js";
 import type { AgentProvider, ProviderEvent } from "../src/provider.js";
 import type { PreparedIssueWorkspace } from "../src/workspace.js";
 import { createDeferred } from "./helpers/deferred.js";
-import { createGitWorkspaceAhead } from "./helpers/git-workspace.js";
+import {
+  createGitWorkspaceAhead,
+  gitHeadSha
+} from "./helpers/git-workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -142,6 +145,7 @@ describe("dispatch mutex", () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await createGitWorkspaceAhead(prepared);
+    const headSha = await gitHeadSha(prepared.workspacePath);
     await writeProject(root, "Work {{issue.number}}\n");
 
     let active = 0;
@@ -174,7 +178,14 @@ describe("dispatch mutex", () => {
       getIssue: vi
         .fn()
         .mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
-      listBranchCommits: vi.fn().mockResolvedValue([]),
+      // Each run's commits are on origin; once those are consumed, lookups (the
+      // cap-reached classifier) see no branch.
+      listBranchCommits: vi
+        .fn()
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])
@@ -219,6 +230,7 @@ describe("dispatch mutex", () => {
     const root = await makeTempRoot();
     const prepared = preparedWorkspaceFixture(root);
     await createGitWorkspaceAhead(prepared);
+    const headSha = await gitHeadSha(prepared.workspacePath);
     await writeProject(
       root,
       "Continuation? {{run.continuation}} attempt={{run.attempt}}\n"
@@ -242,7 +254,13 @@ describe("dispatch mutex", () => {
       getIssue: vi
         .fn()
         .mockResolvedValue({ ...baseIssue, labels: ["agent-ready"] }),
-      listBranchCommits: vi.fn().mockResolvedValue([]),
+      // Each run's commits are on origin; once those are consumed, lookups (the
+      // cap-reached classifier) see no branch.
+      listBranchCommits: vi
+        .fn()
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValueOnce([{ sha: headSha }])
+        .mockResolvedValue([]),
       listOpenIssues: vi
         .fn()
         .mockResolvedValueOnce([{ ...baseIssue, labels: ["agent-ready"] }])

@@ -131,6 +131,7 @@ import {
   progressFingerprint
 } from "./progress-fingerprint.js";
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
+import { verifyBranchPublished } from "./branch-on-origin.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import {
   CHECKS_NOT_STARTED_REASON,
@@ -176,6 +177,7 @@ import {
 import {
   buildCapReachedReason,
   buildMergePrRefusedReason,
+  buildBranchNotPushedReason,
   buildNoPullRequestTrackedReason,
   buildPullRequestDiscoveryExhaustedReason,
   type BranchRemoteState,
@@ -4191,6 +4193,46 @@ export class RunController {
   // Shared retry-eligibility check: a failed+transient outcome still has
   // budget left in the retry cap. Used at every point that decides whether a
   // Run row is reused for a retry or finalized as terminal.
+  // A run that exits 0 with commits ahead of base but whose Issue Branch never
+  // reached origin (a push still running or failed when the provider exited,
+  // issue #833) is reclassified as a transient failure here, before the FSM or
+  // PR discovery can read it as a success. Transient, so the workspace-reusing
+  // retry budget gives the next attempt the chance to just push. A state that
+  // hands off to another agent state shares the workspace with it and may
+  // legitimately leave its commits local for that later state to publish.
+  private async failIfBranchNotPushed(input: {
+    currentState: ExpandedWorkflowState | undefined;
+    evidence: AttemptEvidence;
+    repository: GitHubIssueRepositoryInput;
+    terminal: ClassifiedTerminal;
+    workflow: ExpandedWorkflow | undefined;
+  }): Promise<ClassifiedTerminal> {
+    if (
+      input.terminal.kind !== "success" ||
+      input.terminal.commitsAhead !== true ||
+      input.evidence.branchName === "" ||
+      handsOffToAgentState(input.currentState, input.workflow)
+    ) {
+      return input.terminal;
+    }
+    const publication = await verifyBranchPublished({
+      api: this.githubIssuesApi,
+      branch: input.evidence.branchName,
+      logger: this.logger,
+      repository: input.repository,
+      timeoutMs: BRANCH_LOOKUP_TIMEOUT_MS,
+      workspacePath: input.evidence.workspacePath
+    });
+    if (publication.kind === "published" || publication.kind === "unverified") {
+      return input.terminal;
+    }
+    return {
+      classification: "transient",
+      kind: "failed",
+      reason: buildBranchNotPushedReason(input.evidence.branchName, publication)
+    };
+  }
+
   private isRetryableTransientFailure(
     outcome: ClassifiedTerminal,
     runId: string
@@ -5116,7 +5158,7 @@ export class RunController {
       // !parkedAsWaiting. The unconditional unregister above already
       // released the in-flight slot. See ADR 0052 — slot-leak fix.
       if (!parkedAsWaiting && !preservedWatchdogTerminal) {
-        const terminal = await classifyFailure({
+        const classified = await classifyFailure({
           cancelRequested,
           ...(caughtError === undefined ? {} : { error: caughtError }),
           events: runtime.events,
@@ -5137,6 +5179,16 @@ export class RunController {
                 }
               })
         });
+        const terminal =
+          started === undefined
+            ? classified
+            : await this.failIfBranchNotPushed({
+                currentState,
+                evidence: started.evidence,
+                repository: input.repository,
+                terminal: classified,
+                workflow: loadedWorkflow?.expandedWorkflow
+              });
         let workflowOutcome: WorkflowOutcomeResult = {
           advancedToState: null,
           advancedToTerminal: false,
@@ -6468,6 +6520,20 @@ const MAX_PR_UNTRACKED_WAIT_ATTEMPTS = 120;
 // supplies. Deliberately strict — `branch_ahead_of_base` and the PR signals are
 // not projected on this path, and treating an unprojected signal as merely
 // "unmet" would let a catch-all transition fire on the first poll.
+function handsOffToAgentState(
+  state: ExpandedWorkflowState | undefined,
+  workflow: ExpandedWorkflow | undefined
+): boolean {
+  if (state === undefined || workflow === undefined) {
+    return false;
+  }
+  return state.transitions.some(
+    (transition) =>
+      workflow.states.find((candidate) => candidate.id === transition.to)
+        ?.action?.kind === "agent"
+  );
+}
+
 function isArtifactOnlyWaitState(state: ExpandedWorkflowState): boolean {
   let sawArtifact = false;
   for (const key of statePredicateKeys(state)) {

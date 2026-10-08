@@ -2050,11 +2050,17 @@ On provider exit code 0:
 3. If Workspace inspection fails, mark the run `failed` with deterministic terminal reason
    `workspace_inspection_failed` and add `sym:failed`. This is a real failure (the `git` inspection
    command itself errored), unlike case 2.
-4. If the branch is ahead of base, mark run `succeeded`.
-5. Remove `sym:running`.
-6. Re-check GitHub issue.
-7. If the issue remains eligible, schedule a short continuation.
-8. If the continuation cap is reached, mark `sym:failed` and surface the reason.
+4. If the branch is ahead of base, verify the Issue Branch reached origin: look up its tip with the
+   GitHub API and compare it with the Workspace `HEAD`. A branch that is missing from origin, or sits
+   at a different commit, fails the attempt with transient terminal reason `branch_not_pushed` so the
+   retry budget gives the next attempt a chance to push (ADR-2026-10-08-1425). The check fails open
+   when GitHub cannot answer, and is skipped for a raw FSM state that hands off to another `agent`
+   state, which shares the Workspace and publishes later.
+5. Otherwise mark run `succeeded`.
+6. Remove `sym:running`.
+7. Re-check GitHub issue.
+8. If the issue remains eligible, schedule a short continuation.
+9. If the continuation cap is reached, mark `sym:failed` and surface the reason.
 
 For raw FSM workflows, a state whose `terminal` is `blocked` (§12.2) produces RunState `blocked` and
 `sym:blocked`, mirroring case 2 above; a state whose `terminal` is `failure` produces RunState

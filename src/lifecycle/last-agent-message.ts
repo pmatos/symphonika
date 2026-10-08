@@ -4,9 +4,10 @@ import { open } from "node:fs/promises";
 const TAIL_BYTES = 256 * 1024;
 
 // Events that carry no assistant text but interleave with streamed deltas
-// (Codex emits usage/rate-limit updates between them), so they must not split
-// one message into two.
+// (Codex emits usage/rate-limit updates and liveness markers between them), so
+// they must not split one message into two.
 const TRANSPARENT_EVENT_TYPES = new Set([
+  "progress",
   "rate_limit_updated",
   "usage_updated"
 ]);

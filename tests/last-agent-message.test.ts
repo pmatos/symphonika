@@ -32,9 +32,11 @@ describe("readLastAgentMessage", () => {
       { type: "usage_updated" },
       { type: "message", message: "done" },
       { type: "rate_limit_updated" },
-      { type: "message", message: "." }
+      { type: "message", message: "." },
+      { type: "progress", signal: "stream_retry" },
+      { type: "message", message: " Bye." }
     );
-    expect(await readFromLines(lines)).toBe("I’m done.");
+    expect(await readFromLines(lines)).toBe("I’m done. Bye.");
   });
 
   it("ignores thinking deltas", async () => {

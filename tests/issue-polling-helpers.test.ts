@@ -528,6 +528,21 @@ describe("fetchPullRequestFollowupState", () => {
       expect(state?.neverStartedChecks ?? []).toEqual([]);
     });
 
+    it("does not flag when a cancelled check run also contributes to the failing rollup", async () => {
+      const state = await fetchWith({
+        contexts: {
+          nodes: [
+            checkRun("static", "STARTUP_FAILURE"),
+            checkRun("unit", "CANCELLED")
+          ],
+          pageInfo: { hasNextPage: false }
+        },
+        state: "FAILURE"
+      });
+
+      expect(state?.neverStartedChecks ?? []).toEqual([]);
+    });
+
     it("does not flag when the contexts page is truncated", async () => {
       const state = await fetchWith({
         contexts: {

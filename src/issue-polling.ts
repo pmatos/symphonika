@@ -831,6 +831,8 @@ export async function fetchPullRequestFollowupState(
 }
 
 const FAILING_CHECK_RUN_CONCLUSIONS = new Set([
+  "ACTION_REQUIRED",
+  "CANCELLED",
   "FAILURE",
   "STARTUP_FAILURE",
   "TIMED_OUT"

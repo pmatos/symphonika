@@ -4,7 +4,10 @@ import path from "node:path";
 import type { Logger } from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { issueFiltersSchema } from "../src/config-schemas.js";
+import {
+  issueFiltersSchema,
+  readyLabelBroadeningWarning
+} from "../src/config-schemas.js";
 import { RuntimeConfigReloader } from "../src/reload.js";
 
 const tempRoots: string[] = [];
@@ -151,7 +154,57 @@ describe("ready_label config migration", () => {
   });
 });
 
+describe("readyLabelBroadeningWarning", () => {
+  it("returns nothing without a multi-label migration marker", () => {
+    expect(
+      readyLabelBroadeningWarning("p", { ready_label: "a" })
+    ).toBeUndefined();
+    expect(
+      readyLabelBroadeningWarning("p", {
+        migrated_from_labels_all: ["a"],
+        ready_label: "a"
+      })
+    ).toBeUndefined();
+  });
+
+  it("names the dropped labels when several were migrated", () => {
+    const warning = readyLabelBroadeningWarning("p", {
+      migrated_from_labels_all: ["a", "b", "c"],
+      ready_label: "a"
+    });
+
+    expect(warning).toContain('"b" or "c"');
+  });
+});
+
+describe("issueFiltersSchema ready_label", () => {
+  it("keeps an explicit ready_label without a migration marker", () => {
+    const parsed = issueFiltersSchema.parse({
+      labels_none: [],
+      ready_label: "go",
+      states: ["open"]
+    });
+
+    expect(parsed.ready_label).toBe("go");
+    expect(parsed.migrated_from_labels_all).toBeUndefined();
+  });
+});
+
 describe("ready_label broadening log", () => {
+  it("surfaces the broadening in reload status without a logger", async () => {
+    const reloader = await loadWithFilterLines([
+      '      labels_all: ["ship-it", "backend"]'
+    ]);
+
+    expect(reloader.getStatus().warnings).toHaveLength(1);
+  });
+
+  it("reports no warnings for a native ready_label", async () => {
+    const reloader = await loadWithFilterLines(['      ready_label: "go"']);
+
+    expect(reloader.getStatus().warnings).toEqual([]);
+  });
+
   it("warns once across repeated reloads of the same multi-label config", async () => {
     const warn = vi.fn();
     const reloader = await loadWithFilterLines(

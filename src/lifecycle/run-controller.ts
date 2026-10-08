@@ -133,6 +133,10 @@ import {
 import { createAsyncMutex, type AsyncMutex } from "./async-mutex.js";
 import { classifyCapReachedOutcome } from "./cap-reached-context.js";
 import {
+  CHECKS_NOT_STARTED_REASON,
+  describeChecksNotStarted
+} from "./checks-not-started.js";
+import {
   evaluateConcurrencyCapacity,
   isGlobalCapReached,
   isProjectCapReached
@@ -2673,11 +2677,29 @@ export class RunController {
       return;
     }
 
-    const heldByProgressGuard = isProgressGuardReason(
-      row.stateTransitionReason
-    );
+    const heldByProgressGuard =
+      isProgressGuardReason(row.stateTransitionReason) ||
+      row.stateTransitionReason === CHECKS_NOT_STARTED_REASON;
 
     if (decision.kind === "stay_waiting") {
+      const neverStartedChecks = pullRequestState?.checksNeverStarted ?? [];
+      if (neverStartedChecks.length > 0) {
+        // Keyed on the persisted reason like the guard park below: every poll
+        // re-observes the same condition, and a restart loses memory.
+        if (row.stateTransitionReason !== CHECKS_NOT_STARTED_REASON) {
+          this.runStore.recordWaitingActivity(runId, CHECKS_NOT_STARTED_REASON);
+          await this.claimLabels.flagHumanAttention({
+            issueNumber: refreshed.number,
+            reason: describeChecksNotStarted(neverStartedChecks),
+            repository
+          });
+        }
+        this.logger?.warn(
+          { checks: neverStartedChecks, runId },
+          "symphonika wait re-eval parked: checks never started"
+        );
+        return;
+      }
       // The guard's own park returns before this branch, so reaching it with a
       // no-progress reason still on the row means the guard has stopped
       // firing: the observation moved on and the state simply has nothing to

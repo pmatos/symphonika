@@ -427,6 +427,132 @@ function buildContinuationPage(
 }
 
 describe("fetchPullRequestFollowupState", () => {
+  describe("never-started checks", () => {
+    const billingMessage =
+      "The job was not started because recent account payments have failed or your spending limit needs to be increased.";
+
+    function pageWithRollup(rollup: unknown): unknown {
+      const page = buildPullRequestPage([], {
+        endCursor: null,
+        hasNextPage: false
+      }) as {
+        repository: {
+          pullRequest: { commits: { nodes: Array<{ commit: unknown }> } };
+        };
+      };
+      page.repository.pullRequest.commits.nodes = [
+        { commit: { statusCheckRollup: rollup } }
+      ];
+      return page;
+    }
+
+    function checkRun(
+      name: string,
+      conclusion: string,
+      messages: string[] = []
+    ): unknown {
+      return {
+        __typename: "CheckRun",
+        annotations: { nodes: messages.map((message) => ({ message })) },
+        conclusion,
+        name
+      };
+    }
+
+    async function fetchWith(rollup: unknown) {
+      const executor: GraphqlExecutor = () =>
+        Promise.resolve(pageWithRollup(rollup));
+      return fetchPullRequestFollowupState(executor, followupInput);
+    }
+
+    it("flags every failing check run whose annotation says the job was not started", async () => {
+      const state = await fetchWith({
+        contexts: {
+          nodes: [
+            checkRun("static", "FAILURE", [billingMessage]),
+            checkRun("unit", "FAILURE", [billingMessage]),
+            checkRun("lint", "SUCCESS")
+          ],
+          pageInfo: { hasNextPage: false }
+        },
+        state: "FAILURE"
+      });
+
+      expect(state?.statusCheckRollupState).toBe("FAILURE");
+      expect(state?.neverStartedChecks).toEqual(["static", "unit"]);
+    });
+
+    it("treats a STARTUP_FAILURE conclusion as never started", async () => {
+      const state = await fetchWith({
+        contexts: {
+          nodes: [checkRun("e2e", "STARTUP_FAILURE")],
+          pageInfo: { hasNextPage: false }
+        },
+        state: "FAILURE"
+      });
+
+      expect(state?.neverStartedChecks).toEqual(["e2e"]);
+    });
+
+    it("does not flag the failure when any failing check actually ran", async () => {
+      const state = await fetchWith({
+        contexts: {
+          nodes: [
+            checkRun("static", "FAILURE", [billingMessage]),
+            checkRun("unit", "FAILURE", ["1 test failed"])
+          ],
+          pageInfo: { hasNextPage: false }
+        },
+        state: "FAILURE"
+      });
+
+      expect(state?.neverStartedChecks ?? []).toEqual([]);
+    });
+
+    it("does not flag a failing commit status alongside never-started check runs", async () => {
+      const state = await fetchWith({
+        contexts: {
+          nodes: [
+            checkRun("static", "STARTUP_FAILURE"),
+            {
+              __typename: "StatusContext",
+              context: "ci/legacy",
+              state: "FAILURE"
+            }
+          ],
+          pageInfo: { hasNextPage: false }
+        },
+        state: "FAILURE"
+      });
+
+      expect(state?.neverStartedChecks ?? []).toEqual([]);
+    });
+
+    it("does not flag when the contexts page is truncated", async () => {
+      const state = await fetchWith({
+        contexts: {
+          nodes: [checkRun("static", "STARTUP_FAILURE")],
+          pageInfo: { hasNextPage: true }
+        },
+        state: "FAILURE"
+      });
+
+      expect(state?.neverStartedChecks ?? []).toEqual([]);
+    });
+
+    it("ignores never-started check runs when the rollup is not failing", async () => {
+      const state = await fetchWith({
+        contexts: {
+          nodes: [checkRun("static", "STARTUP_FAILURE")],
+          pageInfo: { hasNextPage: false }
+        },
+        state: "PENDING"
+      });
+
+      expect(state?.neverStartedChecks ?? []).toEqual([]);
+    });
+  });
+
   it("aggregates unresolved review threads across pagination boundaries", async () => {
     const calls: Array<{ query: string; variables: Record<string, unknown> }> =
       [];

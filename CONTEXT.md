@@ -241,6 +241,15 @@ absolute bound without disabling the Progress Guard's fingerprint rule. The coun
 run-chain boundary.
 _Avoid_: Convergence Budget, review dispatch cap
 
+**Never-Started Checks**:
+A failing PR status rollup in which every failing check run never started for an infrastructure reason
+(a `STARTUP_FAILURE` conclusion, or the GitHub Actions billing/spending-limit annotation "The job was
+not started because…"). Pull Request State reports such a rollup as `checks: unknown`, so it never
+satisfies a `checks: failure` repair edge; the parked wait raises manual attention on the issue
+(`sym:human-needed` and one comment naming the checks) without dispatching an agent or terminalizing
+the Run. One genuinely failing check, or a failing commit status, keeps the rollup an ordinary `failure`.
+_Avoid_: failed checks (a never-started check says nothing about the code)
+
 **Pull Request State**:
 Symphonika's normalized interpretation of a GitHub PR's merged, mergeable, checks, unresolved-thread, and review-decision state; it is the single source of meaning consumed by both Workflow Predicate projection and PR Follow-up verdicts.
 _Avoid_: raw GitHub pull request state

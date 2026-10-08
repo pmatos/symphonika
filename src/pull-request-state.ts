@@ -15,7 +15,11 @@ export type PullRequestState = {
   number: number;
   url: string;
   mergeable: "mergeable" | "conflicting" | "unknown";
+  // `unknown` rather than `failure` when every failing check never started
+  // (billing, runner startup): no code push can fix those, so they must not
+  // satisfy a `checks: failure` repair edge. Carries the check names.
   checks: PullRequestChecksState;
+  checksNeverStarted: string[];
   reviewDecision:
     | "approved"
     | "changes_requested"
@@ -35,8 +39,13 @@ export type PullRequestState = {
 export function interpretPullRequest(
   raw: RawGitHubPullRequestFollowupState
 ): PullRequestState {
+  const checksNeverStarted = raw.neverStartedChecks ?? [];
   return {
-    checks: interpretChecks(raw.statusCheckRollupState),
+    checks:
+      checksNeverStarted.length > 0
+        ? "unknown"
+        : interpretChecks(raw.statusCheckRollupState),
+    checksNeverStarted,
     draft: raw.draft,
     headSha: raw.headSha,
     mergeable: interpretMergeable(raw.mergeable),

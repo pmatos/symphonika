@@ -102,6 +102,11 @@ export type RawGitHubPullRequestFollowupState = {
   headSha: string;
   mergeable: "CONFLICTING" | "MERGEABLE" | "UNKNOWN" | null;
   merged: boolean;
+  // Names of the check runs that never started (GitHub Actions billing or
+  // spending limit, runner startup failure). Set only when the rollup is
+  // failing and every failing context is one of these, so a PR that also has
+  // a genuinely failing check keeps its ordinary failure routing.
+  neverStartedChecks?: string[];
   number: number;
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
   state: "CLOSED" | "MERGED" | "OPEN" | "UNKNOWN";
@@ -541,13 +546,30 @@ type GraphqlReviewThreadConnection = {
   } | null;
 };
 
+type GraphqlStatusCheckContext = {
+  __typename?: string | null;
+  annotations?: {
+    nodes?: Array<{ message?: string | null } | null> | null;
+  } | null;
+  conclusion?: string | null;
+  context?: string | null;
+  name?: string | null;
+  state?: string | null;
+};
+
+type GraphqlStatusCheckRollup = {
+  contexts?: {
+    nodes?: Array<GraphqlStatusCheckContext | null> | null;
+    pageInfo?: { hasNextPage?: boolean | null } | null;
+  } | null;
+  state?: string | null;
+};
+
 type GraphqlPullRequest = {
   commits?: {
     nodes?: Array<{
       commit?: {
-        statusCheckRollup?: {
-          state?: string | null;
-        } | null;
+        statusCheckRollup?: GraphqlStatusCheckRollup | null;
       } | null;
     } | null> | null;
   } | null;
@@ -641,6 +663,27 @@ const PULL_REQUEST_FOLLOWUP_QUERY = `
             commit {
               statusCheckRollup {
                 state
+                contexts(first: 100) {
+                  pageInfo {
+                    hasNextPage
+                  }
+                  nodes {
+                    __typename
+                    ... on CheckRun {
+                      name
+                      conclusion
+                      annotations(first: 5) {
+                        nodes {
+                          message
+                        }
+                      }
+                    }
+                    ... on StatusContext {
+                      context
+                      state
+                    }
+                  }
+                }
               }
             }
           }
@@ -742,17 +785,26 @@ export async function fetchPullRequestFollowupState(
     pageInfo = continuation.pageInfo;
   }
 
+  const statusCheckRollup =
+    pullRequest.commits?.nodes?.[0]?.commit?.statusCheckRollup;
+  const statusCheckRollupState = normalizeStatusCheckRollupState(
+    statusCheckRollup?.state
+  );
+  const neverStartedChecks =
+    statusCheckRollupState === "FAILURE" || statusCheckRollupState === "ERROR"
+      ? findNeverStartedChecks(statusCheckRollup)
+      : [];
+
   return {
     draft: pullRequest.isDraft ?? false,
     headSha: pullRequest.headRefOid,
     mergeable: normalizeMergeable(pullRequest.mergeable),
     merged: pullRequest.merged ?? false,
+    ...(neverStartedChecks.length === 0 ? {} : { neverStartedChecks }),
     number: pullRequest.number ?? input.pullNumber,
     reviewDecision: normalizeReviewDecision(pullRequest.reviewDecision),
     state: normalizePullRequestState(pullRequest.state),
-    statusCheckRollupState: normalizeStatusCheckRollupState(
-      pullRequest.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state
-    ),
+    statusCheckRollupState,
     unresolvedReviewThreads: allThreads
       .filter((thread) => thread.isResolved !== true)
       .map((thread) => ({
@@ -776,6 +828,57 @@ export async function fetchPullRequestFollowupState(
       })),
     url: pullRequest.url ?? ""
   };
+}
+
+const FAILING_CHECK_RUN_CONCLUSIONS = new Set([
+  "FAILURE",
+  "STARTUP_FAILURE",
+  "TIMED_OUT"
+]);
+
+// GitHub reports a job that Actions refused to start (billing failure,
+// spending limit) as an ordinary `failure` conclusion; the annotation text is
+// the only place the cause appears.
+const NEVER_STARTED_ANNOTATION =
+  /job was not started|spending limit needs to be increased|account payments have failed/i;
+
+function isNeverStartedCheckRun(context: GraphqlStatusCheckContext): boolean {
+  if (context.conclusion === "STARTUP_FAILURE") {
+    return true;
+  }
+  return (context.annotations?.nodes ?? []).some((annotation) =>
+    NEVER_STARTED_ANNOTATION.test(annotation?.message ?? "")
+  );
+}
+
+// All-or-nothing on purpose: one genuinely failing check, a failing commit
+// status, or a contexts page too long to see in full means a code push could
+// still matter, so the rollup keeps its ordinary failure routing.
+function findNeverStartedChecks(
+  rollup: GraphqlStatusCheckRollup | null | undefined
+): string[] {
+  const contexts = rollup?.contexts;
+  if (contexts?.pageInfo?.hasNextPage === true) {
+    return [];
+  }
+  const neverStarted: string[] = [];
+  for (const context of contexts?.nodes ?? []) {
+    if (context === null) {
+      continue;
+    }
+    if (context.__typename === "CheckRun") {
+      if (!FAILING_CHECK_RUN_CONCLUSIONS.has(context.conclusion ?? "")) {
+        continue;
+      }
+      if (!isNeverStartedCheckRun(context)) {
+        return [];
+      }
+      neverStarted.push(context.name ?? "(unnamed check)");
+    } else if (context.state === "FAILURE" || context.state === "ERROR") {
+      return [];
+    }
+  }
+  return neverStarted;
 }
 
 // Capped rather than fully paginated: every `blockedBy` count observed

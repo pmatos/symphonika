@@ -46,4 +46,25 @@ describe("interpretPullRequest", () => {
     expect(state.open).toBe(false);
     expect(state.trackingState).toBe("open");
   });
+
+  it("keeps checks unknown, not failure, when every failing check never started", () => {
+    const state = interpretPullRequest(
+      rawPullRequestState({
+        neverStartedChecks: ["static", "unit"],
+        statusCheckRollupState: "FAILURE"
+      })
+    );
+
+    expect(state.checks).toBe("unknown");
+    expect(state.checksNeverStarted).toEqual(["static", "unit"]);
+  });
+
+  it("still reports a failing rollup as failure when no check was flagged never started", () => {
+    const state = interpretPullRequest(
+      rawPullRequestState({ statusCheckRollupState: "FAILURE" })
+    );
+
+    expect(state.checks).toBe("failure");
+    expect(state.checksNeverStarted).toEqual([]);
+  });
 });

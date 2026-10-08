@@ -95,6 +95,7 @@ function sampleFreshState(
 ): PullRequestState {
   return {
     checks: "success",
+    checksNeverStarted: [],
     draft: false,
     headSha: "abc123",
     mergeable: "mergeable",

@@ -404,12 +404,20 @@ The parser recognizes the following keys:
 | `pr_open` | `true`, `false` | no | always | supported |
 | `pr_merged` | `true` | no | only when merged | supported |
 | `mergeable` | `true`, `false` | no | omitted while unknown | supported |
-| `checks` | `success`, `failure`, `pending` | no | omitted while unknown | supported |
+| `checks` | `success`, `failure`, `pending` | no | omitted while unknown, or while every failing check never started (see below) | supported |
 | `review_decision` | `approved`, `changes_requested`, `review_required`, `none` | no | always | supported |
 | `has_unresolved_reviews` | `true`, `false` | no | always | supported |
 | `unresolved_review_threads` | non-negative integer | no | always | supported, exact count only; a wait transition may only gate on `0` — a positive value fails `workflow validate` (issue #632), use `has_unresolved_reviews: true` |
 | `artifact_exists` | path, or a sequence of paths | yes | yes | supported, existence only |
 | `claim_status` | `success`, `blocked`, `failure` | yes, when the final message was a valid Workflow Claim | no | supported, opt-in — see Workflow Claim above; naming it on a `wait`/`merge_pr` state fails `workflow validate`, the same way it does on `close_issue`/`label_issue`/`comment` |
+
+`checks: failure` means a check actually ran and failed. When the rollup is failing but every failing
+check run never started — a `STARTUP_FAILURE` conclusion, or the GitHub Actions billing/spending-limit
+annotation ("The job was not started because…") — no code push can fix it, so the `checks` signal is
+omitted exactly as it is while unknown and the wait does not route to a repair state. The parked
+wait raises manual attention instead: the issue gets `sym:human-needed` and one comment naming the
+checks, and the label is removed again once the checks start. One genuinely failing check, or a
+failing commit status, keeps the whole rollup an ordinary `failure`.
 
 `branch_ahead_of_base` counts commits ahead of `origin/<base_branch>`, not ahead of the commit the
 attempt started from. It is a property of the branch, not of the attempt: in a multi-state walk it

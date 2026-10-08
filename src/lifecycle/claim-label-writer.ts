@@ -252,32 +252,23 @@ export class ClaimLabelWriter {
     // input_required is always terminal regardless of `fsmContinuing`:
     // scheduleNext returns immediately for it, so suppressing `sym:failed`
     // would orphan the issue with neither `sym:running` nor `sym:failed`.
+    const blockTarget: IssueBlockTarget = {
+      issueNumber: input.issueNumber,
+      reason: input.outcome.reason,
+      repository: input.repository,
+      ...(input.runId === undefined ? {} : { runId: input.runId })
+    };
     if (input.outcome.kind === "input_required") {
-      await this.markFailed({
-        issueNumber: input.issueNumber,
-        reason: input.outcome.reason,
-        repository: input.repository,
-        ...(input.runId === undefined ? {} : { runId: input.runId })
-      });
+      await this.markFailed(blockTarget);
     } else if (
       input.outcome.kind === "failed" &&
       !input.willRetry &&
       !input.fsmContinuing
     ) {
       if (isBlockedOutcome(input.outcome)) {
-        await this.markBlocked({
-          issueNumber: input.issueNumber,
-          reason: input.outcome.reason,
-          repository: input.repository,
-          ...(input.runId === undefined ? {} : { runId: input.runId })
-        });
+        await this.markBlocked(blockTarget);
       } else {
-        await this.markFailed({
-          issueNumber: input.issueNumber,
-          reason: input.outcome.reason,
-          repository: input.repository,
-          ...(input.runId === undefined ? {} : { runId: input.runId })
-        });
+        await this.markFailed(blockTarget);
       }
     }
 

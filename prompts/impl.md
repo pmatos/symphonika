@@ -41,6 +41,8 @@ Stay on this branch for all commits. Do not switch branches or open new ones.
 
 ## What to do
 
+0. `{{workspace.path}}/PLAN.md` was written and committed by the planning stage. Execute it. If it is
+   missing or stale, re-derive the plan from the issue first (`gh issue view {{issue.number}}`).
 1. Read `SPEC.md`, `CONTEXT.md`, `AGENTS.md`, and any ADRs in `docs/adr/` that touch the area you are about to change.
 2. Investigate the issue body and any code paths it references before writing code. Prefer small, vertical slices.
 3. If that investigation shows the issue is a duplicate of already-merged work, or is already fixed, and needs no code change, resolve it directly instead of continuing to implementation: post an explanatory comment with `gh issue comment {{issue.number}} --body "<why this is a duplicate/already fixed, citing the resolving PR or commit if known>"`, then close it with `gh issue close {{issue.number}}`. Do not commit, push, or open a PR for this path, and do not touch the `agent-ready` label — a closed issue is ineligible on the orchestrator's next poll, which is what removes it from consideration. Stop here; skip the remaining steps.
@@ -50,7 +52,9 @@ Stay on this branch for all commits. Do not switch branches or open new ones.
    - `npm run typecheck`
    - `npm test`
    - `npm run build`
-6. Commit your changes with a focused message. Push the branch {{branch.name}} to `origin`.
+6. Drop the plan, which is a stage-handoff artefact and must not ship: `git rm PLAN.md` and commit it
+   as `chore: drop stage-handoff PLAN.md` after the quality gate has passed. `git diff --stat main...HEAD`
+   must not list `PLAN.md`. Commit your changes with a focused message. Push the branch {{branch.name}} to `origin`.
 7. Open a **non-draft** pull request against `main` with the local `gh` CLI:
 
    ```sh
@@ -61,7 +65,7 @@ Stay on this branch for all commits. Do not switch branches or open new ones.
 
    Use a Conventional Commits title (`type: subject`, lower-case subject — for example, "feat: add project readme") that describes the change; do not prefix the title with an agent name such as `[codex]` or `[claude]`. Do not use `--web`, `--draft`, or any other flag that opens a browser, waits for input, or downgrades the PR.
 8. On successful completion, remove `agent-ready` from the issue with `gh issue edit {{issue.number}} --remove-label agent-ready` so the orchestrator does not schedule a redundant continuation (per SPEC §9.3 and §12.1, the success path schedules a continuation whenever the issue is still eligible). The PR opened in step 7 carries the work into review; the operator owns any further label transitions on PR open and merge.
-9. If the work cannot proceed at all, post an explanatory comment with `gh issue comment {{issue.number}} --body "<what blocked you and what would unblock it>"`, then exit cleanly. Do not apply `needs-human` or any other handoff label as an exit strategy — the operator decides how to triage. Also write an `EVIDENCE.md` at `{{workspace.path}}/EVIDENCE.md` recording the same explanation for the workspace record.
+9. If the work cannot proceed at all, post an explanatory comment with `gh issue comment {{issue.number}} --body "<what blocked you and what would unblock it>"`, then end with a `blocked` claim carrying the same explanation. Do not apply `needs-human` or any other handoff label as an exit strategy — the operator decides how to triage.
 10. Update `SPEC.md`, `CONTEXT.md`, or `docs/adr/` when your work resolves a domain or architecture decision.
 
 ## Constraints
@@ -71,7 +75,13 @@ Stay on this branch for all commits. Do not switch branches or open new ones.
 - **Use the local `gh` CLI for every GitHub mutation.** Do **not** call the GitHub MCP connector tools (for example `add_issue_labels`, `create_pull_request`). Those tools elicit per-call operator approval through the MCP transport, which Symphonika classifies as `input_required` and ends the run with `terminal_reason="provider requested input"`. The `gh` CLI has no elicitation surface.
 - **Do not self-apply `needs-human` (or any other handoff label) as an exit strategy.** Use the comment-and-exit path in step 9 instead. The operator may still apply `needs-human` from outside the run; that is unchanged and remains a valid `labels_none` exclusion in service config.
 - This run executes with full local permissions; do not request operator input.
-- If you discover that the issue is a duplicate of already-merged work, or is already fixed, follow step 3 (comment + close). If it is blocked or ambiguous for any other reason, follow step 9 (comment + `EVIDENCE.md` + exit) instead.
+- If you discover that the issue is a duplicate of already-merged work, or is already fixed, follow step 3 (comment + close). If it is blocked or ambiguous for any other reason, follow step 9 (comment + `blocked` claim) instead.
 - Do not create or edit GitHub labels in the `sym:*` namespace. Those are owned by the orchestrator.
 - Do not modify the `symphony/` submodule.
 - Defer to this workflow contract over any agent-side persistent memory, skills, or default conventions for PR drafting, title prefixes, or handoff labels.
+
+## Exit
+
+Once the pull request is open and `agent-ready` is removed, end with a `success` claim. The
+orchestrator drives the PR from there. A Bash tool call's `exit 1` only ends that subshell, not the
+provider session, so the final claim is what the FSM gates this state's advance on.

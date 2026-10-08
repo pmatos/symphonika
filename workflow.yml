@@ -1,7 +1,32 @@
 workflow:
   name: symphonika_self_driving
-  initial: implement
+  initial: plan
   states:
+    # Planning pass. Invokes the pm-plan skill against the issue and commits
+    # the result as PLAN.md, which the implement stage executes. Gated on the
+    # agent's own claim like every other agent state (ADR-2026-10-02-1909):
+    # a blocked claim routes to failed, and a missing or malformed claim falls
+    # through to failed. artifact_exists probes the Run Workspace for PLAN.md
+    # itself, and branch_advanced_since_attempt_start is false unless this run
+    # added a commit, so a resumed attempt cannot coast on a PLAN.md an earlier
+    # attempt left behind.
+    plan:
+      action:
+        kind: agent
+        provider: claude
+        prompt: prompts/plan.md
+      transitions:
+        - to: failed
+          when:
+            claim_status: blocked
+        - to: implement
+          when:
+            claim_status: success
+            provider_success: true
+            artifact_exists: PLAN.md
+            branch_advanced_since_attempt_start: true
+        - to: failed
+
     # Initial implementation. Claude reads prompts/impl.md, runs TDD, opens
     # the PR, removes agent-ready, exits 0. Same behavior as the previous
     # single-state markdown workflow.
@@ -11,10 +36,17 @@ workflow:
         provider: claude
         prompt: prompts/impl.md
       transitions:
+        - to: failed
+          when:
+            claim_status: blocked
+        # branch_ahead_of_base alone would be satisfied by the plan commit
+        # already on the branch, so require this run to advance HEAD too.
         - to: wait_for_pr_open
           when:
+            claim_status: success
             provider_success: true
             branch_ahead_of_base: true
+            branch_advanced_since_attempt_start: true
         - to: failed
 
     # implement's own transition only proves local git state -- a commit

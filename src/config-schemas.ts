@@ -123,3 +123,72 @@ export const workflowReferenceSchema = z.union([
 ]);
 
 export type WorkflowReference = z.infer<typeof workflowReferenceSchema>;
+
+export const DEFAULT_READY_LABEL = "ready-for-agent";
+
+// ADR 2026-10-08-1200: a Dispatch Project has exactly one Ready Label. Legacy
+// `labels_all` is migrated here, at load time, so no consumer ever sees it.
+// Several legacy labels collapse to the first; the full original list is kept
+// in `migrated_from_labels_all` so doctor, the startup log, and the UI can
+// report the resulting broadening of eligibility. The marker survives a
+// re-parse of parsed output (it is a passthrough key), keeping this idempotent.
+export const issueFiltersSchema = z
+  .object({
+    states: z.array(z.literal("open")).min(1),
+    ready_label: z.string().trim().min(1).optional(),
+    labels_all: z.array(z.string().trim().min(1)).optional(),
+    labels_none: z.array(z.string().trim().min(1)),
+    migrated_from_labels_all: z.array(z.string().trim().min(1)).optional()
+  })
+  .passthrough()
+  .superRefine((filters, ctx) => {
+    if (filters.labels_all !== undefined && filters.ready_label !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "`labels_all` and `ready_label` are both set; remove `labels_all` and keep the single `ready_label`",
+        path: ["labels_all"]
+      });
+    } else if (filters.labels_all !== undefined) {
+      if (filters.labels_all.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "`labels_all` is empty; choose a `ready_label` (for example `ready-for-agent`)",
+          path: ["labels_all"]
+        });
+      }
+    } else if (filters.ready_label === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "`ready_label` is required: set the single label that marks an issue ready for dispatch",
+        path: ["ready_label"]
+      });
+    }
+  })
+  .transform(({ labels_all, ready_label, ...rest }) => {
+    if (labels_all === undefined) {
+      return { ...rest, ready_label: ready_label ?? DEFAULT_READY_LABEL };
+    }
+    const [first = DEFAULT_READY_LABEL] = labels_all;
+    return {
+      ...rest,
+      ready_label: first,
+      ...(labels_all.length > 1 ? { migrated_from_labels_all: labels_all } : {})
+    };
+  });
+
+export function readyLabelBroadeningWarning(
+  projectName: string,
+  filters: { ready_label: string; migrated_from_labels_all?: string[] | undefined }
+): string | undefined {
+  const legacy = filters.migrated_from_labels_all;
+  if (legacy === undefined || legacy.length < 2) {
+    return undefined;
+  }
+  return `project ${projectName}: legacy issue_filters.labels_all [${legacy.join(", ")}] was migrated to ready_label "${filters.ready_label}"; issues no longer need ${legacy
+    .slice(1)
+    .map((label) => `"${label}"`)
+    .join(" or ")} to be eligible, so eligibility is broader than before. Set issue_filters.ready_label explicitly and remove labels_all`;
+}

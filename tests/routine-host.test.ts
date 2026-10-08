@@ -1557,7 +1557,7 @@ describe("init-project --mode routine-host (ADR 0062)", () => {
       "baseBranch",
       "workspaceRoot"
     ]);
-    expect(promptedKeys).not.toContain("requiredLabels");
+    expect(promptedKeys).not.toContain("readyLabel");
     expect(promptedKeys).not.toContain("excludedLabels");
     expect(promptedKeys).not.toContain("priorityLabels");
     expect(promptedKeys).not.toContain("workflowPath");

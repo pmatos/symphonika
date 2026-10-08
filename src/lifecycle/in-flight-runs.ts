@@ -10,7 +10,7 @@ export type InFlightRunEntry = {
   provider?: AgentProvider;
   // When false, this run is part of an FSM walk where the state machine, not
   // the issue label set, decides whether to keep running. Reconcile uses this
-  // to skip the labels_all / labels_none re-check while still honoring
+  // to skip the ready_label / labels_none re-check while still honoring
   // CLOSED_ISSUE. See ADR 0046.
   respectsIssueLabels: boolean;
   runId: string;

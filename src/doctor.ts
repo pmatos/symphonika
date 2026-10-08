@@ -20,10 +20,13 @@ import { z } from "zod";
 import type { WorkflowFormat } from "./config-schemas.js";
 import { resolveProjectMaxInFlight } from "./lifecycle/concurrency-capacity.js";
 import {
+  DEFAULT_READY_LABEL,
+  issueFiltersSchema,
   pathStringSchema,
   projectDispatchSchema,
   projectProgressGuardSchema,
   projectWorkspaceSchema,
+  readyLabelBroadeningWarning,
   rejectDispatchOnlyKeysOnRoutineHost,
   workflowReferenceSchema
 } from "./config-schemas.js";
@@ -157,7 +160,7 @@ type InitProjectPromptInput = {
     | "provider"
     | "confirmEligibilityLabels"
     | "confirmOperationalLabels"
-    | "requiredLabels"
+    | "readyLabel"
     | "workspaceRoot"
     | "workflowPath";
   message: string;
@@ -307,14 +310,6 @@ const trackerSchema = z
     owner: z.string().trim().min(1),
     repo: z.string().trim().min(1),
     token: z.string().trim().min(1)
-  })
-  .passthrough();
-
-const issueFiltersSchema = z
-  .object({
-    states: z.array(z.literal("open")).min(1),
-    labels_all: z.array(z.string().trim().min(1)),
-    labels_none: z.array(z.string().trim().min(1))
   })
   .passthrough();
 
@@ -622,6 +617,13 @@ export async function runDoctor(
         staleIssues: []
       });
       continue;
+    }
+    const broadeningWarning = readyLabelBroadeningWarning(
+      project.name,
+      project.issue_filters
+    );
+    if (broadeningWarning !== undefined) {
+      warnings.push(broadeningWarning);
     }
     const workflowPath = path.resolve(
       path.dirname(configPath),
@@ -2319,7 +2321,7 @@ type ProjectInitSettings = {
   priorityLabels: Record<string, number>;
   projectName: string;
   provider: InitProvider;
-  requiredLabels: string[];
+  readyLabel: string;
   // Host-only: the operator-chosen workspace root. Dispatch projects derive
   // workspace from stateRoot + projectName (unchanged).
   workspaceRoot?: string;
@@ -2386,7 +2388,7 @@ async function collectProjectSettings(input: {
         priorityLabels: {},
         projectName,
         provider,
-        requiredLabels: [],
+        readyLabel: DEFAULT_READY_LABEL,
         workspaceRoot,
         workflowPath: ""
       };
@@ -2396,14 +2398,16 @@ async function collectProjectSettings(input: {
       input.metadata.projectRoot,
       "WORKFLOW.md"
     );
-    const requiredLabels = parseLabelList(
+    const readyLabel = (
       await promptController.ask({
-        defaultValue: "agent-ready",
-        key: "requiredLabels",
-        message: "Required issue labels (comma-separated)"
-      }),
-      "required issue labels"
-    );
+        defaultValue: DEFAULT_READY_LABEL,
+        key: "readyLabel",
+        message: "Ready label (single label that marks an issue ready for dispatch)"
+      })
+    ).trim();
+    if (readyLabel.length === 0) {
+      throw new Error("ready label must not be empty");
+    }
     const excludedLabels = parseLabelList(
       await promptController.ask({
         defaultValue: "blocked, needs-human, sym:stale",
@@ -2437,7 +2441,7 @@ async function collectProjectSettings(input: {
       priorityLabels,
       projectName,
       provider,
-      requiredLabels,
+      readyLabel,
       workflowPath: path.isAbsolute(workflowAnswer)
         ? path.normalize(workflowAnswer)
         : path.resolve(input.metadata.projectRoot, workflowAnswer)
@@ -2599,7 +2603,7 @@ function buildProjectConfig(input: {
     },
     issue_filters: {
       states: ["open"],
-      labels_all: input.settings.requiredLabels,
+      ready_label: input.settings.readyLabel,
       labels_none: input.settings.excludedLabels
     },
     priority: {
@@ -3371,9 +3375,8 @@ function findMissingEligibilityLabels(
   project: DispatchProjectConfig,
   repositoryLabels: ReadonlySet<string>
 ): string[] {
-  return [...new Set(project.issue_filters.labels_all)].filter(
-    (label) => !repositoryLabels.has(label)
-  );
+  const readyLabel = project.issue_filters.ready_label;
+  return repositoryLabels.has(readyLabel) ? [] : [readyLabel];
 }
 
 function envReferenceName(input: string): string | undefined {

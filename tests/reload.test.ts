@@ -734,8 +734,8 @@ describe("RuntimeConfigReloader workflow validation", () => {
     expect(reloader.getSnapshot()).toBe(firstSnapshot);
     expect(reloader.projectsByName().has("symphonika")).toBe(true);
     expect(
-      reloader.getSnapshot()?.polling.projects[0]?.issue_filters.labels_all
-    ).toEqual(["agent-ready"]);
+      reloader.getSnapshot()?.polling.projects[0]?.issue_filters.ready_label
+    ).toEqual("agent-ready");
     expect(reloader.getStatus()).toMatchObject({
       ok: false,
       usingLastKnownGood: true,

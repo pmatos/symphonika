@@ -118,6 +118,7 @@ function emptyReloadStatus(): RuntimeReloadStatus {
     lastLoadedAt: null,
     ok: true,
     routineErrors: [],
-    usingLastKnownGood: false
+    usingLastKnownGood: false,
+    warnings: []
   };
 }

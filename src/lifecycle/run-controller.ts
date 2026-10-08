@@ -6167,7 +6167,7 @@ export class RunController {
     ) {
       // Raw-FSM mid-walk / label-immune runs (respectsIssueLabels === false,
       // e.g. a PR Follow-up dispatch) intentionally never gate continuation
-      // scheduling on labels_all/labels_none (see ADR 0046), so ineligibility
+      // scheduling on ready_label/labels_none (see ADR 0046), so ineligibility
       // on an open issue is expected steady state, not a lost reservation —
       // releasing sym:claimed for it would strip the claim out from under a
       // still-live parked/waiting Run that owns the same Issue Reservation.

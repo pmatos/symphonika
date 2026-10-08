@@ -8,10 +8,12 @@ import { z } from "zod";
 
 import type { WorkflowFormat } from "./config-schemas.js";
 import {
+  issueFiltersSchema,
   pathStringSchema,
   projectDispatchSchema,
   projectProgressGuardSchema,
   projectWorkspaceSchema,
+  readyLabelBroadeningWarning,
   rejectDispatchOnlyKeysOnRoutineHost,
   workflowReferenceSchema
 } from "./config-schemas.js";
@@ -108,6 +110,7 @@ export type RuntimeReloadStatus = {
   ok: boolean;
   routineErrors: RoutineReloadError[];
   usingLastKnownGood: boolean;
+  warnings: string[];
 };
 
 type RoutineReloadError = {
@@ -296,14 +299,6 @@ const trackerSchema = z
     owner: z.string().trim().min(1),
     repo: z.string().trim().min(1),
     token: z.string().trim().min(1)
-  })
-  .passthrough();
-
-const issueFiltersSchema = z
-  .object({
-    states: z.array(z.literal("open")).min(1),
-    labels_all: z.array(z.string().trim().min(1)),
-    labels_none: z.array(z.string().trim().min(1))
   })
   .passthrough();
 
@@ -496,7 +491,8 @@ export class RuntimeConfigReloader {
     lastLoadedAt: null,
     ok: false,
     routineErrors: [],
-    usingLastKnownGood: false
+    usingLastKnownGood: false,
+    warnings: []
   };
 
   constructor(options: RuntimeConfigReloaderOptions) {
@@ -515,6 +511,7 @@ export class RuntimeConfigReloader {
     return {
       ...this.status,
       errors: this.status.errors.slice(),
+      warnings: this.status.warnings.slice(),
       routineErrors: this.status.routineErrors.map((error) => ({
         ...error,
         sourcePaths: error.sourcePaths.slice()
@@ -593,6 +590,17 @@ export class RuntimeConfigReloader {
       this.status.ok = result.errors.length === 0;
       this.status.routineErrors = result.routineErrors;
       this.status.usingLastKnownGood = result.usingLastKnownGood;
+      this.status.warnings = (this.snapshot?.polling.projects ?? []).flatMap(
+        (project) =>
+          readyLabelBroadeningWarning(project.name, project.issue_filters) ??
+          []
+      );
+      if (this.status.warnings.length > 0) {
+        this.logger?.warn(
+          { warnings: this.status.warnings },
+          "symphonika config migrated legacy labels_all"
+        );
+      }
 
       if (result.errors.length > 0) {
         this.logger?.warn(

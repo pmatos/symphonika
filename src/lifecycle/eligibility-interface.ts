@@ -125,7 +125,7 @@ export const ISSUE_ELIGIBILITY_ADR_RULES = [
     adr: "0023",
     question: { kind: "continue_run", scope: "label_controlled" },
     ruleLocation:
-      "Label-controlled continuation eligibility evaluates labels_all and labels_none.",
+      "Label-controlled continuation eligibility evaluates ready_label and labels_none.",
     summary:
       "Eligibility loss remains the operator control surface for normal active runs and scheduled retries."
   },
@@ -135,7 +135,7 @@ export const ISSUE_ELIGIBILITY_ADR_RULES = [
     ruleLocation:
       "Lifecycle state-advance work asks the FSM-owned continuation question.",
     summary:
-      "State advances skip labels_all and labels_none re-checks while still cancelling on closed issues."
+      "State advances skip ready_label and labels_none re-checks while still cancelling on closed issues."
   },
   {
     adr: "0047",

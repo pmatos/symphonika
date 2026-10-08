@@ -3516,7 +3516,8 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
             lastLoadedAt: null,
             ok: true,
             routineErrors: [],
-            usingLastKnownGood: false
+            usingLastKnownGood: false,
+            warnings: []
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot
@@ -3548,6 +3549,47 @@ describe("HTTP app — dashboard IA shell (#302)", () => {
       expect(hostsSection).toMatch(
         /<tr><td><a href="\/projects\/s11-host">s11-host<\/a><\/td><td>.*?<\/td><td>1<\/td><\/tr>/
       );
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("shows a dashboard banner when a legacy labels_all migration broadened eligibility", async () => {
+    const test = await setup();
+    try {
+      const app = createHttpApp({
+        getStatusSnapshot: () => ({
+          configPath: "/tmp/symphonika.yml",
+          doctorErrors: [],
+          issuePolling: {
+            candidateIssues: [],
+            errors: [],
+            filteredIssues: [],
+            projects: []
+          },
+          projectModes: new Map(),
+          projectStates: [],
+          projects: [],
+          reload: {
+            errors: [],
+            lastAttemptedAt: null,
+            lastLoadedAt: null,
+            ok: true,
+            routineErrors: [],
+            usingLastKnownGood: false,
+            warnings: ["project alpha: legacy labels_all was migrated"]
+          },
+          runs: { active: [], failed: [], recent: [], stale: [] },
+          stateRoot: test.stateRoot
+        }),
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const body = await (await app.request("/")).text();
+
+      expect(body).toContain("eligibility broadened");
+      expect(body).toContain("project alpha: legacy labels_all was migrated");
     } finally {
       test.cleanup();
     }
@@ -3873,7 +3915,8 @@ describe("HTTP app — project detail page (#303)", () => {
             lastLoadedAt: null,
             ok: true,
             routineErrors: [],
-            usingLastKnownGood: false
+            usingLastKnownGood: false,
+            warnings: []
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot
@@ -3971,7 +4014,8 @@ describe("HTTP app — project detail page (#303)", () => {
             lastLoadedAt: null,
             ok: true,
             routineErrors: [],
-            usingLastKnownGood: false
+            usingLastKnownGood: false,
+            warnings: []
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot
@@ -4101,7 +4145,8 @@ describe("HTTP app — project detail page (#303)", () => {
             lastLoadedAt: null,
             ok: true,
             routineErrors: [],
-            usingLastKnownGood: false
+            usingLastKnownGood: false,
+            warnings: []
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot
@@ -4169,7 +4214,8 @@ describe("HTTP app — project detail page (#303)", () => {
             lastLoadedAt: null,
             ok: true,
             routineErrors: [],
-            usingLastKnownGood: false
+            usingLastKnownGood: false,
+            warnings: []
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot
@@ -4337,7 +4383,8 @@ describe("HTTP app — routine detail page (#304)", () => {
                 sourcePaths: ["/tmp/audit.md"]
               }
             ],
-            usingLastKnownGood: true
+            usingLastKnownGood: true,
+            warnings: []
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot
@@ -4396,7 +4443,8 @@ describe("HTTP app — routine detail page (#304)", () => {
                 sourcePaths: ["/tmp/r1.md"]
               }
             ],
-            usingLastKnownGood: true
+            usingLastKnownGood: true,
+            warnings: []
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot
@@ -4455,7 +4503,8 @@ describe("HTTP app — routine detail page (#304)", () => {
                 sourcePaths: ["/tmp/other.md"]
               }
             ],
-            usingLastKnownGood: true
+            usingLastKnownGood: true,
+            warnings: []
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot
@@ -4512,7 +4561,8 @@ describe("HTTP app — routine detail page (#304)", () => {
                 sourcePaths: ["/tmp/r10"]
               }
             ],
-            usingLastKnownGood: true
+            usingLastKnownGood: true,
+            warnings: []
           },
           runs: { active: [], failed: [], recent: [], stale: [] },
           stateRoot: test.stateRoot

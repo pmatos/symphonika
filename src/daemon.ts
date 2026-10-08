@@ -1967,8 +1967,10 @@ export async function startDaemon(
     },
     getProjectRepoAliases: resolveProjectRepoAliases,
     getProjectRequiredLabels: (projectName) =>
-      runtimeConfig.projectsByName().get(projectName)?.issue_filters
-        ?.labels_all ?? [],
+      [
+        runtimeConfig.projectsByName().get(projectName)?.issue_filters
+          ?.ready_label
+      ].filter((label): label is string => label !== undefined),
     getProjectRepo: (projectName) => {
       const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
       return tracker === undefined

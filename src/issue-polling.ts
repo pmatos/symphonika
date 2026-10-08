@@ -3,7 +3,7 @@ import { Octokit } from "@octokit/rest";
 import { parse } from "yaml";
 import { z } from "zod";
 
-import { projectDispatchSchema } from "./config-schemas.js";
+import { issueFiltersSchema, projectDispatchSchema } from "./config-schemas.js";
 import { normalizeLabels, priorityForLabels } from "./issue-priority.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 
@@ -272,13 +272,7 @@ const pollingProjectSchema = z
         token: z.string().trim().min(1)
       })
       .passthrough(),
-    issue_filters: z
-      .object({
-        states: z.array(z.literal("open")).min(1),
-        labels_all: z.array(z.string().trim().min(1)),
-        labels_none: z.array(z.string().trim().min(1))
-      })
-      .passthrough(),
+    issue_filters: issueFiltersSchema,
     priority: z
       .object({
         labels: z.record(z.string(), z.number().int().nonnegative()),
@@ -1666,10 +1660,9 @@ export function evaluateProjectEligibility(
   const reasons: string[] = [...issueStateReasons(issue, project)];
   const labels = new Set(issue.labels);
 
-  for (const requiredLabel of project.issue_filters.labels_all) {
-    if (!labels.has(requiredLabel)) {
-      reasons.push(`missing required label ${requiredLabel}`);
-    }
+  const readyLabel = project.issue_filters.ready_label;
+  if (!labels.has(readyLabel)) {
+    reasons.push(`missing required label ${readyLabel}`);
   }
 
   for (const excludedLabel of project.issue_filters.labels_none) {

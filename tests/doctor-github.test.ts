@@ -564,7 +564,7 @@ describe("GitHub Project initialization", () => {
       createLabel: vi.fn().mockResolvedValue(undefined),
       listLabels: vi
         .fn()
-        .mockResolvedValue(["agent-ready", "sym:claimed", "sym:failed"]),
+        .mockResolvedValue(["ready-for-agent", "sym:claimed", "sym:failed"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -634,7 +634,7 @@ describe("GitHub Project initialization", () => {
       createLabel: vi.fn(createLabel),
       listLabels: vi
         .fn()
-        .mockResolvedValue(["agent-ready", "sym:claimed", "sym:running"]),
+        .mockResolvedValue(["ready-for-agent", "sym:claimed", "sym:running"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -672,7 +672,7 @@ describe("GitHub Project initialization", () => {
       createLabel: vi.fn(createLabel),
       listLabels: vi
         .fn()
-        .mockResolvedValue(["agent-ready", "sym:claimed", "sym:failed"]),
+        .mockResolvedValue(["ready-for-agent", "sym:claimed", "sym:failed"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 

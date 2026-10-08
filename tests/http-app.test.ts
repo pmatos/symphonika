@@ -125,6 +125,7 @@ describe("HTTP app", () => {
         lastLoadedAt: null,
         ok: true,
         routineErrors: [],
+        warnings: [],
         usingLastKnownGood: false
       },
       lastTickAt: null,

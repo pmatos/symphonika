@@ -758,7 +758,7 @@ describe("dispatch continuation cap", () => {
     const project: RunControllerProjectConfig = {
       agent: { provider: "omp" },
       issue_filters: {
-        labels_all: ["agent-ready"],
+        ready_label: "agent-ready",
         labels_none: ["blocked", "needs-human"],
         states: ["open"]
       },

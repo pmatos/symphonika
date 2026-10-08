@@ -159,7 +159,7 @@ describe("Project initialization", () => {
       priorityLabels: "urgent=0, normal=5",
       projectName: "custom-project",
       provider: "claude",
-      requiredLabels: "ready, backend",
+      readyLabel: "ready",
       workflowPath: "automation/WORKFLOW.md"
     };
     const prompted: string[] = [];
@@ -167,11 +167,7 @@ describe("Project initialization", () => {
       createLabel: vi.fn(),
       listLabels: vi
         .fn()
-        .mockResolvedValue([
-          "ready",
-          "backend",
-          ...REQUIRED_OPERATIONAL_LABELS
-        ]),
+        .mockResolvedValue(["ready", ...REQUIRED_OPERATIONAL_LABELS]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -194,8 +190,8 @@ describe("Project initialization", () => {
     expect(config.projects[0]).toMatchObject({
       agent: { provider: "claude" },
       issue_filters: {
-        labels_all: ["ready", "backend"],
         labels_none: ["paused", "sym:stale"],
+        ready_label: "ready",
         states: ["open"]
       },
       name: "custom-project",
@@ -210,7 +206,7 @@ describe("Project initialization", () => {
       "projectName",
       "provider",
       "baseBranch",
-      "requiredLabels",
+      "readyLabel",
       "excludedLabels",
       "priorityLabels",
       "workflowPath"
@@ -284,7 +280,7 @@ describe("Project initialization", () => {
         { answer: "", waitFor: "Project name" },
         { answer: "", waitFor: "Agent Provider" },
         { answer: "main", waitFor: "Base branch" },
-        { answer: "agent-ready", waitFor: "Required issue labels" },
+        { answer: "agent-ready", waitFor: "Ready label" },
         { answer: "", waitFor: "Excluded issue labels" },
         { answer: "", waitFor: "Priority labels" },
         { answer: "WORKFLOW.md", waitFor: "Workflow Contract path" },
@@ -464,7 +460,7 @@ describe("Project initialization", () => {
     const prompted: string[] = [];
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue(["agent-ready"]),
+      listLabels: vi.fn().mockResolvedValue(["ready-for-agent"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -490,7 +486,7 @@ describe("Project initialization", () => {
       "projectName",
       "provider",
       "baseBranch",
-      "requiredLabels",
+      "readyLabel",
       "excludedLabels",
       "priorityLabels",
       "workflowPath",
@@ -536,20 +532,20 @@ describe("Project initialization", () => {
 
     expect(report.ok).toBe(true);
     expect(report.warnings).toContain(
-      "init-project will create required eligibility labels in acme/new-project: agent-ready"
+      "init-project will create required eligibility labels in acme/new-project: ready-for-agent"
     );
     expect(report.projects).toEqual([
       expect.objectContaining({
-        createdEligibilityLabels: ["agent-ready"],
+        createdEligibilityLabels: ["ready-for-agent"],
         createdOperationalLabels: [],
-        missingEligibilityLabels: ["agent-ready"],
+        missingEligibilityLabels: ["ready-for-agent"],
         missingOperationalLabels: [],
         name: "new-project"
       })
     ]);
     expect(githubApi.createLabel).toHaveBeenCalledOnce();
     expect(githubApi.createLabel).toHaveBeenCalledWith({
-      name: "agent-ready",
+      name: "ready-for-agent",
       owner: "acme",
       repo: "new-project",
       token: "secret-token"
@@ -568,7 +564,7 @@ describe("Project initialization", () => {
     const originalContents = await readFile(configPath, "utf8");
     const githubApi: GitHubApi = {
       createLabel: vi.fn(),
-      listLabels: vi.fn().mockResolvedValue(["agent-ready"]),
+      listLabels: vi.fn().mockResolvedValue(["ready-for-agent"]),
       validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
     };
 
@@ -639,7 +635,7 @@ describe("Project initialization", () => {
       expect.objectContaining({
         createdEligibilityLabels: [],
         createdOperationalLabels: [],
-        missingEligibilityLabels: ["agent-ready"],
+        missingEligibilityLabels: ["ready-for-agent"],
         name: "new-project"
       })
     ]);
@@ -690,7 +686,7 @@ describe("Project initialization", () => {
       expect.objectContaining({
         createdEligibilityLabels: [],
         createdOperationalLabels: [],
-        missingEligibilityLabels: ["agent-ready"],
+        missingEligibilityLabels: ["ready-for-agent"],
         missingOperationalLabels: [missingLabel],
         name: "new-project"
       })

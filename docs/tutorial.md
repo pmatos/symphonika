@@ -123,7 +123,7 @@ symphonika init-project
 
 `init-project` reads the current repository's `origin`, prompts for Project settings, appends a
 Dispatch Project, creates a starter Markdown `WORKFLOW.md` when the selected path is absent, and
-creates missing `sym:*` Operational Labels plus required eligibility labels.
+creates missing `sym:*` Operational Labels plus the Ready Label.
 
 Pass `--yes` to accept displayed defaults. `init --force` replaces the global config;
 `init-project --force` replaces only a Project with the same name.
@@ -347,7 +347,7 @@ Common first-run errors:
   `command -v <name>`. For a Bun-installed OMP, confirm `~/.bun/bin` is on the launching shell's
   `PATH`.
 - **Codex profile missing:** add the profile from the previous section.
-- **Required label missing:** rerun `init-project` or create the configured eligibility label.
+- **Ready Label missing:** rerun `init-project` or create the configured `ready_label` in the repository.
 
 ## 8. Make one issue eligible
 

@@ -146,8 +146,8 @@ ADR-2026-10-08-1426.
 Legacy `issue_filters.labels_all` is migrated at config load time and never reaches dispatch,
 polling, the HTTP surfaces, or `doctor`'s label checks: a one-element list keeps its value as the
 Ready Label; a longer list takes its first element and reports the resulting broadening of
-eligibility (a `doctor` warning, a warning in the daemon log on every load, and a dashboard
-banner); an empty list is a validation error; setting both `labels_all` and `ready_label`, or
+eligibility (a `doctor` warning, a warning in the daemon log when a load first produces it or its
+content changes, and a dashboard banner); an empty list is a validation error; setting both `labels_all` and `ready_label`, or
 neither, is a validation error. A new Dispatch Project written by `init-project` defaults its
 `ready_label` to `ready-for-agent`; an existing config that sets neither key is not silently
 defaulted.

@@ -211,6 +211,49 @@ describe("Project initialization", () => {
       "priorityLabels",
       "workflowPath"
     ]);
+    const starter = await readFile(
+      path.join(repositoryRoot, "automation", "WORKFLOW.md"),
+      "utf8"
+    );
+    expect(starter).toContain("Remove the issue's `ready` label");
+    expect(starter).not.toContain("agent-ready");
+  });
+
+  it("refuses a comma-separated answer for the single Ready Label", async () => {
+    const root = await makeTempRoot();
+    const repositoryRoot = path.join(root, "source-repository");
+    const configPath = path.join(root, "config", "symphonika.yml");
+    await createGitHubRepository(
+      repositoryRoot,
+      "git@github.com:acme/source-repository.git"
+    );
+    await writeEmptyConfig(configPath, root);
+    const originalContents = await readFile(configPath, "utf8");
+    const githubApi: GitHubApi = {
+      createLabel: vi.fn(),
+      listLabels: vi.fn(),
+      validateRepositoryAccess: vi.fn().mockResolvedValue({ ok: true })
+    };
+
+    const report = await runInitProject({
+      configPath,
+      cwd: repositoryRoot,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubApi,
+      prompt: (input) =>
+        Promise.resolve(
+          input.key === "readyLabel"
+            ? "agent-ready, backend"
+            : input.defaultValue
+        )
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.errors).toEqual([
+      expect.stringContaining("ready label must be a single label")
+    ]);
+    expect(githubApi.createLabel).not.toHaveBeenCalled();
+    await expect(readFile(configPath, "utf8")).resolves.toBe(originalContents);
   });
 
   it("keeps piped answers buffered through label confirmations", async () => {

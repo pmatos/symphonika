@@ -26,7 +26,8 @@ the config:
 | --- | --- |
 | `ready_label: X` | `X` |
 | `labels_all: [X]` | `ready_label: X`, value unchanged |
-| `labels_all: [X, Y, ...]` | `ready_label: X`; the full original list is kept as `migrated_from_labels_all` so the broadening can be reported |
+| `labels_all: [X, Y, ...]` | `ready_label: X`; the distinct, trimmed list is kept as `migrated_from_labels_all` so the broadening can be reported |
+| `labels_all: [X, X]` (repeats of one label) | `ready_label: X`; a single distinct label is not a broadening, so no marker and no warning |
 | `labels_all: []` | validation error (the operator must choose a label) |
 | `labels_all` and `ready_label` both set | validation error (ambiguous) |
 | neither key | validation error — existing configs are **not** silently defaulted |
@@ -36,8 +37,9 @@ parsed output is idempotent and preserves the broadening marker.
 
 Taking the first of several labels *broadens* eligibility (issues that lacked the other labels now
 qualify). It is reported on every surface an operator watches: a `doctor` warning, a daemon log
-warning on every config load, `warnings` on the reload status (`/api/status`), and a dashboard
-banner. The migration never rewrites the operator's `symphonika.yml`.
+warning when a config load first produces it or its content changes (not on every unchanged reload),
+`warnings` on the reload status (`/api/status`), and a dashboard banner. The migration never
+rewrites the operator's `symphonika.yml`.
 
 ### Defaults
 

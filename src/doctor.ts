@@ -2254,7 +2254,7 @@ export async function runInitProject(
         await mkdir(path.dirname(settings.workflowPath), { recursive: true });
         await writeFile(
           settings.workflowPath,
-          defaultWorkflowContract(),
+          defaultWorkflowContract(settings.readyLabel),
           "utf8"
         );
         createdWorkflow = true;
@@ -2408,6 +2408,11 @@ async function collectProjectSettings(input: {
     ).trim();
     if (readyLabel.length === 0) {
       throw new Error("ready label must not be empty");
+    }
+    if (readyLabel.includes(",")) {
+      throw new Error(
+        "ready label must be a single label; a Project has exactly one Ready Label, so remove the comma"
+      );
     }
     const excludedLabels = parseLabelList(
       await promptController.ask({

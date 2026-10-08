@@ -494,7 +494,7 @@ function sanitizeProjectName(repo: string): string {
   return sanitized.replace(/^-+|-+$/g, "") || "project";
 }
 
-export function defaultWorkflowContract(): string {
+export function defaultWorkflowContract(readyLabel: string): string {
   return [
     "# Implementing issue #{{issue.number}}: {{issue.title}}",
     "",
@@ -512,7 +512,7 @@ export function defaultWorkflowContract(): string {
     "2. Implement a small, focused change with behavior-focused tests.",
     "3. Run the local quality gate.",
     "4. Commit, push {{branch.name}}, and open a non-draft pull request with the local `gh` CLI.",
-    "5. Remove the issue's `agent-ready` label after the PR is open.",
+    `5. Remove the issue's \`${readyLabel}\` label after the PR is open.`,
     "6. If the work cannot proceed, leave a `gh issue comment` describing what blocked it and exit cleanly.",
     "",
     "## Constraints",

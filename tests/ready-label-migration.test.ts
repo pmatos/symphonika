@@ -100,6 +100,17 @@ describe("ready_label config migration", () => {
     expect(status.warnings[0]).toContain('"backend" or "small"');
   });
 
+  it("treats a repeated legacy label as a single label, not a broadening", async () => {
+    const reloader = await loadWithFilterLines([
+      '      labels_all: ["ship-it", "ship-it"]'
+    ]);
+
+    const filters = reloader.getSnapshot()?.polling.projects[0]?.issue_filters;
+    expect(filters?.ready_label).toBe("ship-it");
+    expect(filters).not.toHaveProperty("migrated_from_labels_all");
+    expect(reloader.getStatus().warnings).toEqual([]);
+  });
+
   it("accepts a native ready_label", async () => {
     const reloader = await loadWithFilterLines(['      ready_label: "go"']);
 

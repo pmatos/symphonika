@@ -171,11 +171,12 @@ export const issueFiltersSchema = z
     if (labels_all === undefined) {
       return { ...rest, ready_label: ready_label ?? DEFAULT_READY_LABEL };
     }
-    const [first = DEFAULT_READY_LABEL] = labels_all;
+    const distinct = [...new Set(labels_all)];
+    const [first = DEFAULT_READY_LABEL] = distinct;
     return {
       ...rest,
       ready_label: first,
-      ...(labels_all.length > 1 ? { migrated_from_labels_all: labels_all } : {})
+      ...(distinct.length > 1 ? { migrated_from_labels_all: distinct } : {})
     };
   });
 

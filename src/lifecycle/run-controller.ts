@@ -4190,9 +4190,6 @@ export class RunController {
     );
   }
 
-  // Shared retry-eligibility check: a failed+transient outcome still has
-  // budget left in the retry cap. Used at every point that decides whether a
-  // Run row is reused for a retry or finalized as terminal.
   // A run that exits 0 with commits ahead of base but whose Issue Branch never
   // reached origin (a push still running or failed when the provider exited,
   // issue #833) is reclassified as a transient failure here, before the FSM or
@@ -4233,6 +4230,9 @@ export class RunController {
     };
   }
 
+  // Shared retry-eligibility check: a failed+transient outcome still has
+  // budget left in the retry cap. Used at every point that decides whether a
+  // Run row is reused for a retry or finalized as terminal.
   private isRetryableTransientFailure(
     outcome: ClassifiedTerminal,
     runId: string
@@ -6514,12 +6514,6 @@ const MAX_MERGE_REFUSAL_ATTEMPTS = 5;
 // parking forever (see docs/adr for the incident this closes).
 const MAX_PR_UNTRACKED_WAIT_ATTEMPTS = 120;
 
-// True when every predicate a wait state names can be answered without
-// observing a pull request: at least one artifact predicate, and nothing beyond
-// artifact predicates and `provider_success`, which wait re-evaluation always
-// supplies. Deliberately strict — `branch_ahead_of_base` and the PR signals are
-// not projected on this path, and treating an unprojected signal as merely
-// "unmet" would let a catch-all transition fire on the first poll.
 function handsOffToAgentState(
   state: ExpandedWorkflowState | undefined,
   workflow: ExpandedWorkflow | undefined
@@ -6529,11 +6523,18 @@ function handsOffToAgentState(
   }
   return state.transitions.some(
     (transition) =>
+      transition.to !== state.id &&
       workflow.states.find((candidate) => candidate.id === transition.to)
         ?.action?.kind === "agent"
   );
 }
 
+// True when every predicate a wait state names can be answered without
+// observing a pull request: at least one artifact predicate, and nothing beyond
+// artifact predicates and `provider_success`, which wait re-evaluation always
+// supplies. Deliberately strict — `branch_ahead_of_base` and the PR signals are
+// not projected on this path, and treating an unprojected signal as merely
+// "unmet" would let a catch-all transition fire on the first poll.
 function isArtifactOnlyWaitState(state: ExpandedWorkflowState): boolean {
   let sawArtifact = false;
   for (const key of statePredicateKeys(state)) {

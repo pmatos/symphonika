@@ -175,9 +175,9 @@ import {
   isWorkflowParkedAction
 } from "./workflow-advancement.js";
 import {
+  buildBranchNotPushedReason,
   buildCapReachedReason,
   buildMergePrRefusedReason,
-  buildBranchNotPushedReason,
   buildNoPullRequestTrackedReason,
   buildPullRequestDiscoveryExhaustedReason,
   type BranchRemoteState,

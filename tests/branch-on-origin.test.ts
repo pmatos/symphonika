@@ -82,6 +82,15 @@ describe("verifyBranchPublished", () => {
     await expect(check(api, ws.path)).resolves.toEqual({ kind: "missing" });
   });
 
+  it("reports missing when origin lists no commits for the branch", async () => {
+    const ws = await workspaceWithHead();
+    const api = {
+      ...baseApi,
+      listBranchCommits: vi.fn().mockResolvedValue([])
+    };
+    await expect(check(api, ws.path)).resolves.toEqual({ kind: "missing" });
+  });
+
   it("reports stale when origin's tip differs from the local head", async () => {
     const ws = await workspaceWithHead();
     const api = {

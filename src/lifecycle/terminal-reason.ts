@@ -1,3 +1,5 @@
+import type { BranchPublication } from "./branch-on-origin.js";
+
 export type CapReachedKind = "no_commits" | "no_pr" | "work_landed" | "unknown";
 
 const CAP_REACHED_PREFIX = "cap_reached:";
@@ -90,8 +92,7 @@ export function buildNoPullRequestTrackedReason(
 // origin or sits at a different commit than the workspace head (issue #833).
 export function buildBranchNotPushedReason(
   branchName: string,
-  publication:
-    { kind: "missing" } | { kind: "stale"; localSha: string; originSha: string }
+  publication: Extract<BranchPublication, { kind: "missing" | "stale" }>
 ): string {
   const detail =
     publication.kind === "missing"

@@ -11,13 +11,15 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+const ORIGIN_TIP_WINDOW = 30;
+
 export type BranchPublication =
   | { kind: "published" }
   | { kind: "missing" }
   | { kind: "stale"; localSha: string; originSha: string }
   | { kind: "unverified" };
 
-export type VerifyBranchPublishedInput = {
+type VerifyBranchPublishedInput = {
   api: GitHubIssuesApi;
   branch: string;
   logger?: Logger | undefined;
@@ -60,7 +62,7 @@ async function lookup(
   const commits = await tryListBranchCommits(input.api, {
     ...input.repository,
     branch: input.branch,
-    perPage: 1
+    perPage: ORIGIN_TIP_WINDOW
   });
   if (commits === undefined) {
     return { kind: "unverified" };
@@ -68,7 +70,8 @@ async function lookup(
   if (commits === null || commits.length === 0) {
     return { kind: "missing" };
   }
-  const originSha = commits[0]?.sha;
+  const originShas = commits.map((commit) => commit.sha);
+  const originSha = originShas[0];
   if (originSha === undefined) {
     return { kind: "unverified" };
   }
@@ -79,7 +82,7 @@ async function lookup(
     "HEAD"
   ]);
   const localSha = stdout.trim();
-  return localSha === originSha
+  return originShas.includes(localSha)
     ? { kind: "published" }
     : { kind: "stale", localSha, originSha };
 }

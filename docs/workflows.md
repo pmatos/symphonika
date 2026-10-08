@@ -424,8 +424,8 @@ attempt started from. It is a property of the branch, not of the attempt: in a m
 stays `true` for every later state once any earlier state has committed.
 
 A clean agent exit with commits ahead of base is also checked against origin: Symphonika compares
-the workspace `HEAD` with the Issue Branch tip on GitHub, and a branch that is missing or at a different
-commit (typically a `git push` still running or failed when the provider exited) turns the attempt into
+the workspace `HEAD` with the Issue Branch's recent commits on GitHub, and a branch that is missing or
+does not contain it (typically a `git push` still running or failed when the provider exited) turns the attempt into
 a transient failure with reason `branch_not_pushed`, so `provider_success` reads `false` and the retry
 budget applies. The check fails open when GitHub cannot answer, and is skipped for a state with a
 transition into another `agent` state, since those states share the workspace and a later one is

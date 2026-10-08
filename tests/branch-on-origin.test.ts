@@ -58,8 +58,19 @@ describe("verifyBranchPublished", () => {
     };
     await expect(check(api, ws.path)).resolves.toEqual({ kind: "published" });
     expect(api.listBranchCommits).toHaveBeenCalledWith(
-      expect.objectContaining({ branch, perPage: 1 })
+      expect.objectContaining({ branch, perPage: 30 })
     );
+  });
+
+  it("reports published when origin is ahead of the local head", async () => {
+    const ws = await workspaceWithHead();
+    const api = {
+      ...baseApi,
+      listBranchCommits: vi
+        .fn()
+        .mockResolvedValue([{ sha: "f".repeat(40) }, { sha: ws.head }])
+    };
+    await expect(check(api, ws.path)).resolves.toEqual({ kind: "published" });
   });
 
   it("reports missing when origin has no such branch", async () => {

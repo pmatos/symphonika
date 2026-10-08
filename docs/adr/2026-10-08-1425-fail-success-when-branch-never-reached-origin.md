@@ -14,8 +14,9 @@ reached origin).
 ## Decision
 
 After `classifyFailure` reports a success with `commitsAhead`, and before the workflow outcome or the
-retry logic read it, Symphonika asks GitHub (`listBranchCommits`, one commit) for the Issue Branch tip and
-compares it with the workspace `HEAD`. A missing branch or a different tip reclassifies the attempt as a
+retry logic read it, Symphonika asks GitHub (`listBranchCommits`, the 30 most recent commits) for the Issue Branch and
+checks that the workspace `HEAD` is among them, so a branch that moved ahead (a reviewer commit, an
+"Update branch" merge) still counts as published. A missing branch or a `HEAD` absent from that window reclassifies the attempt as a
 `failed` / `transient` terminal with reason `branch_not_pushed: branch "<name>" has commits but never
 reached origin (...)`.
 

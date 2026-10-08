@@ -2050,9 +2050,9 @@ On provider exit code 0:
 3. If Workspace inspection fails, mark the run `failed` with deterministic terminal reason
    `workspace_inspection_failed` and add `sym:failed`. This is a real failure (the `git` inspection
    command itself errored), unlike case 2.
-4. If the branch is ahead of base, verify the Issue Branch reached origin: look up its tip with the
-   GitHub API and compare it with the Workspace `HEAD`. A branch that is missing from origin, or sits
-   at a different commit, fails the attempt with transient terminal reason `branch_not_pushed` so the
+4. If the branch is ahead of base, verify the Issue Branch reached origin: look up its recent
+   commits with the GitHub API and compare them with the Workspace `HEAD`. A branch that is missing
+   from origin, or does not contain that commit, fails the attempt with transient terminal reason `branch_not_pushed` so the
    retry budget gives the next attempt a chance to push (ADR-2026-10-08-1425). The check fails open
    when GitHub cannot answer, and is skipped for a raw FSM state that hands off to another `agent`
    state, which shares the Workspace and publishes later.

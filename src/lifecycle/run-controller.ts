@@ -2686,8 +2686,11 @@ export class RunController {
       if (neverStartedChecks.length > 0) {
         // Keyed on the persisted reason like the guard park below: every poll
         // re-observes the same condition, and a restart loses memory.
+        // Rewritten on every tick: a merge_pr observation overwrites the
+        // reason with its own "deferred" note before this point, so skipping
+        // the write on a repeat tick would lose the dedup key.
+        this.runStore.recordWaitingActivity(runId, CHECKS_NOT_STARTED_REASON);
         if (row.stateTransitionReason !== CHECKS_NOT_STARTED_REASON) {
-          this.runStore.recordWaitingActivity(runId, CHECKS_NOT_STARTED_REASON);
           await this.claimLabels.flagHumanAttention({
             issueNumber: refreshed.number,
             reason: describeChecksNotStarted(neverStartedChecks),

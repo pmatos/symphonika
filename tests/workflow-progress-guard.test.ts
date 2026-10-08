@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -730,10 +730,21 @@ describe("workflow progress guard", () => {
         reEvaluate: (runId: string) => Promise<void>;
         store: ReturnType<typeof openRunStore>;
       }) => Promise<void>,
-      scheduled: ScheduledWorkInput[] = []
+      scheduled: ScheduledWorkInput[] = [],
+      holdingKind: "merge_pr" | "wait" = "wait"
     ): Promise<void> {
       const root = await makeTempRoot();
       await writeCyclingProject(root);
+      if (holdingKind === "merge_pr") {
+        const workflowPath = path.join(root, "workflow.yml");
+        await writeFile(
+          workflowPath,
+          (await readFile(workflowPath, "utf8")).replace(
+            "        kind: wait",
+            "        kind: merge_pr"
+          )
+        );
+      }
       const store = openRunStore({ stateRoot: path.join(root, ".symphonika") });
       try {
         const issue = issueFixture();
@@ -921,6 +932,26 @@ describe("workflow progress guard", () => {
             expect(body).toContain("billing");
           },
           scheduled
+        );
+      });
+
+      it("flags once and keeps the dedup key on a merge_pr wait whose observation rewrites the reason every tick", async () => {
+        await withParkedGuard(
+          vi.fn().mockResolvedValue(neverStarted),
+          async ({ api, reEvaluate, store }) => {
+            await reEvaluate("waiting-1");
+            await reEvaluate("waiting-1");
+            await reEvaluate("waiting-1");
+            await reEvaluate("waiting-1");
+
+            expect(store.getRun("waiting-1")?.stateTransitionReason).toBe(
+              "checks_not_started"
+            );
+            expect(api.addLabelsToIssue).toHaveBeenCalledTimes(1);
+            expect(api.addIssueComment).toHaveBeenCalledTimes(1);
+          },
+          [],
+          "merge_pr"
         );
       });
 

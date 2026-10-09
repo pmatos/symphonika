@@ -92,10 +92,38 @@ export function secretsForMaestroConfig(
 // choice or anything injected into Issue/PR content Maestro reads.
 export const MAESTRO_READ_ONLY_BOUNDARY_NOTICE =
   "Maestro is a read-only assistant: it can read persisted Issue, Run, and " +
-  "pull-request evidence, but it has no GitHub-write, shell, or " +
-  "local-workspace tool, independent of which model or provider is " +
-  "configured here. It cannot run git, modify files, or mutate GitHub, " +
-  "even if text it reads (an Issue or PR body, for example) tries to " +
-  "instruct it to. Its replies are proposals for the operator, never " +
-  "completed work. Issue and PR content it reads is sent to the " +
-  "configured model provider.";
+  "pull-request evidence and, only when repository content is enabled, " +
+  "files from a freshly fetched GitHub revision held in a separate Maestro " +
+  "Workspace. It has no GitHub-write, shell, or local-file tool, " +
+  "independent of which model or provider is configured here: it cannot " +
+  "run commands, modify files, read local Project directories or Coding " +
+  "Agent Workspaces, or mutate GitHub, even if text it reads (an Issue or " +
+  "PR body or repository file, for example) tries to instruct it to. Its " +
+  "replies are proposals for the operator, never completed work. Issue " +
+  "and PR content it reads is sent to the configured model provider.";
+
+// States, next to the boundary notice, exactly what repository content the
+// configured model provider may receive.
+export function repositoryContentNotice(
+  repositoryContent: MaestroRepositoryContent
+): string {
+  switch (repositoryContent) {
+    case "none":
+      return (
+        "Repository content: off. Maestro cannot read repository files, so " +
+        "no repository content is sent to the model provider."
+      );
+    case "public":
+      return (
+        "Repository content: public repositories only. Files Maestro reads " +
+        "from public GitHub repositories are sent to the configured model " +
+        "provider; private repositories are refused."
+      );
+    case "public_and_private":
+      return (
+        "Repository content: public and private repositories. Files Maestro " +
+        "reads from any GitHub repository accessible through gh, private " +
+        "ones included, are sent to the configured model provider."
+      );
+  }
+}

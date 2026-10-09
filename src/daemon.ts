@@ -54,7 +54,13 @@ import {
   type HostPressureSample
 } from "./lifecycle/host-pressure.js";
 import { sweepProviderScratch } from "./lifecycle/provider-scratch.js";
+import { readGhAuthToken } from "./gh-auth-token.js";
 import { resolveToken } from "./lifecycle/token.js";
+import { secretsForMaestroConfig } from "./maestro/config.js";
+import {
+  createGitHubRepositoryInfoLookup,
+  createMaestroWorkspace
+} from "./maestro/workspace.js";
 import {
   createDaemonHeartbeat,
   isTickRecentEnoughForSystemdWatchdog,
@@ -1806,6 +1812,46 @@ export async function startDaemon(
     return { kind: "adopted", runId };
   };
 
+  // #867: Maestro's read-only repository mirror. A repository that is a
+  // configured Project's tracker uses that Project's token; any other
+  // explicitly named repository uses the operator's `gh` login.
+  const ghTokensSeen = new Set<string>();
+  const maestroWorkspace = createMaestroWorkspace({
+    redactSecrets: () => [
+      ...ghTokensSeen,
+      ...secretsForMaestroConfig(runtimeConfig.maestroConfig(), env),
+      ...[...runtimeConfig.projectsByName().values()].flatMap((project) => {
+        const token =
+          project.tracker === undefined
+            ? undefined
+            : resolveToken(project.tracker.token, env);
+        return token === undefined ? [] : [token];
+      })
+    ],
+    repositoryInfo: createGitHubRepositoryInfoLookup(),
+    stateRoot: state.stateRoot,
+    tokenFor: async (owner, repo) => {
+      for (const project of runtimeConfig.projectsByName().values()) {
+        const tracker = project.tracker;
+        if (
+          tracker !== undefined &&
+          tracker.owner.toLowerCase() === owner.toLowerCase() &&
+          tracker.repo.toLowerCase() === repo.toLowerCase()
+        ) {
+          const projectToken = resolveToken(tracker.token, env);
+          if (projectToken !== undefined) {
+            return projectToken;
+          }
+        }
+      }
+      const ghToken = await readGhAuthToken();
+      if (ghToken !== undefined) {
+        ghTokensSeen.add(ghToken);
+      }
+      return ghToken;
+    }
+  });
+
   const shutdownController = new AbortController();
   const app = createHttpApp({
     cancelRun: cancelViaUi,
@@ -1955,6 +2001,7 @@ export async function startDaemon(
     },
     getPullRequestFollowupPolicy: () => runtimeConfig.pullRequestPolicy(),
     getMaestroConfig: () => runtimeConfig.maestroConfig(),
+    maestroWorkspace,
     getConfigPath: () => state.configPath,
     getProjectWorkflowPath: (projectName) => {
       const workflow = runtimeConfig

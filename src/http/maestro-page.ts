@@ -5,6 +5,7 @@ import type { Hono } from "hono";
 import { createAsyncMutex } from "../lifecycle/async-mutex.js";
 import {
   MAESTRO_READ_ONLY_BOUNDARY_NOTICE,
+  repositoryContentNotice,
   type MaestroConfig
 } from "../maestro/config.js";
 import {
@@ -14,6 +15,7 @@ import {
 import { createAnthropicMaestroModel } from "../maestro/model.js";
 import type { MaestroModel } from "../maestro/model.js";
 import { createMaestroEvidenceReader } from "../maestro/reader.js";
+import type { MaestroWorkspace } from "../maestro/workspace.js";
 import type { MaestroMessageRow, RunStore } from "../run-store.js";
 import {
   checkMutationAuthorized,
@@ -29,8 +31,19 @@ export type RegisterMaestroPageOptions = {
   createMaestroModel?: (config: MaestroConfig) => MaestroModel;
   csrfSecret: CsrfSecret;
   getMaestroConfig?: () => MaestroConfig | undefined;
+  getProjectRepo?: (
+    projectName: string
+  ) => { owner: string; repo: string } | undefined;
+  maestroWorkspace?: MaestroWorkspace;
   runStore: RunStore;
 };
+
+// Repository citations point at github.com rather than an internal page.
+function externalLinkAttributes(href: string): string {
+  return href.startsWith("https://")
+    ? ' rel="noopener noreferrer" target="_blank"'
+    : "";
+}
 
 function renderMessage(message: MaestroMessageRow): string {
   const roleLabel = message.role === "user" ? "You" : "Maestro";
@@ -43,7 +56,7 @@ function renderMessage(message: MaestroMessageRow): string {
             // tool actually returned (src/maestro/tools.ts) — never from
             // model-authored text — so it is safe to render as a link.
             (citation) =>
-              `<li><a href="${escapeHtml(citation.href)}">${escapeHtml(citation.label)}</a> (observed ${renderTimestamp(citation.observedAt)})</li>`
+              `<li><a href="${escapeHtml(citation.href)}"${externalLinkAttributes(citation.href)}>${escapeHtml(citation.label)}</a> (observed ${renderTimestamp(citation.observedAt)})</li>`
           )
           .join("")}</ul>`;
   return (
@@ -86,6 +99,7 @@ function renderMaestroPage(input: {
   return (
     `<h1 class="page-title">Maestro</h1>` +
     boundaryNotice +
+    `<p class="note maestro-repository-content">${escapeHtml(repositoryContentNotice(input.config.repositoryContent))}</p>` +
     history +
     errorHtml +
     `<form method="post" action="/maestro/messages" class="maestro-form">` +
@@ -198,7 +212,16 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
           history,
           model,
           reader,
-          userMessage
+          userMessage,
+          workspace:
+            options.maestroWorkspace === undefined ||
+            options.getProjectRepo === undefined
+              ? undefined
+              : {
+                  projectRepo: options.getProjectRepo,
+                  repositoryContent: config.repositoryContent,
+                  workspace: options.maestroWorkspace
+                }
         });
         options.runStore.appendMaestroMessage({
           citations: result.citations,

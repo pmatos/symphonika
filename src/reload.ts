@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import type { WorkflowFormat } from "./config-schemas.js";
 import {
+  epicLabelsSchema,
   issueFiltersSchema,
   pathStringSchema,
   projectDispatchSchema,
@@ -15,6 +16,7 @@ import {
   projectWorkspaceSchema,
   readyLabelBroadeningWarning,
   rejectDispatchOnlyKeysOnRoutineHost,
+  rejectEpicLabelOverlap,
   workflowReferenceSchema
 } from "./config-schemas.js";
 import type {
@@ -332,10 +334,12 @@ const pollingProjectSchema = z
     tracker: trackerSchema,
     issue_filters: issueFiltersSchema,
     priority: prioritySchema,
+    epic_labels: epicLabelsSchema,
     agent: agentSchema
   })
   .passthrough()
-  .superRefine(rejectPerProjectRoutines);
+  .superRefine(rejectPerProjectRoutines)
+  .superRefine(rejectEpicLabelOverlap);
 
 // A Routine Host: never polled for issues, exists only to host Routine Firings.
 // Requires name + workspace + agent + mode. `tracker` is optional here; the

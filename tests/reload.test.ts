@@ -2854,3 +2854,86 @@ describe("validateServiceConfigContent (#307 editor save-preview validation)", (
     );
   });
 });
+
+describe("epic_labels project vocabulary (#857)", () => {
+  async function configWith(
+    projectLines: string[],
+    priorityLabels = "      labels: {}"
+  ): Promise<{ configPath: string; content: string }> {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", { projectLines });
+    const configPath = path.join(root, "symphonika.yml");
+    const content = (await readFile(configPath, "utf8"))
+      .replace(
+        '      labels_all: ["agent-ready"]',
+        '      ready_label: "agent-ready"'
+      )
+      .replace("      labels: {}", priorityLabels);
+    return { configPath, content };
+  }
+
+  it("exposes epic_labels on the loaded project and leaves them unset when omitted", async () => {
+    const withEpics = await configWith(["    epic_labels: [epic, initiative]"]);
+    await writeFile(withEpics.configPath, withEpics.content);
+    const reloader = new RuntimeConfigReloader({
+      configPath: withEpics.configPath
+    });
+    await reloader.reload();
+    expect(
+      reloader.projectsByName().get("symphonika")?.epic_labels
+    ).toEqual(["epic", "initiative"]);
+
+    const without = await configWith([]);
+    await writeFile(without.configPath, without.content);
+    const plain = new RuntimeConfigReloader({ configPath: without.configPath });
+    await plain.reload();
+    expect(plain.projectsByName().get("symphonika")?.epic_labels).toBeUndefined();
+  });
+
+  it.each([
+    ["a blank entry", ["    epic_labels: ['  ']"], undefined, "epic_labels"],
+    [
+      "a duplicate entry",
+      ["    epic_labels: [epic, epic]"],
+      undefined,
+      "duplicate"
+    ],
+    [
+      "the ready label",
+      ["    epic_labels: [agent-ready]"],
+      undefined,
+      "ready_label"
+    ],
+    [
+      "a priority label",
+      ["    epic_labels: ['priority:high']"],
+      '      labels: { "priority:high": 1 }',
+      "priority"
+    ]
+  ])("rejects %s", async (_name, lines, priorityLabels, fragment) => {
+    const { configPath, content } = await configWith(lines, priorityLabels);
+    const result = await validateServiceConfigContent(content, configPath);
+    expect(result.errors.join("\n")).toContain(fragment);
+  });
+
+  it("rejects epic_labels on a Routine Host like other dispatch-only keys", async () => {
+    const { configPath, content } = await configWith([]);
+    const withHost = [
+      content.trimEnd(),
+      "  - name: vow",
+      "    mode: routine_host",
+      "    epic_labels: [epic]",
+      "    workspace:",
+      "      root: ./.symphonika/workspaces/vow",
+      "      git:",
+      "        remote: git@github.com:vow-lang/vow.git",
+      "        base_branch: main",
+      "    agent:",
+      "      provider: codex",
+      ""
+    ].join("\n");
+    const result = await validateServiceConfigContent(withHost, configPath);
+    expect(result.errors.join("\n")).toContain("epic_labels");
+  });
+});

@@ -222,6 +222,7 @@ export type RunControllerProjectConfig = {
   // Dispatch-only. Routine Hosts have no issue filters, priority, or workflow.
   issue_filters?: PollingProjectConfig["issue_filters"] | undefined;
   priority?: PollingProjectConfig["priority"] | undefined;
+  epic_labels?: PollingProjectConfig["epic_labels"] | undefined;
   // Project-owned bound for changing park-mediated cycles. Zero disables the
   // absolute budget while leaving identical-observation fingerprinting live.
   progressGuard?: { maxClaimsPerEdge: number } | undefined;

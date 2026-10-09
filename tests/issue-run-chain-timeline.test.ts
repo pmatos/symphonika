@@ -1352,6 +1352,52 @@ describe("GET /issues/:project/:number — graph drill-down (#860)", () => {
     }
   });
 
+  it("credits the wait state a chain finished through instead of calling implement to done undeclared", async () => {
+    const test = await setup();
+    try {
+      await seedImplementThenWaitChain(test, {
+        issueNumber: 13,
+        rootId: "root-t",
+        waitId: "wait-t"
+      });
+      test.runStore.recordWorkflowTerminal("wait-t", {
+        terminalStateId: "done",
+        transitionReason: "checks: success"
+      });
+      test.runStore.updateRunState("wait-t", "succeeded");
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/13")).text();
+
+      expect(html).not.toContain("not declared in the captured graph");
+      const [data] = drilldownData(html);
+      expect(data?.visits).toEqual([
+        { anchors: ["chain-root-t-state-0"], stateId: "implement" },
+        { anchors: ["chain-root-t-state-1"], stateId: "review_wait" },
+        { anchors: ["chain-root-t-state-1"], stateId: "done" }
+      ]);
+      expect(data?.traversed).toEqual([
+        {
+          declared: true,
+          from: "implement",
+          kind: "transition",
+          to: "review_wait"
+        },
+        {
+          declared: true,
+          from: "review_wait",
+          kind: "transition",
+          to: "done"
+        }
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("stacks the canvas over the outline on narrow screens", async () => {
     const test = await setup();
     try {

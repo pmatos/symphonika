@@ -214,6 +214,73 @@ describe("buildChainGraphEvidence (#860)", () => {
     ]);
   });
 
+  it("attributes a terminal leaf to the state its parent forward-stamped, then records the terminal it reached", () => {
+    const evidence = buildChainGraphEvidence(
+      [row("completed", "implement", "review_wait"), row("terminal", "done")],
+      GRAPH
+    );
+
+    expect(evidence?.states).toEqual([
+      { stateId: "implement", visits: [0] },
+      { stateId: "review_wait", visits: [1] },
+      { stateId: "done", visits: [1] }
+    ]);
+    expect(evidence?.traversed).toEqual([
+      {
+        declared: true,
+        from: "implement",
+        kind: "transition",
+        to: "review_wait"
+      },
+      { declared: true, from: "review_wait", kind: "transition", to: "done" }
+    ]);
+    expect(evidence?.current).toEqual({
+      kind: "terminal",
+      rowIndex: 1,
+      stateId: "done"
+    });
+  });
+
+  it("uses graph.initial as the executed state of a root that went straight to a terminal", () => {
+    const evidence = buildChainGraphEvidence([row("terminal", "done")], GRAPH);
+
+    expect(evidence?.states).toEqual([
+      { stateId: "implement", visits: [0] },
+      { stateId: "done", visits: [0] }
+    ]);
+    expect(evidence?.traversed).toEqual([
+      { declared: false, from: "implement", kind: "transition", to: "done" }
+    ]);
+  });
+
+  it("does not infer a terminal leaf's executed state from a still-live parent", () => {
+    const evidence = buildChainGraphEvidence(
+      [
+        row("current_waiting", "review_wait", "review_wait"),
+        row("terminal", "done")
+      ],
+      GRAPH
+    );
+
+    expect(evidence?.states.map((s) => s.stateId)).toEqual([
+      "review_wait",
+      "done"
+    ]);
+    expect(evidence?.traversed).toEqual([
+      { declared: true, from: "review_wait", kind: "transition", to: "done" }
+    ]);
+  });
+
+  it("does not invent a handoff for a root that never advanced past its initial state", () => {
+    const evidence = buildChainGraphEvidence(
+      [row("pending_handoff", "implement", "implement")],
+      GRAPH
+    );
+
+    expect(evidence?.states).toEqual([{ stateId: "implement", visits: [0] }]);
+    expect(evidence?.traversed).toEqual([]);
+  });
+
   it("flags consecutive rows in the same state as continued in place, with no edge", () => {
     const evidence = buildChainGraphEvidence(
       [row("completed", "implement"), row("current_running", "implement")],

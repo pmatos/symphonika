@@ -39,13 +39,31 @@ export type ChainGraphEvidence = {
 };
 
 type ExecutedRow = {
-  handoffTarget?: string | undefined;
+  next?: { kind: ChainGraphTraversal["kind"]; stateId: string } | undefined;
   stateId: string | undefined;
 };
 
-// A `pending_handoff` row's stateId names the state it handed off *to*; the
-// state it actually executed is its parent's forward-stamp, or the graph's
-// `initial` for a chain root. Every other kind's stateId is what it executed.
+// State a Run at `index` executed, recovered from the chain's forward-stamps:
+// its parent's `currentStateId`, or the graph's `initial` for the root. A
+// still-live parent never forward-stamped, so its value says nothing.
+function stateExecutedAt(
+  rows: readonly ChainStateRow[],
+  index: number,
+  graph: ExpandedWorkflow
+): string | undefined {
+  if (index === 0) {
+    return graph.initial;
+  }
+  const parent = rows[index - 1];
+  return parent?.kind === "completed"
+    ? (parent.run.currentStateId ?? undefined)
+    : undefined;
+}
+
+// A `pending_handoff` row's stateId names the state it handed off *to*, and a
+// `terminal` row's names the terminal it reached — in both cases the state the
+// Run actually executed is what stateExecutedAt recovers. Every other kind's
+// stateId is what it executed.
 function executedState(
   rows: readonly ChainStateRow[],
   index: number,
@@ -55,18 +73,27 @@ function executedState(
   if (row === undefined) {
     return { stateId: undefined };
   }
-  if (row.kind !== "pending_handoff") {
-    return { stateId: row.stateId };
+  const reached = row.stateId;
+  if (
+    reached === undefined ||
+    (row.kind !== "pending_handoff" && row.kind !== "terminal")
+  ) {
+    return { stateId: reached };
   }
-  if (index === 0) {
-    return row.run.currentStateId === null
-      ? { stateId: row.stateId }
-      : { handoffTarget: row.stateId, stateId: graph.initial };
+  const executed = stateExecutedAt(rows, index, graph);
+  if (executed === reached) {
+    return { stateId: reached };
   }
-  const executed = rows[index - 1]?.run.currentStateId ?? undefined;
-  return executed === undefined || executed === row.stateId
-    ? { stateId: executed }
-    : { handoffTarget: row.stateId, stateId: executed };
+  if (executed === undefined) {
+    return { stateId: row.kind === "terminal" ? reached : undefined };
+  }
+  return {
+    next: {
+      kind: row.kind === "terminal" ? "transition" : "handoff_pending",
+      stateId: reached
+    },
+    stateId: executed
+  };
 }
 
 function declaresTransition(
@@ -97,14 +124,18 @@ export function buildChainGraphEvidence(
   const visited = new Set<string>();
   let previous: string | undefined;
 
+  const visit = (stateId: string, index: number): void => {
+    visitsByState.set(stateId, [...(visitsByState.get(stateId) ?? []), index]);
+    visited.add(stateId);
+  };
+
   rows.forEach((_, index) => {
-    const { handoffTarget, stateId } = executedState(rows, index, graph);
+    const { next, stateId } = executedState(rows, index, graph);
     if (stateId === undefined) {
       previous = undefined;
       return;
     }
-    visitsByState.set(stateId, [...(visitsByState.get(stateId) ?? []), index]);
-    visited.add(stateId);
+    visit(stateId, index);
     if (previous === stateId) {
       continuedInPlace.push(index);
     } else if (previous !== undefined) {
@@ -116,13 +147,17 @@ export function buildChainGraphEvidence(
       });
     }
     previous = stateId;
-    if (handoffTarget !== undefined) {
-      visited.add(handoffTarget);
+    if (next !== undefined) {
+      if (next.kind === "transition") {
+        visit(next.stateId, index);
+      } else {
+        visited.add(next.stateId);
+      }
       traversed.push({
-        declared: declaresTransition(graph, stateId, handoffTarget),
+        declared: declaresTransition(graph, stateId, next.stateId),
         from: stateId,
-        kind: "handoff_pending",
-        to: handoffTarget
+        kind: next.kind,
+        to: next.stateId
       });
       previous = undefined;
     }

@@ -4,6 +4,7 @@
 // and must never be the sole carrier of any status or control (ADR 0056).
 export const CHAIN_GRAPH_CLIENT_JS = `(function () {
   var UNAVAILABLE = "Interactive graph unavailable; use the state list below.";
+  var UNDECLARED_PREFIX = "__undeclared__";
   var AVAILABLE = "The diagram is a visual aid. The state list is the keyboard-accessible version; selecting a node opens its entry there.";
 
   var mounts = document.querySelectorAll("details.chain-graph-drilldown[data-chain-graph-root]");
@@ -62,7 +63,6 @@ export const CHAIN_GRAPH_CLIENT_JS = `(function () {
       } else if (st.terminal === "success") cls.push("term-ok");
       else if (st.terminal) cls.push("term-block");
       else if (st.actionKind) cls.push("act-" + st.actionKind);
-      if (st.id === data.initial) cls.push("initial");
       return cls.join(" ");
     }
 
@@ -71,14 +71,14 @@ export const CHAIN_GRAPH_CLIENT_JS = `(function () {
       elements.push({ data: { id: st.id, label: st.id === current.stateId ? st.id + "\\ncurrent" : st.id }, classes: nodeClasses(st) });
     });
     Object.keys(missing).forEach(function (id) {
-      var cls = "missing visited" + (id === current.stateId ? " current cur-" + current.kind : "");
+      var cls = "missing" + (Object.prototype.hasOwnProperty.call(visited, id) ? " visited" : "") + (id === current.stateId ? " current cur-" + current.kind : "");
       elements.push({ data: { id: id, label: id + "\\n(not in graph)" }, classes: cls });
     });
     states.forEach(function (st) {
       (st.transitions || []).forEach(function (tr, i) {
         var target = tr.to;
         if (!real[target] && !missing[target]) {
-          target = "__undeclared__" + tr.to;
+          target = UNDECLARED_PREFIX + tr.to;
           if (!missing[target]) {
             missing[target] = true;
             elements.push({ data: { id: target, label: tr.to }, classes: "missing" });
@@ -128,7 +128,10 @@ export const CHAIN_GRAPH_CLIENT_JS = `(function () {
     statusEl.textContent = AVAILABLE;
     canvas.setAttribute("aria-hidden", "true");
 
-    cy.on("tap", "node", function (evt) { select(details, statusEl, visited, evt.target.id()); });
+    cy.on("tap", "node", function (evt) {
+      var id = evt.target.id();
+      select(details, statusEl, visited, id.indexOf(UNDECLARED_PREFIX) === 0 ? id.slice(UNDECLARED_PREFIX.length) : id);
+    });
     cy.ready(function () { cy.fit(undefined, 20); });
   }
 

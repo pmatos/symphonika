@@ -3305,8 +3305,10 @@ timeline row's status, not by colour alone), and every visit as a link back to i
 that Run's own effective provider. Traversed transitions are derived only from consecutive timeline
 rows (`src/issues/run-chain-graph.ts`): rows in the same state are "continued in place" with no edge,
 an unrecorded row breaks the walk without a guessed edge, an observed pair the captured graph does not
-declare is listed as undeclared rather than drawn, and a handed-off-but-never-dispatched leaf is shown
-as a pending handoff, not an executed visit. An optional Cytoscape diagram (CDN scripts with SRI, per
+declare is listed as undeclared rather than drawn, a handed-off-but-never-dispatched leaf is shown
+as a pending handoff, not an executed visit, and a leaf that concluded into a terminal state is credited
+with the state it executed (its parent's forward-stamp, or the graph's `initial` for a root) followed by
+a transition into that terminal. An optional Cytoscape diagram (CDN scripts with SRI, per
 ADR-0056, initialised only when the section is opened) highlights the current and traversed states and
 edges and, on selecting a node, opens and focuses that state's outline entry with links to its timeline
 rows. When the scripts or CDN are unavailable the diagram stays hidden and the outline and timeline

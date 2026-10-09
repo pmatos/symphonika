@@ -5006,13 +5006,15 @@ function renderChainGraphDrilldown(view: IssueRunChainView): string {
     return `<ul class="chain-graph-visits">${items}</ul>`;
   };
 
+  const renderCurrentMark = (stateId: string): string =>
+    stateId === evidence.current.stateId && leafRow !== undefined
+      ? ` <strong>Current:</strong> ${renderChainRowStatusPill(leafRow)}`
+      : "";
+
   const renderStateOutline = (state: ExpandedWorkflow["states"][number]) => {
     const visitCount = visitsByState.get(state.id)?.length ?? 0;
     const isCurrent = state.id === evidence.current.stateId;
-    const currentMark =
-      isCurrent && leafRow !== undefined
-        ? ` <strong>Current:</strong> ${renderChainRowStatusPill(leafRow)}`
-        : "";
+    const currentMark = renderCurrentMark(state.id);
     const visited =
       visitCount === 0
         ? `<span class="muted">not executed</span>`
@@ -5029,19 +5031,16 @@ function renderChainGraphDrilldown(view: IssueRunChainView): string {
       : [];
     const transitionItems = transitions
       .map((transition) => {
-        const taken = evidence.traversed.some(
+        const taken = evidence.traversed.find(
           (pair) =>
             pair.declared && pair.from === state.id && pair.to === transition.to
         );
-        const kind = evidence.traversed.find(
-          (pair) =>
-            pair.declared && pair.from === state.id && pair.to === transition.to
-        )?.kind;
-        const mark = !taken
-          ? ""
-          : kind === "handoff_pending"
-            ? ` <strong>taken</strong> <span class="muted">(handed off, not yet dispatched)</span>`
-            : ` <strong>taken</strong>`;
+        const mark =
+          taken === undefined
+            ? ""
+            : taken.kind === "handoff_pending"
+              ? ` <strong>taken</strong> <span class="muted">(handed off, not yet dispatched)</span>`
+              : ` <strong>taken</strong>`;
         return `<li>→ <code>${escapeHtml(transition.to)}</code> — when ${escapeHtml(formatPredicateMap(transition.when, "always"))}${mark}</li>`;
       })
       .join("");
@@ -5056,7 +5055,7 @@ function renderChainGraphDrilldown(view: IssueRunChainView): string {
   const missingItems = evidence.missingStateIds
     .map(
       (stateId) =>
-        `<li><details data-state-id="${escapeHtml(stateId)}"><summary><code>${escapeHtml(stateId)}</code> <span class="muted">not in the captured graph</span></summary>${renderVisits(stateId)}</details></li>`
+        `<li><details data-state-id="${escapeHtml(stateId)}"><summary><code>${escapeHtml(stateId)}</code> <span class="muted">not in the captured graph</span>${renderCurrentMark(stateId)}</summary>${renderVisits(stateId)}</details></li>`
     )
     .join("");
   const undeclared = evidence.traversed.filter((pair) => !pair.declared);
@@ -5079,9 +5078,7 @@ function buildChainGraphClientData(
       kind: evidence.current.kind,
       stateId: evidence.current.stateId ?? null
     },
-    initial: graph.initial,
     missingStateIds: evidence.missingStateIds,
-    name: graph.name,
     states: (Array.isArray(graph.states) ? graph.states : []).map((state) => ({
       actionKind: state.action?.kind ?? null,
       id: state.id,

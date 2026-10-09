@@ -14,9 +14,7 @@ type CytoscapeOptions = {
 
 const DATA = {
   current: { kind: "blocked", stateId: "done" },
-  initial: "implement",
   missingStateIds: ["legacy"],
-  name: "g",
   states: [
     {
       actionKind: "agent",
@@ -34,7 +32,12 @@ const DATA = {
       transitions: [{ to: "done", when: "checks: success" }]
     },
     { actionKind: null, id: "done", terminal: "success", transitions: [] },
-    { actionKind: null, id: "idle", terminal: null, transitions: [] }
+    {
+      actionKind: null,
+      id: "idle",
+      terminal: null,
+      transitions: [{ to: "ghost", when: "otherwise" }]
+    }
   ],
   traversed: [
     {
@@ -176,6 +179,28 @@ describe("chain graph client (#860)", () => {
     expect(
       details.querySelector("[data-chain-graph-status]")?.textContent
     ).toContain("Not executed in this chain.");
+  });
+
+  it("names an undeclared transition target by its state id, not the synthetic node id", () => {
+    const { captured, handlers } = stubCytoscape();
+    const details = mount(true);
+    run();
+
+    const ghost = captured[0]?.elements.find(
+      (e) => e.data.id === "__undeclared__ghost"
+    );
+    expect(ghost?.classes).toContain("missing");
+    expect(ghost?.classes).not.toContain("visited");
+
+    handlers.get("tap:node")?.({
+      target: { id: () => "__undeclared__ghost" }
+    });
+
+    const status = details.querySelector(
+      "[data-chain-graph-status]"
+    )?.textContent;
+    expect(status).toContain("Selected: ghost.");
+    expect(status).not.toContain("__undeclared__");
   });
 
   it("leaves the outline usable and says the graph is unavailable when cytoscape is missing", () => {

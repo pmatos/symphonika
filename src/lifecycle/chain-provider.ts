@@ -1,23 +1,14 @@
 import type { AgentProviderName } from "../provider.js";
 import type { ProviderPlan } from "../run-store.js";
 
-export type EffectiveProviderSource =
-  "chain_plan" | "workflow_action" | "project_default";
-
 // A Run-Chain Provider Plan (the operator's chain-wide choice) outranks a
 // state's own `action.provider`, which outranks the Project default.
 export function resolveEffectiveProvider(input: {
   actionProvider: AgentProviderName | undefined;
   planProvider: AgentProviderName | undefined;
   projectDefault: AgentProviderName;
-}): { name: AgentProviderName; source: EffectiveProviderSource } {
-  if (input.planProvider !== undefined) {
-    return { name: input.planProvider, source: "chain_plan" };
-  }
-  if (input.actionProvider !== undefined) {
-    return { name: input.actionProvider, source: "workflow_action" };
-  }
-  return { name: input.projectDefault, source: "project_default" };
+}): AgentProviderName {
+  return input.planProvider ?? input.actionProvider ?? input.projectDefault;
 }
 
 // `pending` and `label_written` are what a claim may consume. `label_failed`

@@ -10,7 +10,7 @@ describe("resolveEffectiveProvider", () => {
         planProvider: "omp",
         projectDefault: "codex"
       })
-    ).toEqual({ name: "omp", source: "chain_plan" });
+    ).toBe("omp");
   });
 
   it("prefers the workflow action over the project default", () => {
@@ -20,7 +20,7 @@ describe("resolveEffectiveProvider", () => {
         planProvider: undefined,
         projectDefault: "codex"
       })
-    ).toEqual({ name: "claude", source: "workflow_action" });
+    ).toBe("claude");
   });
 
   it("falls back to the project default", () => {
@@ -30,6 +30,6 @@ describe("resolveEffectiveProvider", () => {
         planProvider: undefined,
         projectDefault: "codex"
       })
-    ).toEqual({ name: "codex", source: "project_default" });
+    ).toBe("codex");
   });
 });

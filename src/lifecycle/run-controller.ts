@@ -1201,7 +1201,7 @@ export class RunController {
         initialAction?.kind === "agent" ? initialAction.provider : undefined,
       planProvider: providerPlan?.provider,
       projectDefault: target.project.agent.provider
-    }).name;
+    });
     const providerCommand = (
       providersConfig as Partial<RunControllerProvidersConfig>
     )[providerName]?.command;
@@ -3203,7 +3203,7 @@ export class RunController {
       planProvider: this.runStore.getChainProviderPlan(payload.parentRunId)
         ?.provider,
       projectDefault: project.agent.provider
-    }).name;
+    });
     const providerConfig = (
       providersConfig as Partial<RunControllerProvidersConfig>
     )[providerName];

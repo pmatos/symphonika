@@ -1,6 +1,7 @@
 import {
   evaluateProjectEligibility,
   normalizeIssueSnapshot,
+  sameIssueRepository,
   tryAddLabelsToIssue,
   tryGetIssue,
   tryGetIssueDependencies,
@@ -65,22 +66,20 @@ type StartIssueRequest = {
   snapshotRepository: { owner: string; repo: string } | undefined;
 };
 
-type RetryProviderPlanRequest = {
+type ProviderPlanActionRequest = {
   issueNumber: number;
   planId: string;
   projectName: string;
   snapshotRepository: { owner: string; repo: string } | undefined;
 };
 
-type CancelProviderPlanRequest = RetryProviderPlanRequest;
-
 export type ProviderStartService = {
-  cancel(input: CancelProviderPlanRequest): Promise<ProviderStartOutcome>;
+  cancel(input: ProviderPlanActionRequest): Promise<ProviderStartOutcome>;
   preview(
     projectName: string,
     issueNumber: number
   ): ProviderStartPreview | undefined;
-  retry(input: RetryProviderPlanRequest): Promise<ProviderStartOutcome>;
+  retry(input: ProviderPlanActionRequest): Promise<ProviderStartOutcome>;
   start(input: StartIssueRequest): Promise<ProviderStartOutcome>;
 };
 
@@ -146,16 +145,6 @@ function hasLabel(labels: string[], label: string): boolean {
   return labels.some((candidate) => candidate.toLowerCase() === wanted);
 }
 
-function sameRepository(
-  left: { owner: string; repo: string },
-  right: { owner: string; repo: string }
-): boolean {
-  return (
-    left.owner.toLowerCase() === right.owner.toLowerCase() &&
-    left.repo.toLowerCase() === right.repo.toLowerCase()
-  );
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -214,6 +203,27 @@ export function createProviderStartService(
     });
   }
 
+  function blockersFor(
+    context: ProviderStartContext,
+    snapshot: NonNullable<ReturnType<RunStore["getProjectIssueSnapshot"]>>,
+    projectName: string,
+    issueNumber: number,
+    plan: ProviderPlan | undefined
+  ): string[] {
+    return startBlockers({
+      labels: snapshot.labels,
+      liveRunId: deps.checkLiveRun(projectName, issueNumber),
+      plan,
+      readyLabel: context.readyLabel,
+      snapshotReasons: snapshot.reasons,
+      suppressed: deps.runStore.latestRunSuppressesFreshDispatch({
+        issueNumber,
+        projectName,
+        repository: context.repository
+      })
+    });
+  }
+
   function preview(
     projectName: string,
     issueNumber: number
@@ -232,18 +242,7 @@ export function createProviderStartService(
     }
     const plan = activePlan(context, issueNumber);
     return {
-      blockers: startBlockers({
-        labels: snapshot.labels,
-        liveRunId: deps.checkLiveRun(projectName, issueNumber),
-        plan,
-        readyLabel: context.readyLabel,
-        snapshotReasons: snapshot.reasons,
-        suppressed: deps.runStore.latestRunSuppressesFreshDispatch({
-          issueNumber,
-          projectName,
-          repository: context.repository
-        })
-      }),
+      blockers: blockersFor(context, snapshot, projectName, issueNumber, plan),
       context,
       plan
     };
@@ -419,6 +418,33 @@ export function createProviderStartService(
     return { error, kind: "refused" };
   }
 
+  function resolveOwnedPlan(input: ProviderPlanActionRequest):
+    | { error: string }
+    | {
+        context: ProviderStartContext;
+        plan: ProviderPlan;
+        project: DispatchProjectConfig;
+        token: string;
+      } {
+    const resolved = resolveRequestContext(
+      input.projectName,
+      input.issueNumber,
+      input.snapshotRepository
+    );
+    if ("error" in resolved) {
+      return resolved;
+    }
+    const plan = deps.runStore.getProviderPlan(input.planId);
+    if (
+      plan === undefined ||
+      plan.issueNumber !== input.issueNumber ||
+      !sameIssueRepository(plan.repository, resolved.context.repository)
+    ) {
+      return { error: "the provider plan does not belong to this Issue" };
+    }
+    return { ...resolved, plan };
+  }
+
   async function start(
     input: StartIssueRequest
   ): Promise<ProviderStartOutcome> {
@@ -457,18 +483,13 @@ export function createProviderStartService(
     }
 
     const localBlockers = (): string[] =>
-      startBlockers({
-        labels: snapshot.labels,
-        liveRunId: deps.checkLiveRun(input.projectName, input.issueNumber),
-        plan: activePlan(context, input.issueNumber),
-        readyLabel: context.readyLabel,
-        snapshotReasons: snapshot.reasons,
-        suppressed: deps.runStore.latestRunSuppressesFreshDispatch({
-          issueNumber: input.issueNumber,
-          projectName: input.projectName,
-          repository: context.repository
-        })
-      });
+      blockersFor(
+        context,
+        snapshot,
+        input.projectName,
+        input.issueNumber,
+        activePlan(context, input.issueNumber)
+      );
     const early = localBlockers();
     if (early.length > 0) {
       return refuse(`cannot start: ${early.join("; ")}`);
@@ -511,25 +532,13 @@ export function createProviderStartService(
   }
 
   async function retry(
-    input: RetryProviderPlanRequest
+    input: ProviderPlanActionRequest
   ): Promise<ProviderStartOutcome> {
-    const resolved = resolveRequestContext(
-      input.projectName,
-      input.issueNumber,
-      input.snapshotRepository
-    );
-    if ("error" in resolved) {
-      return refuse(resolved.error);
+    const owned = resolveOwnedPlan(input);
+    if ("error" in owned) {
+      return refuse(owned.error);
     }
-    const { context, project, token } = resolved;
-    const plan = deps.runStore.getProviderPlan(input.planId);
-    if (
-      plan === undefined ||
-      plan.issueNumber !== input.issueNumber ||
-      !sameRepository(plan.repository, context.repository)
-    ) {
-      return refuse("the provider plan does not belong to this Issue");
-    }
+    const { context, plan, project, token } = owned;
     if (plan.status !== "label_failed" && plan.status !== "expired") {
       return refuse(`provider plan is ${plan.status}; nothing to retry`);
     }
@@ -572,25 +581,13 @@ export function createProviderStartService(
   }
 
   async function cancel(
-    input: CancelProviderPlanRequest
+    input: ProviderPlanActionRequest
   ): Promise<ProviderStartOutcome> {
-    const resolved = resolveRequestContext(
-      input.projectName,
-      input.issueNumber,
-      input.snapshotRepository
-    );
-    if ("error" in resolved) {
-      return refuse(resolved.error);
+    const owned = resolveOwnedPlan(input);
+    if ("error" in owned) {
+      return refuse(owned.error);
     }
-    const { context, project, token } = resolved;
-    const plan = deps.runStore.getProviderPlan(input.planId);
-    if (
-      plan === undefined ||
-      plan.issueNumber !== input.issueNumber ||
-      !sameRepository(plan.repository, context.repository)
-    ) {
-      return refuse("the provider plan does not belong to this Issue");
-    }
+    const { context, plan, project, token } = owned;
     if (plan.status === "label_written") {
       const live = await readLive(project, context, input.issueNumber, token);
       if (live.kind === "error") {

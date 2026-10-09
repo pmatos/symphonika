@@ -381,6 +381,13 @@ the final normalized event of the firing — with the file taking precedence whe
 valid. It is evidence to reconcile, not proof that the claimed action happened.
 _Avoid_: Routine Outcome when referring to the provider's unverified input
 
+**Routine GitHub Observation**:
+The per-firing evidence read before and after provider execution, then assessed before terminal
+completion. It compares issue and branch pull-request changes, verifies eligible claim URLs, and
+records newly discovered open pull requests. Its availability records whether the required reads
+succeeded; a Routine Outcome Claim is still reconciled separately into a Routine Outcome.
+_Avoid_: Routine Outcome Claim, Routine Outcome
+
 **Routine Outcome**:
 The canonical per-firing result produced by reconciling a Routine Outcome Claim with observed
 GitHub and workspace state. It adds `verified` and `source` and remains separate from Routine

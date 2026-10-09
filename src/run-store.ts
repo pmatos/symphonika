@@ -1415,6 +1415,89 @@ export type MaestroMessageRow = {
   role: MaestroMessageRole;
 };
 
+// Run-Chain Provider Plan (#861): the operator's chain-wide provider choice,
+// persisted before the Project's Ready Label is added. `pending` and
+// `label_written` are consumable by the claim that fires on the Ready Label;
+// `label_failed` and `expired` are live but blocking, so a write that may have
+// reached GitHub can never fall back to default provider routing.
+export type ProviderPlanStatus =
+  | "pending"
+  | "label_written"
+  | "label_failed"
+  | "expired"
+  | "consumed"
+  | "cancelled"
+  | "superseded";
+
+export type ProviderPlan = {
+  attemptCount: number;
+  consumedRunId: string | null;
+  createdAt: string;
+  graphFingerprint: string;
+  id: string;
+  issueNumber: number;
+  lastError: string | null;
+  projectName: string;
+  provider: AgentProviderName;
+  readyLabel: string;
+  repository: { owner: string; repo: string };
+  snapshotPolledAt: string;
+  status: ProviderPlanStatus;
+  updatedAt: string;
+};
+
+export type CreateProviderPlanInput = {
+  graphFingerprint: string;
+  id: string;
+  issueNumber: number;
+  projectName: string;
+  provider: AgentProviderName;
+  readyLabel: string;
+  repository: { owner: string; repo: string };
+  snapshotPolledAt: string;
+};
+
+type ProviderPlanDbRow = {
+  attempt_count: number;
+  consumed_run_id: string | null;
+  created_at: string;
+  graph_fingerprint: string;
+  id: string;
+  issue_number: number;
+  last_error: string | null;
+  project_name: string;
+  provider: string;
+  ready_label: string;
+  repository_name: string;
+  repository_owner: string;
+  snapshot_polled_at: string;
+  status: string;
+  updated_at: string;
+};
+
+const PROVIDER_PLAN_LIVE_STATUSES_SQL =
+  "('pending', 'label_written', 'label_failed', 'expired')";
+const PROVIDER_PLAN_PENDING_TTL_MS = 60 * 60 * 1000;
+
+function mapProviderPlanRow(row: ProviderPlanDbRow): ProviderPlan {
+  return {
+    attemptCount: row.attempt_count,
+    consumedRunId: row.consumed_run_id,
+    createdAt: row.created_at,
+    graphFingerprint: row.graph_fingerprint,
+    id: row.id,
+    issueNumber: row.issue_number,
+    lastError: row.last_error,
+    projectName: row.project_name,
+    provider: row.provider as AgentProviderName,
+    readyLabel: row.ready_label,
+    repository: { owner: row.repository_owner, repo: row.repository_name },
+    snapshotPolledAt: row.snapshot_polled_at,
+    status: row.status as ProviderPlanStatus,
+    updatedAt: row.updated_at
+  };
+}
+
 export class RunStore {
   private readonly changeListeners = new Set<(event: ChangeEvent) => void>();
   private readonly database: SqliteDatabase;
@@ -1471,6 +1554,187 @@ export class RunStore {
 
   close(): void {
     this.database.close();
+  }
+
+  // Supersedes any older live plan for the same repository Issue in the same
+  // transaction, so the partial unique index never sees two live rows.
+  createProviderPlan(input: CreateProviderPlanInput): ProviderPlan {
+    const now = timestamp();
+    const apply = this.database.transaction(() => {
+      this.database
+        .prepare(
+          [
+            "update run_chain_provider_plans set status = 'superseded', updated_at = @now",
+            "where lower(repository_owner) = lower(@owner)",
+            "and lower(repository_name) = lower(@repo)",
+            "and issue_number = @issueNumber",
+            `and status in ${PROVIDER_PLAN_LIVE_STATUSES_SQL}`
+          ].join(" ")
+        )
+        .run({
+          issueNumber: input.issueNumber,
+          now,
+          owner: input.repository.owner,
+          repo: input.repository.repo
+        });
+      this.database
+        .prepare(
+          [
+            "insert into run_chain_provider_plans (",
+            "id, project_name, issue_number, repository_owner, repository_name,",
+            "provider, graph_fingerprint, snapshot_polled_at, ready_label, status,",
+            "attempt_count, created_at, updated_at",
+            ") values (",
+            "@id, @projectName, @issueNumber, @owner, @repo,",
+            "@provider, @graphFingerprint, @snapshotPolledAt, @readyLabel, 'pending',",
+            "1, @now, @now)"
+          ].join(" ")
+        )
+        .run({
+          graphFingerprint: input.graphFingerprint,
+          id: input.id,
+          issueNumber: input.issueNumber,
+          now,
+          owner: input.repository.owner,
+          projectName: input.projectName,
+          provider: input.provider,
+          readyLabel: input.readyLabel,
+          repo: input.repository.repo,
+          snapshotPolledAt: input.snapshotPolledAt
+        });
+    });
+    apply();
+    return this.getProviderPlan(input.id)!;
+  }
+
+  getProviderPlan(id: string): ProviderPlan | undefined {
+    const row = this.database
+      .prepare("select * from run_chain_provider_plans where id = ?")
+      .get(id) as ProviderPlanDbRow | undefined;
+    return row === undefined ? undefined : mapProviderPlanRow(row);
+  }
+
+  // A `pending` plan older than the TTL becomes `expired` here (lazily, on
+  // read). It stays live and blocking rather than disappearing: a lapsed plan
+  // must never let the Issue fall back to default provider routing.
+  getActiveProviderPlan(
+    input: {
+      issueNumber: number;
+      repository: { owner: string; repo: string };
+    },
+    now: Date = new Date()
+  ): ProviderPlan | undefined {
+    const key = {
+      issueNumber: input.issueNumber,
+      owner: input.repository.owner,
+      repo: input.repository.repo
+    };
+    const where = [
+      "lower(repository_owner) = lower(@owner)",
+      "and lower(repository_name) = lower(@repo)",
+      "and issue_number = @issueNumber"
+    ].join(" ");
+    this.database
+      .prepare(
+        [
+          "update run_chain_provider_plans set status = 'expired', updated_at = @updatedAt",
+          `where ${where} and status = 'pending' and updated_at < @cutoff`
+        ].join(" ")
+      )
+      .run({
+        ...key,
+        cutoff: new Date(
+          now.getTime() - PROVIDER_PLAN_PENDING_TTL_MS
+        ).toISOString(),
+        updatedAt: now.toISOString()
+      });
+    const row = this.database
+      .prepare(
+        `select * from run_chain_provider_plans where ${where} and status in ${PROVIDER_PLAN_LIVE_STATUSES_SQL}`
+      )
+      .get(key) as ProviderPlanDbRow | undefined;
+    return row === undefined ? undefined : mapProviderPlanRow(row);
+  }
+
+  // Conditional on `pending`: if a claim already consumed the plan, or Cancel
+  // won, the label result must not resurrect or overwrite it.
+  markProviderPlanLabelResult(
+    id: string,
+    result: { ok: true } | { error: string; ok: false }
+  ): boolean {
+    const changes = this.database
+      .prepare(
+        "update run_chain_provider_plans set status = ?, last_error = ?, updated_at = ? where id = ? and status = 'pending'"
+      )
+      .run(
+        result.ok ? "label_written" : "label_failed",
+        result.ok ? null : result.error,
+        timestamp(),
+        id
+      ).changes;
+    return changes > 0;
+  }
+
+  reopenProviderPlan(id: string): boolean {
+    const changes = this.database
+      .prepare(
+        "update run_chain_provider_plans set status = 'pending', last_error = null, attempt_count = attempt_count + 1, updated_at = ? where id = ? and status in ('label_failed', 'expired')"
+      )
+      .run(timestamp(), id).changes;
+    return changes > 0;
+  }
+
+  cancelProviderPlan(id: string): boolean {
+    const changes = this.database
+      .prepare(
+        `update run_chain_provider_plans set status = 'cancelled', updated_at = ? where id = ? and status in ${PROVIDER_PLAN_LIVE_STATUSES_SQL}`
+      )
+      .run(timestamp(), id).changes;
+    return changes > 0;
+  }
+
+  // Only a consumable plan can be consumed; linking the root Run happens in
+  // the same transaction so a chain never sees a consumed plan without its
+  // root, nor a root pointing at a plan that was not actually consumed.
+  consumeProviderPlan(planId: string, runId: string): boolean {
+    const apply = this.database.transaction(() => {
+      const now = timestamp();
+      const changes = this.database
+        .prepare(
+          "update run_chain_provider_plans set status = 'consumed', consumed_run_id = ?, updated_at = ? where id = ? and status in ('pending', 'label_written')"
+        )
+        .run(runId, now, planId).changes;
+      if (changes === 0) {
+        return false;
+      }
+      this.database
+        .prepare("update runs set provider_plan_id = ? where id = ?")
+        .run(planId, runId);
+      return true;
+    });
+    return apply();
+  }
+
+  // Walks to the chain root and reads its plan regardless of the plan's
+  // status: by the time a State Advance asks, the plan is already `consumed`.
+  getChainProviderPlan(runId: string): ProviderPlan | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "with recursive chain(id, parent_id, depth) as (",
+          "  select id, continuation_parent_run_id, 0 from runs where id = ?",
+          "  union all",
+          "  select r.id, r.continuation_parent_run_id, chain.depth + 1",
+          "  from chain join runs r on r.id = chain.parent_id",
+          ")",
+          "select p.* from chain",
+          "join runs root on root.id = chain.id",
+          "join run_chain_provider_plans p on p.id = root.provider_plan_id",
+          "where chain.parent_id is null"
+        ].join(" ")
+      )
+      .get(runId) as ProviderPlanDbRow | undefined;
+    return row === undefined ? undefined : mapProviderPlanRow(row);
   }
 
   createRun(input: CreateRunInput): void {
@@ -7350,6 +7614,30 @@ export class RunStore {
 
       create index if not exists maestro_messages_conversation_idx
         on maestro_messages(conversation_id, sequence);
+
+      create table if not exists run_chain_provider_plans (
+        id text primary key,
+        project_name text not null,
+        issue_number integer not null,
+        repository_owner text not null,
+        repository_name text not null,
+        provider text not null,
+        graph_fingerprint text not null,
+        snapshot_polled_at text not null,
+        ready_label text not null,
+        status text not null,
+        last_error text,
+        attempt_count integer not null default 1,
+        consumed_run_id text,
+        created_at text not null,
+        updated_at text not null
+      );
+
+      create unique index if not exists run_chain_provider_plans_live_idx
+        on run_chain_provider_plans(
+          lower(repository_owner), lower(repository_name), issue_number
+        )
+        where status in ('pending', 'label_written', 'label_failed', 'expired');
     `);
 
     const additions: Array<[string, string, string]> = [
@@ -7376,6 +7664,7 @@ export class RunStore {
       ["runs", "issue_repo", "text"],
       ["runs", "provider_scope_cleanup_pending", "integer not null default 0"],
       ["runs", "workspace_pruned_at", "text"],
+      ["runs", "provider_plan_id", "text"],
       // Defensive: workspace_path has been in the base `create table` since
       // this table's first version, so no real database should ever reach
       // this line missing it. It is here only so the new

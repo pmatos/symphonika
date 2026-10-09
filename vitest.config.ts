@@ -7,6 +7,9 @@ export default defineConfig({
     testTimeout: 35_000,
     coverage: {
       provider: "v8",
+      // lcov carries per-branch hit counts. Codecov misreads the clover
+      // report: it scores fully covered conditional lines as partial.
+      reporter: ["text", "html", "json", "lcov"],
       // Floors sit just under the measured baseline (statements 82.7,
       // branches 71.1, functions 89.2, lines 82.6); ratchet up over time.
       thresholds: {

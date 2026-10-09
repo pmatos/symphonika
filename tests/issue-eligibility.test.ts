@@ -115,8 +115,8 @@ describe("epic labels (#857)", () => {
       epicProject
     );
     expect(withEpic).toEqual(plain);
-    expect(priorityForLabels(["agent-ready", "epic"], epicProject.priority)).toBe(
-      epicProject.priority.default
-    );
+    expect(
+      priorityForLabels(["agent-ready", "epic"], epicProject.priority)
+    ).toBe(epicProject.priority.default);
   });
 });

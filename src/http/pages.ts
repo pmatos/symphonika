@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 
 import { contentHash } from "../content-hash.js";
+import { describePriorityPolicy } from "../issue-priority.js";
 import type { WorkflowFormat } from "../config-schemas.js";
 import {
   checkMutationAuthorized,
@@ -198,6 +199,12 @@ export type RegisterPagesOptions = {
   // dependency gate only blocks adding a label in this set. See
   // HttpAppOptions.getProjectRequiredLabels (src/http/app.ts).
   getProjectRequiredLabels?: (projectName: string) => string[];
+  // The Dispatch Project's effective (runtime-snapshot) Ready Label, priority
+  // policy and Epic Labels, shown on the Project page. Undefined for a
+  // Routine Host or unknown name. See HttpAppOptions.getProjectQueuePolicy.
+  getProjectQueuePolicy?: (
+    projectName: string
+  ) => ProjectQueuePolicy | undefined;
   // The dependency graph view (/issues/graph) needs a Project's GitHub
   // owner/repo to build node ids and resolve "## Parent" clustering.
   // Undefined for a Routine Host or an unknown Project name — that
@@ -1675,6 +1682,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           options.startedAtMs,
           nowMs
         ),
+        renderProjectQueuePolicy(name, options.getProjectQueuePolicy?.(name)),
         renderProjectIssuesTable(name, issueRows),
         renderProjectFiringsBlock(firings),
         options.getProjectWorkflowPath?.(name) === undefined
@@ -3332,6 +3340,47 @@ function renderStaleIssuesCard(
 
 function capacityKv(label: string, valueHtml: string): string {
   return `<span class="kv"><span class="k">${escapeHtml(label)}</span><span class="v">${valueHtml}</span></span>`;
+}
+
+export type ProjectQueuePolicy = {
+  epicLabels: string[];
+  priority: { default: number; labels: Record<string, number> };
+  readyLabel: string;
+};
+
+function renderProjectQueuePolicy(
+  name: string,
+  policy: ProjectQueuePolicy | undefined
+): string {
+  if (policy === undefined) {
+    return "";
+  }
+  const { entries, fallback } = describePriorityPolicy(policy.priority);
+  const rows = [
+    ...entries.map(
+      (entry) =>
+        `<tr><td><code>${escapeHtml(entry.label)}</code></td><td>${entry.priority}</td></tr>`
+    ),
+    `<tr><td class="muted">other labels (fallback)</td><td>${fallback}</td></tr>`
+  ].join("");
+  const epics =
+    policy.epicLabels.length === 0
+      ? '<span class="muted">none</span>'
+      : policy.epicLabels
+          .map((label) => `<code>${escapeHtml(label)}</code>`)
+          .join(" ");
+  return [
+    '<section class="queue-policy">',
+    '<div class="capacity-strip">',
+    capacityKv("Ready Label", `<code>${escapeHtml(policy.readyLabel)}</code>`),
+    capacityKv("Epic labels", epics),
+    "</div>",
+    "<table><thead><tr><th>Priority label</th><th>Priority (lower dispatches first)</th></tr></thead>",
+    `<tbody>${rows}</tbody></table>`,
+    '<p class="note">Epic labels do not affect eligibility or priority.</p>',
+    `<p class="note"><a href="/projects/${encodeURIComponent(name)}/settings">Edit settings →</a></p>`,
+    "</section>"
+  ].join("");
 }
 
 function renderProjectFiringsBlock(firings: RoutineFiringStatus[]): string {

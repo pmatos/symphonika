@@ -2880,15 +2880,18 @@ describe("epic_labels project vocabulary (#857)", () => {
       configPath: withEpics.configPath
     });
     await reloader.reload();
-    expect(
-      reloader.projectsByName().get("symphonika")?.epic_labels
-    ).toEqual(["epic", "initiative"]);
+    expect(reloader.projectsByName().get("symphonika")?.epic_labels).toEqual([
+      "epic",
+      "initiative"
+    ]);
 
     const without = await configWith([]);
     await writeFile(without.configPath, without.content);
     const plain = new RuntimeConfigReloader({ configPath: without.configPath });
     await plain.reload();
-    expect(plain.projectsByName().get("symphonika")?.epic_labels).toBeUndefined();
+    expect(
+      plain.projectsByName().get("symphonika")?.epic_labels
+    ).toBeUndefined();
   });
 
   it.each([

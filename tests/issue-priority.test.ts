@@ -170,9 +170,14 @@ describe("describePriorityPolicy", () => {
   });
 
   it("agrees with priorityForLabels: unmapped labels (e.g. epic) never change priority", () => {
-    const config = { default: 99, labels: { "priority:high": 1, "priority:low": 5 } };
+    const config = {
+      default: 99,
+      labels: { "priority:high": 1, "priority:low": 5 }
+    };
     expect(priorityForLabels(["epic", "priority:low"], config)).toBe(5);
     expect(priorityForLabels(["epic"], config)).toBe(99);
-    expect(priorityForLabels(["priority:low", "priority:high"], config)).toBe(1);
+    expect(priorityForLabels(["priority:low", "priority:high"], config)).toBe(
+      1
+    );
   });
 });

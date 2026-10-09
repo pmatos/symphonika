@@ -2977,7 +2977,8 @@ Follow-up, per `CONTEXT.md`'s read-only-association rule. Cancelling a live firi
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
 self-contained, client-side interactive visualization to make evidence explorable — for
 example the workflow-graph view at `GET /runs/:id/graph`, which renders a run's expanded FSM
-(ADR-0045) with pan/zoom and click-to-inspect. Such a visualization must be self-contained
+(ADR-0045) with pan/zoom and click-to-inspect, and the optional graph drill-down on
+`GET /issues/:project/:number` (`#860`). Such a visualization must be self-contained
 (no build step, no bundled single-page application), must degrade gracefully when its external
 visualization dependencies are unavailable — if the CDN/vendored viz libraries are blocked or
 fail Subresource Integrity, the page's own inline script renders a text listing of the evidence
@@ -3294,6 +3295,24 @@ Run Store/file I/O and HTML rendering around them. Tracked pull-request evidence
 resolved per chain via `findTrackedPullRequestForRunChain`, scoped to that chain's own ancestry rather
 than any Run sharing the issue number. The existing Run-detail page and its logs remain reachable and
 unchanged — every state row links out to `/runs/:id` for attempt-level detail.
+
+Each chain with a captured workflow graph also gets a collapsed "Graph drill-down (optional)"
+section (`#860`), a secondary lens on the timeline — never a second source of truth. Every timeline
+row carries a stable id (`chain-<root run id>-state-<n>`). The section is server-rendered as a
+`<details>` outline with one entry per graph state: declared action and provider, `complete_when`,
+declared transitions with the traversed ones marked, the current state (named in text with the
+timeline row's status, not by colour alone), and every visit as a link back to its timeline row with
+that Run's own effective provider. Traversed transitions are derived only from consecutive timeline
+rows (`src/issues/run-chain-graph.ts`): rows in the same state are "continued in place" with no edge,
+an unrecorded row breaks the walk without a guessed edge, an observed pair the captured graph does not
+declare is listed as undeclared rather than drawn, a handed-off-but-never-dispatched leaf is shown
+as a pending handoff, not an executed visit, and a leaf that concluded into a terminal state is credited
+with the state it executed (its parent's forward-stamp, or the graph's `initial` for a root) followed by
+a transition into that terminal. An optional Cytoscape diagram (CDN scripts with SRI, per
+ADR-0056, initialised only when the section is opened) highlights the current and traversed states and
+edges and, on selecting a node, opens and focuses that state's outline entry with links to its timeline
+rows. When the scripts or CDN are unavailable the diagram stays hidden and the outline and timeline
+remain complete; there is no graph-only status or control.
 
 `GET /issues` also lets an operator select several rows and add or remove labels across all of them
 in one action (ADR 0080) — a checkbox per row plus a header "select all," a label-picker toolbar with

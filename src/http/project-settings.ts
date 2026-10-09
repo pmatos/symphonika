@@ -11,16 +11,20 @@ import {
   type YAMLMap
 } from "yaml";
 
-import { describePriorityPolicy } from "../issue-priority.js";
+import {
+  describePriorityPolicy,
+  sortedPriorityEntries
+} from "../issue-priority.js";
 import { escapeHtml } from "../notifications/message.js";
 import { CSRF_FIELD_NAME } from "./csrf.js";
+import type { ProjectQueuePolicy } from "./pages.js";
 
 // The focused Project settings editor (#857) edits exactly three things of one
 // Dispatch Project: its Ready Label, priority policy, and Epic Labels. It never
 // writes a file itself -- it produces a whole-file candidate that goes through
 // the same preview/confirm/save pipeline as the raw Service Config editor.
 
-export type ProjectSettings = {
+type ProjectSettings = {
   epicLabels: string[];
   priorityDefault: number;
   priorityLabels: { label: string; priority: number }[];
@@ -112,10 +116,9 @@ export function parseProjectSettingsForm(body: Record<string, unknown>): {
 function sortPriorityEntries(
   entries: ProjectSettings["priorityLabels"]
 ): ProjectSettings["priorityLabels"] {
-  return describePriorityPolicy({
-    default: 0,
-    labels: Object.fromEntries(entries.map((e) => [e.label, e.priority]))
-  }).entries;
+  return sortedPriorityEntries(
+    Object.fromEntries(entries.map((e) => [e.label, e.priority]))
+  );
 }
 
 function findProjectNode(
@@ -245,6 +248,22 @@ const SETTINGS_PATHS: string[][] = [
   ["epic_labels"]
 ];
 
+function findPlainProject(
+  parsed: unknown,
+  projectName: string
+): Record<string, unknown> | undefined {
+  const projects = (parsed as { projects?: unknown } | null)?.projects;
+  if (!Array.isArray(projects)) {
+    return undefined;
+  }
+  return projects.find(
+    (candidate: unknown) =>
+      typeof candidate === "object" &&
+      candidate !== null &&
+      (candidate as { name?: unknown }).name === projectName
+  ) as Record<string, unknown> | undefined;
+}
+
 function withoutProjectSettings(
   content: string,
   projectName: string
@@ -255,16 +274,7 @@ function withoutProjectSettings(
   } catch {
     return undefined;
   }
-  const projects = (parsed as { projects?: unknown } | null)?.projects;
-  if (!Array.isArray(projects)) {
-    return undefined;
-  }
-  const project = projects.find(
-    (candidate: unknown) =>
-      typeof candidate === "object" &&
-      candidate !== null &&
-      (candidate as { name?: unknown }).name === projectName
-  ) as Record<string, unknown> | undefined;
+  const project = findPlainProject(parsed, projectName);
   if (project === undefined) {
     return undefined;
   }
@@ -310,16 +320,7 @@ export function readProjectSettingsValues(
   } catch {
     return undefined;
   }
-  const projects = (parsed as { projects?: unknown } | null)?.projects;
-  if (!Array.isArray(projects)) {
-    return undefined;
-  }
-  const project = projects.find(
-    (candidate: unknown) =>
-      typeof candidate === "object" &&
-      candidate !== null &&
-      (candidate as { name?: unknown }).name === projectName
-  ) as
+  const project = findPlainProject(parsed, projectName) as
     | {
         epic_labels?: unknown;
         issue_filters?: { labels_all?: unknown; ready_label?: unknown };
@@ -351,19 +352,15 @@ export function readProjectSettingsValues(
       typeof project.priority?.default === "number"
         ? String(project.priority.default)
         : "",
-    priorityLabels: describePriorityPolicy({ default: 0, labels })
-      .entries.map((e) => `${e.label}=${e.priority}`)
+    priorityLabels: sortedPriorityEntries(labels)
+      .map((e) => `${e.label}=${e.priority}`)
       .join("\n"),
     readyLabel: typeof ready === "string" ? ready : ""
   };
 }
 
 export function renderProjectSettingsForm(input: {
-  active: {
-    epicLabels: string[];
-    priority: { default: number; labels: Record<string, number> };
-    readyLabel: string;
-  };
+  active: ProjectQueuePolicy;
   action: string;
   csrfToken: string;
   errors: string[];

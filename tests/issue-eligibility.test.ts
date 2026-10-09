@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { evaluateRunContinuationEligibility } from "../src/lifecycle/issue-eligibility.js";
-import type {
-  IssueSnapshot,
-  PollingProjectConfig
+import {
+  evaluateProjectEligibility,
+  type IssueSnapshot,
+  type PollingProjectConfig
 } from "../src/issue-polling.js";
+import { priorityForLabels } from "../src/issue-priority.js";
 
 const project: PollingProjectConfig = {
   agent: { provider: "codex" },
@@ -88,5 +90,33 @@ describe("run Continuation Eligibility", () => {
       eligible: false,
       reasons: ["state closed is not eligible"]
     });
+  });
+});
+
+describe("epic labels (#857)", () => {
+  const epicProject: PollingProjectConfig = {
+    ...project,
+    epic_labels: ["epic"]
+  };
+
+  it("does not make an epic-labelled issue eligible without the ready label", () => {
+    const result = evaluateProjectEligibility(
+      issue({ labels: ["epic"] }),
+      epicProject
+    );
+    expect(result.eligible).toBe(false);
+    expect(result.reasons).toContain("missing required label agent-ready");
+  });
+
+  it("does not change eligibility or priority of a ready issue that also carries an epic label", () => {
+    const plain = evaluateProjectEligibility(issue(), epicProject);
+    const withEpic = evaluateProjectEligibility(
+      issue({ labels: ["agent-ready", "epic"] }),
+      epicProject
+    );
+    expect(withEpic).toEqual(plain);
+    expect(
+      priorityForLabels(["agent-ready", "epic"], epicProject.priority)
+    ).toBe(epicProject.priority.default);
   });
 });

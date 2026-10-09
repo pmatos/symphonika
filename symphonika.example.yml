@@ -161,6 +161,8 @@ projects:
         "priority:medium": 2
         "priority:low": 3
       default: 99
+    # Labels that identify epic issues. Display only; never affects eligibility or priority.
+    epic_labels: ["epic"]
     workspace:
       root: ./.symphonika/workspaces/symphonika
       git:

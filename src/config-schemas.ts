@@ -82,6 +82,7 @@ export const projectProgressGuardSchema = z
 // `doctor` cannot drift on which keys they reject.
 const DISPATCH_ONLY_KEYS = [
   "dispatch",
+  "epic_labels",
   "issue_filters",
   "priority",
   "progress_guard",
@@ -179,6 +180,51 @@ export const issueFiltersSchema = z
       ...(distinct.length > 1 ? { migrated_from_labels_all: distinct } : {})
     };
   });
+
+// Epic Labels are display-only vocabulary (#857): they never feed eligibility
+// or priority, so a label that does either cannot also be an Epic Label.
+export const epicLabelsSchema = z
+  .array(z.string().trim().min(1))
+  .optional()
+  .superRefine((labels = [], ctx) => {
+    const seen = new Set<string>();
+    labels.forEach((label, index) => {
+      if (seen.has(label)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate epic label \`${label}\``,
+          path: [index]
+        });
+      }
+      seen.add(label);
+    });
+  });
+
+export function rejectEpicLabelOverlap(
+  project: {
+    epic_labels?: string[] | undefined;
+    issue_filters: { ready_label: string };
+    priority: { labels: Record<string, number> };
+  },
+  ctx: z.RefinementCtx
+): void {
+  (project.epic_labels ?? []).forEach((label, index) => {
+    if (label === project.issue_filters.ready_label) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `epic label \`${label}\` is the project's ready_label; epic labels must not carry eligibility`,
+        path: ["epic_labels", index]
+      });
+    }
+    if (Object.hasOwn(project.priority.labels, label)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `epic label \`${label}\` is also a priority label; epic labels must not carry priority`,
+        path: ["epic_labels", index]
+      });
+    }
+  });
+}
 
 export function readyLabelBroadeningWarning(
   projectName: string,

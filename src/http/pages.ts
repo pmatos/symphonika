@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 
 import { contentHash } from "../content-hash.js";
+import { describePriorityPolicy } from "../issue-priority.js";
 import type { WorkflowFormat } from "../config-schemas.js";
 import {
   checkMutationAuthorized,
@@ -30,6 +31,11 @@ import {
 } from "../provider-stream-status.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import {
+  buildChainGraphEvidence,
+  type ChainGraphEvidence
+} from "../issues/run-chain-graph.js";
+import { CHAIN_GRAPH_CLIENT_JS } from "./chain-graph-client.js";
+import {
   deriveChainStateRows,
   findWorkflowStateNode,
   groupRunsIntoChains,
@@ -43,7 +49,15 @@ import {
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
 import { loadRoutineDeclaration } from "../routines/declaration-loader.js";
 import { formatPullRequestReference } from "../notifications/message.js";
-import { createSaveConfirmer } from "./save-confirm.js";
+import {
+  applyProjectSettingsEdit,
+  changesOnlyProjectSettings,
+  parseProjectSettingsForm,
+  readProjectSettingsValues,
+  renderProjectSettingsForm,
+  type ProjectSettingsValues
+} from "./project-settings.js";
+import { createSaveConfirmer, renderStaleSaveNotice } from "./save-confirm.js";
 import {
   createEditorPreviewer,
   providerCommandsDiffer,
@@ -60,7 +74,7 @@ import {
   type RoutineEditRefusal,
   type RoutineGroup
 } from "./routine-resolution.js";
-import type { ReloadOutcome } from "./save-pipeline.js";
+import { validateSaveContent, type ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
   type FilteredProjectIssueSnapshot,
@@ -118,6 +132,7 @@ import {
 import type {
   ExpandedWorkflow,
   WorkflowActionKind,
+  WorkflowPredicateMap,
   WorkflowTransition
 } from "../workflow/types.js";
 import {
@@ -204,6 +219,12 @@ export type RegisterPagesOptions = {
   // dependency gate only blocks adding a label in this set. See
   // HttpAppOptions.getProjectRequiredLabels (src/http/app.ts).
   getProjectRequiredLabels?: (projectName: string) => string[];
+  // The Dispatch Project's effective (runtime-snapshot) Ready Label, priority
+  // policy and Epic Labels, shown on the Project page. Undefined for a
+  // Routine Host or unknown name. See HttpAppOptions.getProjectQueuePolicy.
+  getProjectQueuePolicy?: (
+    projectName: string
+  ) => ProjectQueuePolicy | undefined;
   // The dependency graph view (/issues/graph) needs a Project's GitHub
   // owner/repo to build node ids and resolve "## Parent" clustering.
   // Undefined for a Routine Host or an unknown Project name — that
@@ -1808,6 +1829,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           options.startedAtMs,
           nowMs
         ),
+        renderProjectQueuePolicy(name, options.getProjectQueuePolicy?.(name)),
         renderProjectIssuesTable(name, issueRows),
         renderProjectFiringsBlock(firings),
         options.getProjectWorkflowPath?.(name) === undefined
@@ -2045,6 +2067,246 @@ export function registerPages(options: RegisterPagesOptions): void {
           ),
         savedRedirect: "/",
         validationPath: configPath
+      });
+    }
+  );
+
+  // #857: a focused editor for one Dispatch Project's Ready Label, priority
+  // policy and Epic Labels. It builds a whole-file candidate and hands it to
+  // the same hash-checked preview/confirm/save pipeline as /config/edit; the
+  // confirm route additionally refuses any candidate that changes more than
+  // those settings, because the confirm form carries the raw file content.
+  const projectSettingsContext = (
+    context: Context
+  ):
+    | { configPath: string; name: string; policy: ProjectQueuePolicy }
+    | Response => {
+    const name = context.req.param("name") ?? "";
+    const configPath = options.getConfigPath?.();
+    const policy = options.getProjectQueuePolicy?.(name);
+    if (configPath === undefined || policy === undefined) {
+      return context.html(
+        layout(
+          "Project settings unavailable",
+          `<h1 class="page-title">Project settings unavailable</h1><p class="lede">Project <code>${escapeHtml(name)}</code> was not found, or is a Routine Host with no queue settings.</p>`
+        ),
+        404
+      );
+    }
+    return { configPath, name, policy };
+  };
+
+  const projectSettingsTarget = (
+    name: string,
+    configPath: string
+  ): EditorPreviewTarget => {
+    const base = `/projects/${encodeURIComponent(name)}/settings`;
+    return {
+      artifact: { kind: "service_config", path: configPath },
+      confirmAction: `${base}/confirm`,
+      name: `${name} settings`,
+      previewAction: `${base}/preview`,
+      reviewAction: base
+    };
+  };
+
+  const staleSettingsResponse = (
+    context: Context,
+    resolved: { configPath: string; name: string },
+    onDisk: string | null
+  ): Response =>
+    context.html(
+      layout(
+        "Save refused: changed on disk",
+        renderStaleSaveNotice({
+          currentContent: onDisk,
+          editAction: `/projects/${encodeURIComponent(resolved.name)}/settings`,
+          filePath: resolved.configPath
+        })
+      ),
+      409
+    );
+
+  const renderSettingsPage = (input: {
+    configPath: string;
+    context: Context;
+    errors: string[];
+    expectedContentHash: string;
+    name: string;
+    policy: ProjectQueuePolicy;
+    status: 200 | 422;
+    values: ProjectSettingsValues;
+  }): Response =>
+    input.context.html(
+      layout(
+        `Settings: ${input.name}`,
+        renderProjectSettingsForm({
+          action: `/projects/${encodeURIComponent(input.name)}/settings/preview`,
+          active: input.policy,
+          csrfToken: csrfTokenFor(
+            options.csrfSecret,
+            ensureSession(input.context)
+          ),
+          errors: input.errors,
+          expectedContentHash: input.expectedContentHash,
+          projectName: input.name,
+          values: input.values
+        })
+      ),
+      input.status
+    );
+
+  options.app.get(
+    "/projects/:name/settings",
+    requireSameOriginRead,
+    async (context) => {
+      const resolved = projectSettingsContext(context);
+      if (resolved instanceof Response) {
+        return resolved;
+      }
+      const content = await readFile(resolved.configPath, "utf8").catch(
+        () => null
+      );
+      const values =
+        content === null
+          ? undefined
+          : readProjectSettingsValues(content, resolved.name);
+      if (content === null || values === undefined) {
+        return context.html(
+          layout(
+            "Project settings unavailable",
+            `<h1 class="page-title">Project settings unavailable</h1><p class="lede">Project <code>${escapeHtml(resolved.name)}</code> could not be read from the service config.</p>`
+          ),
+          404
+        );
+      }
+      return renderSettingsPage({
+        ...resolved,
+        context,
+        errors: [],
+        expectedContentHash: contentHash(content),
+        status: 200,
+        values
+      });
+    }
+  );
+
+  options.app.post(
+    "/projects/:name/settings/preview",
+    requireAuthorizedMutation,
+    async (context) => {
+      const resolved = projectSettingsContext(context);
+      if (resolved instanceof Response) {
+        return resolved;
+      }
+      const body = await context.req.parseBody();
+      const expectedContentHash = readRequiredFormField(
+        body,
+        "expected_content_hash"
+      );
+      const onDisk = await readFile(resolved.configPath, "utf8").catch(
+        () => null
+      );
+      if (onDisk === null || contentHash(onDisk) !== expectedContentHash) {
+        return staleSettingsResponse(context, resolved, onDisk);
+      }
+
+      const parsed = parseProjectSettingsForm(body);
+      const refuse = (errors: string[]): Response =>
+        renderSettingsPage({
+          ...resolved,
+          context,
+          errors,
+          expectedContentHash,
+          status: 422,
+          values: parsed.values
+        });
+      if (parsed.settings === undefined) {
+        return refuse(parsed.errors);
+      }
+      const edit = applyProjectSettingsEdit(
+        onDisk,
+        resolved.name,
+        parsed.settings
+      );
+      if (!edit.ok) {
+        return refuse([edit.error]);
+      }
+      const { errors } = await validateSaveContent({
+        content: edit.content,
+        filePath: resolved.configPath,
+        kind: "service_config"
+      });
+      if (errors.length > 0) {
+        return refuse(errors);
+      }
+      return await previewEditor.respond(
+        context,
+        projectSettingsTarget(resolved.name, resolved.configPath),
+        {
+          draft: { content: edit.content, expectedContentHash },
+          errors: [],
+          kind: "prepared",
+          onDisk
+        }
+      );
+    }
+  );
+
+  options.app.post(
+    "/projects/:name/settings/confirm",
+    requireAuthorizedMutation,
+    async (context) => {
+      const resolved = projectSettingsContext(context);
+      if (resolved instanceof Response) {
+        return resolved;
+      }
+      const body = await context.req.parseBody();
+      const content = readRequiredFormField(body, "content");
+      const expectedContentHash = readRequiredFormField(
+        body,
+        "expected_content_hash"
+      );
+      const editAction = `/projects/${encodeURIComponent(resolved.name)}/settings`;
+      const onDisk = await readFile(resolved.configPath, "utf8").catch(
+        () => null
+      );
+      if (onDisk === null || contentHash(onDisk) !== expectedContentHash) {
+        return staleSettingsResponse(context, resolved, onDisk);
+      }
+      if (!changesOnlyProjectSettings(onDisk, content, resolved.name)) {
+        return context.html(
+          layout(
+            "Save refused",
+            `<h1 class="page-title">Save refused</h1><div class="alert" role="alert"><strong>This request changes more than the settings of ${escapeHtml(resolved.name)}</strong>Only the Ready Label, priority policy and Epic Labels of this Project can be saved here. Nothing was written. Use the raw service config editor for other changes.</div><p class="note"><a href="${escapeHtml(editAction)}">← Reopen settings</a></p>`
+          ),
+          403
+        );
+      }
+      return await confirmSave(context, {
+        content,
+        editAction,
+        expectedContentHash,
+        filePath: resolved.configPath,
+        kind: "service_config",
+        name: `${resolved.name} settings`,
+        renderInvalid: ({ csrfToken, errors }) =>
+          renderProjectSettingsForm({
+            action: `${editAction}/preview`,
+            active: resolved.policy,
+            csrfToken,
+            errors,
+            expectedContentHash,
+            projectName: resolved.name,
+            values: readProjectSettingsValues(content, resolved.name) ?? {
+              epicLabels: "",
+              priorityDefault: "",
+              priorityLabels: "",
+              readyLabel: ""
+            }
+          }),
+        savedRedirect: `/projects/${encodeURIComponent(resolved.name)}`,
+        validationPath: resolved.configPath
       });
     }
   );
@@ -3467,6 +3729,47 @@ function capacityKv(label: string, valueHtml: string): string {
   return `<span class="kv"><span class="k">${escapeHtml(label)}</span><span class="v">${valueHtml}</span></span>`;
 }
 
+export type ProjectQueuePolicy = {
+  epicLabels: string[];
+  priority: { default: number; labels: Record<string, number> };
+  readyLabel: string;
+};
+
+function renderProjectQueuePolicy(
+  name: string,
+  policy: ProjectQueuePolicy | undefined
+): string {
+  if (policy === undefined) {
+    return "";
+  }
+  const { entries, fallback } = describePriorityPolicy(policy.priority);
+  const rows = [
+    ...entries.map(
+      (entry) =>
+        `<tr><td><code>${escapeHtml(entry.label)}</code></td><td>${entry.priority}</td></tr>`
+    ),
+    `<tr><td class="muted">other labels (fallback)</td><td>${fallback}</td></tr>`
+  ].join("");
+  const epics =
+    policy.epicLabels.length === 0
+      ? '<span class="muted">none</span>'
+      : policy.epicLabels
+          .map((label) => `<code>${escapeHtml(label)}</code>`)
+          .join(" ");
+  return [
+    '<section class="queue-policy">',
+    '<div class="capacity-strip">',
+    capacityKv("Ready Label", `<code>${escapeHtml(policy.readyLabel)}</code>`),
+    capacityKv("Epic labels", epics),
+    "</div>",
+    "<table><thead><tr><th>Priority label</th><th>Priority (lower dispatches first)</th></tr></thead>",
+    `<tbody>${rows}</tbody></table>`,
+    '<p class="note">Epic labels do not affect eligibility or priority.</p>',
+    `<p class="note"><a href="/projects/${encodeURIComponent(name)}/settings">Edit settings →</a></p>`,
+    "</section>"
+  ].join("");
+}
+
 function renderProjectFiringsBlock(firings: RoutineFiringStatus[]): string {
   if (firings.length === 0) {
     return `<section>${sectionHead("Routine firings", 0)}<div class="empty"><strong>No Routine firings</strong>No Routine currently targets this Project.</div></section>`;
@@ -4861,6 +5164,8 @@ type IssueRunChainRowView = {
 };
 
 type IssueRunChainView = {
+  evidence: ChainGraphEvidence | undefined;
+  graph: ExpandedWorkflow | undefined;
   group: RunChainGroup;
   leafIsActive: boolean;
   rows: IssueRunChainRowView[];
@@ -4943,7 +5248,10 @@ async function loadIssueRunChainViews(
           .map((run) => graphForRun(run.id)?.contentHash)
           .filter((hash): hash is string => hash !== undefined)
       );
+      const graph = nearestGraphs[leafIndex];
       return {
+        evidence: buildChainGraphEvidence(stateRows, graph),
+        graph,
         group,
         leafIsActive,
         rows,
@@ -4998,24 +5306,50 @@ function describeProviderSource(
   }
 }
 
-function renderChainRow(view: IssueRunChainRowView): string {
+function chainRowAnchor(rootRunId: string, rowIndex: number): string {
+  return `chain-${rootRunId}-state-${rowIndex}`;
+}
+
+function describeRowProvider(view: IssueRunChainRowView): string {
+  const effectiveProvider = view.attempts.at(-1)?.providerName;
+  return effectiveProvider === undefined
+    ? "—"
+    : `${escapeHtml(effectiveProvider)} <span class="muted">— ${describeProviderSource(view.providerSource, view.graphAvailable)}</span>`;
+}
+
+function renderChainRow(
+  view: IssueRunChainRowView,
+  rowIndex: number,
+  rootRunId: string
+): string {
   const { row } = view;
   const stateCell =
     row.stateId === undefined
       ? `<em>not recorded</em>`
       : `<code>${escapeHtml(row.stateId)}</code>${view.actionKind === undefined ? "" : ` <span class="muted">(${escapeHtml(view.actionKind)})</span>`}`;
-  const effectiveProvider = view.attempts.at(-1)?.providerName;
-  const providerCell =
-    effectiveProvider === undefined
-      ? "—"
-      : `${escapeHtml(effectiveProvider)} <span class="muted">— ${describeProviderSource(view.providerSource, view.graphAvailable)}</span>`;
+  const providerCell = describeRowProvider(view);
   const attemptsCell =
     view.attempts.length === 0
       ? "—"
       : `${view.attempts.length} attempt${view.attempts.length === 1 ? "" : "s"}`;
   const evidenceCell =
     row.transitionReason === null ? "—" : escapeHtml(row.transitionReason);
-  return `<tr><td>${stateCell}</td><td>${renderChainRowStatusPill(row)}</td><td>${providerCell}</td><td>${attemptsCell}</td><td><code>${renderTimestamp(row.run.createdAt)}</code></td><td><code>${renderTimestamp(row.run.updatedAt)}</code></td><td>${evidenceCell}</td><td><a href="/runs/${encodeURIComponent(row.run.id)}"><code>${escapeHtml(row.run.id)}</code></a></td></tr>`;
+  return `<tr id="${escapeHtml(chainRowAnchor(rootRunId, rowIndex))}"><td>${stateCell}</td><td>${renderChainRowStatusPill(row)}</td><td>${providerCell}</td><td>${attemptsCell}</td><td><code>${renderTimestamp(row.run.createdAt)}</code></td><td><code>${renderTimestamp(row.run.updatedAt)}</code></td><td>${evidenceCell}</td><td><a href="/runs/${encodeURIComponent(row.run.id)}"><code>${escapeHtml(row.run.id)}</code></a></td></tr>`;
+}
+
+function formatPredicateMap(
+  predicates: WorkflowPredicateMap | undefined,
+  emptyText: string
+): string {
+  const entries = Object.entries(predicates ?? {});
+  return entries.length === 0
+    ? emptyText
+    : entries
+        .map(
+          ([key, value]) =>
+            `${key}: ${Array.isArray(value) ? value.join("/") : String(value)}`
+        )
+        .join(", ");
 }
 
 function renderUpcomingSection(
@@ -5033,24 +5367,18 @@ function renderUpcomingSection(
   }
   const items = upcoming
     .map((transition) => {
-      const predicates = Object.entries(transition.when);
-      const when =
-        predicates.length === 0
-          ? "always"
-          : predicates
-              .map(
-                ([key, value]) =>
-                  `${key}: ${Array.isArray(value) ? value.join("/") : String(value)}`
-              )
-              .join(", ");
-      return `<li><code>${escapeHtml(transition.to)}</code> — when ${escapeHtml(when)}</li>`;
+      return `<li><code>${escapeHtml(transition.to)}</code> — when ${escapeHtml(formatPredicateMap(transition.when, "always"))}</li>`;
     })
     .join("");
   return `<p class="note">Upcoming (one hop, predicates decide at run time — not a guaranteed path):</p><ul>${items}</ul>`;
 }
 
 function renderIssueRunChainView(view: IssueRunChainView): string {
-  const rowsHtml = view.rows.map(renderChainRow).join("");
+  const rowsHtml = view.rows
+    .map((rowView, index) =>
+      renderChainRow(rowView, index, view.group.rootRunId)
+    )
+    .join("");
   const table = tableSection(
     "States",
     view.rows.length,
@@ -5068,7 +5396,142 @@ function renderIssueRunChainView(view: IssueRunChainView): string {
     view.trackedPR === undefined
       ? ""
       : `<p class="note">Tracked pull request: ${externalLink(view.trackedPR.prUrl, `#${view.trackedPR.prNumber}`)} (${escapeHtml(view.trackedPR.state)}).</p>`;
-  return `${table}${branchNote}${workflowChangedNote}${prNote}${renderUpcomingSection(view.upcoming, view.leafIsActive)}`;
+  return `${table}${branchNote}${workflowChangedNote}${prNote}${renderUpcomingSection(view.upcoming, view.leafIsActive)}${renderChainGraphDrilldown(view)}`;
+}
+
+// #860: the graph is a secondary lens on the timeline above, never a second
+// source of truth. Everything an operator needs — state, transitions, per-visit
+// provider, links back to the timeline rows — is server-rendered here as a
+// <details> outline that works without JavaScript or the CDN; the canvas
+// (hidden until the client script initialises it) only adds a visual layout.
+function renderChainGraphDrilldown(view: IssueRunChainView): string {
+  const { evidence, graph } = view;
+  if (evidence === undefined || graph === undefined) {
+    return "";
+  }
+  const rootRunId = view.group.rootRunId;
+  const graphStates = Array.isArray(graph.states) ? graph.states : [];
+  const visitsByState = new Map(
+    evidence.states.map((state) => [state.stateId, state.visits])
+  );
+  const leafRow = view.rows[evidence.current.rowIndex]?.row;
+  const continuedInPlace = new Set(evidence.continuedInPlace);
+  const takenTransitions = new Map(
+    evidence.traversed
+      .filter((pair) => pair.declared)
+      .map((pair) => [`${pair.from}\0${pair.to}`, pair.kind])
+  );
+
+  const renderVisits = (stateId: string): string => {
+    const visits = visitsByState.get(stateId) ?? [];
+    if (visits.length === 0) {
+      return `<p class="muted">Not executed in this chain.</p>`;
+    }
+    const items = visits
+      .map((rowIndex) => {
+        const rowView = view.rows[rowIndex];
+        if (rowView === undefined) {
+          return "";
+        }
+        const continued = continuedInPlace.has(rowIndex)
+          ? ` <span class="muted">(continued in place)</span>`
+          : "";
+        return `<li><a href="#${escapeHtml(chainRowAnchor(rootRunId, rowIndex))}">Timeline row ${rowIndex + 1}</a> ${renderChainRowStatusPill(rowView.row)} · provider ${describeRowProvider(rowView)}${continued}</li>`;
+      })
+      .join("");
+    return `<ul class="chain-graph-visits">${items}</ul>`;
+  };
+
+  const renderCurrentMark = (stateId: string): string =>
+    stateId === evidence.current.stateId && leafRow !== undefined
+      ? ` <strong>Current:</strong> ${renderChainRowStatusPill(leafRow)}`
+      : "";
+
+  const renderStateOutline = (state: ExpandedWorkflow["states"][number]) => {
+    const visitCount = visitsByState.get(state.id)?.length ?? 0;
+    const isCurrent = state.id === evidence.current.stateId;
+    const currentMark = renderCurrentMark(state.id);
+    const visited =
+      visitCount === 0
+        ? `<span class="muted">not executed</span>`
+        : `<span class="muted">executed ${visitCount}×</span>`;
+    const action = state.action;
+    const actionLines =
+      action === undefined
+        ? state.terminal === undefined
+          ? ""
+          : `<p>Terminal state (<code>${escapeHtml(state.terminal)}</code> in the captured graph).</p>`
+        : `<p>Declared action: <code>${escapeHtml(action.kind)}</code>${action.kind === "agent" ? ` · declared provider: ${action.provider === undefined ? "project default" : `<code>${escapeHtml(action.provider)}</code>`}` : ""}${action.prompt === undefined ? "" : ` · prompt <code>${escapeHtml(action.prompt)}</code>`}</p>`;
+    const transitions = Array.isArray(state.transitions)
+      ? state.transitions
+      : [];
+    const transitionItems = transitions
+      .map((transition) => {
+        const takenKind = takenTransitions.get(`${state.id}\0${transition.to}`);
+        const mark =
+          takenKind === undefined
+            ? ""
+            : takenKind === "handoff_pending"
+              ? ` <strong>taken</strong> <span class="muted">(handed off, not yet dispatched)</span>`
+              : ` <strong>taken</strong>`;
+        return `<li>→ <code>${escapeHtml(transition.to)}</code> — when ${escapeHtml(formatPredicateMap(transition.when, "always"))}${mark}</li>`;
+      })
+      .join("");
+    const transitionList =
+      transitions.length === 0
+        ? `<p class="muted">No transitions declared from this state.</p>`
+        : `<p>Declared transitions:</p><ul>${transitionItems}</ul>`;
+    const completeWhen = `<p>Complete when: ${escapeHtml(formatPredicateMap(state.completeWhen, "—"))}</p>`;
+    return `<li><details data-state-id="${escapeHtml(state.id)}"${isCurrent ? " open" : ""}><summary><code>${escapeHtml(state.id)}</code> ${visited}${currentMark}</summary>${actionLines}${completeWhen}${transitionList}<p>Visits:</p>${renderVisits(state.id)}</details></li>`;
+  };
+
+  const missingItems = evidence.missingStateIds
+    .map(
+      (stateId) =>
+        `<li><details data-state-id="${escapeHtml(stateId)}"><summary><code>${escapeHtml(stateId)}</code> <span class="muted">not in the captured graph</span>${renderCurrentMark(stateId)}</summary>${renderVisits(stateId)}</details></li>`
+    )
+    .join("");
+  const undeclared = evidence.traversed.filter((pair) => !pair.declared);
+  const undeclaredNote =
+    undeclared.length === 0
+      ? ""
+      : `<p class="note">Observed in the timeline but not declared in the captured graph: ${undeclared.map((pair) => `<code>${escapeHtml(pair.from)}</code> → <code>${escapeHtml(pair.to)}</code>`).join(", ")}.</p>`;
+
+  return `<details class="chain-graph-drilldown" data-chain-graph-root="${escapeHtml(rootRunId)}"><summary>Graph drill-down (optional)</summary><p class="note">The timeline above is the complete record. This outline and the optional diagram repeat the same evidence; nothing here is needed to understand or recover the walk.</p>${undeclaredNote}<div class="chain-graph-layout"><div class="chain-graph" data-chain-graph hidden></div><div class="chain-graph-side"><p class="note" data-chain-graph-status></p><ul class="chain-graph-outline">${graphStates.map(renderStateOutline).join("")}${missingItems}</ul></div></div><script type="application/json" data-chain-graph-data>${escapeJsonForInlineScript(buildChainGraphClientData(view, evidence, graphStates))}</script></details>`;
+}
+
+function buildChainGraphClientData(
+  view: IssueRunChainView,
+  evidence: ChainGraphEvidence,
+  graphStates: ExpandedWorkflow["states"]
+): unknown {
+  const rootRunId = view.group.rootRunId;
+  return {
+    current: {
+      kind: evidence.current.kind,
+      stateId: evidence.current.stateId ?? null
+    },
+    missingStateIds: evidence.missingStateIds,
+    states: graphStates.map((state) => ({
+      actionKind: state.action?.kind ?? null,
+      id: state.id,
+      terminal: state.terminal ?? null,
+      transitions: (Array.isArray(state.transitions)
+        ? state.transitions
+        : []
+      ).map((transition) => ({
+        to: transition.to,
+        when: formatPredicateMap(transition.when, "otherwise")
+      }))
+    })),
+    traversed: evidence.traversed,
+    visits: evidence.states.map((state) => ({
+      anchors: state.visits.map((rowIndex) =>
+        chainRowAnchor(rootRunId, rowIndex)
+      ),
+      stateId: state.stateId
+    }))
+  };
 }
 
 function renderIssueRunChainSection(chains: IssueRunChainView[]): string {
@@ -5076,6 +5539,9 @@ function renderIssueRunChainSection(chains: IssueRunChainView[]): string {
     return `<section><h2>Run Chain</h2><p class="muted">No Run Chain recorded yet for this Issue.</p></section>`;
   }
   const [latest, ...older] = chains;
+  const graphStyles = hasChainGraphs(chains)
+    ? `<style>${CHAIN_GRAPH_STYLES}</style>`
+    : "";
   const latestHtml =
     latest === undefined
       ? ""
@@ -5086,7 +5552,7 @@ function renderIssueRunChainSection(chains: IssueRunChainView[]): string {
         `<details><summary>Earlier Run Chain #${older.length - index}</summary>${renderIssueRunChainView(chain)}</details>`
     )
     .join("");
-  return `${latestHtml}${olderHtml}`;
+  return `${graphStyles}${latestHtml}${olderHtml}`;
 }
 
 function issueDetailHref(projectName: string, issueNumber: number): string {
@@ -5163,6 +5629,37 @@ function renderIssueStartPage(input: {
   return `<h1 class="page-title">Start #${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)}</p>${input.outcome === undefined ? "" : renderIssueStartBanner(input.outcome)}${facts}${verdict}${planForms}${startForm}<p class="note"><a href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}">← Back to the Issue</a></p>`;
 }
 
+function hasChainGraphs(chains: IssueRunChainView[]): boolean {
+  return chains.some((chain) => chain.evidence !== undefined);
+}
+
+// Emitted after every other section: classic <script src> tags are
+// parser-blocking, so a slow CDN must not delay the label and stale-claim
+// controls rendered below the Run Chain.
+function renderChainGraphScripts(chains: IssueRunChainView[]): string {
+  return hasChainGraphs(chains)
+    ? `${WORKFLOW_GRAPH_SCRIPTS}<script>${CHAIN_GRAPH_CLIENT_JS}</script>`
+    : "";
+}
+
+const CHAIN_GRAPH_STYLES = `
+.chain-graph-drilldown { margin: var(--sp-4) 0 0; }
+.chain-graph-drilldown summary { cursor: pointer; }
+.chain-graph-drilldown summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.chain-graph-layout { display: flex; gap: var(--sp-4); align-items: flex-start; }
+.chain-graph { flex: 1 1 60%; height: 60vh; min-height: 320px; border: 1px solid #e2e8f0; border-radius: 10px; }
+.chain-graph[hidden] { display: none; }
+.chain-graph-side { flex: 1 1 40%; min-width: 0; }
+.chain-graph-outline { list-style: none; margin: 0; padding: 0; }
+.chain-graph-outline > li { margin: var(--sp-2) 0; }
+.chain-graph-outline summary { cursor: pointer; }
+@media (max-width: 720px) {
+  .chain-graph-layout { flex-direction: column; }
+  .chain-graph { width: 100%; flex-basis: auto; height: 50vh; }
+  .chain-graph-side { width: 100%; }
+}
+`;
+
 function renderIssueDetailPage(input: {
   banner: IssueActionBanner | undefined;
   chains: IssueRunChainView[];
@@ -5196,7 +5693,7 @@ function renderIssueDetailPage(input: {
     labels: detail.snapshot.labels,
     projectName: detail.projectName,
     snapshotRepository: detail.snapshotRepository
-  })}<p class="note"><a href="/issues">← Back to search</a></p>`;
+  })}<p class="note"><a href="/issues">← Back to search</a></p>${renderChainGraphScripts(input.chains)}`;
 }
 
 // Full itemized breakdown of a Deps-column count — kind of every

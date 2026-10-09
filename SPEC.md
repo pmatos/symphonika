@@ -152,6 +152,14 @@ neither, is a validation error. A new Dispatch Project written by `init-project`
 `ready_label` to `ready-for-agent`; an existing config that sets neither key is not silently
 defaulted.
 
+A Dispatch Project may also declare `epic_labels`: an optional list of nonempty, unique strings
+naming the labels that identify epics in that repository. Epic Labels are display vocabulary only.
+They never change eligibility or priority, and the schema enforces that by rejecting an Epic Label
+that equals the Project's `ready_label` or appears in `priority.labels`. A Routine Host rejects the
+key like the other dispatch-only keys. Priority resolution is unchanged: an issue's priority is the
+lowest (most urgent) number among its mapped labels, and `priority.default` is the explicit
+fallback when none is mapped. See ADR-2026-10-09-0732.
+
 ### 4.4 Operational Labels
 
 Symphonika owns this narrow GitHub label namespace:
@@ -488,6 +496,7 @@ projects:
         "priority:medium": 2
         "priority:low": 3
       default: 99
+    epic_labels: ["epic"]
     workspace:
       root: ./.symphonika/workspaces/symphonika
       git:
@@ -2983,7 +2992,8 @@ Follow-up, per `CONTEXT.md`'s read-only-association rule. Cancelling a live firi
 Operator pages stay server-rendered and primarily read-only, but a page may embed a
 self-contained, client-side interactive visualization to make evidence explorable — for
 example the workflow-graph view at `GET /runs/:id/graph`, which renders a run's expanded FSM
-(ADR-0045) with pan/zoom and click-to-inspect. Such a visualization must be self-contained
+(ADR-0045) with pan/zoom and click-to-inspect, and the optional graph drill-down on
+`GET /issues/:project/:number` (`#860`). Such a visualization must be self-contained
 (no build step, no bundled single-page application), must degrade gracefully when its external
 visualization dependencies are unavailable — if the CDN/vendored viz libraries are blocked or
 fail Subresource Integrity, the page's own inline script renders a text listing of the evidence
@@ -3097,6 +3107,22 @@ provider names the schema allows — requires an explicit checkbox distinct from
 "Confirm save" button, checked both client-side (a required HTML checkbox) and server-side (the
 confirm route independently re-derives the same before/after comparison and refuses the write
 outright if the box wasn't submitted).
+
+`GET /projects/:name/settings` is a focused editor over one Dispatch Project's Ready Label,
+priority policy (`label=number` lines plus the default), and Epic Labels (ADR-2026-10-09-0732).
+It is not a second write path: the preview builds a whole-file candidate with a comment-preserving
+YAML edit of exactly those keys of the named Project (removing a legacy `labels_all` when it sets
+`ready_label`), validates it with `validateServiceConfigContent`, and shows the same diff and
+"Confirm save" as `/config/edit`; the write goes through the same hash-checked, atomic
+`runSavePipeline`. Both the preview and the confirm refuse with `409` when `symphonika.yml` changed
+since the form was opened, and an invalid value is refused with `422` and a re-rendered form,
+without writing. Because the confirm form carries the whole candidate file, the confirm route also
+refuses (`403`) any submitted content that differs from the file on disk outside that Project's
+settings keys, so it cannot be used to change a provider command or another Project. A Project
+whose settings sit under a YAML anchor or alias is refused rather than edited, since the edit would
+leak into the sibling Projects. A save the daemon fails to reload is reported as "Saved, but not
+active". The Project page shows the Ready Label, priority order (lower number first, with the
+explicit fallback row) and Epic Labels from the live Runtime Config Snapshot, never from the file.
 
 `detectGitFileState` (`src/http/git-status.ts`, ADR-0075) gives a future editor the git context the
 issue requires before a save: whether the target path sits inside a git repo, its repo root and
@@ -3317,6 +3343,24 @@ Run Store/file I/O and HTML rendering around them. Tracked pull-request evidence
 resolved per chain via `findTrackedPullRequestForRunChain`, scoped to that chain's own ancestry rather
 than any Run sharing the issue number. The existing Run-detail page and its logs remain reachable and
 unchanged — every state row links out to `/runs/:id` for attempt-level detail.
+
+Each chain with a captured workflow graph also gets a collapsed "Graph drill-down (optional)"
+section (`#860`), a secondary lens on the timeline — never a second source of truth. Every timeline
+row carries a stable id (`chain-<root run id>-state-<n>`). The section is server-rendered as a
+`<details>` outline with one entry per graph state: declared action and provider, `complete_when`,
+declared transitions with the traversed ones marked, the current state (named in text with the
+timeline row's status, not by colour alone), and every visit as a link back to its timeline row with
+that Run's own effective provider. Traversed transitions are derived only from consecutive timeline
+rows (`src/issues/run-chain-graph.ts`): rows in the same state are "continued in place" with no edge,
+an unrecorded row breaks the walk without a guessed edge, an observed pair the captured graph does not
+declare is listed as undeclared rather than drawn, a handed-off-but-never-dispatched leaf is shown
+as a pending handoff, not an executed visit, and a leaf that concluded into a terminal state is credited
+with the state it executed (its parent's forward-stamp, or the graph's `initial` for a root) followed by
+a transition into that terminal. An optional Cytoscape diagram (CDN scripts with SRI, per
+ADR-0056, initialised only when the section is opened) highlights the current and traversed states and
+edges and, on selecting a node, opens and focuses that state's outline entry with links to its timeline
+rows. When the scripts or CDN are unavailable the diagram stays hidden and the outline and timeline
+remain complete; there is no graph-only status or control.
 
 `GET /issues` also lets an operator select several rows and add or remove labels across all of them
 in one action (ADR 0080) — a checkbox per row plus a header "select all," a label-picker toolbar with

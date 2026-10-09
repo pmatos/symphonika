@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   compareCandidateIssues,
+  describePriorityPolicy,
   normalizeLabels,
   normalizeProjectWeight,
   priorityForLabels,
@@ -144,5 +145,39 @@ describe("normalizeProjectWeight", () => {
   it("passes through valid positive integers", () => {
     expect(normalizeProjectWeight(1)).toBe(1);
     expect(normalizeProjectWeight(7)).toBe(7);
+  });
+});
+
+describe("describePriorityPolicy", () => {
+  it("lists entries lower-number-first, then by label, with the explicit fallback", () => {
+    expect(
+      describePriorityPolicy({ default: 99, labels: { b: 2, a: 1, c: 1 } })
+    ).toEqual({
+      entries: [
+        { label: "a", priority: 1 },
+        { label: "c", priority: 1 },
+        { label: "b", priority: 2 }
+      ],
+      fallback: 99
+    });
+  });
+
+  it("reports only the fallback when no label is mapped", () => {
+    expect(describePriorityPolicy({ default: 5, labels: {} })).toEqual({
+      entries: [],
+      fallback: 5
+    });
+  });
+
+  it("agrees with priorityForLabels: unmapped labels (e.g. epic) never change priority", () => {
+    const config = {
+      default: 99,
+      labels: { "priority:high": 1, "priority:low": 5 }
+    };
+    expect(priorityForLabels(["epic", "priority:low"], config)).toBe(5);
+    expect(priorityForLabels(["epic"], config)).toBe(99);
+    expect(priorityForLabels(["priority:low", "priority:high"], config)).toBe(
+      1
+    );
   });
 });

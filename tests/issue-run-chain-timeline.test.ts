@@ -666,7 +666,7 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
       // fact, is what's honestly unknown here).
       const rootRowStart = html.indexOf('href="/runs/adopted-root"');
       const rootRowHtml = html.slice(
-        html.lastIndexOf("<tr>", rootRowStart),
+        html.lastIndexOf("<tr ", rootRowStart),
         html.indexOf("</tr>", rootRowStart)
       );
       expect(rootRowHtml).toContain("Completed");
@@ -900,7 +900,7 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
       // "Completed" just because a review-followup continuation exists.
       const waitRowStart = html.indexOf('href="/runs/contract-wait"');
       const waitRowHtml = html.slice(
-        html.lastIndexOf("<tr>", waitRowStart),
+        html.lastIndexOf("<tr ", waitRowStart),
         html.indexOf("</tr>", waitRowStart)
       );
       expect(waitRowHtml).toContain("Waiting");
@@ -911,7 +911,7 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
       // "not recorded" rather than a borrowed "awaiting_review".
       const followupRowStart = html.indexOf('href="/runs/review-followup"');
       const followupRowHtml = html.slice(
-        html.lastIndexOf("<tr>", followupRowStart),
+        html.lastIndexOf("<tr ", followupRowStart),
         html.indexOf("</tr>", followupRowStart)
       );
       expect(followupRowHtml).toContain("not recorded");
@@ -999,7 +999,7 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
 
       const followupRowStart = html.indexOf('href="/runs/graph-followup"');
       const followupRowHtml = html.slice(
-        html.lastIndexOf("<tr>", followupRowStart),
+        html.lastIndexOf("<tr ", followupRowStart),
         html.indexOf("</tr>", followupRowStart)
       );
       expect(followupRowHtml).toContain(
@@ -1011,7 +1011,7 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
     }
   });
 
-  it("reflects newly persisted state on a plain refresh, with no graph JavaScript", async () => {
+  it("reflects newly persisted state on a plain refresh; the timeline itself needs no graph JavaScript", async () => {
     const test = await setup();
     try {
       seedSnapshot(test.runStore, 96, "Finishes between two page loads");
@@ -1066,7 +1066,7 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
       const firstHtml = await (await app.request("/issues/alpha/96")).text();
       const firstSection = firstHtml.slice(
         firstHtml.indexOf("Run Chain</h2>"),
-        firstHtml.indexOf("</main>")
+        firstHtml.indexOf("Graph drill-down")
       );
       expect(firstSection).toContain("Waiting");
       expect(firstSection).not.toContain("Finished");
@@ -1083,11 +1083,340 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
       const secondHtml = await (await app.request("/issues/alpha/96")).text();
       const secondSection = secondHtml.slice(
         secondHtml.indexOf("Run Chain</h2>"),
-        secondHtml.indexOf("</main>")
+        secondHtml.indexOf("Graph drill-down")
       );
       expect(secondSection).toContain("Finished: success");
       expect(secondSection).not.toContain("Waiting");
       expect(secondSection).not.toContain("<script");
+    } finally {
+      test.cleanup();
+    }
+  });
+});
+
+async function seedImplementThenWaitChain(
+  test: TestSetup,
+  input: {
+    graph?: Record<string, unknown> | false;
+    issueNumber: number;
+    rootId: string;
+    waitId: string;
+    attemptProvider?: "claude" | "codex";
+  }
+): Promise<void> {
+  const issue = sampleIssue({ number: input.issueNumber, title: "drill" });
+  seedSnapshot(test.runStore, input.issueNumber, "drill");
+  const graphPath =
+    input.graph === false
+      ? ""
+      : await writeGraph(
+          test.stateRoot,
+          input.rootId,
+          input.graph ?? IMPLEMENT_THEN_WAIT_GRAPH
+        );
+  test.runStore.createRun({
+    id: input.rootId,
+    issue,
+    projectName: "alpha",
+    providerCommand: "claude",
+    providerName: "claude"
+  });
+  if (input.graph !== false) {
+    test.runStore.createAttempt({
+      attemptNumber: 1,
+      branchName: `sym/alpha/${input.issueNumber}`,
+      branchRef: `refs/heads/sym/alpha/${input.issueNumber}`,
+      id: `${input.rootId}-attempt-1`,
+      issueSnapshotPath: "",
+      metadataPath: "",
+      normalizedLogPath: "",
+      promptPath: "",
+      providerCommand: input.attemptProvider ?? "claude",
+      providerName: input.attemptProvider ?? "claude",
+      rawLogPath: "",
+      runId: input.rootId,
+      state: "succeeded",
+      workflowGraphPath: graphPath,
+      workspacePath: test.stateRoot
+    });
+  }
+  test.runStore.updateRunEvidence(input.rootId, {
+    branchName: `sym/alpha/${input.issueNumber}`,
+    branchRef: `refs/heads/sym/alpha/${input.issueNumber}`,
+    issueSnapshotPath: "",
+    metadataPath: "",
+    normalizedLogPath: "",
+    promptPath: "",
+    rawLogPath: "",
+    workflowGraphPath: graphPath,
+    workspacePath: test.stateRoot
+  });
+  test.runStore.recordWorkflowStateAdvance(input.rootId, {
+    nextStateId: "review_wait",
+    transitionReason: "provider_success"
+  });
+  test.runStore.updateRunState(input.rootId, "succeeded");
+  test.runStore.createWaitingRun({
+    branchName: `sym/alpha/${input.issueNumber}`,
+    currentStateId: "review_wait",
+    id: input.waitId,
+    issue,
+    parentRunId: input.rootId,
+    projectName: "alpha",
+    workspacePath: test.stateRoot
+  });
+}
+
+function drilldownData(html: string): Array<Record<string, unknown>> {
+  return [
+    ...html.matchAll(
+      /<script type="application\/json" data-chain-graph-data>([\s\S]*?)<\/script>/g
+    )
+  ].map((match) => JSON.parse(match[1] ?? "{}") as Record<string, unknown>);
+}
+
+describe("GET /issues/:project/:number — graph drill-down (#860)", () => {
+  it("gives every timeline row a unique id namespaced by its chain root", async () => {
+    const test = await setup();
+    try {
+      await seedImplementThenWaitChain(test, {
+        issueNumber: 7,
+        rootId: "root-a",
+        waitId: "wait-a"
+      });
+      await seedImplementThenWaitChain(test, {
+        issueNumber: 7,
+        rootId: "root-b",
+        waitId: "wait-b"
+      });
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/7")).text();
+
+      const ids = [...html.matchAll(/<tr id="([^"]+)"/g)].map((m) => m[1]);
+      expect(ids).toHaveLength(4);
+      expect(new Set(ids).size).toBe(4);
+      expect(ids).toContain("chain-root-a-state-0");
+      expect(ids).toContain("chain-root-b-state-1");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("renders a collapsed, server-rendered state outline that links visits to timeline rows", async () => {
+    const test = await setup();
+    try {
+      await seedImplementThenWaitChain(test, {
+        attemptProvider: "codex",
+        issueNumber: 8,
+        rootId: "root-o",
+        waitId: "wait-o"
+      });
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/8")).text();
+
+      const drilldown = html.slice(html.indexOf("chain-graph-drilldown"));
+      expect(html).toContain("Graph drill-down (optional)");
+      expect(html).not.toMatch(
+        /<details[^>]*chain-graph-drilldown[^>]*\bopen\b/
+      );
+      expect(drilldown).toContain('data-state-id="implement"');
+      expect(drilldown).toContain('data-state-id="review_wait"');
+      expect(drilldown).toContain('href="#chain-root-o-state-0"');
+      expect(drilldown).toContain('href="#chain-root-o-state-1"');
+      // Per-visit provider is the Run's own attempt provider, not the
+      // captured graph's declared one.
+      expect(drilldown).toMatch(/codex[\s\S]*workflow state \(claude\)/);
+      // Current state is named in text with the row-kind label.
+      expect(drilldown).toMatch(/Current[\s\S]*Waiting/);
+      // The taken transition is marked in text.
+      expect(drilldown).toMatch(/review_wait<\/code>[^<]*<[^>]*>[^<]*taken/);
+      // Declared-but-untaken transitions and the state's complete-when show.
+      expect(drilldown).toContain("blocked_state");
+      expect(drilldown).toContain("checks: success");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("omits the drill-down and graph scripts when no chain captured a graph", async () => {
+    const test = await setup();
+    try {
+      await seedImplementThenWaitChain(test, {
+        graph: false,
+        issueNumber: 9,
+        rootId: "root-n",
+        waitId: "wait-n"
+      });
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/9")).text();
+
+      expect(html).not.toContain("Graph drill-down");
+      expect(html).not.toContain("cytoscape");
+      expect(html).not.toContain("data-chain-graph-data");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("embeds escaped graph data and emits the CDN scripts once per page", async () => {
+    const test = await setup();
+    try {
+      const hostileGraph = {
+        ...IMPLEMENT_THEN_WAIT_GRAPH,
+        states: [
+          ...IMPLEMENT_THEN_WAIT_GRAPH.states,
+          {
+            completeWhen: {},
+            id: "x</script><b>",
+            terminal: "blocked",
+            transitions: []
+          }
+        ]
+      };
+      await seedImplementThenWaitChain(test, {
+        graph: hostileGraph,
+        issueNumber: 10,
+        rootId: "root-h",
+        waitId: "wait-h"
+      });
+      await seedImplementThenWaitChain(test, {
+        issueNumber: 10,
+        rootId: "root-i",
+        waitId: "wait-i"
+      });
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/10")).text();
+
+      expect(html).not.toContain("x</script><b>");
+      expect(html.match(/cytoscape@3\.30\.4/g)).toHaveLength(1);
+      // Parser-blocking CDN scripts must come after the recovery controls.
+      expect(html.indexOf("cytoscape@3.30.4")).toBeGreaterThan(
+        html.indexOf("<h2>Labels</h2>")
+      );
+      const data = drilldownData(html);
+      expect(data).toHaveLength(2);
+      const withHostile = data.find((d) =>
+        JSON.stringify(d).includes("x</script><b>")
+      );
+      expect(withHostile).toBeDefined();
+      expect(data[0]).toMatchObject({
+        current: { kind: "current_waiting", stateId: "review_wait" }
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("embeds current kind blocked for an escalated chain whose graph node is a success terminal", async () => {
+    const test = await setup();
+    try {
+      await seedImplementThenWaitChain(test, {
+        issueNumber: 11,
+        rootId: "root-e",
+        waitId: "wait-e"
+      });
+      test.runStore.recordWorkflowTerminal("wait-e", {
+        terminalStateId: "done",
+        transitionReason: "escalated"
+      });
+      test.runStore.updateRunState("wait-e", "blocked");
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/11")).text();
+
+      expect(drilldownData(html)[0]).toMatchObject({
+        current: { kind: "blocked", stateId: "done" }
+      });
+      expect(html).toContain("Blocked");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("credits the wait state a chain finished through instead of calling implement to done undeclared", async () => {
+    const test = await setup();
+    try {
+      await seedImplementThenWaitChain(test, {
+        issueNumber: 13,
+        rootId: "root-t",
+        waitId: "wait-t"
+      });
+      test.runStore.recordWorkflowTerminal("wait-t", {
+        terminalStateId: "done",
+        transitionReason: "checks: success"
+      });
+      test.runStore.updateRunState("wait-t", "succeeded");
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/13")).text();
+
+      expect(html).not.toContain("not declared in the captured graph");
+      const [data] = drilldownData(html);
+      expect(data?.visits).toEqual([
+        { anchors: ["chain-root-t-state-0"], stateId: "implement" },
+        { anchors: ["chain-root-t-state-1"], stateId: "review_wait" },
+        { anchors: ["chain-root-t-state-1"], stateId: "done" }
+      ]);
+      expect(data?.traversed).toEqual([
+        {
+          declared: true,
+          from: "implement",
+          kind: "transition",
+          to: "review_wait"
+        },
+        {
+          declared: true,
+          from: "review_wait",
+          kind: "transition",
+          to: "done"
+        }
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("stacks the canvas over the outline on narrow screens", async () => {
+    const test = await setup();
+    try {
+      await seedImplementThenWaitChain(test, {
+        issueNumber: 12,
+        rootId: "root-m",
+        waitId: "wait-m"
+      });
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/12")).text();
+
+      expect(html).toMatch(
+        /@media \(max-width: 720px\)[^}]*\.chain-graph-layout/
+      );
+      expect(html).toContain(".chain-graph-drilldown summary:focus-visible");
     } finally {
       test.cleanup();
     }

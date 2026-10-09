@@ -149,7 +149,7 @@ export function createSaveConfirmer(deps: {
   };
 }
 
-function renderStaleSaveNotice(input: {
+export function renderStaleSaveNotice(input: {
   currentContent: string | null;
   editAction: string;
   filePath: string;

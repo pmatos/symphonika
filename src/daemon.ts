@@ -2008,6 +2008,21 @@ export async function startDaemon(
         ?.issue_filters?.ready_label;
       return readyLabel === undefined ? [] : [readyLabel];
     },
+    getProjectQueuePolicy: (projectName) => {
+      const project = runtimeConfig.projectsByName().get(projectName);
+      if (
+        project === undefined ||
+        project.issue_filters === undefined ||
+        project.priority === undefined
+      ) {
+        return undefined;
+      }
+      return {
+        epicLabels: project.epic_labels ?? [],
+        priority: project.priority,
+        readyLabel: project.issue_filters.ready_label
+      };
+    },
     getProjectRepo: (projectName) => {
       const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
       return tracker === undefined

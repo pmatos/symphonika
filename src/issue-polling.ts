@@ -3,7 +3,12 @@ import { Octokit } from "@octokit/rest";
 import { parse } from "yaml";
 import { z } from "zod";
 
-import { issueFiltersSchema, projectDispatchSchema } from "./config-schemas.js";
+import {
+  epicLabelsSchema,
+  issueFiltersSchema,
+  projectDispatchSchema,
+  rejectEpicLabelOverlap
+} from "./config-schemas.js";
 import { normalizeLabels, priorityForLabels } from "./issue-priority.js";
 import { REQUIRED_OPERATIONAL_LABELS } from "./operational-labels.js";
 
@@ -279,13 +284,15 @@ const pollingProjectSchema = z
         default: z.number().int().nonnegative()
       })
       .passthrough(),
+    epic_labels: epicLabelsSchema,
     agent: z
       .object({
         provider: providerNameSchema
       })
       .passthrough()
   })
-  .passthrough();
+  .passthrough()
+  .superRefine(rejectEpicLabelOverlap);
 
 const pollingServiceConfigSchema = z
   .object({

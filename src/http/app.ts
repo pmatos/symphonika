@@ -53,6 +53,7 @@ import {
   buildPullRequestFollowupAttention,
   buildWorkflowProgressAttention,
   registerPages,
+  type ProjectQueuePolicy,
   type ScheduledCallback
 } from "./pages.js";
 import { registerMaestroPage } from "./maestro-page.js";
@@ -298,6 +299,13 @@ export type HttpAppOptions = {
   // since which label actually gates dispatch is per-project config. Absent
   // (or an unknown project name) degrades to an empty set, i.e. no gate.
   getProjectRequiredLabels?: (projectName: string) => string[];
+  // The Dispatch Project's effective Ready Label, priority policy and Epic
+  // Labels from the live runtime snapshot (never the file on disk), so the
+  // Project page shows what the queue actually uses. Undefined for a Routine
+  // Host or an unknown name.
+  getProjectQueuePolicy?: (
+    projectName: string
+  ) => ProjectQueuePolicy | undefined;
   getRuns?: () => RunStatus[];
   getReloadStatus?: () => RuntimeReloadStatus;
   getScheduled?: () => ScheduledCallback[];
@@ -913,6 +921,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getProjectRepo === undefined
         ? {}
         : { getProjectRepo: options.getProjectRepo }),
+      ...(options.getProjectQueuePolicy === undefined
+        ? {}
+        : { getProjectQueuePolicy: options.getProjectQueuePolicy }),
       ...(options.getProjectRequiredLabels === undefined
         ? {}
         : { getProjectRequiredLabels: options.getProjectRequiredLabels }),

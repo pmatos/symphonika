@@ -95,11 +95,13 @@ async function createService(
     getIssue?: ReturnType<typeof vi.fn>;
     getIssueDependencies?: ReturnType<typeof vi.fn>;
     liveRunId?: () => string | undefined;
+    omitAddLabels?: boolean;
     omitDependencies?: boolean;
     project?: () => RunControllerProjectConfig;
     registered?: string[];
     snapshotLabels?: string[];
     snapshotReasons?: string[];
+    token?: string | undefined;
     bindingError?: () => string | undefined;
   } = {}
 ): Promise<{
@@ -136,7 +138,8 @@ async function createService(
     options.addLabelsToIssue ?? vi.fn().mockResolvedValue(undefined);
   const getIssue = options.getIssue ?? vi.fn().mockResolvedValue(rawIssue());
   const githubIssuesApi = {
-    addLabelsToIssue,
+    addLabelsToIssue:
+      options.omitAddLabels === true ? undefined : addLabelsToIssue,
     getIssue,
     getIssueDependencies:
       options.omitDependencies === true
@@ -160,7 +163,7 @@ async function createService(
     }),
     githubIssuesApi,
     isProviderRegistered: (name) => registered.includes(name),
-    resolveToken: () => "token",
+    resolveToken: () => ("token" in options ? options.token : "token"),
     runStore,
     verifySnapshotBinding: () => options.bindingError?.()
   });
@@ -685,6 +688,204 @@ describe("ProviderStartService.retry and cancel", () => {
     await start;
 
     expect(outcome.kind).toBe("refused");
+    expect(harness.runStore.getProviderPlan("plan-1")?.status).toBe(
+      "label_written"
+    );
+  });
+});
+
+describe("ProviderStartService refusal paths", () => {
+  const retryRequest = {
+    issueNumber: 7,
+    planId: "plan-1",
+    projectName: "widgets",
+    snapshotRepository: repository
+  };
+
+  async function failedPlan(options: Parameters<typeof createService>[0] = {}) {
+    const addLabelsToIssue = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue(undefined);
+    const harness = await createService({ addLabelsToIssue, ...options });
+    await harness.service.start(startRequest);
+    return harness;
+  }
+
+  it("refuses outside a dispatch project and without a loaded workflow", async () => {
+    const disabled = await createService({
+      project: () => ({ ...projectConfig(), disabled: true })
+    });
+    expect(disabled.service.preview("widgets", 7)).toBeUndefined();
+    expect(
+      JSON.stringify(await disabled.service.start(startRequest))
+    ).toContain("not a dispatch project");
+
+    const unloaded = await createService({
+      project: () =>
+        ({
+          ...projectConfig(),
+          workflow: { path: "workflow.yml" }
+        }) as unknown as RunControllerProjectConfig
+    });
+    expect(unloaded.service.preview("widgets", 7)).toBeUndefined();
+    expect(
+      JSON.stringify(await unloaded.service.start(startRequest))
+    ).toContain("no loaded workflow");
+  });
+
+  it("refuses an unknown or unregistered provider, a missing token and a missing snapshot", async () => {
+    const harness = await createService({ registered: ["codex"] });
+    expect(
+      await harness.service.start({ ...startRequest, provider: "nope" })
+    ).toMatchObject({ error: "nope is not a known provider" });
+    expect(await harness.service.start(startRequest)).toMatchObject({
+      error: "omp is not configured and registered"
+    });
+    expect(
+      await harness.service.start({
+        ...startRequest,
+        issueNumber: 999,
+        provider: "codex"
+      })
+    ).toMatchObject({
+      error: "the Issue has no snapshot; poll the Project first"
+    });
+
+    const tokenless = await createService({ token: undefined });
+    expect(await tokenless.service.start(startRequest)).toMatchObject({
+      error: "projects.widgets.tracker.token is not available",
+      kind: "refused"
+    });
+  });
+
+  it("refuses when the live Issue is missing or is a pull request", async () => {
+    const missing = await createService({
+      getIssue: vi.fn().mockResolvedValue(null)
+    });
+    expect(await missing.service.start(startRequest)).toMatchObject({
+      error: "the Issue could not be read from GitHub",
+      kind: "refused"
+    });
+
+    const pull = await createService({
+      getIssue: vi
+        .fn()
+        .mockResolvedValue(rawIssue({ pull_request: { url: "x" } }))
+    });
+    expect(await pull.service.start(startRequest)).toMatchObject({
+      error: "#7 is a pull request",
+      kind: "refused"
+    });
+  });
+
+  it("reports a label write failure when the GitHub API cannot add labels", async () => {
+    const harness = await createService({ omitAddLabels: true });
+    expect(await harness.service.start(startRequest)).toMatchObject({
+      error: "adding labels is not supported by the configured GitHub API",
+      kind: "label_write_failed"
+    });
+  });
+
+  it("refuses a Start that becomes blocked while waiting for the dispatch mutex", async () => {
+    const live: { runId?: string } = {};
+    const harness = await createService({ liveRunId: () => live.runId });
+    await harness.mutex.acquire();
+    const start = harness.service.start(startRequest);
+    await vi.waitFor(() => {
+      expect(harness.getIssue).toHaveBeenCalled();
+    });
+    live.runId = "run-9";
+    harness.mutex.release();
+
+    const outcome = await start;
+
+    expect(outcome).toMatchObject({ kind: "refused" });
+    expect(JSON.stringify(outcome)).toContain("run-9");
+    expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
+  });
+
+  it("refuses retry and cancel for an unknown plan", async () => {
+    const harness = await createService();
+    const request = { ...retryRequest, planId: "missing" };
+    expect(await harness.service.retry(request)).toMatchObject({
+      error: "the provider plan does not belong to this Issue",
+      kind: "refused"
+    });
+    expect(await harness.service.cancel(request)).toMatchObject({
+      error: "the provider plan does not belong to this Issue",
+      kind: "refused"
+    });
+  });
+
+  it("refuses to retry a plan that is not retryable", async () => {
+    const harness = await createService();
+    await harness.service.start(startRequest);
+    expect(await harness.service.retry(retryRequest)).toMatchObject({
+      error: "provider plan is label_written; nothing to retry",
+      kind: "refused"
+    });
+  });
+
+  it("refuses to retry when the provider is no longer registered", async () => {
+    const registered = ["codex", "claude", "omp"];
+    const harness = await failedPlan({ registered });
+    registered.splice(registered.indexOf("omp"), 1);
+    expect(await harness.service.retry(retryRequest)).toMatchObject({
+      error: "omp is no longer configured and registered",
+      kind: "refused"
+    });
+  });
+
+  it("refuses to retry when the live read fails or the Issue is no longer eligible", async () => {
+    const unreadable = await failedPlan();
+    unreadable.getIssue.mockRejectedValue(new Error("network down"));
+    expect(
+      JSON.stringify(await unreadable.service.retry(retryRequest))
+    ).toContain("network down");
+
+    const closed = await failedPlan();
+    closed.getIssue.mockResolvedValue(rawIssue({ state: "closed" }));
+    const refused = await closed.service.retry(retryRequest);
+    expect(refused.kind).toBe("refused");
+    expect(JSON.stringify(refused)).toContain("cannot retry:");
+    expect(closed.addLabelsToIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to retry while a live run holds the Issue", async () => {
+    const live: { runId?: string } = {};
+    const harness = await failedPlan({ liveRunId: () => live.runId });
+    live.runId = "run-9";
+    expect(await harness.service.retry(retryRequest)).toMatchObject({
+      error: "cannot retry: reserved by live run run-9",
+      kind: "refused"
+    });
+  });
+
+  it("refuses to retry a plan that changed while the live read was in flight", async () => {
+    const harness = await failedPlan();
+    await harness.mutex.acquire();
+    const retry = harness.service.retry(retryRequest);
+    await vi.waitFor(() => {
+      expect(harness.getIssue).toHaveBeenCalled();
+    });
+    harness.runStore.cancelProviderPlan("plan-1");
+    harness.mutex.release();
+
+    expect(await retry).toMatchObject({
+      error: "the provider plan changed; reload the page",
+      kind: "refused"
+    });
+  });
+
+  it("refuses to cancel a label_written plan when the live read fails", async () => {
+    const harness = await createService();
+    await harness.service.start(startRequest);
+    harness.getIssue.mockRejectedValue(new Error("network down"));
+
+    const outcome = await harness.service.cancel(retryRequest);
+
+    expect(JSON.stringify(outcome)).toContain("network down");
     expect(harness.runStore.getProviderPlan("plan-1")?.status).toBe(
       "label_written"
     );

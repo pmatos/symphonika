@@ -2,14 +2,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const issuesUpdate = vi.fn();
 const issuesCreateComment = vi.fn();
+const issuesGet = vi.fn();
+const graphql = vi.fn();
 const pullsGet = vi.fn();
 
 vi.mock("@octokit/rest", () => ({
   Octokit: vi.fn().mockImplementation(function MockOctokit() {
     return {
+      graphql,
       rest: {
         issues: {
           createComment: issuesCreateComment,
+          get: issuesGet,
           update: issuesUpdate
         },
         pulls: {
@@ -131,5 +135,76 @@ describe("OctokitGitHubIssuesApi.getPullRequest", () => {
         request: { signal: controller.signal }
       })
     );
+  });
+});
+
+describe("OctokitGitHubIssuesApi.getIssue", () => {
+  beforeEach(() => {
+    issuesGet.mockReset().mockResolvedValue({ data: { number: 7 } });
+  });
+
+  it("forwards an abort signal under request, matching the label-write methods", async () => {
+    const controller = new AbortController();
+    await DEFAULT_GITHUB_ISSUES_API.getIssue?.({
+      issueNumber: 7,
+      owner: "pmatos",
+      repo: "symphonika",
+      signal: controller.signal,
+      token: "secret"
+    });
+
+    expect(issuesGet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: { signal: controller.signal }
+      })
+    );
+  });
+
+  it("sends no request option when no signal is given", async () => {
+    await DEFAULT_GITHUB_ISSUES_API.getIssue?.({
+      issueNumber: 7,
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret"
+    });
+
+    expect(issuesGet.mock.calls[0]?.[0]).not.toHaveProperty("request");
+  });
+});
+
+describe("OctokitGitHubIssuesApi.getIssueDependencies", () => {
+  beforeEach(() => {
+    graphql.mockReset().mockResolvedValue({ repository: {} });
+  });
+
+  it("forwards an abort signal under request so the GraphQL call can be bounded", async () => {
+    const controller = new AbortController();
+    await DEFAULT_GITHUB_ISSUES_API.getIssueDependencies?.({
+      issueNumbers: [7],
+      owner: "pmatos",
+      repo: "symphonika",
+      signal: controller.signal,
+      token: "secret"
+    });
+
+    expect(graphql).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        owner: "pmatos",
+        repo: "symphonika",
+        request: { signal: controller.signal }
+      })
+    );
+  });
+
+  it("sends no request option when no signal is given", async () => {
+    await DEFAULT_GITHUB_ISSUES_API.getIssueDependencies?.({
+      issueNumbers: [7],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret"
+    });
+
+    expect(graphql.mock.calls[0]?.[1]).not.toHaveProperty("request");
   });
 });

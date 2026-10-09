@@ -349,7 +349,8 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
       const response = await octokit.rest.issues.get({
         issue_number: input.issueNumber,
         owner: input.owner,
-        repo: input.repo
+        repo: input.repo,
+        ...requestOption(input)
       });
       return response.data;
     } catch (error) {
@@ -419,7 +420,8 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
   ): Promise<Map<number, RawGitHubIssueDependencies>> {
     const octokit = this.octokit(input.token);
     return fetchIssueDependencies(
-      (query, variables) => octokit.graphql(query, variables),
+      (query, variables) =>
+        octokit.graphql(query, { ...variables, ...requestOption(input) }),
       input
     );
   }

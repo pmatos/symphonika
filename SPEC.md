@@ -3276,7 +3276,7 @@ provider choice: the workflow's graph fingerprint (`contentHash`), `owner/repo#n
 poll time, the configured and registered providers (the Project default marked), and an eligibility
 verdict built from the persisted snapshot minus the missing-Ready-Label reason, plus a live
 Issue Reservation, a suppressing latest Run and an in-flight plan. The Start form is omitted when
-the verdict has blockers. `POST .../start`, `POST .../start/retry` and `POST .../start/cancel` are
+the verdict has blockers and while a `label_written` plan is awaiting its claim. `POST .../start`, `POST .../start/retry` and `POST .../start/cancel` are
 authenticated and CSRF-protected like every other mutating route (ADR 0075) and render the same page
 with an outcome banner. Start persists the `pending` plan under `dispatchMutex` (local checks only)
 and only then adds the Ready Label outside the mutex; it refuses, writing nothing, on a stale

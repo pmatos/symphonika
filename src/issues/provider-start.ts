@@ -6,6 +6,7 @@ import {
   tryGetIssueDependencies,
   type GitHubIssuesApi
 } from "../issue-polling.js";
+import { isAgentProviderName } from "../human-resume-command.js";
 import type { AsyncMutex } from "../lifecycle/async-mutex.js";
 import {
   isDispatchProject,
@@ -46,6 +47,12 @@ export type ProviderStartOutcome =
       kind: "label_write_failed";
       error: string;
       plan: ProviderPlan | undefined;
+    }
+  | {
+      kind: "plan_withdrawn";
+      error: string | undefined;
+      labelWritten: boolean;
+      status: ProviderPlan["status"];
     }
   | { kind: "cancelled" };
 
@@ -97,10 +104,6 @@ export type ProviderStartDeps = {
     rendered: { owner: string; repo: string } | undefined;
   }) => string | undefined;
 };
-
-function isProviderChoice(value: string): value is AgentProviderName {
-  return (PROVIDER_CHOICES as readonly string[]).includes(value);
-}
 
 // Reasons an Issue cannot be started with a chain-wide provider choice.
 // `snapshotReasons` are the poller's own ineligibility reasons for the Issue;
@@ -283,8 +286,14 @@ export function createProviderStartService(
         ...repository,
         issueNumbers: [issueNumber]
       });
+      if (dependencies === undefined) {
+        return {
+          error: "the Issue's dependency links could not be read from GitHub",
+          kind: "error"
+        };
+      }
       const issue = normalizeIssueSnapshot(raw, project);
-      const issueDependencies = dependencies?.get(issueNumber);
+      const issueDependencies = dependencies.get(issueNumber);
       if (issueDependencies !== undefined) {
         issue.blockedBy = issueDependencies.blockedBy;
         issue.blockedByTruncated = issueDependencies.truncated;
@@ -346,9 +355,43 @@ export function createProviderStartService(
     return { context, project, token };
   }
 
-  // Add the Ready Label and settle the plan. The status write is conditional
-  // on `pending`, so a claim that already consumed the plan (or a Cancel that
-  // won) is reported as it actually is, never overwritten.
+  // Records the label result under dispatchMutex: a claim holds the mutex from
+  // its plan re-check through consumeProviderPlan, so a result landing in that
+  // window (a timed-out write that actually reached GitHub) would otherwise
+  // flip the plan it is about to consume. The write itself is conditional on
+  // `pending`, so a claim or Cancel that already settled the plan is reported
+  // as it actually is, never overwritten.
+  async function settleLabelWrite(
+    plan: ProviderPlan,
+    failure: string | undefined
+  ): Promise<ProviderStartOutcome> {
+    await deps.dispatchMutex.acquire();
+    try {
+      deps.runStore.markProviderPlanLabelResult(
+        plan.id,
+        failure === undefined ? { ok: true } : { error: failure, ok: false }
+      );
+    } finally {
+      deps.dispatchMutex.release();
+    }
+    const settled = deps.runStore.getProviderPlan(plan.id);
+    if (settled?.status === "consumed") {
+      return { kind: "started", plan: settled };
+    }
+    if (failure === undefined && settled?.status === "label_written") {
+      return { kind: "started", plan: settled };
+    }
+    if (failure !== undefined && settled?.status === "label_failed") {
+      return { error: failure, kind: "label_write_failed", plan: settled };
+    }
+    return {
+      error: failure,
+      kind: "plan_withdrawn",
+      labelWritten: failure === undefined,
+      status: settled?.status ?? plan.status
+    };
+  }
+
   async function writeReadyLabel(
     plan: ProviderPlan,
     context: ProviderStartContext,
@@ -369,19 +412,7 @@ export function createProviderStartService(
     } catch (error) {
       failure = errorMessage(error);
     }
-    if (failure === undefined) {
-      deps.runStore.markProviderPlanLabelResult(plan.id, { ok: true });
-      return { kind: "started", plan: deps.runStore.getProviderPlan(plan.id) };
-    }
-    deps.runStore.markProviderPlanLabelResult(plan.id, {
-      error: failure,
-      ok: false
-    });
-    const settled = deps.runStore.getProviderPlan(plan.id);
-    if (settled?.status === "consumed") {
-      return { kind: "started", plan: settled };
-    }
-    return { error: failure, kind: "label_write_failed", plan: settled };
+    return settleLabelWrite(plan, failure);
   }
 
   function refuse(error: string): ProviderStartOutcome {
@@ -391,7 +422,7 @@ export function createProviderStartService(
   async function start(
     input: StartIssueRequest
   ): Promise<ProviderStartOutcome> {
-    if (!isProviderChoice(input.provider)) {
+    if (!isAgentProviderName(input.provider)) {
       return refuse(`${input.provider} is not a known provider`);
     }
     const provider = input.provider;
@@ -535,8 +566,7 @@ export function createProviderStartService(
       return refuse("the provider plan disappeared");
     }
     if (live.hasReadyLabel) {
-      deps.runStore.markProviderPlanLabelResult(plan.id, { ok: true });
-      return { kind: "started", plan: deps.runStore.getProviderPlan(plan.id) };
+      return settleLabelWrite(reopened, undefined);
     }
     return writeReadyLabel(reopened, context, token);
   }
@@ -574,6 +604,9 @@ export function createProviderStartService(
     }
     await deps.dispatchMutex.acquire();
     try {
+      if (deps.runStore.getProviderPlan(plan.id)?.status !== plan.status) {
+        return refuse("the provider plan changed; reload the page");
+      }
       if (!deps.runStore.cancelProviderPlan(plan.id)) {
         const settled = deps.runStore.getProviderPlan(plan.id);
         return refuse(

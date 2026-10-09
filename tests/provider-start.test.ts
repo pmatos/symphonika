@@ -95,6 +95,7 @@ async function createService(
     getIssue?: ReturnType<typeof vi.fn>;
     getIssueDependencies?: ReturnType<typeof vi.fn>;
     liveRunId?: () => string | undefined;
+    omitDependencies?: boolean;
     project?: () => RunControllerProjectConfig;
     registered?: string[];
     snapshotLabels?: string[];
@@ -138,7 +139,10 @@ async function createService(
     addLabelsToIssue,
     getIssue,
     getIssueDependencies:
-      options.getIssueDependencies ?? vi.fn().mockResolvedValue(new Map()),
+      options.omitDependencies === true
+        ? undefined
+        : (options.getIssueDependencies ??
+          vi.fn().mockResolvedValue(new Map())),
     listOpenIssues: vi.fn().mockResolvedValue([])
   } as unknown as GitHubIssuesApi;
   const mutex = createAsyncMutex();
@@ -173,6 +177,28 @@ const startRequest = {
 };
 
 const repository = { owner: "acme", repo: "widgets" };
+
+function claimWithPlan(runStore: RunStore): void {
+  runStore.createRun({
+    id: "run-x",
+    issue: {
+      body: "",
+      created_at: "",
+      id: 7,
+      labels: [],
+      number: 7,
+      priority: 0,
+      state: "open",
+      title: "x",
+      updated_at: "",
+      url: "https://github.com/acme/widgets/issues/7"
+    },
+    projectName: "widgets",
+    providerCommand: "omp",
+    providerName: "omp"
+  });
+  runStore.consumeProviderPlan("plan-1", "run-x");
+}
 
 describe("startBlockers", () => {
   it("drops the missing-ready-label reason but keeps every other reason", () => {
@@ -404,25 +430,7 @@ describe("ProviderStartService.start", () => {
   it("does not flip a consumed plan to label_failed when the write throws after a claim", async () => {
     const harness = await createService();
     harness.addLabelsToIssue.mockImplementation(() => {
-      harness.runStore.createRun({
-        id: "run-x",
-        issue: {
-          body: "",
-          created_at: "",
-          id: 7,
-          labels: [],
-          number: 7,
-          priority: 0,
-          state: "open",
-          title: "x",
-          updated_at: "",
-          url: "https://github.com/acme/widgets/issues/7"
-        },
-        projectName: "widgets",
-        providerCommand: "omp",
-        providerName: "omp"
-      });
-      harness.runStore.consumeProviderPlan("plan-1", "run-x");
+      claimWithPlan(harness.runStore);
       return Promise.reject(new Error("timeout after landing"));
     });
 
@@ -453,6 +461,69 @@ describe("ProviderStartService.start", () => {
 
     expect(second.kind).toBe("refused");
     expect(harness.addLabelsToIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("records the label result only after an in-flight claim releases the dispatch mutex", async () => {
+    const harness = await createService();
+    harness.addLabelsToIssue.mockImplementation(async () => {
+      await harness.mutex.acquire();
+      throw new Error("timeout after landing");
+    });
+
+    const pending = harness.service.start(startRequest);
+    await vi.waitFor(() => {
+      expect(harness.mutex.held).toBe(true);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(harness.runStore.getProviderPlan("plan-1")?.status).toBe("pending");
+
+    claimWithPlan(harness.runStore);
+    harness.mutex.release();
+
+    expect(await pending).toMatchObject({
+      kind: "started",
+      plan: { status: "consumed" }
+    });
+  });
+
+  it("reports a withdrawn plan, not a start, when Cancel wins the race with a successful label write", async () => {
+    const harness = await createService();
+    harness.addLabelsToIssue.mockImplementation(() => {
+      harness.runStore.cancelProviderPlan("plan-1");
+      return Promise.resolve();
+    });
+
+    expect(await harness.service.start(startRequest)).toEqual({
+      error: undefined,
+      kind: "plan_withdrawn",
+      labelWritten: true,
+      status: "cancelled"
+    });
+  });
+
+  it("reports a withdrawn plan, not a label failure, when Cancel wins the race with a failed label write", async () => {
+    const harness = await createService();
+    harness.addLabelsToIssue.mockImplementation(() => {
+      harness.runStore.cancelProviderPlan("plan-1");
+      return Promise.reject(new Error("403 forbidden"));
+    });
+
+    expect(await harness.service.start(startRequest)).toEqual({
+      error: "403 forbidden",
+      kind: "plan_withdrawn",
+      labelWritten: false,
+      status: "cancelled"
+    });
+  });
+
+  it("fails closed when the GitHub API cannot read dependencies", async () => {
+    const harness = await createService({ omitDependencies: true });
+
+    const outcome = await harness.service.start(startRequest);
+
+    expect(outcome).toMatchObject({ kind: "refused" });
+    expect(JSON.stringify(outcome)).toContain("dependency");
+    expect(harness.addLabelsToIssue).not.toHaveBeenCalled();
   });
 
   it("does not hold the dispatch mutex across the GitHub label write", async () => {
@@ -591,5 +662,31 @@ describe("ProviderStartService.retry and cancel", () => {
     expect(await harness.service.cancel(retryRequest)).toEqual({
       kind: "cancelled"
     });
+  });
+  it("refuses to cancel a plan whose status changed while it waited for the dispatch mutex", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const harness = await createService({
+      addLabelsToIssue: vi.fn().mockImplementation(() => gate)
+    });
+    const start = harness.service.start(startRequest);
+    await vi.waitFor(() => {
+      expect(harness.addLabelsToIssue).toHaveBeenCalledTimes(1);
+    });
+
+    await harness.mutex.acquire();
+    const cancel = harness.service.cancel(retryRequest);
+    harness.runStore.markProviderPlanLabelResult("plan-1", { ok: true });
+    harness.mutex.release();
+    const outcome = await cancel;
+    release();
+    await start;
+
+    expect(outcome.kind).toBe("refused");
+    expect(harness.runStore.getProviderPlan("plan-1")?.status).toBe(
+      "label_written"
+    );
   });
 });

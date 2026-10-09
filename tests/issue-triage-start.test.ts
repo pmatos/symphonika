@@ -199,6 +199,21 @@ describe("GET /issues/:project/:number/start (#861)", () => {
     expect(html).toContain('name="plan_id" value="plan-1"');
   });
 
+  it("withholds the Start form and says the Issue is awaiting its claim once the Ready Label was written", async () => {
+    const { app } = await setup(
+      previewFixture({ plan: planFixture({ status: "label_written" }) })
+    );
+    const html = await (
+      await app.request("/issues/alpha/7/start", { headers: browserHeaders() })
+    ).text();
+
+    expect(html).toContain("the next poll claims the Issue with omp");
+    expect(html).not.toContain("startable");
+    expect(html).not.toContain("Start work");
+    expect(html).not.toContain('name="provider"');
+    expect(html).toContain("/issues/alpha/7/start/cancel");
+  });
+
   it("returns 404 for an unknown issue and when start is unavailable", async () => {
     const known = await setup(previewFixture());
     expect(
@@ -302,6 +317,28 @@ describe("POST /issues/:project/:number/start (#861)", () => {
     expect(html).toContain("403 forbidden");
     expect(html).toContain("The Issue was not started");
     expect(html).not.toContain("the Ready Label was added on GitHub");
+  });
+
+  it("reports a withdrawn plan without claiming the provider choice will be honored", async () => {
+    const { app, service } = await setup(previewFixture());
+    service.start.mockResolvedValueOnce({
+      error: undefined,
+      kind: "plan_withdrawn",
+      labelWritten: true,
+      status: "cancelled"
+    });
+    const html = await (
+      await app.request("/issues/alpha/7/start", {
+        body: formBody(fields),
+        headers: browserHeaders(),
+        method: "POST"
+      })
+    ).text();
+
+    expect(html).toContain("while the Ready Label write was in flight");
+    expect(html).toContain("The Ready Label was added.");
+    expect(html).toContain("default routing");
+    expect(html).not.toContain("next poll claims the Issue with");
   });
 
   it("reports a refusal", async () => {

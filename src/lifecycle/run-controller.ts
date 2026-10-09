@@ -4522,8 +4522,10 @@ export class RunController {
       });
     }
 
-    // Start/Retry/Cancel flip plan status under this same mutex, so a plan
-    // read that matches here stays valid through createRun below. Any
+    // Start, Retry, Cancel and the Ready Label write's result all change plan
+    // status under this same mutex, so a plan read that matches here stays
+    // valid through createRun below (bar the lazy one-hour expiry of a
+    // `pending` plan in getActiveProviderPlan). Any
     // mismatch (a plan appeared, was cancelled, lapsed, or failed its label
     // write since resolveAndClaim chose the provider) defers to the next tick.
     const expectedProviderPlanId = input.expectedProviderPlanId ?? null;

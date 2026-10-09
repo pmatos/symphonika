@@ -5105,6 +5105,8 @@ function renderIssueStartBanner(input: IssueStartBannerInput): string {
       return `<div class="alert alert--ok" role="status"><strong>${action === "retry" ? "Retried" : "Started"}: the Ready Label was added on GitHub</strong><p>The next poll claims the Issue with ${escapeHtml(outcome.plan?.provider ?? "the chosen provider")} for the whole Run Chain.${outcome.plan !== undefined && outcome.plan.status !== "label_written" ? ` Plan status: ${escapeHtml(outcome.plan.status)}.` : ""}</p></div>`;
     case "cancelled":
       return `<div class="alert alert--ok" role="status"><strong>Provider plan cancelled</strong><p>Cancelling does not remove the Ready Label. If the Issue already has it, the next poll will claim it with the Project's default routing.</p></div>`;
+    case "plan_withdrawn":
+      return `<div class="alert" role="alert"><strong>The provider plan was ${escapeHtml(outcome.status)} while the Ready Label write was in flight</strong><p>${outcome.labelWritten ? "The Ready Label was added." : `The Ready Label write failed (${escapeHtml(outcome.error ?? "unknown error")}) and may still have reached GitHub.`} No provider plan applies to this Issue any more, so a claim uses the Project's default routing.</p></div>`;
     case "label_write_failed":
       return `<div class="alert" role="alert"><strong>The Ready Label write failed</strong><p>${escapeHtml(outcome.error)}</p><p>The provider plan is saved as <code>${escapeHtml(outcome.plan?.status ?? "label_failed")}</code> and blocks this Issue from dispatching until you retry or cancel it. The Issue was not started.</p></div>`;
     case "refused":
@@ -5125,8 +5127,10 @@ function renderIssueStartPage(input: {
     `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`;
   const common = `${hidden(CSRF_FIELD_NAME, csrfToken)}${renderSnapshotRepositoryFields(detail.snapshotRepository)}`;
   const facts = `<dl class="facts"><dt>Issue</dt><dd>${escapeHtml(`${context.repository.owner}/${context.repository.repo}#${detail.issueNumber}`)}</dd><dt>Workflow</dt><dd>${escapeHtml(context.workflowName)}</dd><dt>Graph fingerprint</dt><dd><code>${escapeHtml(context.graphFingerprint)}</code></dd><dt>Snapshot polled at</dt><dd>${escapeHtml(detail.snapshot.polledAt)}</dd><dt>Ready Label</dt><dd><code>${escapeHtml(context.readyLabel)}</code></dd><dt>Project default provider</dt><dd>${escapeHtml(context.defaultProvider)}</dd></dl>`;
-  const verdict =
-    preview.blockers.length === 0
+  const awaitingClaim = plan?.status === "label_written";
+  const verdict = awaitingClaim
+    ? `<p>${labelPill("started", "ok")} The Ready Label was added; the next poll claims the Issue with ${escapeHtml(plan.provider)}.</p>`
+    : preview.blockers.length === 0
       ? `<p>${labelPill("startable", "ok")} Nothing in the last poll snapshot blocks this Issue. GitHub is re-checked live when you submit.</p>`
       : `<div class="alert" role="alert"><strong>Cannot be started</strong><ul>${preview.blockers.map((blocker) => `<li>${escapeHtml(blocker)}</li>`).join("")}</ul></div>`;
   const planForms =
@@ -5151,7 +5155,7 @@ function renderIssueStartPage(input: {
     )
     .join(" ");
   const startForm =
-    preview.blockers.length > 0
+    awaitingClaim || preview.blockers.length > 0
       ? ""
       : context.providers.length === 0
         ? `<p class="muted">No provider is configured and registered.</p>`

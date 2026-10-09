@@ -55,9 +55,13 @@ the status update does not strand an Issue whose label did land.
 3. Under `dispatchMutex`, local checks only: no live Issue Reservation (in-flight, scheduled,
    waiting; alias-expanded), no suppressing latest Run, no other pending plan. One transaction
    supersedes older unconsumed plans and inserts the `pending` plan.
-4. Outside the mutex, add the Ready Label (bounded), then a **conditional** status write
-   (`pending` -> `label_written` or `label_failed`). A claim that already consumed the plan, or a
-   Cancel that won, is reported as it is and never overwritten.
+4. Outside the mutex, add the Ready Label (bounded), then take `dispatchMutex` again for a
+   **conditional** status write (`pending` -> `label_written` or `label_failed`). A claim holds the
+   mutex from its plan re-check through consuming the plan, so a label result that arrives while a
+   claim is in flight (a timed-out write that did reach GitHub) cannot flip the plan the claim is
+   about to consume. A claim that already consumed the plan is reported as a start; a Cancel that
+   won is reported as a withdrawn plan (the label may be on the Issue, and the Project default
+   routing applies); neither is ever overwritten.
 5. Retry reopens `label_failed`/`expired` after the same repository, fingerprint (the plan's stored
    one) and live-state checks; if the live Issue already carries the Ready Label it records
    `label_written` without a second write. Cancel is refused once consumed; a `label_written` plan

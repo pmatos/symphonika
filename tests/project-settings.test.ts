@@ -138,6 +138,20 @@ describe("applyProjectSettingsEdit", () => {
     );
   });
 
+  it("fills an empty flow-style priority map", () => {
+    const result = applyProjectSettingsEdit(CONFIG, "beta", {
+      ...SETTINGS,
+      priorityLabels: [{ label: "priority:high", priority: 1 }]
+    });
+    if (!result.ok) throw new Error(result.error);
+    expect(readProjectSettingsValues(result.content, "beta")).toMatchObject({
+      priorityLabels: "priority:high=1"
+    });
+    expect(changesOnlyProjectSettings(CONFIG, result.content, "beta")).toBe(
+      true
+    );
+  });
+
   it("drops epic_labels when empty and replaces legacy labels_all", () => {
     const legacy = CONFIG.replace(
       "ready_label: agent-ready",

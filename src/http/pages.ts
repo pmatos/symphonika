@@ -2162,7 +2162,7 @@ export function registerPages(options: RegisterPagesOptions): void {
             errors,
             expectedContentHash,
             projectName: resolved.name,
-            values: readProjectSettingsValues(onDisk, resolved.name) ?? {
+            values: readProjectSettingsValues(content, resolved.name) ?? {
               epicLabels: "",
               priorityDefault: "",
               priorityLabels: "",

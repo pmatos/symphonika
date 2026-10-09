@@ -1011,7 +1011,7 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
     }
   });
 
-  it("reflects newly persisted state on a plain refresh, with no graph JavaScript", async () => {
+  it("reflects newly persisted state on a plain refresh; the timeline itself needs no graph JavaScript", async () => {
     const test = await setup();
     try {
       seedSnapshot(test.runStore, 96, "Finishes between two page loads");
@@ -1305,6 +1305,10 @@ describe("GET /issues/:project/:number — graph drill-down (#860)", () => {
 
       expect(html).not.toContain("x</script><b>");
       expect(html.match(/cytoscape@3\.30\.4/g)).toHaveLength(1);
+      // Parser-blocking CDN scripts must come after the recovery controls.
+      expect(html.indexOf("cytoscape@3.30.4")).toBeGreaterThan(
+        html.indexOf("<h2>Labels</h2>")
+      );
       const data = drilldownData(html);
       expect(data).toHaveLength(2);
       const withHostile = data.find((d) =>

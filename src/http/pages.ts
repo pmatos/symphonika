@@ -5109,8 +5109,8 @@ function renderIssueRunChainSection(chains: IssueRunChainView[]): string {
     return `<section><h2>Run Chain</h2><p class="muted">No Run Chain recorded yet for this Issue.</p></section>`;
   }
   const [latest, ...older] = chains;
-  const graphAssets = chains.some((chain) => chain.evidence !== undefined)
-    ? `<style>${CHAIN_GRAPH_STYLES}</style>${WORKFLOW_GRAPH_SCRIPTS}<script>${CHAIN_GRAPH_CLIENT_JS}</script>`
+  const graphStyles = hasChainGraphs(chains)
+    ? `<style>${CHAIN_GRAPH_STYLES}</style>`
     : "";
   const latestHtml =
     latest === undefined
@@ -5122,7 +5122,20 @@ function renderIssueRunChainSection(chains: IssueRunChainView[]): string {
         `<details><summary>Earlier Run Chain #${older.length - index}</summary>${renderIssueRunChainView(chain)}</details>`
     )
     .join("");
-  return `${latestHtml}${olderHtml}${graphAssets}`;
+  return `${graphStyles}${latestHtml}${olderHtml}`;
+}
+
+function hasChainGraphs(chains: IssueRunChainView[]): boolean {
+  return chains.some((chain) => chain.evidence !== undefined);
+}
+
+// Emitted after every other section: classic <script src> tags are
+// parser-blocking, so a slow CDN must not delay the label and stale-claim
+// controls rendered below the Run Chain.
+function renderChainGraphScripts(chains: IssueRunChainView[]): string {
+  return hasChainGraphs(chains)
+    ? `${WORKFLOW_GRAPH_SCRIPTS}<script>${CHAIN_GRAPH_CLIENT_JS}</script>`
+    : "";
 }
 
 const CHAIN_GRAPH_STYLES = `
@@ -5174,7 +5187,7 @@ function renderIssueDetailPage(input: {
     labels: detail.snapshot.labels,
     projectName: detail.projectName,
     snapshotRepository: detail.snapshotRepository
-  })}<p class="note"><a href="/issues">← Back to search</a></p>`;
+  })}<p class="note"><a href="/issues">← Back to search</a></p>${renderChainGraphScripts(input.chains)}`;
 }
 
 // Full itemized breakdown of a Deps-column count — kind of every

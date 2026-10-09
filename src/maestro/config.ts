@@ -14,7 +14,18 @@ export type MaestroConfig = {
   maxOutputTokens: number;
   model: string;
   provider: "anthropic";
+  repositoryContent: MaestroRepositoryContent;
 };
+
+// What repository content Maestro's workspace tools may send to the
+// configured model provider. `none` offers no workspace tool at all.
+export const MAESTRO_REPOSITORY_CONTENT_VALUES = [
+  "none",
+  "public",
+  "public_and_private"
+] as const;
+export type MaestroRepositoryContent =
+  (typeof MAESTRO_REPOSITORY_CONTENT_VALUES)[number];
 
 // Deliberately not ANTHROPIC_API_KEY: a spawned `claude` Coding Agent
 // inherits the daemon's environment and reads that exact variable to
@@ -42,14 +53,18 @@ export const maestroConfigSchema = z
       .int()
       .positive()
       .max(32_000)
-      .default(DEFAULT_MAX_OUTPUT_TOKENS)
+      .default(DEFAULT_MAX_OUTPUT_TOKENS),
+    repository_content: z
+      .enum(MAESTRO_REPOSITORY_CONTENT_VALUES)
+      .default("none")
   })
   .strict()
   .transform((maestro): MaestroConfig => ({
     apiKeyEnv: maestro.api_key_env,
     maxOutputTokens: maestro.max_output_tokens,
     model: maestro.model,
-    provider: maestro.provider
+    provider: maestro.provider,
+    repositoryContent: maestro.repository_content
   }));
 
 // Mirrors src/notifications/config.ts's secretsForEmailConfig: providers

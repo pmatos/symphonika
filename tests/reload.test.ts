@@ -298,7 +298,8 @@ describe("RuntimeConfigReloader workflow validation", () => {
       apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
       maxOutputTokens: 4096,
       model: "claude-sonnet-5",
-      provider: "anthropic"
+      provider: "anthropic",
+      repositoryContent: "none"
     });
   });
 
@@ -324,7 +325,53 @@ describe("RuntimeConfigReloader workflow validation", () => {
       apiKeyEnv: "MAESTRO_ANTHROPIC_KEY",
       maxOutputTokens: 2048,
       model: "claude-opus-5",
-      provider: "anthropic"
+      provider: "anthropic",
+      repositoryContent: "none"
+    });
+  });
+
+  it.each(["public", "public_and_private"] as const)(
+    "loads maestro.repository_content %s",
+    async (value) => {
+      const root = await makeTempRoot();
+      await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+      await writeProjectConfig(root, "WORKFLOW.md", {
+        serviceLines: [
+          "maestro:",
+          '  model: "claude-sonnet-5"',
+          `  repository_content: ${value}`
+        ]
+      });
+      const reloader = new RuntimeConfigReloader({
+        configPath: path.join(root, "symphonika.yml")
+      });
+
+      await reloader.reload();
+
+      expect(reloader.getStatus().errors).toEqual([]);
+      expect(reloader.maestroConfig()?.repositoryContent).toBe(value);
+    }
+  );
+
+  it("rejects an unknown maestro.repository_content value", async () => {
+    const root = await makeTempRoot();
+    await writeFile(path.join(root, "WORKFLOW.md"), "Work\n");
+    await writeProjectConfig(root, "WORKFLOW.md", {
+      serviceLines: [
+        "maestro:",
+        '  model: "claude-sonnet-5"',
+        "  repository_content: everything"
+      ]
+    });
+    const reloader = new RuntimeConfigReloader({
+      configPath: path.join(root, "symphonika.yml")
+    });
+
+    await reloader.reload();
+
+    expect(reloader.getStatus()).toMatchObject({
+      errors: [expect.stringContaining("maestro.repository_content")],
+      ok: false
     });
   });
 

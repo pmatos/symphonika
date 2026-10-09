@@ -27,6 +27,10 @@ afterEach(async () => {
   );
 });
 
+type AsyncMock = ReturnType<
+  typeof vi.fn<(...args: unknown[]) => Promise<void>>
+>;
+
 const POLLED_AT = "2026-10-09T10:00:00.000Z";
 
 function rawIssue(overrides: Partial<RawGitHubIssue> = {}): RawGitHubIssue {
@@ -41,7 +45,7 @@ function rawIssue(overrides: Partial<RawGitHubIssue> = {}): RawGitHubIssue {
     title: "An issue",
     updated_at: "2026-10-01T00:00:00Z",
     ...overrides
-  } as RawGitHubIssue;
+  };
 }
 
 function projectConfig(
@@ -87,7 +91,7 @@ function projectConfig(
 
 async function createService(
   options: {
-    addLabelsToIssue?: ReturnType<typeof vi.fn>;
+    addLabelsToIssue?: AsyncMock;
     getIssue?: ReturnType<typeof vi.fn>;
     getIssueDependencies?: ReturnType<typeof vi.fn>;
     liveRunId?: () => string | undefined;
@@ -98,7 +102,7 @@ async function createService(
     bindingError?: () => string | undefined;
   } = {}
 ): Promise<{
-  addLabelsToIssue: ReturnType<typeof vi.fn>;
+  addLabelsToIssue: AsyncMock;
   getIssue: ReturnType<typeof vi.fn>;
   runStore: RunStore;
   service: ProviderStartService;

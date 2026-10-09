@@ -1420,7 +1420,7 @@ export type MaestroMessageRow = {
 // `label_written` are consumable by the claim that fires on the Ready Label;
 // `label_failed` and `expired` are live but blocking, so a write that may have
 // reached GitHub can never fall back to default provider routing.
-export type ProviderPlanStatus =
+type ProviderPlanStatus =
   | "pending"
   | "label_written"
   | "label_failed"

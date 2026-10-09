@@ -96,7 +96,7 @@ async function createHarness(
   let runCounter = 0;
   const controller = new RunController({
     activeRuns: new ActiveRunRegistry(),
-    agentProviders: providers as Record<AgentProviderName, AgentProvider>,
+    agentProviders: providers,
     configDir: root,
     createRunId: () => `run-${++runCounter}`,
     emailConfigLoader: () => undefined,

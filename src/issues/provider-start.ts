@@ -24,7 +24,7 @@ const PROVIDER_CHOICES: readonly AgentProviderName[] = [
 
 const DEFAULT_GITHUB_TIMEOUT_MS = 15_000;
 
-export type ProviderStartContext = {
+type ProviderStartContext = {
   defaultProvider: AgentProviderName;
   graphFingerprint: string;
   providers: AgentProviderName[];
@@ -49,7 +49,7 @@ export type ProviderStartOutcome =
     }
   | { kind: "cancelled" };
 
-export type StartIssueRequest = {
+type StartIssueRequest = {
   graphFingerprint: string;
   issueNumber: number;
   projectName: string;
@@ -58,14 +58,14 @@ export type StartIssueRequest = {
   snapshotRepository: { owner: string; repo: string } | undefined;
 };
 
-export type RetryProviderPlanRequest = {
+type RetryProviderPlanRequest = {
   issueNumber: number;
   planId: string;
   projectName: string;
   snapshotRepository: { owner: string; repo: string } | undefined;
 };
 
-export type CancelProviderPlanRequest = RetryProviderPlanRequest;
+type CancelProviderPlanRequest = RetryProviderPlanRequest;
 
 export type ProviderStartService = {
   cancel(input: CancelProviderPlanRequest): Promise<ProviderStartOutcome>;
@@ -98,7 +98,7 @@ export type ProviderStartDeps = {
   }) => string | undefined;
 };
 
-export function isProviderChoice(value: string): value is AgentProviderName {
+function isProviderChoice(value: string): value is AgentProviderName {
   return (PROVIDER_CHOICES as readonly string[]).includes(value);
 }
 

@@ -940,12 +940,12 @@ export function registerPages(options: RegisterPagesOptions): void {
     return context.html(html);
   });
 
-  async function renderStartPage(
+  function renderStartPage(
     context: Context,
     projectName: string,
     issueNumberParam: string,
     outcome: IssueStartBannerInput | undefined
-  ): Promise<Response> {
+  ): Response {
     const issueNumber = Number.parseInt(issueNumberParam, 10);
     const detail = loadIssueDetail(
       options.runStore,

@@ -38,7 +38,10 @@ export type ChainGraphEvidence = {
   traversed: ChainGraphTraversal[];
 };
 
-type ExecutedRow = { handoffTarget?: string; stateId: string | undefined };
+type ExecutedRow = {
+  handoffTarget?: string | undefined;
+  stateId: string | undefined;
+};
 
 // A `pending_handoff` row's stateId names the state it handed off *to*; the
 // state it actually executed is its parent's forward-stamp, or the graph's

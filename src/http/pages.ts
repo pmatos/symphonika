@@ -30,6 +30,11 @@ import {
 } from "../provider-stream-status.js";
 import { describeIssueVerdict } from "../issues/verdict.js";
 import {
+  buildChainGraphEvidence,
+  type ChainGraphEvidence
+} from "../issues/run-chain-graph.js";
+import { CHAIN_GRAPH_CLIENT_JS } from "./chain-graph-client.js";
+import {
   deriveChainStateRows,
   findWorkflowStateNode,
   groupRunsIntoChains,
@@ -117,6 +122,7 @@ import {
 import type {
   ExpandedWorkflow,
   WorkflowActionKind,
+  WorkflowPredicateMap,
   WorkflowTransition
 } from "../workflow/types.js";
 import {
@@ -4728,6 +4734,8 @@ type IssueRunChainRowView = {
 };
 
 type IssueRunChainView = {
+  evidence: ChainGraphEvidence | undefined;
+  graph: ExpandedWorkflow | undefined;
   group: RunChainGroup;
   leafIsActive: boolean;
   rows: IssueRunChainRowView[];
@@ -4810,7 +4818,10 @@ async function loadIssueRunChainViews(
           .map((run) => graphForRun(run.id)?.contentHash)
           .filter((hash): hash is string => hash !== undefined)
       );
+      const graph = nearestGraphs[leafIndex];
       return {
+        evidence: buildChainGraphEvidence(stateRows, graph),
+        graph,
         group,
         leafIsActive,
         rows,
@@ -4865,24 +4876,50 @@ function describeProviderSource(
   }
 }
 
-function renderChainRow(view: IssueRunChainRowView): string {
+function chainRowAnchor(rootRunId: string, rowIndex: number): string {
+  return `chain-${rootRunId}-state-${rowIndex}`;
+}
+
+function describeRowProvider(view: IssueRunChainRowView): string {
+  const effectiveProvider = view.attempts.at(-1)?.providerName;
+  return effectiveProvider === undefined
+    ? "—"
+    : `${escapeHtml(effectiveProvider)} <span class="muted">— ${describeProviderSource(view.providerSource, view.graphAvailable)}</span>`;
+}
+
+function renderChainRow(
+  view: IssueRunChainRowView,
+  rowIndex: number,
+  rootRunId: string
+): string {
   const { row } = view;
   const stateCell =
     row.stateId === undefined
       ? `<em>not recorded</em>`
       : `<code>${escapeHtml(row.stateId)}</code>${view.actionKind === undefined ? "" : ` <span class="muted">(${escapeHtml(view.actionKind)})</span>`}`;
-  const effectiveProvider = view.attempts.at(-1)?.providerName;
-  const providerCell =
-    effectiveProvider === undefined
-      ? "—"
-      : `${escapeHtml(effectiveProvider)} <span class="muted">— ${describeProviderSource(view.providerSource, view.graphAvailable)}</span>`;
+  const providerCell = describeRowProvider(view);
   const attemptsCell =
     view.attempts.length === 0
       ? "—"
       : `${view.attempts.length} attempt${view.attempts.length === 1 ? "" : "s"}`;
   const evidenceCell =
     row.transitionReason === null ? "—" : escapeHtml(row.transitionReason);
-  return `<tr><td>${stateCell}</td><td>${renderChainRowStatusPill(row)}</td><td>${providerCell}</td><td>${attemptsCell}</td><td><code>${renderTimestamp(row.run.createdAt)}</code></td><td><code>${renderTimestamp(row.run.updatedAt)}</code></td><td>${evidenceCell}</td><td><a href="/runs/${encodeURIComponent(row.run.id)}"><code>${escapeHtml(row.run.id)}</code></a></td></tr>`;
+  return `<tr id="${escapeHtml(chainRowAnchor(rootRunId, rowIndex))}"><td>${stateCell}</td><td>${renderChainRowStatusPill(row)}</td><td>${providerCell}</td><td>${attemptsCell}</td><td><code>${renderTimestamp(row.run.createdAt)}</code></td><td><code>${renderTimestamp(row.run.updatedAt)}</code></td><td>${evidenceCell}</td><td><a href="/runs/${encodeURIComponent(row.run.id)}"><code>${escapeHtml(row.run.id)}</code></a></td></tr>`;
+}
+
+function formatPredicateMap(
+  predicates: WorkflowPredicateMap | undefined,
+  emptyText: string
+): string {
+  const entries = Object.entries(predicates ?? {});
+  return entries.length === 0
+    ? emptyText
+    : entries
+        .map(
+          ([key, value]) =>
+            `${key}: ${Array.isArray(value) ? value.join("/") : String(value)}`
+        )
+        .join(", ");
 }
 
 function renderUpcomingSection(
@@ -4900,24 +4937,18 @@ function renderUpcomingSection(
   }
   const items = upcoming
     .map((transition) => {
-      const predicates = Object.entries(transition.when);
-      const when =
-        predicates.length === 0
-          ? "always"
-          : predicates
-              .map(
-                ([key, value]) =>
-                  `${key}: ${Array.isArray(value) ? value.join("/") : String(value)}`
-              )
-              .join(", ");
-      return `<li><code>${escapeHtml(transition.to)}</code> — when ${escapeHtml(when)}</li>`;
+      return `<li><code>${escapeHtml(transition.to)}</code> — when ${escapeHtml(formatPredicateMap(transition.when, "always"))}</li>`;
     })
     .join("");
   return `<p class="note">Upcoming (one hop, predicates decide at run time — not a guaranteed path):</p><ul>${items}</ul>`;
 }
 
 function renderIssueRunChainView(view: IssueRunChainView): string {
-  const rowsHtml = view.rows.map(renderChainRow).join("");
+  const rowsHtml = view.rows
+    .map((rowView, index) =>
+      renderChainRow(rowView, index, view.group.rootRunId)
+    )
+    .join("");
   const table = tableSection(
     "States",
     view.rows.length,
@@ -4935,7 +4966,142 @@ function renderIssueRunChainView(view: IssueRunChainView): string {
     view.trackedPR === undefined
       ? ""
       : `<p class="note">Tracked pull request: ${externalLink(view.trackedPR.prUrl, `#${view.trackedPR.prNumber}`)} (${escapeHtml(view.trackedPR.state)}).</p>`;
-  return `${table}${branchNote}${workflowChangedNote}${prNote}${renderUpcomingSection(view.upcoming, view.leafIsActive)}`;
+  return `${table}${branchNote}${workflowChangedNote}${prNote}${renderUpcomingSection(view.upcoming, view.leafIsActive)}${renderChainGraphDrilldown(view)}`;
+}
+
+// #860: the graph is a secondary lens on the timeline above, never a second
+// source of truth. Everything an operator needs — state, transitions, per-visit
+// provider, links back to the timeline rows — is server-rendered here as a
+// <details> outline that works without JavaScript or the CDN; the canvas
+// (hidden until the client script initialises it) only adds a visual layout.
+function renderChainGraphDrilldown(view: IssueRunChainView): string {
+  const { evidence, graph } = view;
+  if (evidence === undefined || graph === undefined) {
+    return "";
+  }
+  const rootRunId = view.group.rootRunId;
+  const graphStates = Array.isArray(graph.states) ? graph.states : [];
+  const visitsByState = new Map(
+    evidence.states.map((state) => [state.stateId, state.visits])
+  );
+  const leafRow = view.rows[evidence.current.rowIndex]?.row;
+
+  const renderVisits = (stateId: string): string => {
+    const visits = visitsByState.get(stateId) ?? [];
+    if (visits.length === 0) {
+      return `<p class="muted">Not executed in this chain.</p>`;
+    }
+    const items = visits
+      .map((rowIndex) => {
+        const rowView = view.rows[rowIndex];
+        if (rowView === undefined) {
+          return "";
+        }
+        const continued = evidence.continuedInPlace.includes(rowIndex)
+          ? ` <span class="muted">(continued in place)</span>`
+          : "";
+        return `<li><a href="#${escapeHtml(chainRowAnchor(rootRunId, rowIndex))}">Timeline row ${rowIndex + 1}</a> ${renderChainRowStatusPill(rowView.row)} · provider ${describeRowProvider(rowView)}${continued}</li>`;
+      })
+      .join("");
+    return `<ul class="chain-graph-visits">${items}</ul>`;
+  };
+
+  const renderStateOutline = (state: ExpandedWorkflow["states"][number]) => {
+    const visitCount = visitsByState.get(state.id)?.length ?? 0;
+    const isCurrent = state.id === evidence.current.stateId;
+    const currentMark =
+      isCurrent && leafRow !== undefined
+        ? ` <strong>Current:</strong> ${renderChainRowStatusPill(leafRow)}`
+        : "";
+    const visited =
+      visitCount === 0
+        ? `<span class="muted">not executed</span>`
+        : `<span class="muted">executed ${visitCount}×</span>`;
+    const action = state.action;
+    const actionLines =
+      action === undefined
+        ? state.terminal === undefined
+          ? ""
+          : `<p>Terminal state (<code>${escapeHtml(state.terminal)}</code> in the captured graph).</p>`
+        : `<p>Declared action: <code>${escapeHtml(action.kind)}</code>${action.kind === "agent" ? ` · declared provider: ${action.provider === undefined ? "project default" : `<code>${escapeHtml(action.provider)}</code>`}` : ""}${action.prompt === undefined ? "" : ` · prompt <code>${escapeHtml(action.prompt)}</code>`}</p>`;
+    const transitions = Array.isArray(state.transitions)
+      ? state.transitions
+      : [];
+    const transitionItems = transitions
+      .map((transition) => {
+        const taken = evidence.traversed.some(
+          (pair) =>
+            pair.declared && pair.from === state.id && pair.to === transition.to
+        );
+        const kind = evidence.traversed.find(
+          (pair) =>
+            pair.declared && pair.from === state.id && pair.to === transition.to
+        )?.kind;
+        const mark = !taken
+          ? ""
+          : kind === "handoff_pending"
+            ? ` <strong>taken</strong> <span class="muted">(handed off, not yet dispatched)</span>`
+            : ` <strong>taken</strong>`;
+        return `<li>→ <code>${escapeHtml(transition.to)}</code> — when ${escapeHtml(formatPredicateMap(transition.when, "always"))}${mark}</li>`;
+      })
+      .join("");
+    const transitionList =
+      transitions.length === 0
+        ? `<p class="muted">No transitions declared from this state.</p>`
+        : `<p>Declared transitions:</p><ul>${transitionItems}</ul>`;
+    const completeWhen = `<p>Complete when: ${escapeHtml(formatPredicateMap(state.completeWhen, "—"))}</p>`;
+    return `<li><details data-state-id="${escapeHtml(state.id)}"${isCurrent ? " open" : ""}><summary><code>${escapeHtml(state.id)}</code> ${visited}${currentMark}</summary>${actionLines}${completeWhen}${transitionList}<p>Visits:</p>${renderVisits(state.id)}</details></li>`;
+  };
+
+  const missingItems = evidence.missingStateIds
+    .map(
+      (stateId) =>
+        `<li><details data-state-id="${escapeHtml(stateId)}"><summary><code>${escapeHtml(stateId)}</code> <span class="muted">not in the captured graph</span></summary>${renderVisits(stateId)}</details></li>`
+    )
+    .join("");
+  const undeclared = evidence.traversed.filter((pair) => !pair.declared);
+  const undeclaredNote =
+    undeclared.length === 0
+      ? ""
+      : `<p class="note">Observed in the timeline but not declared in the captured graph: ${undeclared.map((pair) => `<code>${escapeHtml(pair.from)}</code> → <code>${escapeHtml(pair.to)}</code>`).join(", ")}.</p>`;
+
+  return `<details class="chain-graph-drilldown" data-chain-graph-root="${escapeHtml(rootRunId)}"><summary>Graph drill-down (optional)</summary><p class="note">The timeline above is the complete record. This outline and the optional diagram repeat the same evidence; nothing here is needed to understand or recover the walk.</p>${undeclaredNote}<div class="chain-graph-layout"><div class="chain-graph" data-chain-graph hidden></div><div class="chain-graph-side"><p class="note" data-chain-graph-status></p><ul class="chain-graph-outline">${graphStates.map(renderStateOutline).join("")}${missingItems}</ul></div></div><script type="application/json" data-chain-graph-data>${escapeJsonForInlineScript(buildChainGraphClientData(view, evidence, graph))}</script></details>`;
+}
+
+function buildChainGraphClientData(
+  view: IssueRunChainView,
+  evidence: ChainGraphEvidence,
+  graph: ExpandedWorkflow
+): unknown {
+  const rootRunId = view.group.rootRunId;
+  return {
+    current: {
+      kind: evidence.current.kind,
+      stateId: evidence.current.stateId ?? null
+    },
+    initial: graph.initial,
+    missingStateIds: evidence.missingStateIds,
+    name: graph.name,
+    states: (Array.isArray(graph.states) ? graph.states : []).map((state) => ({
+      actionKind: state.action?.kind ?? null,
+      id: state.id,
+      terminal: state.terminal ?? null,
+      transitions: (Array.isArray(state.transitions)
+        ? state.transitions
+        : []
+      ).map((transition) => ({
+        to: transition.to,
+        when: formatPredicateMap(transition.when, "otherwise")
+      }))
+    })),
+    traversed: evidence.traversed,
+    visits: evidence.states.map((state) => ({
+      anchors: state.visits.map((rowIndex) =>
+        chainRowAnchor(rootRunId, rowIndex)
+      ),
+      stateId: state.stateId
+    }))
+  };
 }
 
 function renderIssueRunChainSection(chains: IssueRunChainView[]): string {
@@ -4943,6 +5109,9 @@ function renderIssueRunChainSection(chains: IssueRunChainView[]): string {
     return `<section><h2>Run Chain</h2><p class="muted">No Run Chain recorded yet for this Issue.</p></section>`;
   }
   const [latest, ...older] = chains;
+  const graphAssets = chains.some((chain) => chain.evidence !== undefined)
+    ? `<style>${CHAIN_GRAPH_STYLES}</style>${WORKFLOW_GRAPH_SCRIPTS}<script>${CHAIN_GRAPH_CLIENT_JS}</script>`
+    : "";
   const latestHtml =
     latest === undefined
       ? ""
@@ -4953,8 +5122,26 @@ function renderIssueRunChainSection(chains: IssueRunChainView[]): string {
         `<details><summary>Earlier Run Chain #${older.length - index}</summary>${renderIssueRunChainView(chain)}</details>`
     )
     .join("");
-  return `${latestHtml}${olderHtml}`;
+  return `${latestHtml}${olderHtml}${graphAssets}`;
 }
+
+const CHAIN_GRAPH_STYLES = `
+.chain-graph-drilldown { margin: var(--sp-4) 0 0; }
+.chain-graph-drilldown summary { cursor: pointer; }
+.chain-graph-drilldown summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.chain-graph-layout { display: flex; gap: var(--sp-4); align-items: flex-start; }
+.chain-graph { flex: 1 1 60%; height: 60vh; min-height: 320px; border: 1px solid #e2e8f0; border-radius: 10px; }
+.chain-graph[hidden] { display: none; }
+.chain-graph-side { flex: 1 1 40%; min-width: 0; }
+.chain-graph-outline { list-style: none; margin: 0; padding: 0; }
+.chain-graph-outline > li { margin: var(--sp-2) 0; }
+.chain-graph-outline summary { cursor: pointer; }
+@media (max-width: 720px) {
+  .chain-graph-layout { flex-direction: column; }
+  .chain-graph { width: 100%; flex-basis: auto; height: 50vh; }
+  .chain-graph-side { width: 100%; }
+}
+`;
 
 function renderIssueDetailPage(input: {
   banner: IssueActionBanner | undefined;

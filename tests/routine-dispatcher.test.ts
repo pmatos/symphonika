@@ -7535,7 +7535,8 @@ describe("RoutineFiringDispatcher", () => {
           apiKeyEnv: "MAESTRO_TEST_KEY",
           maxOutputTokens: 4096,
           model: "claude-test",
-          provider: "anthropic"
+          provider: "anthropic",
+          repositoryContent: "none"
         }),
         notification: {
           createSink: () => ({

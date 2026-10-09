@@ -72,7 +72,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       {
         env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" },
@@ -123,7 +124,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -161,7 +163,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -192,7 +195,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: {}, fetch: fakeFetch }
     );
@@ -224,7 +228,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "" }, fetch: fakeFetch }
     );
@@ -256,7 +261,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
           apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
           maxOutputTokens: 1024,
           model: "claude-sonnet-5",
-          provider: "anthropic"
+          provider: "anthropic",
+          repositoryContent: "none"
         },
         { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" } }
       );
@@ -288,7 +294,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -361,7 +368,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -387,7 +395,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -412,7 +421,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -437,7 +447,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -462,7 +473,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );

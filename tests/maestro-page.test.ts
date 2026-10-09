@@ -50,7 +50,8 @@ const MAESTRO_CONFIG: MaestroConfig = {
   apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
   maxOutputTokens: 1024,
   model: "claude-sonnet-5",
-  provider: "anthropic"
+  provider: "anthropic",
+  repositoryContent: "none"
 };
 
 function fakeModel(text: string): MaestroModel {

@@ -87,6 +87,7 @@ import type {
   RunArtifactDescriptor,
   RunArtifactKind,
   RunState,
+  ProviderPlan,
   RunStatus,
   RunStore,
   TrackedPullRequest
@@ -934,11 +935,22 @@ export function registerPages(options: RegisterPagesOptions): void {
         csrfToken,
         detail,
         pollNowAvailable: options.pollNow !== undefined,
-        startAvailable: options.providerStart !== undefined
+        startAvailable: options.providerStart !== undefined,
+        startPlan: loadStartPlan(detail)
       })
     );
     return context.html(html);
   });
+
+  function loadStartPlan(detail: IssueDetail): ProviderPlan | undefined {
+    return options.providerStart === undefined ||
+      detail.snapshotRepository === undefined
+      ? undefined
+      : options.runStore.getActiveProviderPlan({
+          issueNumber: detail.issueNumber,
+          repository: detail.snapshotRepository
+        });
+  }
 
   function renderStartPage(
     context: Context,
@@ -1154,7 +1166,8 @@ export function registerPages(options: RegisterPagesOptions): void {
         csrfToken,
         detail,
         pollNowAvailable: options.pollNow !== undefined,
-        startAvailable: options.providerStart !== undefined
+        startAvailable: options.providerStart !== undefined,
+        startPlan: loadStartPlan(detail)
       })
     );
     return context.html(html);
@@ -1354,7 +1367,8 @@ export function registerPages(options: RegisterPagesOptions): void {
         csrfToken,
         detail,
         pollNowAvailable: options.pollNow !== undefined,
-        startAvailable: options.providerStart !== undefined
+        startAvailable: options.providerStart !== undefined,
+        startPlan: loadStartPlan(detail)
       })
     );
     return context.html(html);
@@ -5152,6 +5166,7 @@ function renderIssueDetailPage(input: {
   detail: IssueDetail;
   pollNowAvailable: boolean;
   startAvailable: boolean;
+  startPlan: ProviderPlan | undefined;
 }): string {
   const { detail } = input;
   const offerPollNow =
@@ -5163,7 +5178,7 @@ function renderIssueDetailPage(input: {
     input.banner === undefined
       ? ""
       : `${renderIssueActionBanner(input.banner)}${offerPollNow && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
-  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${input.startAvailable ? `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/start">Start with a provider…</a></p>` : ""}${renderIssueRunChainSection(input.chains)}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
+  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${input.startPlan === undefined ? "" : `<div class="alert" role="status"><strong>Provider plan ${escapeHtml(input.startPlan.status)}</strong><p><code>${escapeHtml(input.startPlan.provider)}</code>${input.startPlan.lastError === null ? "" : ` · ${escapeHtml(input.startPlan.lastError)}`}${input.startPlan.status === "label_failed" || input.startPlan.status === "expired" ? " — this Issue will not dispatch until the plan is retried or cancelled." : ""}</p></div>`}${input.startAvailable ? `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/start">Start with a provider…</a></p>` : ""}${renderIssueRunChainSection(input.chains)}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,
       issueNumber: detail.issueNumber,

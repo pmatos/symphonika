@@ -219,6 +219,30 @@ describe("GET /issues/:project/:number/start (#861)", () => {
     ).toBe(404);
   });
 
+  it("shows a blocking plan on the issue page itself", async () => {
+    const { app, runStore } = await setup(previewFixture());
+    runStore.createProviderPlan({
+      graphFingerprint: "sha256:graph-a",
+      id: "plan-1",
+      issueNumber: 7,
+      projectName: "alpha",
+      provider: "omp",
+      readyLabel: "agent-ready",
+      repository: { owner: "pmatos", repo: "alpha" },
+      snapshotPolledAt: POLLED_AT
+    });
+    runStore.markProviderPlanLabelResult("plan-1", {
+      error: "403 forbidden",
+      ok: false
+    });
+    const html = await (
+      await app.request("/issues/alpha/7", { headers: browserHeaders() })
+    ).text();
+    expect(html).toContain("Provider plan label_failed");
+    expect(html).toContain("403 forbidden");
+    expect(html).toContain("will not dispatch until the plan is retried");
+  });
+
   it("links to the preview from the issue page", async () => {
     const { app } = await setup(previewFixture());
     const html = await (

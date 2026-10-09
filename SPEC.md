@@ -152,6 +152,14 @@ neither, is a validation error. A new Dispatch Project written by `init-project`
 `ready_label` to `ready-for-agent`; an existing config that sets neither key is not silently
 defaulted.
 
+A Dispatch Project may also declare `epic_labels`: an optional list of nonempty, unique strings
+naming the labels that identify epics in that repository. Epic Labels are display vocabulary only.
+They never change eligibility or priority, and the schema enforces that by rejecting an Epic Label
+that equals the Project's `ready_label` or appears in `priority.labels`. A Routine Host rejects the
+key like the other dispatch-only keys. Priority resolution is unchanged: an issue's priority is the
+lowest (most urgent) number among its mapped labels, and `priority.default` is the explicit
+fallback when none is mapped. See ADR-2026-10-09-0732.
+
 ### 4.4 Operational Labels
 
 Symphonika owns this narrow GitHub label namespace:
@@ -488,6 +496,7 @@ projects:
         "priority:medium": 2
         "priority:low": 3
       default: 99
+    epic_labels: ["epic"]
     workspace:
       root: ./.symphonika/workspaces/symphonika
       git:
@@ -3092,6 +3101,22 @@ provider names the schema allows — requires an explicit checkbox distinct from
 "Confirm save" button, checked both client-side (a required HTML checkbox) and server-side (the
 confirm route independently re-derives the same before/after comparison and refuses the write
 outright if the box wasn't submitted).
+
+`GET /projects/:name/settings` is a focused editor over one Dispatch Project's Ready Label,
+priority policy (`label=number` lines plus the default), and Epic Labels (ADR-2026-10-09-0732).
+It is not a second write path: the preview builds a whole-file candidate with a comment-preserving
+YAML edit of exactly those keys of the named Project (removing a legacy `labels_all` when it sets
+`ready_label`), validates it with `validateServiceConfigContent`, and shows the same diff and
+"Confirm save" as `/config/edit`; the write goes through the same hash-checked, atomic
+`runSavePipeline`. Both the preview and the confirm refuse with `409` when `symphonika.yml` changed
+since the form was opened, and an invalid value is refused with `422` and a re-rendered form,
+without writing. Because the confirm form carries the whole candidate file, the confirm route also
+refuses (`403`) any submitted content that differs from the file on disk outside that Project's
+settings keys, so it cannot be used to change a provider command or another Project. A Project
+whose settings sit under a YAML anchor or alias is refused rather than edited, since the edit would
+leak into the sibling Projects. A save the daemon fails to reload is reported as "Saved, but not
+active". The Project page shows the Ready Label, priority order (lower number first, with the
+explicit fallback row) and Epic Labels from the live Runtime Config Snapshot, never from the file.
 
 `detectGitFileState` (`src/http/git-status.ts`, ADR-0075) gives a future editor the git context the
 issue requires before a save: whether the target path sits inside a git repo, its repo root and

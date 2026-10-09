@@ -3,9 +3,11 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 import {
+  epicLabelsSchema,
   issueFiltersSchema,
   projectDispatchSchema,
   projectWorkspaceSchema,
+  rejectEpicLabelOverlap,
   workflowReferenceSchema
 } from "./config-schemas.js";
 import type { GitHubIssuesApi, IssuePollStatus } from "./issue-polling.js";
@@ -84,6 +86,7 @@ const dispatchProjectSchema = z
         default: z.number().int().nonnegative()
       })
       .passthrough(),
+    epic_labels: epicLabelsSchema,
     workspace: projectWorkspaceSchema,
     agent: z
       .object({
@@ -92,7 +95,8 @@ const dispatchProjectSchema = z
       .passthrough(),
     workflow: workflowReferenceSchema
   })
-  .passthrough();
+  .passthrough()
+  .superRefine(rejectEpicLabelOverlap);
 
 const dispatchServiceConfigSchema = z
   .object({

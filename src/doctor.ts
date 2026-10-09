@@ -21,6 +21,7 @@ import type { WorkflowFormat } from "./config-schemas.js";
 import { resolveProjectMaxInFlight } from "./lifecycle/concurrency-capacity.js";
 import {
   DEFAULT_READY_LABEL,
+  epicLabelsSchema,
   issueFiltersSchema,
   pathStringSchema,
   projectDispatchSchema,
@@ -28,6 +29,7 @@ import {
   projectWorkspaceSchema,
   readyLabelBroadeningWarning,
   rejectDispatchOnlyKeysOnRoutineHost,
+  rejectEpicLabelOverlap,
   workflowReferenceSchema
 } from "./config-schemas.js";
 import {
@@ -358,13 +360,15 @@ const dispatchProjectSchema = z
     tracker: trackerSchema,
     issue_filters: issueFiltersSchema,
     priority: prioritySchema,
+    epic_labels: epicLabelsSchema,
     progress_guard: projectProgressGuardSchema.optional(),
     workspace: projectWorkspaceSchema,
     agent: agentSchema,
     workflow: workflowReferenceSchema
   })
   .passthrough()
-  .superRefine(rejectPerProjectRoutines);
+  .superRefine(rejectPerProjectRoutines)
+  .superRefine(rejectEpicLabelOverlap);
 
 const routineHostProjectSchema = z
   .object({

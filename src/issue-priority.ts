@@ -77,3 +77,27 @@ export function normalizeProjectWeight(weight: number | undefined): number {
   }
   return weight;
 }
+
+// Operator-facing view of a priority config: entries in dispatch order (most
+// urgent first, label name as tie-break) plus the explicit fallback applied to
+// issues carrying no mapped label.
+export function sortedPriorityEntries(
+  labels: Record<string, number>
+): { label: string; priority: number }[] {
+  return Object.entries(labels)
+    .map(([label, priority]) => ({ label, priority }))
+    .sort(
+      (left, right) =>
+        left.priority - right.priority || left.label.localeCompare(right.label)
+    );
+}
+
+export function describePriorityPolicy(config: LabelPriorityConfig): {
+  entries: { label: string; priority: number }[];
+  fallback: number;
+} {
+  return {
+    entries: sortedPriorityEntries(config.labels),
+    fallback: config.default
+  };
+}

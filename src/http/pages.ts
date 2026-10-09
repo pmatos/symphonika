@@ -4985,6 +4985,12 @@ function renderChainGraphDrilldown(view: IssueRunChainView): string {
     evidence.states.map((state) => [state.stateId, state.visits])
   );
   const leafRow = view.rows[evidence.current.rowIndex]?.row;
+  const continuedInPlace = new Set(evidence.continuedInPlace);
+  const takenTransitions = new Map(
+    evidence.traversed
+      .filter((pair) => pair.declared)
+      .map((pair) => [`${pair.from}\0${pair.to}`, pair.kind])
+  );
 
   const renderVisits = (stateId: string): string => {
     const visits = visitsByState.get(stateId) ?? [];
@@ -4997,7 +5003,7 @@ function renderChainGraphDrilldown(view: IssueRunChainView): string {
         if (rowView === undefined) {
           return "";
         }
-        const continued = evidence.continuedInPlace.includes(rowIndex)
+        const continued = continuedInPlace.has(rowIndex)
           ? ` <span class="muted">(continued in place)</span>`
           : "";
         return `<li><a href="#${escapeHtml(chainRowAnchor(rootRunId, rowIndex))}">Timeline row ${rowIndex + 1}</a> ${renderChainRowStatusPill(rowView.row)} · provider ${describeRowProvider(rowView)}${continued}</li>`;
@@ -5031,14 +5037,11 @@ function renderChainGraphDrilldown(view: IssueRunChainView): string {
       : [];
     const transitionItems = transitions
       .map((transition) => {
-        const taken = evidence.traversed.find(
-          (pair) =>
-            pair.declared && pair.from === state.id && pair.to === transition.to
-        );
+        const takenKind = takenTransitions.get(`${state.id}\0${transition.to}`);
         const mark =
-          taken === undefined
+          takenKind === undefined
             ? ""
-            : taken.kind === "handoff_pending"
+            : takenKind === "handoff_pending"
               ? ` <strong>taken</strong> <span class="muted">(handed off, not yet dispatched)</span>`
               : ` <strong>taken</strong>`;
         return `<li>→ <code>${escapeHtml(transition.to)}</code> — when ${escapeHtml(formatPredicateMap(transition.when, "always"))}${mark}</li>`;
@@ -5064,13 +5067,13 @@ function renderChainGraphDrilldown(view: IssueRunChainView): string {
       ? ""
       : `<p class="note">Observed in the timeline but not declared in the captured graph: ${undeclared.map((pair) => `<code>${escapeHtml(pair.from)}</code> → <code>${escapeHtml(pair.to)}</code>`).join(", ")}.</p>`;
 
-  return `<details class="chain-graph-drilldown" data-chain-graph-root="${escapeHtml(rootRunId)}"><summary>Graph drill-down (optional)</summary><p class="note">The timeline above is the complete record. This outline and the optional diagram repeat the same evidence; nothing here is needed to understand or recover the walk.</p>${undeclaredNote}<div class="chain-graph-layout"><div class="chain-graph" data-chain-graph hidden></div><div class="chain-graph-side"><p class="note" data-chain-graph-status></p><ul class="chain-graph-outline">${graphStates.map(renderStateOutline).join("")}${missingItems}</ul></div></div><script type="application/json" data-chain-graph-data>${escapeJsonForInlineScript(buildChainGraphClientData(view, evidence, graph))}</script></details>`;
+  return `<details class="chain-graph-drilldown" data-chain-graph-root="${escapeHtml(rootRunId)}"><summary>Graph drill-down (optional)</summary><p class="note">The timeline above is the complete record. This outline and the optional diagram repeat the same evidence; nothing here is needed to understand or recover the walk.</p>${undeclaredNote}<div class="chain-graph-layout"><div class="chain-graph" data-chain-graph hidden></div><div class="chain-graph-side"><p class="note" data-chain-graph-status></p><ul class="chain-graph-outline">${graphStates.map(renderStateOutline).join("")}${missingItems}</ul></div></div><script type="application/json" data-chain-graph-data>${escapeJsonForInlineScript(buildChainGraphClientData(view, evidence, graphStates))}</script></details>`;
 }
 
 function buildChainGraphClientData(
   view: IssueRunChainView,
   evidence: ChainGraphEvidence,
-  graph: ExpandedWorkflow
+  graphStates: ExpandedWorkflow["states"]
 ): unknown {
   const rootRunId = view.group.rootRunId;
   return {
@@ -5079,7 +5082,7 @@ function buildChainGraphClientData(
       stateId: evidence.current.stateId ?? null
     },
     missingStateIds: evidence.missingStateIds,
-    states: (Array.isArray(graph.states) ? graph.states : []).map((state) => ({
+    states: graphStates.map((state) => ({
       actionKind: state.action?.kind ?? null,
       id: state.id,
       terminal: state.terminal ?? null,

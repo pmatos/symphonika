@@ -125,7 +125,12 @@ export function buildChainGraphEvidence(
   let previous: string | undefined;
 
   const visit = (stateId: string, index: number): void => {
-    visitsByState.set(stateId, [...(visitsByState.get(stateId) ?? []), index]);
+    const visits = visitsByState.get(stateId);
+    if (visits === undefined) {
+      visitsByState.set(stateId, [index]);
+    } else {
+      visits.push(index);
+    }
     visited.add(stateId);
   };
 

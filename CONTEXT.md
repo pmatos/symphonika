@@ -139,6 +139,17 @@ Symphonika reads but does not own its workflow meaning. Replaces the former join
 `labels_all` list ("Required Eligibility Label"); legacy `labels_all` is migrated at load time.
 _Avoid_: Required Eligibility Label, operational label
 
+**Epic Label**:
+A label listed in a Dispatch Project's `epic_labels` that identifies epic issues in its repository.
+Display vocabulary only: it never grants eligibility or priority, and cannot equal the Ready Label
+or appear in the priority map. Edited from the Project settings page.
+_Avoid_: parent label, grouping label
+
+**Priority Policy**:
+A Dispatch Project's `priority` config: a label-to-number map where the lowest number among an
+issue's mapped labels wins (lower dispatches first), plus a `default` fallback for issues with no
+mapped label. The Project page shows the effective policy of the running snapshot.
+
 **Operational Label**:
 A GitHub issue label owned by the orchestrator for dispatch safety and runtime bookkeeping; v1 labels are `sym:claimed`, `sym:running`, `sym:failed`, `sym:blocked`, `sym:stale`, and `sym:human-needed`.
 _Avoid_: workflow label

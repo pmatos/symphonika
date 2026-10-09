@@ -12,7 +12,7 @@ import {
 } from "./run-chain-timeline.js";
 import type { ExpandedWorkflow } from "../workflow/types.js";
 
-export type ChainGraphTraversal = {
+type ChainGraphTraversal = {
   declared: boolean;
   from: string;
   // "handoff_pending": the Run advanced to `to` but no Run was dispatched

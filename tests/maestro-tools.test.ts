@@ -724,4 +724,105 @@ describe("Maestro workspace tools (#867)", () => {
       test.cleanup();
     }
   });
+  it("refuses read_file without a path and search without a pattern", async () => {
+    const test = await setup();
+    try {
+      const { access, resolveCalls } = fakeWorkspace({});
+      const reader = createMaestroEvidenceReader(test.runStore);
+
+      const read = await executeMaestroTool({
+        input: { project_name: "symphonika" },
+        name: "workspace_read_file",
+        reader,
+        workspace: access
+      });
+      const search = await executeMaestroTool({
+        input: { project_name: "symphonika" },
+        name: "workspace_search",
+        reader,
+        workspace: access
+      });
+
+      expect(read).toEqual({ kind: "refused", reason: "path is required" });
+      expect(search).toEqual({
+        kind: "refused",
+        reason: "pattern is required"
+      });
+      expect(resolveCalls).toEqual([]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("surfaces an unavailable listing, read, and search instead of throwing", async () => {
+    const test = await setup();
+    try {
+      const { access } = fakeWorkspace({});
+      const unavailable = {
+        kind: "unavailable",
+        reason: "git is down"
+      } as const;
+      const failing: MaestroWorkspaceAccess = {
+        ...access,
+        session: {
+          ...access.session,
+          listFiles: () => Promise.resolve(unavailable),
+          readFile: () => Promise.resolve(unavailable),
+          search: () => Promise.resolve(unavailable)
+        }
+      };
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const calls: Array<[string, unknown]> = [
+        ["workspace_list_files", { project_name: "symphonika" }],
+        ["workspace_read_file", { path: "a.md", project_name: "symphonika" }],
+        ["workspace_search", { pattern: "x", project_name: "symphonika" }]
+      ];
+
+      for (const [name, input] of calls) {
+        const outcome = await executeMaestroTool({
+          input,
+          name,
+          reader,
+          workspace: failing
+        });
+        expect(outcome).toMatchObject({
+          kind: "ok",
+          output: { reason: "git is down", unavailable: true }
+        });
+      }
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("refuses a Run whose Project differs from the requested one or has no repository", async () => {
+    const test = await setup();
+    try {
+      const { access } = fakeWorkspace({});
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const mismatch = await executeMaestroTool({
+        input: { path: "README.md", project_name: "other", run_id: "run-1" },
+        name: "workspace_read_file",
+        reader,
+        workspace: access
+      });
+      const noRepo = await executeMaestroTool({
+        input: { path: "README.md", run_id: "run-1" },
+        name: "workspace_read_file",
+        reader,
+        workspace: { ...access, projectRepo: () => undefined }
+      });
+
+      expect(mismatch).toEqual({
+        kind: "refused",
+        reason: 'Run run-1 belongs to Project "symphonika"'
+      });
+      expect(noRepo).toEqual({
+        kind: "refused",
+        reason: 'Project "symphonika" has no GitHub repository'
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
 });

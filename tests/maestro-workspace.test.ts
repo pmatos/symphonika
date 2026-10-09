@@ -3,10 +3,11 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MaestroRepositoryContent } from "../src/maestro/config.js";
 import {
+  createGitHubRepositoryInfoLookup,
   createMaestroWorkspace,
   type GitRunner,
   type MaestroRevision,
@@ -643,5 +644,156 @@ describe("Maestro Workspace content access", () => {
     expect(JSON.stringify(read)).not.toContain("ghp_SECRETVALUE123");
     expect(JSON.stringify(search)).not.toContain("ghp_SECRETVALUE123");
     expect(JSON.stringify(read)).toContain("[REDACTED]");
+  });
+});
+
+describe("Maestro Workspace edge handling", () => {
+  async function openWith(
+    files: Record<string, string>,
+    wrap?: (runGit: GitRunner) => GitRunner
+  ): Promise<{
+    revision: MaestroRevision;
+    session: MaestroWorkspaceSession;
+  }> {
+    const remote = await makeFixtureRemote(files);
+    const stateRoot = await makeTempRoot();
+    const real: GitRunner = async (args, options) => {
+      const { stdout } = await execFileAsync("git", args, {
+        encoding: "buffer",
+        env: options.env,
+        maxBuffer: options.maxBuffer,
+        timeout: options.timeoutMs
+      });
+      return stdout;
+    };
+    const workspace = createMaestroWorkspace({
+      remoteUrl: () => remote.url,
+      repositoryInfo: () =>
+        Promise.resolve({ defaultBranch: "main", private: false }),
+      runGit: wrap === undefined ? real : wrap(real),
+      stateRoot,
+      tokenFor: () => Promise.resolve("test-token")
+    });
+    const session = workspace.session("public");
+    return { revision: await resolveDefault(session), session };
+  }
+
+  it("rejects an invalid path prefix, search pattern, and search pathspec", async () => {
+    const { revision, session } = await openWith({ "a.txt": "needle\n" });
+
+    expect(await session.listFiles(revision, "../escape")).toMatchObject({
+      kind: "unavailable"
+    });
+    expect(
+      await session.search(revision, { pathspec: undefined, pattern: "" })
+    ).toMatchObject({ kind: "unavailable" });
+    expect(
+      await session.search(revision, { pathspec: "/abs", pattern: "needle" })
+    ).toMatchObject({ kind: "unavailable" });
+  });
+
+  it("refuses a blob over the size cap", async () => {
+    const { revision, session } = await openWith({
+      "huge.txt": "x".repeat(8_000_001)
+    });
+
+    expect(await session.readFile(revision, "huge.txt")).toMatchObject({
+      kind: "unavailable"
+    });
+  });
+
+  it("reports git output overflow on listings and searches as unavailable", async () => {
+    const overflow = Object.assign(new Error("maxBuffer"), {
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+    });
+    const { revision, session } = await openWith(
+      { "a.txt": "needle\n" },
+      (real) => (args, options) =>
+        args.some((arg) => arg === "ls-tree" || arg === "grep")
+          ? Promise.reject(overflow)
+          : real(args, options)
+    );
+
+    const listing = await session.listFiles(revision, undefined);
+    const search = await session.search(revision, {
+      pathspec: undefined,
+      pattern: "needle"
+    });
+
+    expect(listing).toEqual({
+      kind: "unavailable",
+      reason: "the repository tree is too large to list; pass a narrower path"
+    });
+    expect(search).toEqual({
+      kind: "unavailable",
+      reason: "too many matches; narrow the pattern or path"
+    });
+  });
+
+  it("falls back to the real git runner and clock when none are injected", async () => {
+    const remote = await makeFixtureRemote({ "README.md": "hello\n" });
+    const workspace = createMaestroWorkspace({
+      remoteUrl: () => remote.url,
+      repositoryInfo: () =>
+        Promise.resolve({ defaultBranch: "main", private: false }),
+      stateRoot: await makeTempRoot(),
+      tokenFor: () => Promise.resolve("test-token")
+    });
+    const session = workspace.session("public");
+
+    const revision = await resolveDefault(session);
+
+    expect(revision.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(Number.isNaN(Date.parse(revision.fetchedAt))).toBe(false);
+  });
+});
+
+describe("createGitHubRepositoryInfoLookup", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns the default branch and visibility from the GitHub API", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ default_branch: "trunk", private: true }),
+            { headers: { "content-type": "application/json" }, status: 200 }
+          )
+        )
+      )
+    );
+
+    const info = await createGitHubRepositoryInfoLookup()(
+      "acme",
+      "widgets",
+      "t"
+    );
+
+    expect(info).toEqual({ defaultBranch: "trunk", private: true });
+  });
+
+  it("returns undefined when the repository cannot be read", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ message: "Not Found" }), {
+            headers: { "content-type": "application/json" },
+            status: 404
+          })
+        )
+      )
+    );
+
+    const info = await createGitHubRepositoryInfoLookup()(
+      "acme",
+      "widgets",
+      "t"
+    );
+
+    expect(info).toBeUndefined();
   });
 });

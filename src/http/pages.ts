@@ -44,7 +44,15 @@ import {
 import { setRoutineDisabled } from "../routines/declaration-editor.js";
 import { loadRoutineDeclaration } from "../routines/declaration-loader.js";
 import { formatPullRequestReference } from "../notifications/message.js";
-import { createSaveConfirmer } from "./save-confirm.js";
+import {
+  applyProjectSettingsEdit,
+  changesOnlyProjectSettings,
+  parseProjectSettingsForm,
+  readProjectSettingsValues,
+  renderProjectSettingsForm,
+  type ProjectSettingsValues
+} from "./project-settings.js";
+import { createSaveConfirmer, renderStaleSaveNotice } from "./save-confirm.js";
 import {
   createEditorPreviewer,
   providerCommandsDiffer,
@@ -61,7 +69,7 @@ import {
   type RoutineEditRefusal,
   type RoutineGroup
 } from "./routine-resolution.js";
-import type { ReloadOutcome } from "./save-pipeline.js";
+import { validateSaveContent, type ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
   type FilteredProjectIssueSnapshot,
@@ -1920,6 +1928,249 @@ export function registerPages(options: RegisterPagesOptions): void {
           ),
         savedRedirect: "/",
         validationPath: configPath
+      });
+    }
+  );
+
+  // #857: a focused editor for one Dispatch Project's Ready Label, priority
+  // policy and Epic Labels. It builds a whole-file candidate and hands it to
+  // the same hash-checked preview/confirm/save pipeline as /config/edit; the
+  // confirm route additionally refuses any candidate that changes more than
+  // those settings, because the confirm form carries the raw file content.
+  const projectSettingsContext = (
+    context: Context
+  ):
+    | { configPath: string; name: string; policy: ProjectQueuePolicy }
+    | Response => {
+    const name = context.req.param("name") ?? "";
+    const configPath = options.getConfigPath?.();
+    const policy = options.getProjectQueuePolicy?.(name);
+    if (configPath === undefined || policy === undefined) {
+      return context.html(
+        layout(
+          "Project settings unavailable",
+          `<h1 class="page-title">Project settings unavailable</h1><p class="lede">Project <code>${escapeHtml(name)}</code> was not found, or is a Routine Host with no queue settings.</p>`
+        ),
+        404
+      );
+    }
+    return { configPath, name, policy };
+  };
+
+  const projectSettingsTarget = (
+    name: string,
+    configPath: string
+  ): EditorPreviewTarget => {
+    const base = `/projects/${encodeURIComponent(name)}/settings`;
+    return {
+      artifact: { kind: "service_config", path: configPath },
+      confirmAction: `${base}/confirm`,
+      name: `${name} settings`,
+      previewAction: `${base}/preview`,
+      reviewAction: base
+    };
+  };
+
+  const renderSettingsPage = (input: {
+    configPath: string;
+    context: Context;
+    errors: string[];
+    expectedContentHash: string;
+    name: string;
+    policy: ProjectQueuePolicy;
+    status: 200 | 422;
+    values: ProjectSettingsValues;
+  }): Response =>
+    input.context.html(
+      layout(
+        `Settings: ${input.name}`,
+        renderProjectSettingsForm({
+          action: `/projects/${encodeURIComponent(input.name)}/settings/preview`,
+          active: input.policy,
+          csrfToken: csrfTokenFor(
+            options.csrfSecret,
+            ensureSession(input.context)
+          ),
+          errors: input.errors,
+          expectedContentHash: input.expectedContentHash,
+          projectName: input.name,
+          values: input.values
+        })
+      ),
+      input.status
+    );
+
+  options.app.get(
+    "/projects/:name/settings",
+    requireSameOriginRead,
+    async (context) => {
+      const resolved = projectSettingsContext(context);
+      if (resolved instanceof Response) {
+        return resolved;
+      }
+      const content = await readFile(resolved.configPath, "utf8").catch(
+        () => null
+      );
+      const values =
+        content === null
+          ? undefined
+          : readProjectSettingsValues(content, resolved.name);
+      if (content === null || values === undefined) {
+        return context.html(
+          layout(
+            "Project settings unavailable",
+            `<h1 class="page-title">Project settings unavailable</h1><p class="lede">Project <code>${escapeHtml(resolved.name)}</code> could not be read from the service config.</p>`
+          ),
+          404
+        );
+      }
+      return renderSettingsPage({
+        ...resolved,
+        context,
+        errors: [],
+        expectedContentHash: contentHash(content),
+        status: 200,
+        values
+      });
+    }
+  );
+
+  options.app.post(
+    "/projects/:name/settings/preview",
+    requireAuthorizedMutation,
+    async (context) => {
+      const resolved = projectSettingsContext(context);
+      if (resolved instanceof Response) {
+        return resolved;
+      }
+      const body = await context.req.parseBody();
+      const expectedContentHash = readRequiredFormField(
+        body,
+        "expected_content_hash"
+      );
+      const onDisk = await readFile(resolved.configPath, "utf8").catch(
+        () => null
+      );
+      if (onDisk === null || contentHash(onDisk) !== expectedContentHash) {
+        return context.html(
+          layout(
+            "Save refused: changed on disk",
+            renderStaleSaveNotice({
+              currentContent: onDisk,
+              editAction: `/projects/${encodeURIComponent(resolved.name)}/settings`,
+              filePath: resolved.configPath
+            })
+          ),
+          409
+        );
+      }
+
+      const parsed = parseProjectSettingsForm(body);
+      const refuse = (errors: string[]): Response =>
+        renderSettingsPage({
+          ...resolved,
+          context,
+          errors,
+          expectedContentHash,
+          status: 422,
+          values: parsed.values
+        });
+      if (parsed.settings === undefined) {
+        return refuse(parsed.errors);
+      }
+      const edit = applyProjectSettingsEdit(
+        onDisk,
+        resolved.name,
+        parsed.settings
+      );
+      if (!edit.ok) {
+        return refuse([edit.error]);
+      }
+      const { errors } = await validateSaveContent({
+        content: edit.content,
+        filePath: resolved.configPath,
+        kind: "service_config"
+      });
+      if (errors.length > 0) {
+        return refuse(errors);
+      }
+      return await previewEditor.respond(
+        context,
+        projectSettingsTarget(resolved.name, resolved.configPath),
+        {
+          draft: { content: edit.content, expectedContentHash },
+          errors: [],
+          kind: "prepared",
+          onDisk
+        }
+      );
+    }
+  );
+
+  options.app.post(
+    "/projects/:name/settings/confirm",
+    requireAuthorizedMutation,
+    async (context) => {
+      const resolved = projectSettingsContext(context);
+      if (resolved instanceof Response) {
+        return resolved;
+      }
+      const body = await context.req.parseBody();
+      const content = readRequiredFormField(body, "content");
+      const expectedContentHash = readRequiredFormField(
+        body,
+        "expected_content_hash"
+      );
+      const editAction = `/projects/${encodeURIComponent(resolved.name)}/settings`;
+      const onDisk = await readFile(resolved.configPath, "utf8").catch(
+        () => null
+      );
+      if (onDisk === null || contentHash(onDisk) !== expectedContentHash) {
+        return context.html(
+          layout(
+            "Save refused: changed on disk",
+            renderStaleSaveNotice({
+              currentContent: onDisk,
+              editAction,
+              filePath: resolved.configPath
+            })
+          ),
+          409
+        );
+      }
+      if (!changesOnlyProjectSettings(onDisk, content, resolved.name)) {
+        return context.html(
+          layout(
+            "Save refused",
+            `<h1 class="page-title">Save refused</h1><div class="alert" role="alert"><strong>This request changes more than the settings of ${escapeHtml(resolved.name)}</strong>Only the Ready Label, priority policy and Epic Labels of this Project can be saved here. Nothing was written. Use the raw service config editor for other changes.</div><p class="note"><a href="${escapeHtml(editAction)}">← Reopen settings</a></p>`
+          ),
+          403
+        );
+      }
+      return await confirmSave(context, {
+        content,
+        editAction,
+        expectedContentHash,
+        filePath: resolved.configPath,
+        kind: "service_config",
+        name: `${resolved.name} settings`,
+        renderInvalid: ({ csrfToken, errors }) =>
+          renderProjectSettingsForm({
+            action: `${editAction}/preview`,
+            active: resolved.policy,
+            csrfToken,
+            errors,
+            expectedContentHash,
+            projectName: resolved.name,
+            values: readProjectSettingsValues(onDisk, resolved.name) ?? {
+              epicLabels: "",
+              priorityDefault: "",
+              priorityLabels: "",
+              readyLabel: ""
+            }
+          }),
+        savedRedirect: `/projects/${encodeURIComponent(resolved.name)}`,
+        validationPath: resolved.configPath
       });
     }
   );

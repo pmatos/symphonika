@@ -120,7 +120,12 @@ describe("HTTP app — mutation authentication (#306 part 1, ADR 0075)", () => {
         init: { method: "POST" },
         path: "/api/update-now",
         successStatuses: [200, 503]
-      }
+      },
+      ...["start", "start/retry", "start/cancel"].map((suffix) => ({
+        init: { method: "POST" },
+        path: `/issues/alpha/1/${suffix}`,
+        successStatuses: [200, 404]
+      }))
     ];
   }
 

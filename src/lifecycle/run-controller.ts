@@ -126,6 +126,10 @@ import {
 } from "./artifact-probe.js";
 import { probeStateClaim, stateGatesOnClaim } from "./claim-probe.js";
 import {
+  isConsumableProviderPlan,
+  resolveEffectiveProvider
+} from "./chain-provider.js";
+import {
   DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS,
   isProgressGuardReason,
   progressFingerprint
@@ -1176,13 +1180,50 @@ export class RunController {
       // error surfaces from runAttemptLifecycle's reload during the attempt.
     }
 
-    const providerName =
-      initialAction?.kind === "agent" && initialAction.provider !== undefined
-        ? initialAction.provider
-        : target.project.agent.provider;
+    // A Run-Chain Provider Plan (#861) outranks the initial state's own
+    // action.provider and the Project default. A live plan that cannot be
+    // consumed (label write failed or lapsed) blocks the candidate outright:
+    // claiming it with the default provider is the bug the plan prevents.
+    const providerPlan = this.runStore.getActiveProviderPlan({
+      issueNumber: target.candidate.issue.number,
+      repository
+    });
+    if (providerPlan !== undefined && !isConsumableProviderPlan(providerPlan)) {
+      return {
+        kind: "terminal",
+        result: {
+          dispatched: false,
+          reason: `provider plan ${providerPlan.id} for ${target.project.name}#${target.candidate.issue.number} is ${providerPlan.status}; awaiting operator`
+        }
+      };
+    }
+    const providerName = resolveEffectiveProvider({
+      actionProvider:
+        initialAction?.kind === "agent" ? initialAction.provider : undefined,
+      planProvider: providerPlan?.provider,
+      projectDefault: target.project.agent.provider
+    });
     const providerCommand = (
       providersConfig as Partial<RunControllerProvidersConfig>
     )[providerName]?.command;
+
+    if (
+      providerPlan !== undefined &&
+      (providerCommand === undefined ||
+        providerCommand.trim().length === 0 ||
+        this.agentProviders[providerName] === undefined)
+    ) {
+      // Per-candidate, unlike the Project-level exclusions below: the plan is
+      // this one Issue's choice, so no failed Run is created and the plan
+      // stays visible on the Issue page.
+      return {
+        kind: "terminal",
+        result: {
+          dispatched: false,
+          reason: `provider plan ${providerPlan.id} names ${providerName}, which is not configured or registered`
+        }
+      };
+    }
 
     try {
       if (
@@ -1224,6 +1265,7 @@ export class RunController {
       const deadline = await this.claimFreshTarget({
         attemptNumber: 1,
         ...(claimGuard === undefined ? {} : { claimGuard }),
+        expectedProviderPlanId: providerPlan?.id ?? null,
         isContinuation: false,
         issue: target.candidate.issue,
         parentRunId: null,
@@ -3154,11 +3196,15 @@ export class RunController {
       return;
     }
 
-    const providerName =
-      targetState.action?.kind === "agent" &&
-      targetState.action.provider !== undefined
-        ? targetState.action.provider
-        : project.agent.provider;
+    const providerName = resolveEffectiveProvider({
+      actionProvider:
+        targetState.action?.kind === "agent"
+          ? targetState.action.provider
+          : undefined,
+      planProvider: this.runStore.getChainProviderPlan(payload.parentRunId)
+        ?.provider,
+      projectDefault: project.agent.provider
+    });
     const providerConfig = (
       providersConfig as Partial<RunControllerProvidersConfig>
     )[providerName];
@@ -3951,6 +3997,17 @@ export class RunController {
     };
   }
 
+  private hasBlockingProviderPlan(
+    project: DispatchProjectConfig,
+    issueNumber: number
+  ): boolean {
+    const plan = this.runStore.getActiveProviderPlan({
+      issueNumber,
+      repository: project.tracker
+    });
+    return plan !== undefined && !isConsumableProviderPlan(plan);
+  }
+
   // Sequential on purpose: the first admissible candidate wins, so the overlap
   // guard's GitHub round-trip is only paid until one is found.
   private async pickProjectCandidate(
@@ -3997,6 +4054,12 @@ export class RunController {
         continue;
       }
       if (
+        isDispatchProject(project) &&
+        this.hasBlockingProviderPlan(project, entry.issue.number)
+      ) {
+        continue;
+      }
+      if (
         rawFsmWorkflow !== undefined &&
         this.isIssueParkedAtRawFsmState(rawFsmWorkflow, {
           issueNumber: entry.issue.number,
@@ -4024,6 +4087,9 @@ export class RunController {
   private async claimFreshTarget(input: {
     attemptNumber: number;
     claimGuard?: () => boolean;
+    // The Run-Chain Provider Plan id resolveAndClaim based its provider on
+    // (null: none). Re-verified under dispatchMutex by claimAndPersistRun.
+    expectedProviderPlanId?: string | null;
     extraInstructions?: string;
     isContinuation: boolean;
     issue: IssueSnapshot;
@@ -4318,6 +4384,7 @@ export class RunController {
 
   private async claimAndPersistRun(input: {
     claimGuard?: () => boolean;
+    expectedProviderPlanId?: string | null;
     isContinuation: boolean;
     issue: IssueSnapshot;
     // Invoked (still under dispatchMutex) when this call's own createRun
@@ -4456,6 +4523,32 @@ export class RunController {
       });
     }
 
+    // Start, Retry, Cancel and the Ready Label write's result all change plan
+    // status under this same mutex, so a plan read that matches here stays
+    // valid through createRun below (bar the lazy one-hour expiry of a
+    // `pending` plan in getActiveProviderPlan). Any
+    // mismatch (a plan appeared, was cancelled, lapsed, or failed its label
+    // write since resolveAndClaim chose the provider) defers to the next tick.
+    const expectedProviderPlanId = input.expectedProviderPlanId ?? null;
+    if (!input.isContinuation) {
+      const livePlan = this.runStore.getActiveProviderPlan({
+        issueNumber: input.issue.number,
+        repository: input.repository
+      });
+      const consumablePlanId =
+        livePlan !== undefined && isConsumableProviderPlan(livePlan)
+          ? livePlan.id
+          : null;
+      if (
+        (livePlan !== undefined && consumablePlanId === null) ||
+        consumablePlanId !== expectedProviderPlanId
+      ) {
+        throw new FreshClaimDeferredError(
+          `provider plan for ${input.project.name}#${input.issue.number} changed before the claim; deferring`
+        );
+      }
+    }
+
     let claimed = false;
     let deadline = NO_RUN_SLOT_DEADLINE;
     let runCreated = false;
@@ -4529,6 +4622,15 @@ export class RunController {
         this.runStore.createRun(createInput);
       }
       runCreated = true;
+      if (
+        !input.isContinuation &&
+        expectedProviderPlanId !== null &&
+        !this.runStore.consumeProviderPlan(expectedProviderPlanId, input.runId)
+      ) {
+        throw new Error(
+          `provider plan ${expectedProviderPlanId} could not be consumed by run ${input.runId}`
+        );
+      }
       deadline = this.createRunSlotDeadline({
         config: watchdogConfig,
         issueNumber: input.issue.number,

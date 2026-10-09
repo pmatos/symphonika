@@ -605,6 +605,12 @@ operator cancellation still apply.
 Symphonika uses `projects[].agent.provider`. Both providers still need valid commands in the
 Service Config when referenced.
 
+An operator can override both for one Run Chain from the Issue page (**Start with a provider…**).
+That persists a Run-Chain Provider Plan before the Ready Label is added, and the precedence becomes
+chain plan, then `action.provider`, then `projects[].agent.provider` — for the first agent state
+and every later State Advance of that chain. Non-FSM Continuations and PR review follow-ups keep
+the Project default. See ADR-2026-10-09-0743.
+
 ### Retries and failure transitions
 
 Transient provider or infrastructure failures consume the normal retry budget before a transition

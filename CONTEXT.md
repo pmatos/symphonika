@@ -311,6 +311,16 @@ _Avoid_: event log when referring to scheduler state
 One orchestrator-managed execution lifecycle for one issue in one workspace.
 _Avoid_: issue when referring to execution status
 
+**Run-Chain Provider Plan**:
+The operator's chain-wide provider choice (`omp`, `claude` or `codex`) for one Issue's Run Chain,
+persisted in the Run Store before the Project's Ready Label is added so the claim the label
+triggers runs every agent state on it. Keyed by repository and Issue; consumed by the claim, which
+links it to the chain's root Run. `pending` and `label_written` plans are consumable; `label_failed`
+and `expired` plans are live but block dispatch of the Issue until retried or cancelled, so an
+uncertain label write never falls back to the Project default. Outranks `action.provider` and the
+Project's `agent.provider` (ADR-2026-10-09-0743).
+_Avoid_: provider override, provider pin
+
 **Run Chain**:
 The full lineage of Runs linked by `continuation_parent_run_id`: one root Run (created fresh, with no
 parent) plus every Continuation, State Advance, and waiting Run that descends from it. Chain

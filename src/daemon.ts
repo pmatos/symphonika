@@ -18,6 +18,7 @@ import {
   type WriteIssueLabelsResult
 } from "./http/app.js";
 import { findLiveRunIdForIssue } from "./http/pages.js";
+import { createProviderStartService } from "./issues/provider-start.js";
 import {
   removeDaemonEndpoint,
   writeDaemonEndpoint
@@ -1562,6 +1563,42 @@ export async function startDaemon(
     }));
   const getScheduledCallbacks = () => activeRuns.peekDelayed();
 
+  // Start with a chain-wide provider choice (#861): shares dispatchMutex with
+  // RunController's claim path so the plan write and a claim never interleave.
+  const providerStart = createProviderStartService({
+    checkLiveRun: (projectName, issueNumber) =>
+      findLiveRunIdForIssue({
+        getActiveRuns: getActiveRunsForLiveCheck,
+        getProjectRepoAliases: resolveProjectRepoAliases,
+        getScheduled: getScheduledCallbacks,
+        issueNumber,
+        projectName,
+        runStore
+      }),
+    createPlanId: randomUUID,
+    dispatchMutex,
+    getProject: (name) => runtimeConfig.projectsByName().get(name),
+    getProvidersConfig: () => runtimeConfig.providersConfig(),
+    githubIssuesApi,
+    isProviderRegistered: (name) => agentProviders[name] !== undefined,
+    resolveToken: (tokenRef) => resolveToken(tokenRef, env),
+    runStore,
+    verifySnapshotBinding: ({ issueNumber, projectName, rendered }) => {
+      const tracker = runtimeConfig.projectsByName().get(projectName)?.tracker;
+      if (tracker === undefined) {
+        return `projects.${projectName}.tracker is not configured`;
+      }
+      return verifySnapshotRepositoryBinding({
+        action: "starting work",
+        currentRepository: { owner: tracker.owner, repo: tracker.repo },
+        renderedRepository: rendered,
+        resolveSnapshotRepository: () =>
+          runStore.getProjectIssueSnapshotRepository(projectName, issueNumber),
+        subjectLabel: `issue #${issueNumber}`
+      });
+    }
+  });
+
   // adopt-pr (ADR-2026-09-03-1158): attaches an already-open pull request to a
   // fresh Run parked at an operator-chosen wait/merge_pr state. Defined as
   // its own const rather than inline in the createHttpApp options object
@@ -2143,6 +2180,7 @@ export async function startDaemon(
         ? { freshState, ok: true }
         : { error: mergeError, freshState, ok: false };
     },
+    providerStart,
     writeIssueLabels: async (input): Promise<WriteIssueLabelsResult> => {
       const project = runtimeConfig.projectsByName().get(input.projectName);
       if (project?.tracker === undefined) {

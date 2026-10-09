@@ -57,6 +57,7 @@ import {
   type ScheduledCallback
 } from "./pages.js";
 import { registerMaestroPage } from "./maestro-page.js";
+import type { ProviderStartService } from "../issues/provider-start.js";
 import type { MaestroConfig } from "../maestro/config.js";
 import type { MaestroModel } from "../maestro/model.js";
 import type { MaestroWorkspace } from "../maestro/workspace.js";
@@ -357,6 +358,9 @@ export type HttpAppOptions = {
   // checkOnly, just the release check) without waiting for the coordinator's
   // own check interval.
   updateNow?: UpdateNowFn;
+  // #861's guarded "start with a provider" action (preview, start, retry,
+  // cancel). Optional so tests that never exercise it stay unwired.
+  providerStart?: ProviderStartService;
   // #308 part 2's label-write action: adds/removes non-sym:* labels on a
   // GitHub issue. See docs/adr/0077-issue-triage-and-label-writes.md.
   writeIssueLabels?: WriteIssueLabelsFn;
@@ -954,6 +958,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         ? {}
         : { triggerReload: options.triggerReload }),
       version: options.version,
+      ...(options.providerStart === undefined
+        ? {}
+        : { providerStart: options.providerStart }),
       ...(options.writeIssueLabels === undefined
         ? {}
         : { writeIssueLabels: options.writeIssueLabels })

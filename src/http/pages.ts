@@ -101,6 +101,7 @@ import type {
   RunArtifactDescriptor,
   RunArtifactKind,
   RunState,
+  ProviderPlan,
   RunStatus,
   RunStore,
   TrackedPullRequest
@@ -138,6 +139,11 @@ import {
   buildHumanResumeCommand,
   isAgentProviderName
 } from "../human-resume-command.js";
+import type {
+  ProviderStartOutcome,
+  ProviderStartPreview,
+  ProviderStartService
+} from "../issues/provider-start.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 import {
   buildWorkOverview,
@@ -265,6 +271,9 @@ export type RegisterPagesOptions = {
   // #307's editors: see HttpAppOptions.triggerReload (src/http/app.ts).
   triggerReload?: () => Promise<ReloadOutcome>;
   version: string;
+  // #861's guarded start-with-a-provider action. See
+  // HttpAppOptions.providerStart (src/http/app.ts).
+  providerStart?: ProviderStartService;
   // #308 part 2's label-write action. See HttpAppOptions.writeIssueLabels
   // (src/http/app.ts).
   writeIssueLabels?: WriteIssueLabelsFn;
@@ -946,11 +955,131 @@ export function registerPages(options: RegisterPagesOptions): void {
         chains,
         csrfToken,
         detail,
-        pollNowAvailable: options.pollNow !== undefined
+        pollNowAvailable: options.pollNow !== undefined,
+        startAvailable: options.providerStart !== undefined,
+        startPlan: loadStartPlan(detail)
       })
     );
     return context.html(html);
   });
+
+  function loadStartPlan(detail: IssueDetail): ProviderPlan | undefined {
+    return options.providerStart === undefined ||
+      detail.snapshotRepository === undefined
+      ? undefined
+      : options.runStore.getActiveProviderPlan({
+          issueNumber: detail.issueNumber,
+          repository: detail.snapshotRepository
+        });
+  }
+
+  function renderStartPage(
+    context: Context,
+    projectName: string,
+    issueNumberParam: string,
+    outcome: IssueStartBannerInput | undefined
+  ): Response {
+    const issueNumber = Number.parseInt(issueNumberParam, 10);
+    const detail = loadIssueDetail(
+      options.runStore,
+      projectName,
+      issueNumber,
+      options.getScheduled?.() ?? []
+    );
+    if (detail === undefined) {
+      return context.html(
+        renderIssueNotFound(projectName, issueNumberParam),
+        404
+      );
+    }
+    const preview = options.providerStart?.preview(projectName, issueNumber);
+    if (preview === undefined) {
+      return context.html(
+        layout(
+          "Start unavailable",
+          `<h1 class="page-title">Start unavailable</h1><p class="lede">${escapeHtml(projectName)}#${issueNumber} cannot be started with a provider choice here: the Project has no loaded workflow, is not a dispatch Project, or the action is not wired.</p><p class="note"><a href="${escapeHtml(issueDetailHref(projectName, issueNumber))}">← Back to the Issue</a></p>`
+        ),
+        404
+      );
+    }
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    return context.html(
+      layout(
+        `Start #${issueNumber} with a provider`,
+        renderIssueStartPage({
+          csrfToken,
+          detail,
+          outcome,
+          preview
+        })
+      )
+    );
+  }
+
+  options.app.get("/issues/:project/:number/start", (context) =>
+    renderStartPage(
+      context,
+      context.req.param("project"),
+      context.req.param("number"),
+      undefined
+    )
+  );
+
+  options.app.post(
+    "/issues/:project/:number/start",
+    requireAuthorizedMutation,
+    async (context) => {
+      const projectName = context.req.param("project");
+      const numberParam = context.req.param("number");
+      const issueNumber = Number.parseInt(numberParam, 10);
+      const body = (await context.req.parseBody()) as Record<string, unknown>;
+      const outcome: ProviderStartOutcome =
+        options.providerStart === undefined
+          ? { error: "start is unavailable", kind: "refused" }
+          : await options.providerStart.start({
+              graphFingerprint:
+                readOptionalFormField(body, "graph_fingerprint") ?? "",
+              issueNumber,
+              projectName,
+              provider: readOptionalFormField(body, "provider") ?? "",
+              snapshotPolledAt:
+                readOptionalFormField(body, "snapshot_polled_at") ?? "",
+              snapshotRepository: readSnapshotRepository(body)
+            });
+      return renderStartPage(context, projectName, numberParam, {
+        action: "start",
+        outcome
+      });
+    }
+  );
+
+  for (const action of ["retry", "cancel"] as const) {
+    options.app.post(
+      `/issues/:project/:number/start/${action}`,
+      requireAuthorizedMutation,
+      async (context) => {
+        const projectName = context.req.param("project");
+        const numberParam = context.req.param("number");
+        const body = (await context.req.parseBody()) as Record<string, unknown>;
+        const request = {
+          issueNumber: Number.parseInt(numberParam, 10),
+          planId: readOptionalFormField(body, "plan_id") ?? "",
+          projectName,
+          snapshotRepository: readSnapshotRepository(body)
+        };
+        const outcome: ProviderStartOutcome =
+          options.providerStart === undefined
+            ? { error: "start is unavailable", kind: "refused" }
+            : action === "retry"
+              ? await options.providerStart.retry(request)
+              : await options.providerStart.cancel(request);
+        return renderStartPage(context, projectName, numberParam, {
+          action,
+          outcome
+        });
+      }
+    );
+  }
 
   async function handleIssueLabelWrite(
     context: Context,
@@ -1057,7 +1186,9 @@ export function registerPages(options: RegisterPagesOptions): void {
         chains,
         csrfToken,
         detail,
-        pollNowAvailable: options.pollNow !== undefined
+        pollNowAvailable: options.pollNow !== undefined,
+        startAvailable: options.providerStart !== undefined,
+        startPlan: loadStartPlan(detail)
       })
     );
     return context.html(html);
@@ -1256,7 +1387,9 @@ export function registerPages(options: RegisterPagesOptions): void {
         chains,
         csrfToken,
         detail,
-        pollNowAvailable: options.pollNow !== undefined
+        pollNowAvailable: options.pollNow !== undefined,
+        startAvailable: options.providerStart !== undefined,
+        startPlan: loadStartPlan(detail)
       })
     );
     return context.html(html);
@@ -5422,6 +5555,80 @@ function renderIssueRunChainSection(chains: IssueRunChainView[]): string {
   return `${graphStyles}${latestHtml}${olderHtml}`;
 }
 
+function issueDetailHref(projectName: string, issueNumber: number): string {
+  return `/issues/${encodeURIComponent(projectName)}/${issueNumber}`;
+}
+
+type IssueStartBannerInput = {
+  action: "cancel" | "retry" | "start";
+  outcome: ProviderStartOutcome;
+};
+
+function renderIssueStartBanner(input: IssueStartBannerInput): string {
+  const { action, outcome } = input;
+  switch (outcome.kind) {
+    case "started":
+      return `<div class="alert alert--ok" role="status"><strong>${action === "retry" ? "Retried" : "Started"}: the Ready Label was added on GitHub</strong><p>The next poll claims the Issue with ${escapeHtml(outcome.plan?.provider ?? "the chosen provider")} for the whole Run Chain.${outcome.plan !== undefined && outcome.plan.status !== "label_written" ? ` Plan status: ${escapeHtml(outcome.plan.status)}.` : ""}</p></div>`;
+    case "cancelled":
+      return `<div class="alert alert--ok" role="status"><strong>Provider plan cancelled</strong><p>Cancelling does not remove the Ready Label. If the Issue already has it, the next poll will claim it with the Project's default routing.</p></div>`;
+    case "plan_withdrawn":
+      return `<div class="alert" role="alert"><strong>The provider plan was ${escapeHtml(outcome.status)} while the Ready Label write was in flight</strong><p>${outcome.labelWritten ? "The Ready Label was added." : `The Ready Label write failed (${escapeHtml(outcome.error ?? "unknown error")}) and may still have reached GitHub.`} No provider plan applies to this Issue any more, so a claim uses the Project's default routing.</p></div>`;
+    case "label_write_failed":
+      return `<div class="alert" role="alert"><strong>The Ready Label write failed</strong><p>${escapeHtml(outcome.error)}</p><p>The provider plan is saved as <code>${escapeHtml(outcome.plan?.status ?? "label_failed")}</code> and blocks this Issue from dispatching until you retry or cancel it. The Issue was not started.</p></div>`;
+    case "refused":
+      return `<div class="alert" role="alert"><strong>${action === "start" ? "Start" : action === "retry" ? "Retry" : "Cancel"} refused</strong><p>${escapeHtml(outcome.error)}</p><p>Nothing was written.</p></div>`;
+  }
+}
+
+function renderIssueStartPage(input: {
+  csrfToken: string;
+  detail: IssueDetail;
+  outcome: IssueStartBannerInput | undefined;
+  preview: ProviderStartPreview;
+}): string {
+  const { csrfToken, detail, preview } = input;
+  const { context, plan } = preview;
+  const base = `/issues/${encodeURIComponent(detail.projectName)}/${detail.issueNumber}/start`;
+  const hidden = (name: string, value: string): string =>
+    `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`;
+  const common = `${hidden(CSRF_FIELD_NAME, csrfToken)}${renderSnapshotRepositoryFields(detail.snapshotRepository)}`;
+  const facts = `<dl class="facts"><dt>Issue</dt><dd>${escapeHtml(`${context.repository.owner}/${context.repository.repo}#${detail.issueNumber}`)}</dd><dt>Workflow</dt><dd>${escapeHtml(context.workflowName)}</dd><dt>Graph fingerprint</dt><dd><code>${escapeHtml(context.graphFingerprint)}</code></dd><dt>Snapshot polled at</dt><dd>${escapeHtml(detail.snapshot.polledAt)}</dd><dt>Ready Label</dt><dd><code>${escapeHtml(context.readyLabel)}</code></dd><dt>Project default provider</dt><dd>${escapeHtml(context.defaultProvider)}</dd></dl>`;
+  const awaitingClaim = plan?.status === "label_written";
+  const verdict = awaitingClaim
+    ? `<p>${labelPill("started", "ok")} The Ready Label was added; the next poll claims the Issue with ${escapeHtml(plan.provider)}.</p>`
+    : preview.blockers.length === 0
+      ? `<p>${labelPill("startable", "ok")} Nothing in the last poll snapshot blocks this Issue. GitHub is re-checked live when you submit.</p>`
+      : `<div class="alert" role="alert"><strong>Cannot be started</strong><ul>${preview.blockers.map((blocker) => `<li>${escapeHtml(blocker)}</li>`).join("")}</ul></div>`;
+  const planForms =
+    plan === undefined
+      ? ""
+      : `<section><h2>Provider plan</h2><p>${labelPill(plan.status, plan.status === "consumed" ? "ok" : plan.status === "label_failed" || plan.status === "expired" ? "blocked" : "neutral")} <code>${escapeHtml(plan.provider)}</code> · attempt ${plan.attemptCount}${plan.lastError === null ? "" : ` · ${escapeHtml(plan.lastError)}`}</p>${
+          plan.status === "label_failed" || plan.status === "expired"
+            ? `<p class="note">This plan blocks the Issue from dispatching until you retry or cancel it.</p><form method="post" action="${escapeHtml(`${base}/retry`)}">${common}${hidden("plan_id", plan.id)}<button class="btn" type="submit">Retry</button></form>`
+            : ""
+        }${
+          plan.status === "label_written"
+            ? `<p class="note">The Ready Label was added; the next poll claims the Issue. To cancel, first remove the Ready Label on the Issue page.</p>`
+            : ""
+        }<form method="post" action="${escapeHtml(`${base}/cancel`)}">${common}${hidden("plan_id", plan.id)}<button class="btn" type="submit">Cancel plan</button></form></section>`;
+  const preferred = context.providers.includes(context.defaultProvider)
+    ? context.defaultProvider
+    : context.providers[0];
+  const radios = context.providers
+    .map(
+      (name) =>
+        `<label><input type="radio" name="provider" value="${escapeHtml(name)}"${name === preferred ? " checked" : ""}> ${escapeHtml(name)}${name === context.defaultProvider ? " (Project default)" : ""}</label>`
+    )
+    .join(" ");
+  const startForm =
+    awaitingClaim || preview.blockers.length > 0
+      ? ""
+      : context.providers.length === 0
+        ? `<p class="muted">No provider is configured and registered.</p>`
+        : `<form method="post" action="${escapeHtml(base)}">${common}${hidden("graph_fingerprint", context.graphFingerprint)}${hidden("snapshot_polled_at", detail.snapshot.polledAt)}<fieldset><legend>Provider for the whole Run Chain</legend>${radios}</fieldset><button class="btn" type="submit">Start work</button></form>`;
+  return `<h1 class="page-title">Start #${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)}</p>${input.outcome === undefined ? "" : renderIssueStartBanner(input.outcome)}${facts}${verdict}${planForms}${startForm}<p class="note"><a href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}">← Back to the Issue</a></p>`;
+}
+
 function hasChainGraphs(chains: IssueRunChainView[]): boolean {
   return chains.some((chain) => chain.evidence !== undefined);
 }
@@ -5459,6 +5666,8 @@ function renderIssueDetailPage(input: {
   csrfToken: string;
   detail: IssueDetail;
   pollNowAvailable: boolean;
+  startAvailable: boolean;
+  startPlan: ProviderPlan | undefined;
 }): string {
   const { detail } = input;
   const offerPollNow =
@@ -5470,7 +5679,7 @@ function renderIssueDetailPage(input: {
     input.banner === undefined
       ? ""
       : `${renderIssueActionBanner(input.banner)}${offerPollNow && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
-  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${renderIssueRunChainSection(input.chains)}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
+  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${input.startPlan === undefined ? "" : `<div class="alert" role="status"><strong>Provider plan ${escapeHtml(input.startPlan.status)}</strong><p><code>${escapeHtml(input.startPlan.provider)}</code>${input.startPlan.lastError === null ? "" : ` · ${escapeHtml(input.startPlan.lastError)}`}${input.startPlan.status === "label_failed" || input.startPlan.status === "expired" ? " — this Issue will not dispatch until the plan is retried or cancelled." : ""}</p></div>`}${input.startAvailable ? `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/start">Start with a provider…</a></p>` : ""}${renderIssueRunChainSection(input.chains)}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,
       issueNumber: detail.issueNumber,

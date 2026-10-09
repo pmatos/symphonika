@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createAnthropicMaestroModel } from "../src/maestro/model.js";
-import { MAESTRO_TOOLS } from "../src/maestro/tools.js";
+import { maestroToolsFor } from "../src/maestro/tools.js";
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -72,7 +72,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       {
         env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" },
@@ -83,7 +84,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     await model.nextTurn({
       history: [{ content: "What's eligible?", role: "user" }],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(calls).toHaveLength(1);
@@ -94,7 +95,9 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const body = parseRequestBody(call.body);
     expect(body.model).toBe("claude-sonnet-5");
     expect(body.tools.map((tool) => tool.name).sort()).toEqual(
-      MAESTRO_TOOLS.map((tool) => tool.name).sort()
+      maestroToolsFor("none")
+        .map((tool) => tool.name)
+        .sort()
     );
     expect(call.headers.get("x-api-key")).toBe("sk-test-key");
     expect(call.headers.get("authorization")).toBeNull();
@@ -123,7 +126,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -131,7 +135,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const turn = await model.nextTurn({
       history: [{ content: "What's eligible?", role: "user" }],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(turn).toEqual({
@@ -161,7 +165,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -169,7 +174,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const turn = await model.nextTurn({
       history: [{ content: "What's eligible?", role: "user" }],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(turn).toEqual({
@@ -192,7 +197,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: {}, fetch: fakeFetch }
     );
@@ -200,7 +206,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const turn = await model.nextTurn({
       history: [{ content: "What's eligible?", role: "user" }],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(called).toBe(false);
@@ -224,7 +230,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "" }, fetch: fakeFetch }
     );
@@ -232,7 +239,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const turn = await model.nextTurn({
       history: [{ content: "What's eligible?", role: "user" }],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(called).toBe(false);
@@ -256,7 +263,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
           apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
           maxOutputTokens: 1024,
           model: "claude-sonnet-5",
-          provider: "anthropic"
+          provider: "anthropic",
+          repositoryContent: "none"
         },
         { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" } }
       );
@@ -264,7 +272,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
       const turn = await model.nextTurn({
         history: [{ content: "What's eligible?", role: "user" }],
         systemPrompt: "You are Maestro.",
-        tools: MAESTRO_TOOLS
+        tools: maestroToolsFor("none")
       });
 
       expect(called).toBe(true);
@@ -288,7 +296,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -313,7 +322,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         }
       ],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(calls).toHaveLength(1);
@@ -361,7 +370,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -369,7 +379,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const turn = await model.nextTurn({
       history: [{ content: "What's eligible?", role: "user" }],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(turn).toEqual({
@@ -387,7 +397,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -395,7 +406,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const turn = await model.nextTurn({
       history: [{ content: "What's eligible?", role: "user" }],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(turn).toEqual({
@@ -412,7 +423,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -420,7 +432,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const turn = await model.nextTurn({
       history: [{ content: "What's eligible?", role: "user" }],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(turn).toEqual({
@@ -437,7 +449,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -445,7 +458,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const turn = await model.nextTurn({
       history: [{ content: "What's eligible?", role: "user" }],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(turn).toEqual({
@@ -462,7 +475,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         apiKeyEnv: "SYMPHONIKA_MAESTRO_API_KEY",
         maxOutputTokens: 1024,
         model: "claude-sonnet-5",
-        provider: "anthropic"
+        provider: "anthropic",
+        repositoryContent: "none"
       },
       { env: { SYMPHONIKA_MAESTRO_API_KEY: "sk-test-key" }, fetch: fakeFetch }
     );
@@ -470,7 +484,7 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const turn = await model.nextTurn({
       history: [{ content: "What's eligible?", role: "user" }],
       systemPrompt: "You are Maestro.",
-      tools: MAESTRO_TOOLS
+      tools: maestroToolsFor("none")
     });
 
     expect(turn).toEqual({

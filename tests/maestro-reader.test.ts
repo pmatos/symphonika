@@ -171,6 +171,61 @@ describe("Maestro evidence reader (#865)", () => {
     }
   });
 
+  it("reports a Run's branch with the head sha recorded on its tracked pull request", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const branchName = reader.getRun("run-1")?.branchName ?? "";
+      test.runStore.replaceProjectPullRequestSnapshots({
+        polledAt: "2026-10-06T12:05:00.000Z",
+        projectName: "symphonika",
+        rows: [
+          {
+            branchOrigin: "issue_branch",
+            checks: "success",
+            draft: false,
+            headRef: branchName,
+            headSha: "b".repeat(40),
+            labels: [],
+            mergeable: "mergeable",
+            merged: false,
+            open: true,
+            prNumber: 7,
+            reviewDecision: null,
+            stateAvailable: true,
+            title: "feat: add feature X",
+            trackingState: null,
+            unresolvedReviewThreads: 0,
+            url: "https://github.com/pmatos/symphonika/pull/7"
+          }
+        ]
+      });
+
+      expect(reader.getRunRevision("run-1")).toEqual({
+        branchName,
+        projectName: "symphonika",
+        recordedHeadSha: "b".repeat(40)
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("reports no recorded head sha when the Run has no tracked pull request", async () => {
+    const test = await setup();
+    try {
+      const reader = createMaestroEvidenceReader(test.runStore);
+
+      expect(reader.getRunRevision("run-1")).toMatchObject({
+        projectName: "symphonika",
+        recordedHeadSha: null
+      });
+      expect(reader.getRunRevision("missing")).toBeUndefined();
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("exposes no write methods — only the narrow read-only surface", async () => {
     const test = await setup();
     try {
@@ -183,6 +238,7 @@ describe("Maestro evidence reader (#865)", () => {
         [
           "getIssue",
           "getRun",
+          "getRunRevision",
           "listIssues",
           "listProjects",
           "listPullRequests",

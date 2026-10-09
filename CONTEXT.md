@@ -13,7 +13,7 @@ An operator-facing assistant that helps a person understand and prioritize work 
 _Avoid_: Orchestrator, coding agent
 
 **Maestro Workspace**:
-A read-only view of GitHub repository content available to Maestro, distinct from a Coding Agent's Workspace and arbitrary local files.
+A read-only view of GitHub repository content available to Maestro: a bare git mirror under the state root, fetched on demand and never checked out, distinct from a Coding Agent's Workspace and arbitrary local files. Which content it may expose to the model provider is the explicit `maestro.repository_content` setting (`none`, `public`, `public_and_private`).
 _Avoid_: Workspace, local Project directory
 
 **Issue Tracker**:
@@ -673,12 +673,12 @@ _Avoid_: chat session
 The operator-facing, read-only conversational assistant on the dashboard (`GET /maestro`). It answers
 from persisted Issue, Run, and pull-request evidence RunStore already holds, citing the Project,
 Issue/Run/PR, and observed timestamp behind every claim. Its model-facing tool surface is a fixed,
-hand-written list of read-only lookups (`MAESTRO_TOOLS`); no GitHub-write, shell, or local-workspace
+hand-written list of read-only lookups (`maestroToolsFor`); no GitHub-write, shell, or local-file
 tool is ever offered to it, a structural boundary independent of which model is configured (ADR
 2026-10-07-0813). A Maestro reply is a proposal for the operator, never completed work, and is never
 counted as a Run. This bootstrap slice is dashboard-scope only, over configured Projects' own evidence
-— Project-focused chat, grounding in repository content via a Maestro Workspace, and evidence-linked
-briefings are separate, not-yet-built slices of epic #844.
+— repository content is read only through the Maestro Workspace when the operator enables it; Project-focused chat
+and evidence-linked briefings are separate, not-yet-built slices of epic #844.
 _Avoid_: Orchestrator, Coding Agent — Maestro never dispatches, claims, or executes issue work, and has
 no provider-execution posture of its own; chat session, which names an Autonomous Run's own property
 of needing no interactive input, not this assistant

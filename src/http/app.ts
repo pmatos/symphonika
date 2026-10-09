@@ -59,6 +59,7 @@ import {
 import { registerMaestroPage } from "./maestro-page.js";
 import type { MaestroConfig } from "../maestro/config.js";
 import type { MaestroModel } from "../maestro/model.js";
+import type { MaestroWorkspace } from "../maestro/workspace.js";
 
 type CancelRunFn = (
   runId: string,
@@ -235,6 +236,10 @@ export type HttpAppOptions = {
   // #865: current Maestro config, or undefined when the `maestro:` Service
   // Config block is absent (Maestro not configured, not merely disabled).
   getMaestroConfig?: () => MaestroConfig | undefined;
+  // #867: the Maestro Workspace Maestro's repository-content tools read
+  // through. Absent means those tools are never offered, whatever
+  // `maestro.repository_content` says.
+  maestroWorkspace?: MaestroWorkspace;
   // Host pressure-stall admission state (ADR 0088): the current verdict plus
   // the sample behind it, so an operator can tell a deferred dispatch from an
   // idle one without reading the journal.
@@ -963,6 +968,12 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.getMaestroConfig === undefined
         ? {}
         : { getMaestroConfig: options.getMaestroConfig }),
+      ...(options.getProjectRepo === undefined
+        ? {}
+        : { getProjectRepo: options.getProjectRepo }),
+      ...(options.maestroWorkspace === undefined
+        ? {}
+        : { maestroWorkspace: options.maestroWorkspace }),
       runStore
     });
   }

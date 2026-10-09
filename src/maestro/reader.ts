@@ -65,12 +65,23 @@ type MaestroPullRequestEvidence = {
   url: string | null;
 };
 
+// What a Run-specific repository question needs to read the Run's own code:
+// the Project it belongs to, its branch, and the head sha Symphonika last
+// observed on that branch's pull request (null when none was tracked, in
+// which case the branch tip is fetched instead and disclosed as such).
+type MaestroRunRevisionEvidence = {
+  branchName: string;
+  projectName: string;
+  recordedHeadSha: string | null;
+};
+
 export type MaestroEvidenceReader = {
   getIssue(
     projectName: string,
     issueNumber: number
   ): MaestroIssueEvidence | undefined;
   getRun(runId: string): MaestroRunEvidence | undefined;
+  getRunRevision(runId: string): MaestroRunRevisionEvidence | undefined;
   listIssues(projectName: string): MaestroIssueEvidence[];
   listProjects(): MaestroProjectEvidence[];
   listPullRequests(projectName: string): MaestroPullRequestEvidence[];
@@ -167,6 +178,21 @@ export function createMaestroEvidenceReader(
     getRun: (runId) => {
       const run = runStore.getRun(runId);
       return run === undefined ? undefined : toRunEvidence(run);
+    },
+    getRunRevision: (runId) => {
+      const run = runStore.getRun(runId);
+      if (run === undefined) {
+        return undefined;
+      }
+      const recorded = runStore
+        .listProjectPullRequestSnapshots(run.project)
+        .filter((pr) => pr.headRef === run.branchName && pr.headSha !== null)
+        .at(-1);
+      return {
+        branchName: run.branchName,
+        projectName: run.project,
+        recordedHeadSha: recorded?.headSha ?? null
+      };
     },
     listIssues,
     // Project status evidence (AC1): poll provenance, age, and failure

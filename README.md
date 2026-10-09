@@ -50,7 +50,7 @@ npm test
 npm run build
 ```
 
-CI also runs `npm run test:coverage`, uploads `coverage/clover.xml` to Codecov using the
+CI also runs `npm run test:coverage`, uploads `coverage/lcov.info` to Codecov using the
 `CODECOV_TOKEN` repository secret, and retains the coverage directory as a GitHub Actions artifact.
 
 ## Running the daemon

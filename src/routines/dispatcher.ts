@@ -1670,7 +1670,7 @@ async function runRoutineFiring(input: {
     // applies to the entry error above.
     let failureSnapshotTimedOut = false;
     const githubAfter =
-      githubBefore === null || githubObserver === undefined
+      githubObserver === undefined || githubBefore === null
         ? null
         : await cancellation
             .race(deadline.race(githubObserver.capture()))

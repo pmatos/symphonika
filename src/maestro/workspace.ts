@@ -52,7 +52,7 @@ export type RevisionTarget =
   | { branch: string; kind: "branch" }
   | { branch?: string; kind: "sha"; sha: string };
 
-export type MaestroRevisionSource =
+type MaestroRevisionSource =
   "default_branch" | "branch_tip" | "recorded_head_sha";
 
 export type MaestroRevision = {
@@ -66,27 +66,27 @@ export type MaestroRevision = {
   visibility: "private" | "public";
 };
 
-export type MaestroUnavailable = { kind: "unavailable"; reason: string };
+type MaestroUnavailable = { kind: "unavailable"; reason: string };
 
 export type MaestroResolveResult =
   { kind: "ok"; revision: MaestroRevision } | MaestroUnavailable;
 
-export type MaestroFileListing = {
+type MaestroFileListing = {
   files: string[];
   truncated: boolean;
   withheld: number;
 };
 
-export type MaestroFileContent = {
+type MaestroFileContent = {
   content: string;
   path: string;
   size: number;
   truncated: boolean;
 };
 
-export type MaestroSearchMatch = { line: number; path: string; text: string };
+type MaestroSearchMatch = { line: number; path: string; text: string };
 
-export type MaestroSearchResult = {
+type MaestroSearchResult = {
   matches: MaestroSearchMatch[];
   truncated: boolean;
   withheld: number;
@@ -120,7 +120,7 @@ export type MaestroWorkspace = {
   session(repositoryContent: MaestroRepositoryContent): MaestroWorkspaceSession;
 };
 
-export type GitRunOptions = {
+type GitRunOptions = {
   cwd?: string;
   env: NodeJS.ProcessEnv;
   maxBuffer: number;

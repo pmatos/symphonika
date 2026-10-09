@@ -466,6 +466,10 @@ maestro:
   model: "claude-sonnet-5"
   # api_key_env: "SYMPHONIKA_MAESTRO_API_KEY"
   # max_output_tokens: 4096
+  # none (default) | public | public_and_private: which repository content
+  # Maestro's read-only Maestro Workspace tools may read and send to the model
+  # provider (§14). `none` offers no repository tool at all.
+  # repository_content: none
 
 projects:
   - name: symphonika
@@ -3381,12 +3385,12 @@ evidence, not Run evidence, and is never counted by `/api/status`, `/runs`, or a
 History survives a daemon restart because it is RunStore-backed, the same durability every other
 RunStore table has.
 
-Maestro's model-facing tool surface (`MAESTRO_TOOLS`, `src/maestro/tools.ts`) is a fixed, hand-written
+Maestro's model-facing tool surface (`maestroToolsFor`, `src/maestro/tools.ts`) is a fixed, hand-written
 list of read-only lookups over already-persisted Project/Issue-snapshot/Run/PR-snapshot evidence —
 `list_projects` (each Project's poll validation state, last successful poll time, and last poll
 ok/error outcome — the same provenance `/projects/:name`'s capacity strip shows), `list_issues`,
 `get_issue`, `list_runs`, `get_run`, `list_pull_requests` in this slice. No tool in that list writes
-to GitHub, runs a shell command, or touches a local workspace, and `executeMaestroTool` refuses any
+to GitHub, runs a shell command, or reads a local directory, and `executeMaestroTool` refuses any
 tool name outside that list without executing anything; see ADR-2026-10-07-0813 for why this is a
 structural boundary rather than a prompt instruction. Every citation attached to a reply
 (Project/Issue/Run/PR, an internal href, and an observed/polled timestamp) is built server-side from
@@ -3397,18 +3401,32 @@ long-lived conversation cannot flood a single request or reply (`MAX_EVIDENCE_IT
 `MAX_HISTORY_MESSAGES`). The tool-calling loop (`runMaestroTurn`, `src/maestro/conversation.ts`) is
 capped at a small fixed number of rounds per chat message.
 
-This slice is dashboard scope only: Maestro understands every configured Project's evidence, but there
-is no Project-focused chat yet (`#866`), no grounding in repository content via a Maestro Workspace
-(`#867`), and no rolling 7/30-day evidence-linked briefings (`#868`) — all three are separate issues
-under epic `#844`'s own split of its original Maestro slice (`#852`). No tool in this slice calls
-GitHub live; every tool reads only persisted RunStore snapshots from the daemon's normal poll cadence.
+Repository grounding (`#867`, ADR-2026-10-09-0730): when `maestro.repository_content` is `public` or
+`public_and_private`, Maestro is additionally offered `workspace_list_files`, `workspace_read_file`, and
+`workspace_search`. They read a **Maestro Workspace**, a bare git mirror under
+`<state root>/maestro-workspace/` kept apart from every Coding Agent Workspace and never checked out, so
+no local Project file, secret environment file, or Coding Agent Workspace is reachable. A target is a
+`project_name` (that Project's default branch, fetched fresh), a `run_id` (the head sha recorded on the
+Run's tracked pull request, else the Run branch's tip, with the source disclosed), or an explicitly named
+`repository` (`owner/name`, including a private one the operator can access through `gh`). Nothing lists
+repositories, so no briefing inventories the accessible set. An unavailable revision is reported with a
+reason and is never replaced by another revision. Each result carries repository, ref, commit sha, fetch
+time, source, and visibility; its citation links to github.com at that sha. `public` refuses a private
+repository before any git subprocess runs; `none` (the default) offers no repository tool. File names,
+contents, and search hits are untrusted evidence, secret-shaped paths are withheld, and known token values
+are redacted. The `/maestro` page states the configured disclosure setting.
+
+This slice is dashboard scope only: there is no Project-focused chat yet (`#866`) and no rolling
+7/30-day evidence-linked briefings (`#868`). Apart from the `workspace_*` tools above, no tool calls
+GitHub live; every other tool reads only persisted RunStore snapshots from the daemon's normal poll
+cadence.
 
 Maestro's model configuration lives under the optional `maestro:` Service Config block (§5.1),
 independent of `providers.codex/claude/omp`: selecting or changing Maestro's model never selects or
 spawns a Coding Agent, and vice versa. `model` is required (no default is guessed); `api_key_env`
 defaults to `SYMPHONIKA_MAESTRO_API_KEY` and `max_output_tokens` to `4096`. The configured provider
-receives whatever Issue/PR content a tool call returns — the boundary notice shown on `/maestro` when
-Maestro is configured states this plainly.
+receives whatever Issue/PR content and, when `repository_content` allows it, repository content a tool
+call returns — the notices shown on `/maestro` when Maestro is configured state this plainly.
 
 ## 15. Bootstrap Acceptance Bar
 

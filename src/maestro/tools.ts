@@ -628,7 +628,7 @@ export async function executeMaestroTool(input: {
   // Unreachable while MAESTRO_TOOL_NAMES.has(input.name) is true above and
   // every registered name has a matching branch — kept explicit (rather
   // than an unconditional fallthrough) so a future tool added to
-  // MAESTRO_TOOLS without a matching branch here is refused instead of
+  // the tool lists without a matching branch here is refused instead of
   // silently misdispatched to whichever branch happened to be last.
   return { kind: "refused", reason: `tool "${input.name}" has no handler` };
 }

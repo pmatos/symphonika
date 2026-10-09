@@ -95,7 +95,9 @@ describe("Anthropic-backed Maestro model (#865)", () => {
     const body = parseRequestBody(call.body);
     expect(body.model).toBe("claude-sonnet-5");
     expect(body.tools.map((tool) => tool.name).sort()).toEqual(
-      maestroToolsFor("none").map((tool) => tool.name).sort()
+      maestroToolsFor("none")
+        .map((tool) => tool.name)
+        .sort()
     );
     expect(call.headers.get("x-api-key")).toBe("sk-test-key");
     expect(call.headers.get("authorization")).toBeNull();

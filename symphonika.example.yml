@@ -96,6 +96,10 @@ self_update: false
 #   model: "claude-sonnet-5"
 #   api_key_env: "SYMPHONIKA_MAESTRO_API_KEY"
 #   max_output_tokens: 4096
+#   # What repository content Maestro may read and send to the model provider
+#   # through its read-only Maestro Workspace (ADR 2026-10-09-0730-maestro-workspace-boundary):
+#   # none (default), public, or public_and_private.
+#   repository_content: none
 
 # Optional Routine execution defaults. A Routine's Markdown front matter wins;
 # when both levels omit a value, the provider command below stays as authored.

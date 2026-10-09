@@ -19,7 +19,7 @@ export type MaestroConfig = {
 
 // What repository content Maestro's workspace tools may send to the
 // configured model provider. `none` offers no workspace tool at all.
-export const MAESTRO_REPOSITORY_CONTENT_VALUES = [
+const MAESTRO_REPOSITORY_CONTENT_VALUES = [
   "none",
   "public",
   "public_and_private"

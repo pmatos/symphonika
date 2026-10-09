@@ -1971,6 +1971,23 @@ export function registerPages(options: RegisterPagesOptions): void {
     };
   };
 
+  const staleSettingsResponse = (
+    context: Context,
+    resolved: { configPath: string; name: string },
+    onDisk: string | null
+  ): Response =>
+    context.html(
+      layout(
+        "Save refused: changed on disk",
+        renderStaleSaveNotice({
+          currentContent: onDisk,
+          editAction: `/projects/${encodeURIComponent(resolved.name)}/settings`,
+          filePath: resolved.configPath
+        })
+      ),
+      409
+    );
+
   const renderSettingsPage = (input: {
     configPath: string;
     context: Context;
@@ -2052,17 +2069,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         () => null
       );
       if (onDisk === null || contentHash(onDisk) !== expectedContentHash) {
-        return context.html(
-          layout(
-            "Save refused: changed on disk",
-            renderStaleSaveNotice({
-              currentContent: onDisk,
-              editAction: `/projects/${encodeURIComponent(resolved.name)}/settings`,
-              filePath: resolved.configPath
-            })
-          ),
-          409
-        );
+        return staleSettingsResponse(context, resolved, onDisk);
       }
 
       const parsed = parseProjectSettingsForm(body);
@@ -2126,17 +2133,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         () => null
       );
       if (onDisk === null || contentHash(onDisk) !== expectedContentHash) {
-        return context.html(
-          layout(
-            "Save refused: changed on disk",
-            renderStaleSaveNotice({
-              currentContent: onDisk,
-              editAction,
-              filePath: resolved.configPath
-            })
-          ),
-          409
-        );
+        return staleSettingsResponse(context, resolved, onDisk);
       }
       if (!changesOnlyProjectSettings(onDisk, content, resolved.name)) {
         return context.html(

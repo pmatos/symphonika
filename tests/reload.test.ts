@@ -2920,6 +2920,14 @@ describe("epic_labels project vocabulary (#857)", () => {
     expect(result.errors.join("\n")).toContain(fragment);
   });
 
+  it("accepts an epic label that merely shares a name with an Object.prototype member", async () => {
+    const { configPath, content } = await configWith([
+      "    epic_labels: [constructor, toString]"
+    ]);
+    const result = await validateServiceConfigContent(content, configPath);
+    expect(result.errors).toEqual([]);
+  });
+
   it("rejects epic_labels on a Routine Host like other dispatch-only keys", async () => {
     const { configPath, content } = await configWith([]);
     const withHost = [

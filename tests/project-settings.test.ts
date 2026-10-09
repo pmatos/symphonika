@@ -175,6 +175,67 @@ describe("applyProjectSettingsEdit", () => {
     );
   });
 
+  it("leaves untouched lines byte-identical: long scalars are not refolded and an unchanged epic_labels keeps its flow style", () => {
+    const longCommand = `codex -p symphonika ${"-c model_verbosity=medium ".repeat(8)}app-server`;
+    const config = `providers:
+  codex:
+    command: "${longCommand}"
+projects:
+  - name: alpha
+    issue_filters:
+      states: ["open"]
+      ready_label: agent-ready
+      labels_none: ["blocked"]
+    priority:
+      labels:
+        "priority:high": 1
+      default: 99
+    epic_labels: ["epic"]
+`;
+    const result = applyProjectSettingsEdit(config, "alpha", {
+      epicLabels: ["epic"],
+      priorityDefault: 99,
+      priorityLabels: [{ label: "priority:high", priority: 1 }],
+      readyLabel: "agent-ready"
+    });
+    if (!result.ok) throw new Error(result.error);
+    expect(result.content).toBe(config);
+  });
+
+  it.each([
+    [
+      "an anchored ready_label",
+      "ready_label: agent-ready",
+      "ready_label: &rl agent-ready"
+    ],
+    ["an anchored default", "default: 99", "default: &d 99"],
+    [
+      "an anchored priority value",
+      '"priority:high": 1',
+      '"priority:high": &p 1'
+    ]
+  ])(
+    "refuses %s, whose alias elsewhere would change too",
+    (_name, from, to) => {
+      const shared = CONFIG.replace(from, to);
+      expect(shared).not.toBe(CONFIG);
+      const result = applyProjectSettingsEdit(shared, "alpha", SETTINGS);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("anchor");
+    }
+  );
+
+  it("refuses, rather than throws on, a project whose issue_filters or priority is not a mapping", () => {
+    const blank = CONFIG.replace(
+      '    issue_filters:\n      states: ["open"]\n      ready_label: agent-ready\n      labels_none: ["blocked"]\n',
+      "    issue_filters:\n"
+    );
+    expect(blank).not.toBe(CONFIG);
+    const result = applyProjectSettingsEdit(blank, "alpha", SETTINGS);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("issue_filters");
+  });
+
   it("refuses to edit a node shared through a YAML anchor and leaves the text alone", () => {
     const shared = CONFIG.replace(
       "    priority:\n      labels: {}\n      default: 5",

@@ -216,7 +216,7 @@ export function rejectEpicLabelOverlap(
         path: ["epic_labels", index]
       });
     }
-    if (label in project.priority.labels) {
+    if (Object.hasOwn(project.priority.labels, label)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `epic label \`${label}\` is also a priority label; epic labels must not carry priority`,

@@ -119,6 +119,38 @@ describe("doctor", () => {
     expect(output.stdout).toContain("1 project");
   });
 
+  it.each([
+    [
+      "an epic label equal to the ready label",
+      ["    epic_labels: [agent-ready]"],
+      "ready_label"
+    ],
+    [
+      "an epic label that is a priority label",
+      ["    epic_labels: ['priority:high']"],
+      "priority"
+    ],
+    ["a duplicate epic label", ["    epic_labels: [epic, epic]"], "duplicate"],
+    ["a non-list epic_labels", ["    epic_labels: epic"], "projects.0"]
+  ])(
+    "rejects %s like the daemon reload does",
+    async (_name, additionalProjectLines, message) => {
+      const root = await makeTempRoot();
+      const configPath = path.join(root, "symphonika.yml");
+      await writeValidConfig(configPath, { additionalProjectLines });
+      await writeFile(
+        path.join(root, "WORKFLOW.md"),
+        "Work on {{issue.title}}.\n"
+      );
+      process.env.GITHUB_TOKEN = "test-secret-token";
+
+      const output = await runDoctorCommand(configPath);
+
+      expect(process.exitCode).toBe(1);
+      expect(output.stderr).toContain(message);
+    }
+  );
+
   it("warns, without failing, when several legacy labels_all collapse to the first", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");

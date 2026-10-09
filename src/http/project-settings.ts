@@ -134,6 +134,16 @@ function findProjectNode(
   return undefined;
 }
 
+function isSharedNode(node: unknown): boolean {
+  return (
+    isAlias(node) ||
+    (node !== null &&
+      typeof node === "object" &&
+      "anchor" in node &&
+      node.anchor !== undefined)
+  );
+}
+
 export function applyProjectSettingsEdit(
   content: string,
   projectName: string,
@@ -151,22 +161,21 @@ export function applyProjectSettingsEdit(
     };
   }
 
-  const shared = [
-    [],
-    ["issue_filters"],
-    ["priority"],
-    ["priority", "labels"],
-    ["epic_labels"]
-  ].some((path) => {
-    const node = path.length === 0 ? project : project.getIn(path, true);
-    return (
-      isAlias(node) ||
-      (node !== null &&
-        typeof node === "object" &&
-        "anchor" in node &&
-        node.anchor !== undefined)
-    );
-  });
+  const labelsNode = project.getIn(["priority", "labels"], true);
+  const shared =
+    [
+      [],
+      ["issue_filters"],
+      ["issue_filters", "ready_label"],
+      ["priority"],
+      ["priority", "default"],
+      ["priority", "labels"],
+      ["epic_labels"]
+    ].some((path) =>
+      isSharedNode(path.length === 0 ? project : project.getIn(path, true))
+    ) ||
+    (isMap(labelsNode) &&
+      labelsNode.items.some((pair) => isSharedNode(pair.value)));
   if (shared) {
     return {
       error:
@@ -174,10 +183,18 @@ export function applyProjectSettingsEdit(
       ok: false
     };
   }
+  for (const key of ["issue_filters", "priority"]) {
+    const node = project.get(key, true);
+    if (node !== undefined && !isMap(node)) {
+      return {
+        error: `this project's \`${key}\` is not a mapping; edit the raw config instead`,
+        ok: false
+      };
+    }
+  }
 
   project.setIn(["issue_filters", "ready_label"], settings.readyLabel);
   project.deleteIn(["issue_filters", "labels_all"]);
-  const labelsNode = project.getIn(["priority", "labels"], true);
   if (isMap(labelsNode)) {
     // Edit the existing map in place so untouched entries keep their key
     // quoting and the diff stays limited to what actually changed.
@@ -200,13 +217,22 @@ export function applyProjectSettingsEdit(
     );
   }
   project.setIn(["priority", "default"], settings.priorityDefault);
-  if (settings.epicLabels.length === 0) {
-    project.delete("epic_labels");
-  } else {
-    project.set("epic_labels", document.createNode(settings.epicLabels));
+  const currentEpics = project.get("epic_labels", true);
+  const currentEpicLabels: unknown =
+    currentEpics === undefined
+      ? []
+      : isSeq(currentEpics)
+        ? currentEpics.toJSON()
+        : undefined;
+  if (!isDeepStrictEqual(currentEpicLabels, settings.epicLabels)) {
+    if (settings.epicLabels.length === 0) {
+      project.delete("epic_labels");
+    } else {
+      project.set("epic_labels", document.createNode(settings.epicLabels));
+    }
   }
   return {
-    content: document.toString({ flowCollectionPadding: false }),
+    content: document.toString({ flowCollectionPadding: false, lineWidth: 0 }),
     ok: true
   };
 }
@@ -342,7 +368,6 @@ export function renderProjectSettingsForm(input: {
   csrfToken: string;
   errors: string[];
   expectedContentHash: string;
-  notice?: string;
   projectName: string;
   values: ProjectSettingsValues;
 }): string {
@@ -360,7 +385,7 @@ export function renderProjectSettingsForm(input: {
       ? ""
       : `<div class="alert" role="alert"><strong>Fix these before saving</strong><ul>${input.errors.map((e) => `<li>${escapeHtml(e)}</li>`).join("")}</ul></div>`;
   const projectHref = `/projects/${encodeURIComponent(input.projectName)}`;
-  return `<h1 class="page-title">Settings: ${escapeHtml(input.projectName)}</h1>${input.notice ?? ""}${errors}
+  return `<h1 class="page-title">Settings: ${escapeHtml(input.projectName)}</h1>${errors}
 <div class="empty"><strong>Active now</strong>Ready Label <code>${escapeHtml(input.active.readyLabel)}</code> · priority ${activePriority}, other labels → ${policy.fallback} · Epic labels ${activeEpics}. The fields below start from the saved file; a saved edit is not active until the daemon reloads it.</div>
 <form method="post" action="${escapeHtml(input.action)}">
   <input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">

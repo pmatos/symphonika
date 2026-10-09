@@ -21,6 +21,7 @@ const execFileAsync = promisify(execFile);
 
 const FETCH_TIMEOUT_MS = 60_000;
 const READ_TIMEOUT_MS = 20_000;
+const REPOSITORY_INFO_TIMEOUT_MS = 15_000;
 const MAX_READ_BYTES = 100_000;
 const MAX_BLOB_BYTES = 8_000_000;
 const MAX_LIST_ENTRIES = 200;
@@ -35,13 +36,18 @@ const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const MAX_PATH_CHARS = 500;
 const MAX_PATTERN_CHARS = 200;
 
+// A fixed local ref every fetch lands in. Without a ref the mirror has no
+// "have" lines to offer, so each shallow fetch re-downloads the whole tree;
+// one ref also roots just the latest fetched tip, so older ones stay prunable.
+const FETCHED_REF = "refs/maestro/fetched";
+
 // Committed secrets are not harmless just because they are in git history,
 // and Maestro's output goes to a third-party model provider.
 const SECRET_PATH_PATTERNS: readonly RegExp[] = [
-  /(^|\/)\.env(\..*)?$/i,
+  /(^|\/)\.env[^/]*$/i,
   /\.(pem|key|p12|pfx)$/i,
   /(^|\/)id_(rsa|dsa|ecdsa|ed25519)[^/]*$/i,
-  /(^|\/)\.(npmrc|netrc|pypirc)$/i,
+  /(^|\/)\.(npmrc|netrc|pypirc|git-credentials)$/i,
   /(^|\/)credentials[^/]*$/i
 ];
 
@@ -169,7 +175,11 @@ export function createGitHubRepositoryInfoLookup(): MaestroWorkspaceDeps["reposi
       }
     });
     try {
-      const { data } = await octokit.rest.repos.get({ owner, repo });
+      const { data } = await octokit.rest.repos.get({
+        owner,
+        repo,
+        request: { signal: AbortSignal.timeout(REPOSITORY_INFO_TIMEOUT_MS) }
+      });
       return { defaultBranch: data.default_branch, private: data.private };
     } catch {
       return undefined;
@@ -185,7 +195,7 @@ function unavailable(reason: string): MaestroUnavailable {
   return { kind: "unavailable", reason };
 }
 
-function validRepoPath(value: string): boolean {
+export function isValidRepoPath(value: string): boolean {
   return (
     value.length > 0 &&
     value.length <= MAX_PATH_CHARS &&
@@ -194,6 +204,14 @@ function validRepoPath(value: string): boolean {
     !value.includes("\0") &&
     !value.includes("\n") &&
     !value.split("/").includes("..")
+  );
+}
+
+export function isValidSearchPattern(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= MAX_PATTERN_CHARS &&
+    !/[\0\n\r]/.test(value)
   );
 }
 
@@ -224,8 +242,12 @@ export function createMaestroWorkspace(
     deps.remoteUrl ??
     ((owner: string, repo: string): string =>
       `https://github.com/${owner}/${repo}.git`);
-  const scrub = (text: string): string =>
-    redactAll(text, deps.redactSecrets?.() ?? []);
+  // The secret inventory walks every Project's token, so resolve it once per
+  // operation rather than once per scrubbed string.
+  const scrubber = (): ((text: string) => string) => {
+    const secrets = deps.redactSecrets?.() ?? [];
+    return (text) => redactAll(text, secrets);
+  };
 
   const baseEnv = (): NodeJS.ProcessEnv => ({
     GIT_CONFIG_GLOBAL: "/dev/null",
@@ -286,13 +308,18 @@ export function createMaestroWorkspace(
         "--no-tags",
         "--depth=1",
         url,
-        input.refspec
+        `+${input.refspec}:${FETCHED_REF}`
       ],
       { env, maxBuffer: MAX_GIT_OUTPUT_BYTES, timeoutMs: FETCH_TIMEOUT_MS }
     );
     const sha = (
       await runGit(
-        [`--git-dir=${mirror}`, "rev-parse", "--verify", "FETCH_HEAD^{commit}"],
+        [
+          `--git-dir=${mirror}`,
+          "rev-parse",
+          "--verify",
+          `${FETCHED_REF}^{commit}`
+        ],
         {
           env: baseEnv(),
           maxBuffer: MAX_GIT_OUTPUT_BYTES,
@@ -403,7 +430,7 @@ export function createMaestroWorkspace(
     revision: MaestroRevision,
     prefix: string | undefined
   ): Promise<{ kind: "ok"; listing: MaestroFileListing } | MaestroUnavailable> {
-    if (prefix !== undefined && !validRepoPath(prefix)) {
+    if (prefix !== undefined && !isValidRepoPath(prefix)) {
       return unavailable("path is not valid");
     }
     try {
@@ -420,6 +447,7 @@ export function createMaestroWorkspace(
         .split("\0")
         .filter((entry) => entry.length > 0);
       const visible = all.filter((entry) => !isSecretPath(entry));
+      const scrub = scrubber();
       return {
         kind: "ok",
         listing: {
@@ -445,7 +473,7 @@ export function createMaestroWorkspace(
     | { kind: "withheld"; path: string }
     | MaestroUnavailable
   > {
-    if (!validRepoPath(filePath)) {
+    if (!isValidRepoPath(filePath)) {
       return unavailable("path is not valid");
     }
     if (isSecretPath(filePath)) {
@@ -470,9 +498,16 @@ export function createMaestroWorkspace(
         return unavailable(`${filePath} is a binary file`);
       }
       const truncated = blob.length > MAX_READ_BYTES;
+      // Redact the whole text before cutting, so a secret straddling the
+      // truncation point cannot leave a readable prefix behind.
+      const redacted = scrubber()(blob.toString("utf8"));
       return {
         content: {
-          content: scrub(blob.subarray(0, MAX_READ_BYTES).toString("utf8")),
+          content: truncated
+            ? Buffer.from(redacted, "utf8")
+                .subarray(0, MAX_READ_BYTES)
+                .toString("utf8")
+            : redacted,
           path: filePath,
           size: blob.length,
           truncated
@@ -488,14 +523,10 @@ export function createMaestroWorkspace(
     revision: MaestroRevision,
     input: { pathspec: string | undefined; pattern: string }
   ): Promise<{ kind: "ok"; result: MaestroSearchResult } | MaestroUnavailable> {
-    if (
-      input.pattern.length === 0 ||
-      input.pattern.length > MAX_PATTERN_CHARS ||
-      /[\0\n\r]/.test(input.pattern)
-    ) {
+    if (!isValidSearchPattern(input.pattern)) {
       return unavailable("pattern is not valid");
     }
-    if (input.pathspec !== undefined && !validRepoPath(input.pathspec)) {
+    if (input.pathspec !== undefined && !isValidRepoPath(input.pathspec)) {
       return unavailable("path is not valid");
     }
     let out: Buffer;
@@ -526,6 +557,7 @@ export function createMaestroWorkspace(
       );
     }
 
+    const scrub = scrubber();
     const prefix = `${revision.sha}:`;
     const matches: MaestroSearchMatch[] = [];
     let withheld = 0;
@@ -549,7 +581,7 @@ export function createMaestroWorkspace(
       matches.push({
         line: Number(row.slice(first + 1, second)),
         path: filePath,
-        text: scrub(row.slice(second + 1, second + 1 + MAX_SEARCH_LINE_CHARS))
+        text: scrub(row.slice(second + 1)).slice(0, MAX_SEARCH_LINE_CHARS)
       });
     }
     return { kind: "ok", result: { matches, truncated, withheld } };

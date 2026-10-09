@@ -1,11 +1,13 @@
 import type { MaestroCitation } from "../run-store.js";
 import type { MaestroRepositoryContent } from "./config.js";
 import type { MaestroEvidenceReader } from "./reader.js";
-import type {
-  MaestroResolveResult,
-  MaestroRevision,
-  MaestroWorkspaceSession,
-  RevisionTarget
+import {
+  isValidRepoPath,
+  isValidSearchPattern,
+  type MaestroResolveResult,
+  type MaestroRevision,
+  type MaestroWorkspaceSession,
+  type RevisionTarget
 } from "./workspace.js";
 
 // The closed, read-only tool surface offered to the model (src/maestro/
@@ -361,13 +363,24 @@ async function executeWorkspaceTool(input: {
   reader: MaestroEvidenceReader;
   workspace: MaestroWorkspaceAccess;
 }): Promise<MaestroToolOutcome> {
-  const filePath = stringField(input.input, "path");
+  // An empty path is how a model says "the repository root": treat it as
+  // omitted rather than as an invalid path.
+  const rawPath = stringField(input.input, "path");
+  const filePath = rawPath?.trim() === "" ? undefined : rawPath;
   const pattern = stringField(input.input, "pattern");
   if (input.name === "workspace_read_file" && filePath === undefined) {
     return { kind: "refused", reason: "path is required" };
   }
   if (input.name === "workspace_search" && pattern === undefined) {
     return { kind: "refused", reason: "pattern is required" };
+  }
+  // Rejected before resolving a target: a bad argument must not cost a token
+  // lookup, a GitHub API call, and a git fetch first.
+  if (filePath !== undefined && !isValidRepoPath(filePath)) {
+    return { kind: "refused", reason: "path is not valid" };
+  }
+  if (pattern !== undefined && !isValidSearchPattern(pattern)) {
+    return { kind: "refused", reason: "pattern is not valid" };
   }
 
   const target = await resolveWorkspaceTarget(

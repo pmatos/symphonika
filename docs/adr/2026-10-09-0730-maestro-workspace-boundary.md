@@ -16,7 +16,9 @@ would also expose uncommitted files, `.env` files, and unrelated local directori
 - **Maestro Workspace** is a bare git mirror under `<state root>/maestro-workspace/<owner>/<repo>.git`,
   separate from every Coding Agent Workspace. Revisions are fetched with a fixed-argv `git fetch
   --depth=1` using a scrubbed environment (no user or system git config, no prompts, token passed via
-  `GIT_CONFIG_*` `http.extraheader`, never argv). Nothing is ever checked out, so no local file can be
+  `GIT_CONFIG_*` `http.extraheader`, never argv). Every fetch lands in one scratch ref
+  (`refs/maestro/fetched`) so the next fetch of the same repository negotiates from it instead of
+  re-downloading the whole tree. Nothing is ever checked out, so no local file can be
   read; reads are `git ls-tree` / `cat-file` / `grep` object lookups with `GIT_LITERAL_PATHSPECS=1`.
   Model-supplied values reach git only as a validated `<sha>:<path>` operand, a `-e` pattern, or a
   `--`-separated literal pathspec.
@@ -36,7 +38,7 @@ would also expose uncommitted files, `.env` files, and unrelated local directori
   ref, commit sha, fetch time, source, and visibility, and a session fetches each revision once per chat
   turn, so every new question re-fetches.
 - Repository content is wrapped as untrusted evidence (`untrusted: true`, plus the system prompt), and
-  files that look like secrets (`.env*`, keys, `.npmrc`, `credentials*`) are withheld. Known token values
+  files that look like secrets (`.env*`, keys, `.npmrc`, `.git-credentials`, `credentials*`) are withheld. Known token values
   are redacted from anything returned.
 - No per-repository mutex: `/maestro/messages` already serializes turns on the single dashboard
   conversation. The mirror is not pruned in this slice.

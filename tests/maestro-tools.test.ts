@@ -593,6 +593,59 @@ describe("Maestro workspace tools (#867)", () => {
     }
   });
 
+  it("rejects an invalid path or pattern before resolving any revision", async () => {
+    const test = await setup();
+    try {
+      const { access, resolveCalls } = fakeWorkspace({});
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const bad: Array<[string, unknown]> = [
+        [
+          "workspace_read_file",
+          { path: "../etc/passwd", project_name: "symphonika" }
+        ],
+        [
+          "workspace_list_files",
+          { path: "--help", project_name: "symphonika" }
+        ],
+        [
+          "workspace_search",
+          { path: "/abs", pattern: "x", project_name: "symphonika" }
+        ],
+        ["workspace_search", { pattern: "a\nb", project_name: "symphonika" }]
+      ];
+
+      for (const [name, input] of bad) {
+        const outcome = await executeMaestroTool({
+          input,
+          name,
+          reader,
+          workspace: access
+        });
+        expect(outcome.kind).toBe("refused");
+      }
+      expect(resolveCalls).toEqual([]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("treats an empty path as the repository root rather than an invalid path", async () => {
+    const test = await setup();
+    try {
+      const { access } = fakeWorkspace({});
+      const outcome = await executeMaestroTool({
+        input: { path: "", project_name: "symphonika" },
+        name: "workspace_list_files",
+        reader: createMaestroEvidenceReader(test.runStore),
+        workspace: access
+      });
+
+      expect(outcome).toMatchObject({ kind: "ok" });
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("reports an unavailable revision instead of substituting another one", async () => {
     const test = await setup();
     try {

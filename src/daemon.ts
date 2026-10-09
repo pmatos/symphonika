@@ -91,6 +91,7 @@ import { detectStaleClaims } from "./lifecycle/stale-claims.js";
 import { pollConfiguredGitHubPullRequestsFromConfig } from "./pull-request-polling.js";
 import type { AgentProviderRegistry } from "./provider.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
+import { secretsForEmailConfig } from "./notifications/config.js";
 import { createSmtpNotificationSink } from "./notifications/smtp.js";
 import {
   DaemonHealthNotifier,
@@ -1819,6 +1820,7 @@ export async function startDaemon(
   const maestroWorkspace = createMaestroWorkspace({
     redactSecrets: () => [
       ...ghTokensSeen,
+      ...secretsForEmailConfig(runtimeConfig.emailConfig(), env),
       ...secretsForMaestroConfig(runtimeConfig.maestroConfig(), env),
       ...[...runtimeConfig.projectsByName().values()].flatMap((project) => {
         const token =

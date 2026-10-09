@@ -91,6 +91,7 @@ async function makeFixtureRemote(
 
 type Harness = {
   gitCalls: string[][];
+  redactSecretsCalls: () => number;
   session: (
     repositoryContent: MaestroRepositoryContent
   ) => MaestroWorkspaceSession;
@@ -105,6 +106,7 @@ async function makeHarness(input: {
 }): Promise<Harness> {
   const stateRoot = await makeTempRoot();
   const gitCalls: string[][] = [];
+  let redactSecretsCalls = 0;
   const runGit: GitRunner = async (args, options) => {
     gitCalls.push(args);
     const { stdout } = await execFileAsync("git", args, {
@@ -117,7 +119,10 @@ async function makeHarness(input: {
   };
   const workspace = createMaestroWorkspace({
     now: () => new Date("2026-10-09T12:00:00.000Z"),
-    redactSecrets: () => input.redactSecrets ?? [],
+    redactSecrets: () => {
+      redactSecretsCalls += 1;
+      return input.redactSecrets ?? [];
+    },
     remoteUrl: () => input.remote.url,
     repositoryInfo: () =>
       Promise.resolve(
@@ -130,6 +135,7 @@ async function makeHarness(input: {
   });
   return {
     gitCalls,
+    redactSecretsCalls: () => redactSecretsCalls,
     session: (repositoryContent) => workspace.session(repositoryContent),
     stateRoot
   };
@@ -362,11 +368,15 @@ describe("Maestro Workspace content access", () => {
   async function open(
     files: Record<string, string>,
     redactSecrets: string[] = []
-  ): Promise<{ revision: MaestroRevision; session: MaestroWorkspaceSession }> {
+  ): Promise<{
+    harness: Harness;
+    revision: MaestroRevision;
+    session: MaestroWorkspaceSession;
+  }> {
     const remote = await makeFixtureRemote(files);
     const harness = await makeHarness({ redactSecrets, remote });
     const session = harness.session("public");
-    return { revision: await resolveDefault(session), session };
+    return { harness, revision: await resolveDefault(session), session };
   }
 
   it("lists files with a path-prefix filter and caps the listing", async () => {
@@ -390,15 +400,25 @@ describe("Maestro Workspace content access", () => {
     });
   });
 
-  it("treats a magic pathspec as a literal path", async () => {
+  it("treats a glob or magic pathspec as a literal path", async () => {
     const { revision, session } = await open({
-      "a.txt": "x\n",
-      "b.txt": "y\n"
+      "a.txt": "needle\n",
+      "b.txt": "needle\n"
     });
 
     const listing = await session.listFiles(revision, ":(top)*.txt");
+    const glob = await session.search(revision, {
+      pathspec: "*.txt",
+      pattern: "needle"
+    });
+    const exact = await session.search(revision, {
+      pathspec: "a.txt",
+      pattern: "needle"
+    });
 
     expect(listing).toMatchObject({ kind: "ok", listing: { files: [] } });
+    expect(glob).toMatchObject({ kind: "ok", result: { matches: [] } });
+    expect(exact.kind === "ok" ? exact.result.matches : []).toHaveLength(1);
   });
 
   it("reads a file, truncating large content and refusing binaries and directories", async () => {
@@ -522,6 +542,90 @@ describe("Maestro Workspace content access", () => {
       kind: "ok",
       result: { matches: [{ path: "README.md" }], withheld: 2 }
     });
+  });
+
+  it("withholds dotenv variants and git's credential store", async () => {
+    const { revision, session } = await open({
+      ".env-production": "TOKEN=1\n",
+      ".envrc": "export TOKEN=1\n",
+      "README.md": "docs\n",
+      "config/.git-credentials": "https://user:pw@example.com\n"
+    });
+
+    for (const secret of [
+      ".envrc",
+      ".env-production",
+      "config/.git-credentials"
+    ]) {
+      expect(await session.readFile(revision, secret)).toEqual({
+        kind: "withheld",
+        path: secret
+      });
+    }
+    expect(await session.listFiles(revision, undefined)).toMatchObject({
+      listing: { files: ["README.md"], withheld: 3 }
+    });
+  });
+
+  it("redacts a secret that straddles the truncation point instead of leaking its prefix", async () => {
+    const secret = "ghp_SECRETVALUE123";
+    const { revision, session } = await open(
+      {
+        "big.txt": `${"x".repeat(99_995)}${secret}${"y".repeat(50)}\n`,
+        "wide.txt": `${"w".repeat(290)}${secret}${"z".repeat(50)}\n`
+      },
+      [secret]
+    );
+
+    const read = await session.readFile(revision, "big.txt");
+    const search = await session.search(revision, {
+      pathspec: "wide.txt",
+      pattern: "www"
+    });
+
+    expect(read).toMatchObject({ content: { truncated: true }, kind: "ok" });
+    expect(JSON.stringify(read)).not.toContain("ghp_");
+    expect(JSON.stringify(search)).toContain("wwww");
+    expect(JSON.stringify(search)).not.toContain("ghp_");
+  });
+
+  it("resolves the secret inventory once per operation, not once per string", async () => {
+    const many: Record<string, string> = {};
+    for (let index = 0; index < 60; index += 1) {
+      many[`src/f${index}.ts`] = "needle\n";
+    }
+    const { harness, revision, session } = await open(many);
+
+    const before = harness.redactSecretsCalls();
+    await session.listFiles(revision, undefined);
+    const afterList = harness.redactSecretsCalls();
+    await session.search(revision, { pathspec: undefined, pattern: "needle" });
+    const afterSearch = harness.redactSecretsCalls();
+
+    expect(afterList - before).toBe(1);
+    expect(afterSearch - afterList).toBe(1);
+  });
+
+  it("lands every fetch in one scratch ref so the next fetch has a revision to negotiate from", async () => {
+    const remote = await makeFixtureRemote({ "README.md": "hello\n" });
+    const harness = await makeHarness({ remote });
+    await resolveDefault(harness.session("public"));
+    await remote.commit({ "README.md": "hello v2\n" }, "v2");
+
+    await resolveDefault(harness.session("public"));
+
+    const refs = execFileSync(
+      "git",
+      [
+        `--git-dir=${path.join(harness.stateRoot, "maestro-workspace", "acme", "widgets.git")}`,
+        "for-each-ref",
+        "--format=%(refname)"
+      ],
+      { encoding: "utf8" }
+    )
+      .trim()
+      .split("\n");
+    expect(refs).toEqual(["refs/maestro/fetched"]);
   });
 
   it("redacts known secret values out of file content and search text", async () => {

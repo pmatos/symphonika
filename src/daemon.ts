@@ -1837,8 +1837,7 @@ export async function startDaemon(
         const tracker = project.tracker;
         if (
           tracker !== undefined &&
-          tracker.owner.toLowerCase() === owner.toLowerCase() &&
-          tracker.repo.toLowerCase() === repo.toLowerCase()
+          sameGitHubRepository(tracker, { owner, repo })
         ) {
           const projectToken = resolveToken(tracker.token, env);
           if (projectToken !== undefined) {

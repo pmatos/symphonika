@@ -8,6 +8,7 @@ import type { MaestroEvidenceReader } from "./reader.js";
 import {
   executeMaestroTool,
   maestroToolsFor,
+  type MaestroToolOutcome,
   type MaestroWorkspaceAccess
 } from "./tools.js";
 import type { MaestroWorkspace } from "./workspace.js";
@@ -137,7 +138,7 @@ export async function runMaestroTurn(input: {
       // falls through to the refused branch below with nothing executed.
       // See tests/maestro-tools.test.ts. A thrown tool error (a git
       // failure, say) becomes an error tool result, not a failed turn.
-      let outcome: Awaited<ReturnType<typeof executeMaestroTool>>;
+      let outcome: MaestroToolOutcome;
       try {
         outcome = await executeMaestroTool({
           input: toolUse.input,

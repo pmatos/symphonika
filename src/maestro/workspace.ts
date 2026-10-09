@@ -337,22 +337,19 @@ export function createMaestroWorkspace(
     input: { owner: string; repo: string; target: RevisionTarget }
   ): Promise<MaestroResolveResult> {
     const { owner, repo, target } = input;
-    if (!OWNER_PATTERN.test(owner) || !REPO_PATTERN.test(repo)) {
-      return unavailable(`"${owner}/${repo}" is not a valid GitHub repository`);
-    }
-    if (repo === "." || repo === "..") {
+    if (
+      !OWNER_PATTERN.test(owner) ||
+      !REPO_PATTERN.test(repo) ||
+      repo === "." ||
+      repo === ".."
+    ) {
       return unavailable(`"${owner}/${repo}" is not a valid GitHub repository`);
     }
     if (repositoryContent === "none") {
       return unavailable("repository content disclosure is disabled");
     }
-    if (
-      (target.kind === "branch" ||
-        (target.kind === "sha" && target.branch !== undefined)) &&
-      !BRANCH_PATTERN.test(
-        target.kind === "branch" ? target.branch : (target.branch ?? "")
-      )
-    ) {
+    const branch = target.kind === "default_branch" ? undefined : target.branch;
+    if (branch !== undefined && !BRANCH_PATTERN.test(branch)) {
       return unavailable("branch name is not valid");
     }
     if (target.kind === "sha" && !SHA_PATTERN.test(target.sha)) {

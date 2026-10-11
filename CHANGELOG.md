@@ -1,5 +1,28 @@
 # Changelog
 
+# [0.10.0](https://github.com/pmatos/symphonika/compare/v0.9.2...v0.10.0) (2026-10-11)
+
+
+### Bug Fixes
+
+* fail the run when the issue branch never reached origin ([#879](https://github.com/pmatos/symphonika/issues/879)) ([e5438d9](https://github.com/pmatos/symphonika/commit/e5438d9ffc54c6828ce32c6df4a798884bacfb91))
+* ignore subagent thread events in the codex reducer ([#840](https://github.com/pmatos/symphonika/issues/840)) ([1170fa9](https://github.com/pmatos/symphonika/commit/1170fa998498f1c39e5f0c96edea262821bdb1c2))
+* park for a human when checks never started instead of routing to autofix ([#877](https://github.com/pmatos/symphonika/issues/877)) ([042823a](https://github.com/pmatos/symphonika/commit/042823ab85bbae8f68b9af519ae99939034dace7))
+
+
+### Features
+
+* add a pm-plan planning stage ahead of implementation ([#880](https://github.com/pmatos/symphonika/issues/880)) ([0ec08c8](https://github.com/pmatos/symphonika/commit/0ec08c876ea10e46ddc63a0f05294b650eb063f3))
+* add graph drill-down to the issue run chain ([#887](https://github.com/pmatos/symphonika/issues/887)) ([afdb350](https://github.com/pmatos/symphonika/commit/afdb35057671e26898f34aa507218bc0cb282bdf))
+* chat with read-only maestro across projects ([#874](https://github.com/pmatos/symphonika/issues/874)) ([e65dbb7](https://github.com/pmatos/symphonika/commit/e65dbb72cb315090f965fd637fcbaef92b989dd6))
+* edit project ready label, priority, and epic vocabulary ([#888](https://github.com/pmatos/symphonika/issues/888)) ([c1c2f78](https://github.com/pmatos/symphonika/commit/c1c2f78e4955f1d04db228986bf9c26b9accbdb0))
+* ground maestro in a read-only maestro workspace ([#886](https://github.com/pmatos/symphonika/issues/886)) ([0ebc6c6](https://github.com/pmatos/symphonika/commit/0ebc6c6f192fcb1eb0c3cc2060c1c5639b2ec5a2))
+* include run id and last agent message in the sym:human-needed comment ([#878](https://github.com/pmatos/symphonika/issues/878)) ([a6fc820](https://github.com/pmatos/symphonika/commit/a6fc8206aeabee90cf87379f2bb543f5eaead44c))
+* migrate to a single configurable ready_label per project ([#881](https://github.com/pmatos/symphonika/issues/881)) ([defa508](https://github.com/pmatos/symphonika/commit/defa5088d9a5c8a6254bc5583aec7c04c411d42b))
+* show an actionable daily work overview ([#872](https://github.com/pmatos/symphonika/issues/872)) ([474dc31](https://github.com/pmatos/symphonika/commit/474dc31529a89d9c32a10e88386599b857627fb1))
+* show an issue's run chain as a readable fsm timeline ([#873](https://github.com/pmatos/symphonika/issues/873)) ([df05322](https://github.com/pmatos/symphonika/commit/df0532220fe2643a1a34bd357d55549a87e0ca1c))
+* start an issue with a chain-wide provider choice ([#889](https://github.com/pmatos/symphonika/issues/889)) ([71b525a](https://github.com/pmatos/symphonika/commit/71b525ac248e242bda85627f60b834a465458ba0))
+
 ## [0.9.2](https://github.com/pmatos/symphonika/compare/v0.9.1...v0.9.2) (2026-10-05)
 
 

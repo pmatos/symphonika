@@ -62,6 +62,10 @@ import { renderProviderCommandTemplate } from "./provider-command-template.js";
 import { probeProviderCommand } from "./provider-probe.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
+import {
+  rejectProjectRoutineDeclarations,
+  routineServiceConfigFields
+} from "./routines/service-config.js";
 import type { RoutineExecutionOverrides } from "./routines/types.js";
 import { type GhAuthTokenReader, readGhAuthToken } from "./gh-auth-token.js";
 import { unitEnvironmentFilePath, userUnitDir } from "./service.js";
@@ -328,27 +332,6 @@ const agentSchema = z
   })
   .passthrough();
 
-// Explicitly reject the removed per-project `routines:` key so a legacy config
-// fails loudly with a migration pointer instead of silently stopping firing.
-// See ADR 0069.
-function rejectPerProjectRoutines(
-  rawProject: unknown,
-  ctx: z.RefinementCtx
-): void {
-  if (
-    rawProject !== null &&
-    typeof rawProject === "object" &&
-    "routines" in rawProject
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message:
-        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `projects: [<name>, ...]` target list (see ADR 0069)",
-      path: ["routines"]
-    });
-  }
-}
-
 const dispatchProjectSchema = z
   .object({
     name: z.string().trim().min(1),
@@ -367,7 +350,7 @@ const dispatchProjectSchema = z
     workflow: workflowReferenceSchema
   })
   .passthrough()
-  .superRefine(rejectPerProjectRoutines)
+  .superRefine(rejectProjectRoutineDeclarations)
   .superRefine(rejectEpicLabelOverlap);
 
 const routineHostProjectSchema = z
@@ -381,62 +364,13 @@ const routineHostProjectSchema = z
     agent: agentSchema
   })
   .passthrough()
-  .superRefine(rejectPerProjectRoutines)
+  .superRefine(rejectProjectRoutineDeclarations)
   .superRefine(rejectDispatchOnlyKeysOnRoutineHost);
 
 const projectSchema = z.union([
   dispatchProjectSchema,
   routineHostProjectSchema
 ]);
-
-const serviceRoutineSchema = z
-  .object({
-    projects: z.array(z.string().trim().min(1)).min(1).optional(),
-    path: pathStringSchema
-  })
-  .passthrough()
-  .superRefine((entry, ctx) => {
-    if ("project" in entry) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "service-level `project:` was replaced by the explicit `projects: [<name>, ...]` target list (see ADR 0069)",
-        path: ["project"]
-      });
-    }
-    if (entry.projects === undefined) {
-      if (!("project" in entry)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            "an explicit non-empty `projects: [<name>, ...]` target list is required",
-          path: ["projects"]
-        });
-      }
-      return;
-    }
-    const seen = new Set<string>();
-    for (const [index, projectName] of entry.projects.entries()) {
-      if (seen.has(projectName)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `duplicate target project "${projectName}"`,
-          path: ["projects", index]
-        });
-      }
-      seen.add(projectName);
-    }
-  })
-  .transform((entry) => ({ ...entry, projects: entry.projects! }));
-
-const routineExecutionDefaultsSchema = z
-  .object({
-    effort: z.string().trim().min(1).optional(),
-    model: z.string().trim().min(1).optional(),
-    permission_mode: z.string().trim().min(1).optional(),
-    timeout_minutes: z.number().positive().optional()
-  })
-  .strict();
 
 const serviceConfigSchema = z
   .object({
@@ -467,8 +401,7 @@ const serviceConfigSchema = z
         omp: providerCommandSchema.optional()
       })
       .passthrough(),
-    routine_defaults: routineExecutionDefaultsSchema.optional(),
-    routines: z.array(serviceRoutineSchema).optional(),
+    ...routineServiceConfigFields("effort-first"),
     projects: z.array(projectSchema).min(1)
   })
   .passthrough();
@@ -681,7 +614,7 @@ export async function runDoctor(
       projects,
       parsedConfig.providers,
       agentProviders,
-      routineDefaultsFromParsed(parsedConfig.routine_defaults)
+      parsedConfig.routine_defaults ?? {}
     ))
   );
 
@@ -1733,24 +1666,6 @@ async function readFileIfExists(filePath: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
-}
-
-function routineDefaultsFromParsed(
-  raw: z.infer<typeof routineExecutionDefaultsSchema> | undefined
-): RoutineExecutionOverrides {
-  if (raw === undefined) {
-    return {};
-  }
-  return {
-    ...(raw.model === undefined ? {} : { model: raw.model }),
-    ...(raw.effort === undefined ? {} : { effort: raw.effort }),
-    ...(raw.permission_mode === undefined
-      ? {}
-      : { permissionMode: raw.permission_mode }),
-    ...(raw.timeout_minutes === undefined
-      ? {}
-      : { timeoutMinutes: raw.timeout_minutes })
-  };
 }
 
 async function validateServiceRoutines(

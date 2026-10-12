@@ -37,7 +37,10 @@ _Avoid_: Dispatch Project when referring to a firing-only Project
 **Service Config**:
 The reloadable orchestrator-owned configuration file that lists Projects, Routines, and service-level
 runtime settings. It is the only registry that knows Project names, so it is where a Routine's target
-Projects are declared.
+Projects are declared. Routine target-list validation, execution-default normalization, and legacy
+Project syntax refusal are shared by `doctor` and runtime reload through the Routine Service Config
+module (`src/routines/service-config.ts`); each reader retains its own enclosing validation and
+reporting policy.
 _Avoid_: workflow when referring to the multi-project registry
 
 **Runtime Config Snapshot**:

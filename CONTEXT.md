@@ -504,6 +504,11 @@ _Avoid_: daemon log line, issue Run digest
 **Run Lifecycle**:
 The stateful progression of one Run from dispatch selection through provider execution, scheduling,
 waiting, cancellation, or terminal labels.
+The controller registers delayed retry, Continuation, and State Advance Planned Steps through one
+private operation that pairs refused-registration and cleared-timer cancellation with the durable
+owning Run. That owner may differ from the prospective child Run named by the scheduler. Accepted
+retry accounting happens before yielding; waiting-row rechecks and shutdown resumes retain their
+separate registration policy because their shutdown evidence is already durable.
 _Avoid_: daemon loop when referring to Run-local progression
 
 **Run Slot Deadline**:

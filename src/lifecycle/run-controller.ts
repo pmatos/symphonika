@@ -312,6 +312,19 @@ export type ScheduleHandler = (input: {
   runId: string;
 }) => boolean;
 
+type RunWorkRegistration = Omit<
+  Parameters<ScheduleHandler>[0],
+  "kind" | "onShutdown"
+> & {
+  kind: "retry" | "continuation" | "state_advance";
+  onAccepted?: () => void;
+  shutdownOwner: {
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  };
+};
+
 export type RunControllerOptions = {
   activeRuns: ActiveRunRegistry;
   agentProviders: AgentProviderRegistry;
@@ -1691,27 +1704,19 @@ export class RunController {
         },
         "symphonika retry rescheduled: contention at claim"
       );
-      const scheduled = this.schedule({
+      await this.scheduleRunWork({
         delayMs: this.lifecyclePolicy.continuation.delayMs,
         fire: () => this.executeRetry(payload),
         issueNumber: refreshed.number,
         kind: "retry",
-        onShutdown: () =>
-          this.cancelRunAfterScheduleCleared({
-            issueNumber: refreshed.number,
-            repository,
-            runId: payload.runId
-          }),
-        projectName: project.name,
-        runId: payload.runId
-      });
-      if (!scheduled) {
-        await this.cancelRunAfterScheduleRefused({
+        shutdownOwner: {
           issueNumber: refreshed.number,
           repository,
           runId: payload.runId
-        });
-      }
+        },
+        projectName: project.name,
+        runId: payload.runId
+      });
       return;
     }
 
@@ -2915,7 +2920,7 @@ export class RunController {
           )
         : undefined;
 
-    const scheduled = this.schedule({
+    await this.scheduleRunWork({
       delayMs: this.lifecyclePolicy.continuation.delayMs,
       fire: () =>
         this.executeStateAdvance({
@@ -2929,22 +2934,14 @@ export class RunController {
         }),
       issueNumber: refreshed.number,
       kind: "state_advance",
-      onShutdown: () =>
-        this.cancelRunAfterScheduleCleared({
-          issueNumber: refreshed.number,
-          repository,
-          runId
-        }),
-      projectName: project.name,
-      runId
-    });
-    if (!scheduled) {
-      await this.cancelRunAfterScheduleRefused({
+      shutdownOwner: {
         issueNumber: refreshed.number,
         repository,
         runId
-      });
-    }
+      },
+      projectName: project.name,
+      runId
+    });
   }
 
   // Re-enters a raw-FSM walk that a graceful shutdown cancelled mid-flight,
@@ -3332,27 +3329,19 @@ export class RunController {
           this.scheduleShutdownResume(payload);
           return;
         }
-        const scheduled = this.schedule({
+        await this.scheduleRunWork({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
           fire: () => this.executeStateAdvance(payload),
           issueNumber: refreshed.number,
           kind: "state_advance",
-          onShutdown: () =>
-            this.cancelRunAfterScheduleCleared({
-              issueNumber: refreshed.number,
-              repository,
-              runId: payload.parentRunId
-            }),
-          projectName: project.name,
-          runId
-        });
-        if (!scheduled) {
-          await this.cancelRunAfterScheduleRefused({
+          shutdownOwner: {
             issueNumber: refreshed.number,
             repository,
             runId: payload.parentRunId
-          });
-        }
+          },
+          projectName: project.name,
+          runId
+        });
         return;
       }
       throw error;
@@ -3729,27 +3718,19 @@ export class RunController {
           },
           "symphonika continuation rescheduled: contention at claim"
         );
-        const scheduled = this.schedule({
+        await this.scheduleRunWork({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
           fire: () => this.executeContinuation(payload),
           issueNumber: refreshed.number,
           kind: "continuation",
-          onShutdown: () =>
-            this.cancelRunAfterScheduleCleared({
-              issueNumber: refreshed.number,
-              repository,
-              runId: payload.parentRunId
-            }),
-          projectName: project.name,
-          runId
-        });
-        if (!scheduled) {
-          await this.cancelRunAfterScheduleRefused({
+          shutdownOwner: {
             issueNumber: refreshed.number,
             repository,
             runId: payload.parentRunId
-          });
-        }
+          },
+          projectName: project.name,
+          runId
+        });
         return;
       }
       throw error;
@@ -4332,6 +4313,26 @@ export class RunController {
     }
   }
 
+  // A delayed Planned Step has two shutdown exits: refused registration and
+  // an accepted timer cleared before firing. Both belong to the durable owner,
+  // which can differ from the scheduler's prospective child Run id. Waiting
+  // rows and shutdown resumes already have durable shutdown evidence and use
+  // the scheduler directly.
+  private async scheduleRunWork(input: RunWorkRegistration): Promise<void> {
+    const { onAccepted, shutdownOwner, ...scheduledWork } = input;
+    const accepted = this.schedule({
+      ...scheduledWork,
+      onShutdown: () => this.cancelRunAfterScheduleCleared(shutdownOwner)
+    });
+    if (accepted) {
+      // Consume retry budget before yielding, so shutdown cannot interleave
+      // between acceptance and its accounting write.
+      onAccepted?.();
+      return;
+    }
+    await this.cancelRunAfterScheduleRefused(shutdownOwner);
+  }
+
   private async cancelRunAfterScheduleRefused(input: {
     issueNumber: number;
     repository: GitHubIssueRepositoryInput;
@@ -4351,8 +4352,8 @@ export class RunController {
   // Companion to cancelRunAfterScheduleRefused for the other half of the same
   // shutdown race: a timer accepted before cancelAll() latched the registry,
   // then cleared before it fired. Passed as onShutdown to every retry/
-  // continuation/state_advance schedule() call so the registry can invoke it
-  // once the timer is gone — that item never gets its own fire() call, so
+  // continuation/state_advance registration by scheduleRunWork. The registry
+  // invokes it once the timer is gone — that item never gets its own fire(), so
   // this is the only remaining chance to record cancellation evidence. Without
   // it the row is left "failed" (transient) with sym:claimed and no
   // cancel_reason, which the restart-resume pass ignores because it requires
@@ -6069,7 +6070,7 @@ export class RunController {
           },
           "symphonika scheduling state advance"
         );
-        const scheduled = this.schedule({
+        await this.scheduleRunWork({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
           fire: () =>
             this.executeStateAdvance({
@@ -6080,22 +6081,14 @@ export class RunController {
             }),
           issueNumber: refreshedForAdvance.number,
           kind: "state_advance",
-          onShutdown: () =>
-            this.cancelRunAfterScheduleCleared({
-              issueNumber: input.issue.number,
-              repository: input.repository,
-              runId: input.runId
-            }),
-          projectName: input.project.name,
-          runId: input.runId
-        });
-        if (!scheduled) {
-          await this.cancelRunAfterScheduleRefused({
+          shutdownOwner: {
             issueNumber: input.issue.number,
             repository: input.repository,
             runId: input.runId
-          });
-        }
+          },
+          projectName: input.project.name,
+          runId: input.runId
+        });
         return;
       }
       // Bail-out: `refreshIssue` returned `undefined` (transient API error)
@@ -6180,7 +6173,7 @@ export class RunController {
       }
       const next = currentRetries + 1;
       const delayMs = computeRetryDelayMs(next, this.lifecyclePolicy);
-      const scheduled = this.schedule({
+      await this.scheduleRunWork({
         delayMs,
         fire: () =>
           this.executeRetry({
@@ -6204,24 +6197,15 @@ export class RunController {
           }),
         issueNumber: input.issue.number,
         kind: "retry",
-        onShutdown: () =>
-          this.cancelRunAfterScheduleCleared({
-            issueNumber: input.issue.number,
-            repository: input.repository,
-            runId: input.runId
-          }),
-        projectName: input.project.name,
-        runId: input.runId
-      });
-      if (!scheduled) {
-        await this.cancelRunAfterScheduleRefused({
+        onAccepted: () => this.runStore.incrementRetryCount(input.runId),
+        shutdownOwner: {
           issueNumber: input.issue.number,
           repository: input.repository,
           runId: input.runId
-        });
-        return;
-      }
-      this.runStore.incrementRetryCount(input.runId);
+        },
+        projectName: input.project.name,
+        runId: input.runId
+      });
       return;
     }
 
@@ -6366,7 +6350,7 @@ export class RunController {
       "symphonika scheduling continuation"
     );
 
-    const scheduled = this.schedule({
+    await this.scheduleRunWork({
       delayMs: this.lifecyclePolicy.continuation.delayMs,
       fire: () =>
         this.executeContinuation({
@@ -6379,22 +6363,14 @@ export class RunController {
         }),
       issueNumber: refreshed.number,
       kind: "continuation",
-      onShutdown: () =>
-        this.cancelRunAfterScheduleCleared({
-          issueNumber: input.issue.number,
-          repository: input.repository,
-          runId: input.runId
-        }),
-      projectName: input.project.name,
-      runId: input.runId
-    });
-    if (!scheduled) {
-      await this.cancelRunAfterScheduleRefused({
+      shutdownOwner: {
         issueNumber: input.issue.number,
         repository: input.repository,
         runId: input.runId
-      });
-    }
+      },
+      projectName: input.project.name,
+      runId: input.runId
+    });
   }
 
   private async refreshIssue(input: {

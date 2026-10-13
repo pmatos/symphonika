@@ -1433,7 +1433,7 @@ firing whose kind is unknown remains conservatively protected.
 
 After a Routine Firing reaches a terminal state, Symphonika evaluates its Routine notification
 policy. Delivery occurs after `kind: git` PR discovery, uses both plain text and an escaped HTML
-alternative, and includes the canonical outcome as one ptt-style line with action, title, URL, and
+alternative, and includes the canonical outcome as one line with action, title, URL, and
 an `(unverified)` marker whenever `verified` is false, including for an error outcome. The marker is
 omitted whenever `verified` is true because outcome status and verification are independent. The
 final claim JSON is excluded from report-output content.
@@ -1514,7 +1514,7 @@ silently progressing a schedule whose work never ran; see ADRs 0070 and 0084.
 A Routine Fan-out is summary-ready after every expected target is skipped, held, or has a terminal
 firing. Symphonika then claims one durable grouped-notification delivery with a per-Project result
 and subject
-`[ptt] <routine> — <PR count> PR, <issue count> issue, <failure count> failed`. Skips remain visible
+`[Symphonika] <routine> — <PR count> PR, <issue count> issue, <failure count> failed`. Skips remain visible
 but do not count as failures; held targets and failed or cancelled firings do. Delivery failures
 return to pending for retry. An all-`catch_up_window` group uses that same subject and renders each
 Project as `skipped (catch_up_window)`; `email.on: always` sends it, while `changes` and `failures`

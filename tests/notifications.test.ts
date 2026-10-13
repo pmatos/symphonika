@@ -77,7 +77,7 @@ function fakeFanout(targets: RoutineFanoutTargetStatus[]): RoutineFanoutStatus {
     ),
     routineName: "refactor-audit",
     scheduledAt: "2026-09-03T23:00:00.000Z",
-    subject: "[ptt] refactor-audit",
+    subject: "[Symphonika] refactor-audit",
     targets,
     updatedAt: "2026-09-03T23:06:00.000Z"
   };

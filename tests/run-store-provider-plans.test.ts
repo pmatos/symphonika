@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { openRunStore, type RunStore } from "../src/run-store.js";
+import Database from "better-sqlite3";
+
+import { databasePath, openRunStore, type RunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -288,6 +290,52 @@ describe("RunStore provider plans", () => {
       seedRun(store, "unsourced");
       expect(store.getRun("sourced")?.providerSource).toBe("operator_state");
       expect(store.getRun("unsourced")?.providerSource).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it.each([
+    ["not json", {}],
+    ['["codex"]', {}],
+    ["null", {}],
+    ['{"review":"codex","plan":"gpt","x":3}', { review: "codex" }]
+  ])(
+    "reads a hand-edited state_providers_json %s defensively (#862)",
+    async (json, expected) => {
+      const { store, root } = await openTempStore();
+      try {
+        store.createProviderPlan(planInput());
+        const db = new Database(databasePath(root));
+        try {
+          db.prepare(
+            "update run_chain_provider_plans set state_providers_json = ? where id = 'plan-1'"
+          ).run(json);
+        } finally {
+          db.close();
+        }
+        expect(store.getProviderPlan("plan-1")?.stateProviders).toEqual(
+          expected
+        );
+      } finally {
+        store.close();
+      }
+    }
+  );
+
+  it("ignores an unknown recorded provider source (#862)", async () => {
+    const { store, root } = await openTempStore();
+    try {
+      seedRun(store, "run-odd");
+      const db = new Database(databasePath(root));
+      try {
+        db.prepare(
+          "update runs set provider_source = 'mystery' where id = 'run-odd'"
+        ).run();
+      } finally {
+        db.close();
+      }
+      expect(store.getRun("run-odd")?.providerSource).toBeNull();
     } finally {
       store.close();
     }

@@ -9,6 +9,7 @@ import {
 } from "../issue-polling.js";
 import { isAgentProviderName } from "../human-resume-command.js";
 import type { AsyncMutex } from "../lifecycle/async-mutex.js";
+import { isAgentState } from "../lifecycle/chain-provider.js";
 import {
   isDispatchProject,
   type DispatchProjectConfig,
@@ -26,12 +27,22 @@ const PROVIDER_CHOICES: readonly AgentProviderName[] = [
 
 const DEFAULT_GITHUB_TIMEOUT_MS = 15_000;
 
+// One row of the workflow preview. `agent` states of a raw FSM accept a
+// per-state provider choice (#862); every other state is listed without one.
+export type ProviderStartState = {
+  actionKind: string | undefined;
+  declaredProvider: AgentProviderName | undefined;
+  id: string;
+  selectable: boolean;
+};
+
 type ProviderStartContext = {
   defaultProvider: AgentProviderName;
   graphFingerprint: string;
   providers: AgentProviderName[];
   readyLabel: string;
   repository: { owner: string; repo: string };
+  states: ProviderStartState[];
   workflowName: string;
 };
 
@@ -64,6 +75,9 @@ type StartIssueRequest = {
   provider: string;
   snapshotPolledAt: string;
   snapshotRepository: { owner: string; repo: string } | undefined;
+  // Per-agent-state exceptions (#862), state id -> provider name. An empty
+  // value means "use the chain-wide choice" and is dropped.
+  stateProviders?: Readonly<Record<string, string>>;
 };
 
 type ProviderPlanActionRequest = {
@@ -149,6 +163,37 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// Validates the form's per-state choices against the previewed graph: only a
+// selectable (agent) state may carry one, and only a configured, registered
+// provider may be chosen. Blank entries mean "chain-wide" and are dropped.
+function parseStateProviders(
+  raw: Readonly<Record<string, string>> | undefined,
+  context: Pick<ProviderStartContext, "providers" | "states">
+): { stateProviders: Record<string, AgentProviderName> } | { error: string } {
+  const stateProviders: Record<string, AgentProviderName> = {};
+  for (const [stateId, value] of Object.entries(raw ?? {})) {
+    if (value.length === 0) {
+      continue;
+    }
+    const state = context.states.find((candidate) => candidate.id === stateId);
+    if (state === undefined) {
+      return { error: `state ${stateId} is not in the previewed workflow` };
+    }
+    if (!state.selectable) {
+      return {
+        error: `state ${stateId} is not an agent state and takes no provider`
+      };
+    }
+    if (!isAgentProviderName(value) || !context.providers.includes(value)) {
+      return {
+        error: `${value} for state ${stateId} is not configured and registered`
+      };
+    }
+    stateProviders[stateId] = value;
+  }
+  return { stateProviders };
+}
+
 type LiveReadResult =
   | { kind: "ok"; hasReadyLabel: boolean; reasons: string[] }
   | { kind: "error"; error: string };
@@ -179,6 +224,7 @@ export function createProviderStartService(
     const providersConfig = deps.getProvidersConfig() as Partial<
       Record<AgentProviderName, { command: string }>
     >;
+    const isRawFsm = workflow.expandedWorkflow.source.kind === "raw_fsm";
     return {
       defaultProvider: project.agent.provider,
       graphFingerprint: workflow.contentHash,
@@ -192,6 +238,16 @@ export function createProviderStartService(
         owner: project.tracker.owner,
         repo: project.tracker.repo
       },
+      // Only a raw FSM routes its states by provider; a contract workflow's
+      // synthesized states run on the chain-wide choice (or the default).
+      states: workflow.expandedWorkflow.states.map((state) => ({
+        actionKind: state.action?.kind,
+        declaredProvider: isAgentState(state)
+          ? state.action?.provider
+          : undefined,
+        id: state.id,
+        selectable: isRawFsm && isAgentState(state)
+      })),
       workflowName: workflow.expandedWorkflow.name
     };
   }
@@ -469,6 +525,10 @@ export function createProviderStartService(
         "the workflow changed since this preview was rendered; reload the preview"
       );
     }
+    const parsedStates = parseStateProviders(input.stateProviders, context);
+    if ("error" in parsedStates) {
+      return refuse(parsedStates.error);
+    }
     const snapshot = deps.runStore.getProjectIssueSnapshot(
       input.projectName,
       input.issueNumber
@@ -523,7 +583,8 @@ export function createProviderStartService(
         provider,
         readyLabel: context.readyLabel,
         repository: context.repository,
-        snapshotPolledAt: input.snapshotPolledAt
+        snapshotPolledAt: input.snapshotPolledAt,
+        stateProviders: parsedStates.stateProviders
       });
     } finally {
       deps.dispatchMutex.release();
@@ -549,6 +610,12 @@ export function createProviderStartService(
     }
     if (!context.providers.includes(plan.provider)) {
       return refuse(`${plan.provider} is no longer configured and registered`);
+    }
+    // Same rules as Start; the fingerprint check above guarantees the
+    // previewed states still match the plan's.
+    const stillValid = parseStateProviders(plan.stateProviders, context);
+    if ("error" in stillValid) {
+      return refuse(`cannot retry: ${stillValid.error}`);
     }
     const live = await readLive(project, context, input.issueNumber, token);
     if (live.kind === "error") {

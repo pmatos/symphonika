@@ -64,6 +64,26 @@ function previewFixture(
       providers: ["omp", "claude", "codex"],
       readyLabel: "agent-ready",
       repository: { owner: "pmatos", repo: "alpha" },
+      states: [
+        {
+          actionKind: "agent",
+          declaredProvider: undefined,
+          id: "implement",
+          selectable: true
+        },
+        {
+          actionKind: "agent",
+          declaredProvider: "claude",
+          id: "review",
+          selectable: true
+        },
+        {
+          actionKind: "wait",
+          declaredProvider: undefined,
+          id: "await_checks",
+          selectable: false
+        }
+      ],
       workflowName: "default"
     },
     plan: undefined,
@@ -85,6 +105,7 @@ function planFixture(overrides: Partial<ProviderPlan> = {}): ProviderPlan {
     readyLabel: "agent-ready",
     repository: { owner: "pmatos", repo: "alpha" },
     snapshotPolledAt: POLLED_AT,
+    stateProviders: {},
     status: "pending",
     updatedAt: POLLED_AT,
     ...overrides
@@ -163,6 +184,61 @@ describe("GET /issues/:project/:number/start (#861)", () => {
     expect(html).toContain('name="snapshot_owner" value="pmatos"');
     expect(html).toContain(`name="csrf_token"`);
     expect(html).toContain("Start work");
+  });
+
+  it("offers a provider selector for agent states only (#862)", async () => {
+    const { app } = await setup(previewFixture());
+    const html = await (
+      await app.request("/issues/alpha/7/start", { headers: browserHeaders() })
+    ).text();
+
+    expect(html).toContain("Per-state exceptions");
+    expect(html).toContain('name="state_provider:implement"');
+    expect(html).toContain('name="state_provider:review"');
+    expect(html).toContain("(workflow declares claude;");
+    expect(html).toContain("<code>await_checks</code>");
+    expect(html).not.toContain('name="state_provider:await_checks"');
+    expect(html).toContain(
+      '<option value="" selected>Chain-wide choice</option>'
+    );
+  });
+
+  it("omits per-state exceptions when no state is selectable (#862)", async () => {
+    const preview = previewFixture();
+    const { app } = await setup({
+      ...preview,
+      context: {
+        ...preview.context,
+        states: preview.context.states.map((state) => ({
+          ...state,
+          selectable: false
+        }))
+      }
+    });
+    const html = await (
+      await app.request("/issues/alpha/7/start", { headers: browserHeaders() })
+    ).text();
+
+    expect(html).toContain("Start work");
+    expect(html).not.toContain("Per-state exceptions");
+  });
+
+  it("shows a plan's per-state exceptions (#862)", async () => {
+    const { app } = await setup(
+      previewFixture({
+        plan: planFixture({
+          stateProviders: { review: "codex" },
+          status: "label_failed"
+        })
+      })
+    );
+    const html = await (
+      await app.request("/issues/alpha/7/start", { headers: browserHeaders() })
+    ).text();
+
+    expect(html).toContain(
+      "Per-state exceptions: <code>review</code> → <code>codex</code>"
+    );
   });
 
   it("lists blockers and withholds the Start form when not startable", async () => {
@@ -293,9 +369,29 @@ describe("POST /issues/:project/:number/start (#861)", () => {
       projectName: "alpha",
       provider: "omp",
       snapshotPolledAt: POLLED_AT,
-      snapshotRepository: { owner: "pmatos", repo: "alpha" }
+      snapshotRepository: { owner: "pmatos", repo: "alpha" },
+      stateProviders: {}
     });
     expect(html).toContain("the Ready Label was added on GitHub");
+  });
+
+  it("forwards per-state choices to the service (#862)", async () => {
+    const { app, service } = await setup(previewFixture());
+    await app.request("/issues/alpha/7/start", {
+      body: formBody({
+        ...fields,
+        "state_provider:implement": "",
+        "state_provider:review": "codex"
+      }),
+      headers: browserHeaders(),
+      method: "POST"
+    });
+
+    expect(service.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stateProviders: { implement: "", review: "codex" }
+      })
+    );
   });
 
   it("reports a label write failure without claiming success", async () => {

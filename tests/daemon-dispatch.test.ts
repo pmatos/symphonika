@@ -3198,6 +3198,129 @@ describe("daemon dispatch", () => {
     }
   });
 
+  it("routes each agent state by the operator's per-state choice, keeping it across a retry (#862)", async () => {
+    const root = await makeTempRoot();
+    // planning declares codex, autofix declares claude; the Project default is
+    // codex. The operator picks claude chain-wide and codex for autofix only.
+    await writePerStateProviderRawFsmProject(root);
+    const seedStore = openRunStore({
+      stateRoot: path.join(root, ".symphonika")
+    });
+    try {
+      seedStore.createProviderPlan({
+        graphFingerprint: "sha256:graph",
+        id: "plan-per-state",
+        issueNumber: 8,
+        projectName: "symphonika",
+        provider: "claude",
+        readyLabel: "agent-ready",
+        repository: { owner: "pmatos", repo: "symphonika" },
+        snapshotPolledAt: "2026-10-09T10:00:00.000Z",
+        stateProviders: { autofix: "codex" }
+      });
+      seedStore.markProviderPlanLabelResult("plan-per-state", { ok: true });
+    } finally {
+      seedStore.close();
+    }
+
+    const issue = issueFixture({
+      labels: ["agent-ready"],
+      number: 8,
+      title: "Dispatch an end-to-end run through a test provider"
+    });
+    const githubIssuesApi = {
+      addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
+      getIssue: vi.fn().mockResolvedValue(issue),
+      listOpenIssues: vi
+        .fn()
+        .mockResolvedValueOnce([issue])
+        .mockResolvedValue([]),
+      removeLabelsFromIssue: vi.fn().mockResolvedValue(undefined)
+    };
+    const claudeInputs: ProviderRunInput[] = [];
+    const codexInputs: ProviderRunInput[] = [];
+    const claudeProvider = successfulProvider("claude", claudeInputs);
+    const codexProvider: AgentProvider = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      name: "codex",
+      runAttempt: vi.fn(async function* (
+        input: ProviderRunInput
+      ): AsyncGenerator<ProviderEvent> {
+        await Promise.resolve();
+        codexInputs.push(input);
+        const exitCode = codexInputs.length === 1 ? 1 : 0;
+        yield {
+          normalized: { exitCode, type: "process_exit" },
+          raw: { code: exitCode, kind: "exit" }
+        };
+      }),
+      validate: vi.fn().mockResolvedValue(undefined)
+    };
+    const preparedWorkspace = preparedWorkspaceFixture(root);
+    await createGitWorkspaceAhead(preparedWorkspace);
+
+    let runCounter = 0;
+    const daemon = await startDaemon({
+      agentProviders: { claude: claudeProvider, codex: codexProvider },
+      createRunId: () => `run-fsm-plan-${++runCounter}`,
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      lifecyclePolicy: {
+        continuation: { cap: 0, delayMs: 5 },
+        retry: { cap: 1, delaysMs: [5], maxBackoffMs: 10 }
+      },
+      logger: pino({ enabled: false }),
+      port: 0,
+      prepareIssueWorkspace: () => Promise.resolve(preparedWorkspace)
+    });
+
+    try {
+      await waitForTerminalState(root, "done");
+
+      expect(claudeInputs).toHaveLength(1);
+      expect(codexInputs).toHaveLength(2);
+
+      const database = new Database(
+        path.join(root, ".symphonika", "symphonika.db"),
+        { readonly: true }
+      );
+      try {
+        const runs = database
+          .prepare(
+            "select id, provider_name, provider_source from runs order by created_at"
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(runs).toMatchObject([
+          {
+            id: "run-fsm-plan-1",
+            provider_name: "claude",
+            provider_source: "operator_chain"
+          },
+          {
+            id: "run-fsm-plan-2",
+            provider_name: "codex",
+            provider_source: "operator_state"
+          }
+        ]);
+        const attempts = database
+          .prepare(
+            "select run_id, provider_name from attempts order by created_at"
+          )
+          .all() as Array<Record<string, unknown>>;
+        expect(attempts).toMatchObject([
+          { provider_name: "claude", run_id: "run-fsm-plan-1" },
+          { provider_name: "codex", run_id: "run-fsm-plan-2" },
+          { provider_name: "codex", run_id: "run-fsm-plan-2" }
+        ]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("honors action.provider on the initial raw-FSM state during fresh dispatch", async () => {
     const root = await makeTempRoot();
     await writeInitialStateClaudeRawFsmProject(root);
@@ -3259,11 +3382,14 @@ describe("daemon dispatch", () => {
       );
       try {
         const rows = database
-          .prepare("select id, provider_name from runs order by created_at")
+          .prepare(
+            "select id, provider_name, provider_source from runs order by created_at"
+          )
           .all() as Array<Record<string, unknown>>;
         expect(rows[0]).toMatchObject({
           id: "run-fsm-initial-1",
-          provider_name: "claude"
+          provider_name: "claude",
+          provider_source: "workflow_action"
         });
       } finally {
         database.close();

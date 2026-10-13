@@ -8,6 +8,7 @@ import type {
   IssueSnapshot,
   RawGitHubIssueDependencyRef
 } from "./issue-polling.js";
+import { isAgentProviderName } from "./human-resume-command.js";
 import { normalizeProjectWeight } from "./issue-priority.js";
 import { isNoWorkspaceChangesReason } from "./lifecycle/terminal-reason.js";
 import { symphonikaSubject } from "./notifications/message.js";
@@ -182,6 +183,9 @@ export type RunStatus = {
   project: string;
   provider: string;
   providerScopeCleanupPending: boolean;
+  // Which precedence level chose `provider` at launch (#862); null for Runs
+  // that predate the column or launched no provider of their own.
+  providerSource: ProviderSelectionSource | null;
   retryCount: number;
   state: RunState;
   stateTransitionReason: string | null;
@@ -660,6 +664,7 @@ export type CreateRunInput = {
   projectName: string;
   providerCommand: string;
   providerName: AgentProviderName;
+  providerSource?: ProviderSelectionSource;
 };
 
 export type RunEvidenceInput = {
@@ -718,6 +723,7 @@ type RunRow = {
   project_name: string;
   provider_name: string | null;
   provider_scope_cleanup_pending: number;
+  provider_source: string | null;
   retry_count: number;
   state: RunState;
   state_transition_reason: string | null;
@@ -1370,6 +1376,7 @@ type InsertRunRowInput = {
   projectName: string;
   providerCommand: string | null;
   providerName: AgentProviderName | null;
+  providerSource?: ProviderSelectionSource;
   state: RunState;
   workspacePath?: string;
 };
@@ -1430,6 +1437,26 @@ type ProviderPlanStatus =
   | "cancelled"
   | "superseded";
 
+// Which precedence level chose a Run's provider (#862), recorded on the Run
+// at launch so the timeline never has to re-derive it from a graph that may
+// have changed since: an operator's per-state choice, their chain-wide
+// choice, the state's own `action.provider`, or the Project default.
+const PROVIDER_SELECTION_SOURCES = [
+  "operator_state",
+  "operator_chain",
+  "workflow_action",
+  "project_default"
+] as const;
+
+export type ProviderSelectionSource =
+  (typeof PROVIDER_SELECTION_SOURCES)[number];
+
+function parseProviderSelectionSource(
+  value: string | null
+): ProviderSelectionSource | null {
+  return PROVIDER_SELECTION_SOURCES.find((source) => source === value) ?? null;
+}
+
 export type ProviderPlan = {
   attemptCount: number;
   consumedRunId: string | null;
@@ -1443,6 +1470,9 @@ export type ProviderPlan = {
   readyLabel: string;
   repository: { owner: string; repo: string };
   snapshotPolledAt: string;
+  // Per-agent-state exceptions to `provider` (#862), keyed by state id. A
+  // state absent here runs on the chain-wide `provider`.
+  stateProviders: Readonly<Record<string, AgentProviderName>>;
   status: ProviderPlanStatus;
   updatedAt: string;
 };
@@ -1456,6 +1486,7 @@ export type CreateProviderPlanInput = {
   readyLabel: string;
   repository: { owner: string; repo: string };
   snapshotPolledAt: string;
+  stateProviders?: Readonly<Record<string, AgentProviderName>>;
 };
 
 type ProviderPlanDbRow = {
@@ -1472,6 +1503,7 @@ type ProviderPlanDbRow = {
   repository_name: string;
   repository_owner: string;
   snapshot_polled_at: string;
+  state_providers_json: string | null;
   status: string;
   updated_at: string;
 };
@@ -1479,6 +1511,34 @@ type ProviderPlanDbRow = {
 const PROVIDER_PLAN_LIVE_STATUSES_SQL =
   "('pending', 'label_written', 'label_failed', 'expired')";
 const PROVIDER_PLAN_PENDING_TTL_MS = 60 * 60 * 1000;
+
+// Written only by createProviderPlan from validated input; still parsed
+// defensively so a hand-edited row cannot route a state to an unknown name.
+function parseStoredStateProviders(
+  json: string | null
+): Readonly<Record<string, AgentProviderName>> {
+  if (json === null) {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return {};
+  }
+  const result: Record<string, AgentProviderName> = {};
+  for (const [stateId, provider] of Object.entries(
+    parsed as Record<string, unknown>
+  )) {
+    if (typeof provider === "string" && isAgentProviderName(provider)) {
+      result[stateId] = provider;
+    }
+  }
+  return result;
+}
 
 function mapProviderPlanRow(row: ProviderPlanDbRow): ProviderPlan {
   return {
@@ -1494,6 +1554,7 @@ function mapProviderPlanRow(row: ProviderPlanDbRow): ProviderPlan {
     readyLabel: row.ready_label,
     repository: { owner: row.repository_owner, repo: row.repository_name },
     snapshotPolledAt: row.snapshot_polled_at,
+    stateProviders: parseStoredStateProviders(row.state_providers_json),
     status: row.status as ProviderPlanStatus,
     updatedAt: row.updated_at
   };
@@ -1584,11 +1645,11 @@ export class RunStore {
             "insert into run_chain_provider_plans (",
             "id, project_name, issue_number, repository_owner, repository_name,",
             "provider, graph_fingerprint, snapshot_polled_at, ready_label, status,",
-            "attempt_count, created_at, updated_at",
+            "attempt_count, state_providers_json, created_at, updated_at",
             ") values (",
             "@id, @projectName, @issueNumber, @owner, @repo,",
             "@provider, @graphFingerprint, @snapshotPolledAt, @readyLabel, 'pending',",
-            "1, @now, @now)"
+            "1, @stateProvidersJson, @now, @now)"
           ].join(" ")
         )
         .run({
@@ -1601,7 +1662,8 @@ export class RunStore {
           provider: input.provider,
           readyLabel: input.readyLabel,
           repo: input.repository.repo,
-          snapshotPolledAt: input.snapshotPolledAt
+          snapshotPolledAt: input.snapshotPolledAt,
+          stateProvidersJson: JSON.stringify(input.stateProviders ?? {})
         });
     });
     apply();
@@ -1933,6 +1995,9 @@ export class RunStore {
         projectName: input.projectName,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
+        ...(input.providerSource === undefined
+          ? {}
+          : { providerSource: input.providerSource }),
         state: "queued",
         ...(parent?.workspace_path == null
           ? {}
@@ -2645,13 +2710,13 @@ export class RunStore {
             "insert into runs (",
             "id, project_name, issue_number, issue_title, state, issue_snapshot_json,",
             "issue_owner, issue_repo,",
-            "evidence_ignore_json, provider_name, provider_command,",
+            "evidence_ignore_json, provider_name, provider_command, provider_source,",
             "is_continuation, continuation_parent_run_id, workspace_path, branch_name,",
             "created_at, updated_at",
             ") values (",
             "@id, @project_name, @issue_number, @issue_title, @state, @issue_snapshot_json,",
             "@issue_owner, @issue_repo,",
-            "@evidence_ignore_json, @provider_name, @provider_command,",
+            "@evidence_ignore_json, @provider_name, @provider_command, @provider_source,",
             "@is_continuation, @continuation_parent_run_id, @workspace_path, @branch_name,",
             "@created_at, @updated_at",
             ")"
@@ -2672,6 +2737,7 @@ export class RunStore {
           project_name: input.projectName,
           provider_command: input.providerCommand,
           provider_name: input.providerName,
+          provider_source: input.providerSource ?? null,
           state: input.state,
           updated_at: now,
           workspace_path: input.workspacePath ?? null
@@ -5590,7 +5656,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, issue_number, issue_title, state, provider_name,",
+          "select id, project_name, issue_number, issue_title, state, provider_name, provider_source,",
           "workspace_path, branch_name,",
           "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
@@ -5661,7 +5727,7 @@ export class RunStore {
     const rows = this.database
       .prepare(
         [
-          "select id, project_name, issue_number, issue_title, state, provider_name,",
+          "select id, project_name, issue_number, issue_title, state, provider_name, provider_source,",
           "workspace_path, branch_name,",
           "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
@@ -5766,7 +5832,7 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "select id, project_name, issue_number, issue_title, state, provider_name,",
+          "select id, project_name, issue_number, issue_title, state, provider_name, provider_source,",
           "workspace_path, branch_name,",
           "current_state_id, terminal_state_id, state_transition_reason,",
           "is_continuation, continuation_parent_run_id, retry_count,",
@@ -7668,6 +7734,8 @@ export class RunStore {
       ["runs", "provider_scope_cleanup_pending", "integer not null default 0"],
       ["runs", "workspace_pruned_at", "text"],
       ["runs", "provider_plan_id", "text"],
+      ["runs", "provider_source", "text"],
+      ["run_chain_provider_plans", "state_providers_json", "text"],
       // Defensive: workspace_path has been in the base `create table` since
       // this table's first version, so no real database should ever reach
       // this line missing it. It is here only so the new
@@ -8575,6 +8643,7 @@ function mapRunRow(row: RunRow): RunStatus {
     project: row.project_name,
     provider: row.provider_name ?? "",
     providerScopeCleanupPending: row.provider_scope_cleanup_pending === 1,
+    providerSource: parseProviderSelectionSource(row.provider_source),
     retryCount: row.retry_count ?? 0,
     state: row.state,
     stateTransitionReason: row.state_transition_reason ?? null,

@@ -849,6 +849,74 @@ describe("GET /issues/:project/:number — Run Chain timeline (#859)", () => {
     }
   });
 
+  it("names the recorded provider source, including an operator's choice (#862)", async () => {
+    const test = await setup();
+    try {
+      seedSnapshot(test.runStore, 96, "Operator routed");
+      const issue = sampleIssue({ number: 96, title: "Operator routed" });
+      test.runStore.createRun({
+        id: "op-root",
+        issue,
+        projectName: "alpha",
+        providerCommand: "omp",
+        providerName: "omp",
+        providerSource: "operator_chain"
+      });
+      test.runStore.setRunCurrentState("op-root", "review");
+      test.runStore.updateRunState("op-root", "succeeded");
+      test.runStore.createContinuationRun({
+        id: "op-review",
+        issue,
+        parentRunId: "op-root",
+        projectName: "alpha",
+        providerCommand: "codex",
+        providerName: "codex",
+        providerSource: "operator_state"
+      });
+      for (const [runId, provider] of [
+        ["op-root", "omp"],
+        ["op-review", "codex"]
+      ] as const) {
+        test.runStore.createAttempt({
+          attemptNumber: 1,
+          branchName: "sym/alpha/96",
+          branchRef: "refs/heads/sym/alpha/96",
+          id: `${runId}-attempt-1`,
+          issueSnapshotPath: "",
+          metadataPath: "",
+          normalizedLogPath: "",
+          promptPath: "",
+          providerCommand: provider,
+          providerName: provider,
+          rawLogPath: "",
+          runId,
+          state: "succeeded",
+          workflowGraphPath: "",
+          workspacePath: test.stateRoot
+        });
+      }
+
+      const app = createHttpApp({
+        runStore: test.runStore,
+        stateRoot: test.stateRoot,
+        version: "0.1.0"
+      });
+      const html = await (await app.request("/issues/alpha/96")).text();
+
+      expect(html).toContain(
+        'omp <span class="muted">— operator choice for the Run Chain</span>'
+      );
+      expect(html).toContain(
+        'codex <span class="muted">— operator choice for this state</span>'
+      );
+      expect(test.runStore.getRun("op-review")?.providerSource).toBe(
+        "operator_state"
+      );
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("keeps a still-waiting parent 'Waiting' even after a PR review follow-up continuation off it", async () => {
     const test = await setup();
     try {

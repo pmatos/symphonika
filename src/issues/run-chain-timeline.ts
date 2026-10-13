@@ -14,9 +14,9 @@
 // executed is only recoverable from its *parent's* row (or, for a chain's
 // root, from that root's own captured graph's `initial`).
 
+import { isAgentState } from "../lifecycle/chain-provider.js";
 import { findWorkflowState } from "../lifecycle/state-machine-dispatch.js";
-import type { AgentProviderName } from "../provider.js";
-import type { RunStatus } from "../run-store.js";
+import type { ProviderSelectionSource, RunStatus } from "../run-store.js";
 import type {
   ExpandedWorkflow,
   ExpandedWorkflowState,
@@ -305,24 +305,37 @@ export function findWorkflowStateNode(
 export type ProviderSource =
   | { kind: "no_provider" }
   | { kind: "not_recorded" }
+  | { kind: "operator_chain" }
+  | { kind: "operator_state" }
   | { kind: "project_default" }
-  | { declaredProvider: AgentProviderName; kind: "workflow_state" };
+  | { declaredProvider: string; kind: "workflow_state" };
 
-// Where the action's provider came from, per that state's *own* captured
-// graph node — never the chain's newest graph, which may postdate this Run
-// if the workflow changed mid-chain (ADR-2026-09-10-2031-adjacent concern).
+// Where the action's provider came from. A Run launched since #862 records
+// the precedence level that chose it, and that record wins: an operator's
+// choice is invisible in any graph. Older Runs fall back to that state's
+// *own* captured graph node — never the chain's newest graph, which may
+// postdate this Run if the workflow changed mid-chain
+// (ADR-2026-09-10-2031-adjacent concern).
 export function resolveProviderSource(
   graph: ExpandedWorkflow | undefined,
-  stateId: string | undefined
+  stateId: string | undefined,
+  recorded?: { provider: string; source: ProviderSelectionSource | null }
 ): ProviderSource {
   const node = findWorkflowStateNode(graph, stateId);
+  // A state the captured graph knows has no agent action launched no
+  // provider of its own, whatever its Run row recorded at the claim.
+  if (node !== undefined && !isAgentState(node)) {
+    return { kind: "no_provider" };
+  }
+  if (recorded?.source != null) {
+    return recorded.source === "workflow_action"
+      ? { declaredProvider: recorded.provider, kind: "workflow_state" }
+      : { kind: recorded.source };
+  }
   if (node === undefined) {
     return { kind: "not_recorded" };
   }
-  if (node.action?.kind !== "agent") {
-    return { kind: "no_provider" };
-  }
-  return node.action.provider === undefined
+  return node.action?.provider === undefined
     ? { kind: "project_default" }
     : { declaredProvider: node.action.provider, kind: "workflow_state" };
 }

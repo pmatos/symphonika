@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { openRunStore, type RunStore } from "../src/run-store.js";
+import Database from "better-sqlite3";
+
+import { databasePath, openRunStore, type RunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -232,6 +234,108 @@ describe("RunStore provider plans", () => {
       seedRun(store, "run-plain");
       expect(store.getChainProviderPlan("run-plain")).toBeUndefined();
       expect(store.getChainProviderPlan("missing")).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("round-trips per-state choices and defaults to none (#862)", async () => {
+    const { store } = await openTempStore();
+    try {
+      expect(store.createProviderPlan(planInput()).stateProviders).toEqual({});
+      const plan = store.createProviderPlan(
+        planInput({
+          id: "plan-2",
+          stateProviders: { implement: "claude", review: "codex" }
+        })
+      );
+      expect(plan.stateProviders).toEqual({
+        implement: "claude",
+        review: "codex"
+      });
+      seedRun(store, "root");
+      store.consumeProviderPlan("plan-2", "root");
+      seedRun(store, "child", "root");
+      expect(store.getChainProviderPlan("child")?.stateProviders).toEqual({
+        implement: "claude",
+        review: "codex"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("records the provider source on a Run (#862)", async () => {
+    const { store } = await openTempStore();
+    try {
+      store.createRun({
+        id: "sourced",
+        issue: {
+          body: "",
+          created_at: "2026-10-09T09:00:00Z",
+          id: 7,
+          labels: [],
+          number: 7,
+          priority: 0,
+          state: "open",
+          title: "Issue",
+          updated_at: "2026-10-09T09:00:00Z",
+          url: "https://github.com/Acme/Widgets/issues/7"
+        },
+        projectName: "widgets",
+        providerCommand: "echo",
+        providerName: "omp",
+        providerSource: "operator_state"
+      });
+      seedRun(store, "unsourced");
+      expect(store.getRun("sourced")?.providerSource).toBe("operator_state");
+      expect(store.getRun("unsourced")?.providerSource).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it.each([
+    ["not json", {}],
+    ['["codex"]', {}],
+    ["null", {}],
+    ['{"review":"codex","plan":"gpt","x":3}', { review: "codex" }]
+  ])(
+    "reads a hand-edited state_providers_json %s defensively (#862)",
+    async (json, expected) => {
+      const { store, root } = await openTempStore();
+      try {
+        store.createProviderPlan(planInput());
+        const db = new Database(databasePath(root));
+        try {
+          db.prepare(
+            "update run_chain_provider_plans set state_providers_json = ? where id = 'plan-1'"
+          ).run(json);
+        } finally {
+          db.close();
+        }
+        expect(store.getProviderPlan("plan-1")?.stateProviders).toEqual(
+          expected
+        );
+      } finally {
+        store.close();
+      }
+    }
+  );
+
+  it("ignores an unknown recorded provider source (#862)", async () => {
+    const { store, root } = await openTempStore();
+    try {
+      seedRun(store, "run-odd");
+      const db = new Database(databasePath(root));
+      try {
+        db.prepare(
+          "update runs set provider_source = 'mystery' where id = 'run-odd'"
+        ).run();
+      } finally {
+        db.close();
+      }
+      expect(store.getRun("run-odd")?.providerSource).toBeNull();
     } finally {
       store.close();
     }

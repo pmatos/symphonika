@@ -4192,30 +4192,97 @@ export class RunController {
       cancelRequested: false,
       redactSecrets: this.redactionInventory(input.repository.token)
     });
-    const state = mapOutcomeToRunState(terminal);
     const willRetry = this.isRetryableTransientFailure(terminal, input.runId);
     this.runStore.recordTerminalReason(
       input.runId,
       terminal.reason,
       terminal.classification
     );
-    this.runStore.updateRunState(input.runId, state);
-    this.markNotificationPendingIfNeeded(input.runId, willRetry);
-    await this.claimLabels.applyTerminal({
-      fsmContinuing: false,
-      issueNumber: input.issue.number,
+    const completion = await this.completeTerminalRun({
+      ...input,
       outcome: terminal,
+      willRetry
+    });
+    this.logger?.warn(
+      {
+        classification: terminal.classification,
+        issueNumber: input.issue.number,
+        project: input.project.name,
+        runId: input.runId,
+        state: completion.state,
+        terminalReason: terminal.reason,
+        willRetry
+      },
+      "symphonika reconciled Run after claim persistence failed"
+    );
+  }
+
+  // Requires dispatchMutex to be held by the caller. Classification, Attempt
+  // evidence, terminal reasons, and mutex ownership stay with each entry point.
+  private async completeTerminalRun(input: {
+    attemptNumber: number;
+    cancelReason?: CancelReason;
+    extraInstructions?: string;
+    issue: IssueSnapshot;
+    onPersisted?: (completion: {
+      state: ReturnType<typeof mapOutcomeToRunState>;
+      willRetry: boolean;
+    }) => void;
+    outcome: ClassifiedTerminal;
+    project: DispatchProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    repository: GitHubIssueRepositoryInput;
+    respectsIssueLabels?: boolean;
+    runId: string;
+    // Claim repair assesses retry eligibility before recording its reason.
+    willRetry?: boolean;
+    // Only raw-FSM results participate in continuation suppression.
+    workflow?: WorkflowOutcomeResult;
+  }): Promise<{
+    state: ReturnType<typeof mapOutcomeToRunState>;
+    willRetry: boolean;
+  }> {
+    const state = mapOutcomeToRunState(input.outcome);
+    this.runStore.updateRunState(input.runId, state);
+    const willRetry =
+      input.willRetry ??
+      this.isRetryableTransientFailure(input.outcome, input.runId);
+    // The Run row is reused by transient retries. Exhaustion makes the final
+    // attempt visible to the durable notification digest (ADR 0071).
+    this.markNotificationPendingIfNeeded(input.runId, willRetry);
+    const completion = { state, willRetry };
+    input.onPersisted?.(completion);
+
+    const workflow = input.workflow;
+    // A raw-FSM walk can continue despite a per-state failure (for example,
+    // a planning state that succeeds without commits). Do not leave a failed
+    // label on an Issue whose next state or wait park still owns it (ADR 0046).
+    const fsmContinuing =
+      workflow !== undefined &&
+      (workflow.advancedToState !== null || workflow.parkAsWait === true);
+    const labelInput: ApplyLabelsInput = {
+      fsmContinuing,
+      issueNumber: input.issue.number,
+      outcome: input.outcome,
       repository: input.repository,
       runId: input.runId,
       willRetry
-    });
+    };
+    if (input.cancelReason !== undefined) {
+      labelInput.cancelReason = input.cancelReason;
+    }
+    await this.claimLabels.applyTerminal(labelInput);
+
+    // scheduleNext owns retry, Continuation, State Advance, and wait-park
+    // policy. Its failure stays diagnostic and never replaces the outcome.
     try {
       await this.scheduleNext({
         ...(input.extraInstructions === undefined
           ? {}
           : { extraInstructions: input.extraInstructions }),
         issue: input.issue,
-        outcome: terminal,
+        outcome: input.outcome,
         project: input.project,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
@@ -4225,7 +4292,22 @@ export class RunController {
           : { respectsIssueLabels: input.respectsIssueLabels }),
         runId: input.runId,
         runtimeAttemptNumber: input.attemptNumber,
-        willRetry
+        willRetry,
+        stateAdvance:
+          workflow !== undefined &&
+          workflow.advancedToState !== null &&
+          workflow.parkAsWait !== true
+            ? { toStateId: workflow.advancedToState }
+            : null,
+        waitPark:
+          workflow?.parkAsWait === true && workflow.waitingRunId !== undefined
+            ? { waitingRunId: workflow.waitingRunId }
+            : null,
+        suppressContinuation:
+          workflow !== undefined &&
+          (workflow.advancedToTerminal ||
+            workflow.blocked ||
+            workflow.advancedToState !== null)
       });
     } catch (scheduleError) {
       this.logger?.error(
@@ -4233,18 +4315,7 @@ export class RunController {
         "symphonika scheduleNext failed"
       );
     }
-    this.logger?.warn(
-      {
-        classification: terminal.classification,
-        issueNumber: input.issue.number,
-        project: input.project.name,
-        runId: input.runId,
-        state,
-        terminalReason: terminal.reason,
-        willRetry
-      },
-      "symphonika reconciled Run after claim persistence failed"
-    );
+    return completion;
   }
 
   // A run that exits 0 with commits ahead of base but whose Issue Branch never
@@ -5349,13 +5420,6 @@ export class RunController {
           effectiveOutcome.reason,
           effectiveOutcome.classification
         );
-        const sourceKind = loadedWorkflow?.expandedWorkflow.source.kind;
-        const isRawFsm = sourceKind === "raw_fsm";
-        const suppressContinuation =
-          isRawFsm &&
-          (workflowOutcome.advancedToTerminal ||
-            workflowOutcome.blocked ||
-            workflowOutcome.advancedToState !== null);
         // Hold dispatchMutex from the terminal-state write through
         // scheduleNext's registration of the retry/continuation/state-advance
         // callback (this.schedule, surfaced to readers via getScheduled).
@@ -5368,102 +5432,35 @@ export class RunController {
         // it here closes that window instead of racing it.
         await this.dispatchMutex.acquire();
         try {
-          this.runStore.updateRunState(input.runId, outcomeState);
-
-          const willRetry = this.isRetryableTransientFailure(
-            effectiveOutcome,
-            input.runId
-          );
-          // updateRunState deliberately defers transient failures because the
-          // same Run row is reused by retries. Once the budget is exhausted,
-          // this is the point that makes the genuinely-terminal attempt
-          // visible to the durable notification digest (ADR 0071).
-          this.markNotificationPendingIfNeeded(input.runId, willRetry);
-
-          this.logger?.info(
-            {
-              attemptNumber: input.attemptNumber,
-              cancelReason,
-              cancelRequested,
-              classification: effectiveOutcome.classification,
-              isContinuation: input.isContinuation,
-              issueNumber: input.issue.number,
-              kind: effectiveOutcome.kind,
-              project: input.project.name,
-              runId: input.runId,
-              state: outcomeState,
-              terminalReason: effectiveOutcome.reason,
-              willRetry,
-              workflowTerminalLabel: workflowOutcome.terminalLabel
-            },
-            "symphonika run terminated"
-          );
-
-          // The raw-FSM walk is "continuing" when applyWorkflowOutcome either
-          // advanced into a non-terminal next state or parked into a wait/merge_pr
-          // action. In both cases the per-state ClassifiedTerminal may legitimately
-          // be `failed` (e.g. a planning step that exited provider_success=true
-          // without committing → no_workspace_changes) while the workflow as a
-          // whole is not failing. The claim-label writer's `applyTerminal` uses
-          // this to suppress `sym:failed`, which subsequent successful states
-          // would otherwise leave
-          // on the issue forever.
-          const fsmContinuing =
-            isRawFsm &&
-            (workflowOutcome.advancedToState !== null ||
-              workflowOutcome.parkAsWait === true);
-          const labelInput: ApplyLabelsInput = {
-            fsmContinuing,
-            issueNumber: input.issue.number,
+          await this.completeTerminalRun({
+            ...input,
             outcome: effectiveOutcome,
-            repository: input.repository,
-            runId: input.runId,
-            willRetry
-          };
-          if (cancelReason !== undefined) {
-            labelInput.cancelReason = cancelReason;
-          }
-          await this.claimLabels.applyTerminal(labelInput);
-
-          // scheduleNext also handles transient throws (kind=failed/transient with retry budget).
-          // It is a no-op for cancelled, deterministic, and input_required outcomes.
-          try {
-            await this.scheduleNext({
-              ...(input.extraInstructions === undefined
-                ? {}
-                : { extraInstructions: input.extraInstructions }),
-              issue: input.issue,
-              outcome: effectiveOutcome,
-              project: input.project,
-              providerCommand: input.providerCommand,
-              providerName: input.providerName,
-              repository: input.repository,
-              respectsIssueLabels,
-              runId: input.runId,
-              runtimeAttemptNumber: input.attemptNumber,
-              willRetry,
-              stateAdvance:
-                isRawFsm &&
-                workflowOutcome.advancedToState !== null &&
-                workflowOutcome.parkAsWait !== true
-                  ? {
-                      toStateId: workflowOutcome.advancedToState
-                    }
-                  : null,
-              waitPark:
-                isRawFsm &&
-                workflowOutcome.parkAsWait === true &&
-                workflowOutcome.waitingRunId !== undefined
-                  ? { waitingRunId: workflowOutcome.waitingRunId }
-                  : null,
-              suppressContinuation
-            });
-          } catch (scheduleError) {
-            this.logger?.error(
-              { err: scheduleError, runId: input.runId },
-              "symphonika scheduleNext failed"
-            );
-          }
+            respectsIssueLabels,
+            ...(cancelReason === undefined ? {} : { cancelReason }),
+            ...(loadedWorkflow?.expandedWorkflow.source.kind === "raw_fsm"
+              ? { workflow: workflowOutcome }
+              : {}),
+            onPersisted: ({ state, willRetry }) => {
+              this.logger?.info(
+                {
+                  attemptNumber: input.attemptNumber,
+                  cancelReason,
+                  cancelRequested,
+                  classification: effectiveOutcome.classification,
+                  isContinuation: input.isContinuation,
+                  issueNumber: input.issue.number,
+                  kind: effectiveOutcome.kind,
+                  project: input.project.name,
+                  runId: input.runId,
+                  state,
+                  terminalReason: effectiveOutcome.reason,
+                  willRetry,
+                  workflowTerminalLabel: workflowOutcome.terminalLabel
+                },
+                "symphonika run terminated"
+              );
+            }
+          });
         } finally {
           this.dispatchMutex.release();
         }

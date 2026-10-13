@@ -508,6 +508,12 @@ _Avoid_: daemon log line, issue Run digest
 **Run Lifecycle**:
 The stateful progression of one Run from dispatch selection through provider execution, scheduling,
 waiting, cancellation, or terminal labels.
+The controller completes classified outcomes through one private operation, shared by post-create
+claim repair and ordinary Attempt completion. It publishes Run state, accounts for retry-dependent
+notification deferral, applies terminal labels, and schedules the next Planned Step under the
+caller's already-held dispatch mutex. Classification, Attempt evidence, terminal-reason writes,
+and Watchdog verdict preservation remain with each entry point; raw-FSM continuation flags are
+derived once from its Workflow Advancement result.
 The controller registers delayed retry, Continuation, and State Advance Planned Steps through one
 private operation that pairs refused-registration and cleared-timer cancellation with the durable
 owning Run. That owner may differ from the prospective child Run named by the scheduler. Accepted

@@ -239,6 +239,17 @@ describe("dispatch continuation cap", () => {
             run["terminalReason"] === "cap_reached:no_commits"
         )
       );
+      // The cap-reached row is persisted before markFailed posts the comment
+      // and release drops sym:claimed, so wait for that last step too rather
+      // than racing the assertions below against it.
+      await vi.waitFor(() => {
+        expect(
+          githubIssuesApi.removeLabelsFromIssue.mock.calls.some(
+            ([call]) =>
+              (call as { labels: string[] }).labels[0] === "sym:claimed"
+          )
+        ).toBe(true);
+      });
 
       const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
         r.json()

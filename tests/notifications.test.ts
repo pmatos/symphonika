@@ -142,6 +142,39 @@ describe("Routine Fan-out notifications", () => {
     expect(message.text).not.toContain("Deepen verification ladder");
   });
 
+  it("falls back to the outcome detail for a verified PR without a GitHub pull URL", () => {
+    const outcome = {
+      action: "pr" as const,
+      source: "claude" as const,
+      status: "success" as const,
+      summary: "Opened a PR.",
+      title: "Off-GitHub refactor",
+      verified: true
+    };
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: { ...outcome, url: "https://example.com/pull/3" },
+          pullRequests: []
+        })
+      }),
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: { ...outcome, url: null },
+          pullRequests: []
+        }),
+        projectName: "beta"
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain(
+      "succeeded — Off-GitHub refactor https://example.com/pull/3"
+    );
+    expect(message.text).toContain("- beta: succeeded — Off-GitHub refactor");
+  });
+
   it("keeps an unverified PR claim as an explained claim rather than a PR link", () => {
     const fanout = fakeFanout([
       fakeFanoutTarget({

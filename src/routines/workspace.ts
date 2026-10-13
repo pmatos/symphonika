@@ -101,6 +101,8 @@ export async function prepareRoutineWorkspace(
           "-C",
           cachePath,
           "branch",
+          // Keep firing branches upstream-less (ADR-2026-09-11-1001).
+          "--no-track",
           branchName,
           `origin/${input.project.workspace.git.base_branch}`
         ],

@@ -38,6 +38,59 @@ afterEach(async () => {
 });
 
 describe("Routine workspace preparation", () => {
+  it("creates the firing branch without an upstream even when the cache maps remote-tracking refs", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const input = {
+      configDir: root,
+      kind: "git" as const,
+      project: {
+        name: "alpha",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      },
+      routineName: "refactor-audit"
+    };
+    const first = await prepareRoutineWorkspace({
+      ...input,
+      firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12"
+    });
+    // Worktrees share the cache's config, so this refspec makes git's default
+    // autoSetupMerge track origin/main unless --no-track is passed.
+    await git([
+      "-C",
+      first.cachePath,
+      "config",
+      "remote.origin.fetch",
+      "+refs/heads/*:refs/remotes/origin/*"
+    ]);
+
+    const prepared = await prepareRoutineWorkspace({
+      ...input,
+      firingId: "01KABCDEFGHJKMNPQRSTVWXYZ12"
+    });
+
+    const branch = await git([
+      "-C",
+      prepared.workspacePath,
+      "rev-parse",
+      "--abbrev-ref",
+      "HEAD"
+    ]);
+    await expect(
+      git([
+        "-C",
+        prepared.workspacePath,
+        "config",
+        "--get",
+        `branch.${branch}.merge`
+      ])
+    ).rejects.toThrow();
+  });
+
   it("cancels clone and fetch helper process trees without poisoning the shared cache", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

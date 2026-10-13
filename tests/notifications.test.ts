@@ -112,6 +112,167 @@ describe("Routine Fan-out notifications", () => {
     );
   });
 
+  it("renders a verified PR opened from another branch like a discovered one", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "pr",
+            source: "claude",
+            status: "success",
+            summary:
+              "Opened the PR from pm-deepen/observed-ladder-consumption.",
+            title: "Deepen verification ladder consumption",
+            url: "https://github.com/pmatos/forseti/pull/350",
+            verified: true
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain(
+      "succeeded — PR #350 (https://github.com/pmatos/forseti/pull/350)"
+    );
+    expect(message.html).toContain(
+      'succeeded — PR <a href="https://github.com/pmatos/forseti/pull/350">#350</a>'
+    );
+    expect(message.text).not.toContain("Deepen verification ladder");
+  });
+
+  it("falls back to the outcome detail for a verified PR without a GitHub pull URL", () => {
+    const outcome = {
+      action: "pr" as const,
+      source: "claude" as const,
+      status: "success" as const,
+      summary: "Opened a PR.",
+      title: "Off-GitHub refactor",
+      verified: true
+    };
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: { ...outcome, url: "https://example.com/pull/3" },
+          pullRequests: []
+        })
+      }),
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: { ...outcome, url: null },
+          pullRequests: []
+        }),
+        projectName: "beta"
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain(
+      "succeeded — Off-GitHub refactor https://example.com/pull/3"
+    );
+    expect(message.text).toContain("- beta: succeeded — Off-GitHub refactor");
+  });
+
+  it("falls back to defaults for legs and outcomes missing their reasons", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        disposition: "skipped",
+        firing: null,
+        projectName: "skipped-leg"
+      }),
+      fakeFanoutTarget({
+        disposition: "missed",
+        firing: null,
+        projectName: "missed-leg"
+      }),
+      fakeFanoutTarget({
+        deferredAttempts: 1,
+        disposition: "missed",
+        firing: null,
+        projectName: "missed-once",
+        skipReason: "concurrency_cap"
+      }),
+      fakeFanoutTarget({
+        deferredAttempts: 3,
+        disposition: "missed",
+        firing: null,
+        projectName: "missed-thrice",
+        skipReason: "concurrency_cap"
+      }),
+      fakeFanoutTarget({
+        disposition: "held",
+        firing: null,
+        projectName: "held-leg"
+      }),
+      fakeFanoutTarget({
+        disposition: "pending",
+        firing: null,
+        projectName: "pending-leg"
+      }),
+      fakeFanoutTarget({
+        firing: fakeFiring({ outcome: null, pullRequests: [] }),
+        projectName: "no-outcome"
+      }),
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "pr",
+            source: "claude",
+            status: "error",
+            summary: "",
+            title: "Opened PR",
+            url: null,
+            verified: false
+          },
+          pullRequests: []
+        }),
+        projectName: "empty-error"
+      })
+    ]);
+
+    const lines = renderRoutineFanoutNotification(fanout).text.split("\n");
+
+    expect(lines).toEqual(
+      expect.arrayContaining([
+        "- skipped-leg: skipped (unspecified)",
+        "- missed-leg: did not run (unspecified)",
+        "- missed-once: did not run (concurrency_cap) after 1 admission attempt",
+        "- missed-thrice: did not run (concurrency_cap) after 3 admission attempts",
+        "- held-leg: held (provider unavailable)",
+        "- pending-leg: pending",
+        "- no-outcome: succeeded",
+        "- empty-error: succeeded — error (unverified)"
+      ])
+    );
+  });
+
+  it("keeps an unverified PR claim as an explained claim rather than a PR link", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "pr",
+            source: "claude",
+            status: "success",
+            summary: "Opened a PR.",
+            title: "Claimed refactor",
+            url: "https://github.com/pmatos/alpha/pull/12",
+            verified: false
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain(
+      "succeeded — Claimed refactor https://github.com/pmatos/alpha/pull/12 (unverified)"
+    );
+  });
+
   it("explains a succeeded firing that opened no PR instead of leaving it unexplained", () => {
     const fanout = fakeFanout([
       fakeFanoutTarget({

@@ -237,11 +237,12 @@ function claimsMatch(
 // suffix) must never reach reconcileRoutineOutcome marked verified, since
 // that step persists the claim's own url verbatim rather than the verified
 // GitHub-canonical one.
-export function parseGithubClaimUrl(
-  url: string,
-  owner: string,
-  repo: string
-): { kind: "issue" | "pull"; number: number } | null {
+export function parseCanonicalGithubUrl(url: string): {
+  kind: "issue" | "pull";
+  number: number;
+  owner: string;
+  repo: string;
+} | null {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -263,19 +264,31 @@ export function parseGithubClaimUrl(
   if (match === null) {
     return null;
   }
-  const [, matchedOwner, matchedRepo, matchedKind, matchedNumber] = match;
+  const [, owner, repo, matchedKind, matchedNumber] = match;
+  return {
+    kind: matchedKind === "pull" ? "pull" : "issue",
+    number: Number(matchedNumber),
+    owner: owner!,
+    repo: repo!
+  };
+}
+
+export function parseGithubClaimUrl(
+  url: string,
+  owner: string,
+  repo: string
+): { kind: "issue" | "pull"; number: number } | null {
+  const parsed = parseCanonicalGithubUrl(url);
   if (
+    parsed === null ||
     !sameIssueRepository(
-      { owner: matchedOwner!, repo: matchedRepo! },
+      { owner: parsed.owner, repo: parsed.repo },
       { owner, repo }
     )
   ) {
     return null;
   }
-  return {
-    kind: matchedKind === "pull" ? "pull" : "issue",
-    number: Number(matchedNumber)
-  };
+  return { kind: parsed.kind, number: parsed.number };
 }
 
 export function diffRoutineGithubSnapshots(

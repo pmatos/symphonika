@@ -101,13 +101,7 @@ export async function prepareRoutineWorkspace(
           "-C",
           cachePath,
           "branch",
-          // The bare cache has no fetch refspec, but worktrees share its
-          // config, so one `git config remote.origin.fetch ...` inside any
-          // firing workspace is enough for git's default autoSetupMerge to
-          // make every later firing branch track origin/<base_branch>. A
-          // skill that refuses to adopt an upstream-tracking branch (forseti's
-          // pm-deepen) then opens its PR from a branch of its own, which
-          // branch-scoped PR discovery cannot see (ADR-2026-09-11-1001).
+          // Keep firing branches upstream-less (ADR-2026-09-11-1001).
           "--no-track",
           branchName,
           `origin/${input.project.workspace.git.base_branch}`

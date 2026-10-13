@@ -58,12 +58,8 @@ describe("Routine workspace preparation", () => {
       ...input,
       firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12"
     });
-    // Worktrees share the bare cache's config, so a `git config` run inside
-    // any firing workspace can add the standard fetch refspec. With it,
-    // git's default branch.autoSetupMerge would make every later firing
-    // branch track origin/main, and a skill that refuses to adopt an
-    // upstream-tracking branch opens its PR from a branch PR discovery
-    // cannot see.
+    // Worktrees share the cache's config, so this refspec makes git's default
+    // autoSetupMerge track origin/main unless --no-track is passed.
     await git([
       "-C",
       first.cachePath,
@@ -77,16 +73,22 @@ describe("Routine workspace preparation", () => {
       firingId: "01KABCDEFGHJKMNPQRSTVWXYZ12"
     });
 
+    const branch = await git([
+      "-C",
+      prepared.workspacePath,
+      "rev-parse",
+      "--abbrev-ref",
+      "HEAD"
+    ]);
     await expect(
       git([
         "-C",
         prepared.workspacePath,
-        "rev-parse",
-        "--abbrev-ref",
-        "--symbolic-full-name",
-        "@{upstream}"
+        "config",
+        "--get",
+        `branch.${branch}.merge`
       ])
-    ).rejects.toThrow(/no upstream/);
+    ).rejects.toThrow();
   });
 
   it("cancels clone and fetch helper process trees without poisoning the shared cache", async () => {

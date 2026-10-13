@@ -9,7 +9,7 @@ import {
   htmlShell,
   type PullRequestReference
 } from "../notifications/message.js";
-import { unverifiedOutcomeSuffix } from "./outcome.js";
+import { parseCanonicalGithubUrl, unverifiedOutcomeSuffix } from "./outcome.js";
 
 export type RoutineFanoutNotification = {
   fanout: RoutineFanoutStatus;
@@ -100,12 +100,9 @@ function targetSummary(target: RoutineFanoutTargetStatus): {
   // suffix is shared with formatRoutineOutcomeLine so an error or unverified
   // claim never reads as an explained success here.
   //
-  // A verified `pr` outcome whose PR was opened from a branch other than the
-  // firing's own (ADR-2026-09-11-1001: e.g. forseti's pm-deepen falling back
-  // to its own `pm-deepen/<slug>` branch) never reaches `pullRequests`, which
-  // branch-scoped discovery alone fills. Render it from the verified URL in
-  // the same `PR #N` form so the summary reads the same for every project.
-  const references: PullRequestReference[] =
+  // A verified `pr` outcome opened from a branch other than the firing's own
+  // never reaches `pullRequests`; render it from the verified URL instead.
+  const references =
     pullRequests.length > 0
       ? pullRequests
       : verifiedOutcomePullRequests(firing.outcome);
@@ -133,13 +130,11 @@ function verifiedOutcomePullRequests(
   ) {
     return [];
   }
-  const match = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)$/.exec(
-    outcome.url
-  );
-  if (match === null) {
+  const parsed = parseCanonicalGithubUrl(outcome.url);
+  if (parsed === null || parsed.kind !== "pull") {
     return [];
   }
-  return [{ prNumber: Number(match[1]), prUrl: outcome.url }];
+  return [{ prNumber: parsed.number, prUrl: outcome.url }];
 }
 
 function outcomeDetail(outcome: RoutineFiringStatus["outcome"]): string {

@@ -70,7 +70,8 @@ merge path and a repair path.
 `codex`, `claude`, `omp` (Oh My Pi) — `action.provider` on an `agent` state, falling back to the
 Project's `agent.provider` when omitted. Per-state routing is fully honored; mix providers freely
 across states in one FSM. An operator's chain-wide choice made through the Issue page's "Start with
-a provider…" action outranks both for that Run Chain (see `docs/workflows.md`, "Provider routing").
+a provider…" action outranks both for that Run Chain, and a per-state choice made there outranks
+the chain-wide one for that state (see `docs/workflows.md`, "Provider routing").
 
 ## Prompt templating
 

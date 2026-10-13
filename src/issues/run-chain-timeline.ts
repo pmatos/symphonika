@@ -15,8 +15,7 @@
 // root, from that root's own captured graph's `initial`).
 
 import { findWorkflowState } from "../lifecycle/state-machine-dispatch.js";
-import type { AgentProviderName } from "../provider.js";
-import type { RunStatus } from "../run-store.js";
+import type { ProviderSelectionSource, RunStatus } from "../run-store.js";
 import type {
   ExpandedWorkflow,
   ExpandedWorkflowState,
@@ -305,16 +304,33 @@ export function findWorkflowStateNode(
 export type ProviderSource =
   | { kind: "no_provider" }
   | { kind: "not_recorded" }
+  | { kind: "operator_chain" }
+  | { kind: "operator_state" }
   | { kind: "project_default" }
-  | { declaredProvider: AgentProviderName; kind: "workflow_state" };
+  | { declaredProvider: string; kind: "workflow_state" };
 
-// Where the action's provider came from, per that state's *own* captured
-// graph node — never the chain's newest graph, which may postdate this Run
-// if the workflow changed mid-chain (ADR-2026-09-10-2031-adjacent concern).
+// Where the action's provider came from. A Run launched since #862 records
+// the precedence level that chose it, and that record wins: an operator's
+// choice is invisible in any graph. Older Runs fall back to that state's
+// *own* captured graph node — never the chain's newest graph, which may
+// postdate this Run if the workflow changed mid-chain
+// (ADR-2026-09-10-2031-adjacent concern).
 export function resolveProviderSource(
   graph: ExpandedWorkflow | undefined,
-  stateId: string | undefined
+  stateId: string | undefined,
+  recorded?: { provider: string; source: ProviderSelectionSource | null }
 ): ProviderSource {
+  switch (recorded?.source) {
+    case "operator_state":
+    case "operator_chain":
+    case "project_default":
+      return { kind: recorded.source };
+    case "workflow_action":
+      return { declaredProvider: recorded.provider, kind: "workflow_state" };
+    case undefined:
+    case null:
+      break;
+  }
   const node = findWorkflowStateNode(graph, stateId);
   if (node === undefined) {
     return { kind: "not_recorded" };

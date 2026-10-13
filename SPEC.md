@@ -645,7 +645,10 @@ Agent Provider. If an agent state omits `action.provider`, Symphonika uses the P
 A **Run-Chain Provider Plan** (ADR-2026-10-09-0743) overrides both for one Run Chain: an operator
 chooses `omp`, `claude` or `codex` for the whole chain, the choice is persisted before the Ready
 Label is added, and every agent state of that chain — the first at fresh claim, later ones at State
-Advance — runs on it. Precedence is chain plan, then `action.provider`, then `agent.provider`.
+Advance — runs on it. The plan may also carry per-state choices for individual agent states
+(ADR-2026-10-13-0659). Precedence is the plan's per-state choice, then its chain-wide choice, then
+`action.provider`, then `agent.provider`; an unset level reveals the next. Each Run records which
+level chose its provider (`runs.provider_source`), and an Attempt's retry keeps the Run's provider.
 Non-FSM Continuations and PR review follow-ups are not covered and keep Project routing.
 
 Raw FSM workflows declare every state under `workflow.states`; there is no template, import, or
@@ -3303,7 +3306,9 @@ Label creation and workspace cleanup remain CLI-only; stale-claim reset no longe
 
 `GET /issues/:project/:number/start` (`#861`) previews starting the Issue with a chain-wide
 provider choice: the workflow's graph fingerprint (`contentHash`), `owner/repo#number`, the snapshot
-poll time, the configured and registered providers (the Project default marked), and an eligibility
+poll time, the configured and registered providers (the Project default marked), every workflow
+state with a per-state provider selector on each raw-FSM `agent` state (`#862`; blank means
+chain-wide), and an eligibility
 verdict built from the persisted snapshot minus the missing-Ready-Label reason, plus a live
 Issue Reservation, a suppressing latest Run and an in-flight plan. The Start form is omitted when
 the verdict has blockers and while a `label_written` plan is awaiting its claim. `POST .../start`, `POST .../start/retry` and `POST .../start/cancel` are
@@ -3311,12 +3316,14 @@ authenticated and CSRF-protected like every other mutating route (ADR 0075) and 
 with an outcome banner. Start persists the `pending` plan under `dispatchMutex` (local checks only)
 and only then adds the Ready Label outside the mutex; it refuses, writing nothing, on a stale
 snapshot `polled_at`, a stale graph fingerprint, a changed repository binding, an unconfigured
-provider, a live Issue Reservation, an existing Ready Label (snapshot or live GitHub), any `sym:*`
+provider (chain-wide or per-state), a per-state choice on an unknown or non-agent state, a live Issue Reservation, an existing Ready Label (snapshot or live GitHub), any `sym:*`
 label, or an unresolved, truncated or unreadable dependency/Issue read. A label-write failure is
 reported as failed and leaves a `label_failed` plan that blocks dispatch of that Issue and is
 retried or cancelled from this page; the Issue page also shows the active plan. A concurrent poll
 cannot bypass these guards: the claim re-reads the plan under the same mutex and defers on any
-change. Plan states, consumption and ordering are specified in ADR-2026-10-09-0743.
+change. Plan states, consumption and ordering are specified in ADR-2026-10-09-0743; per-state
+choices in ADR-2026-10-13-0659. The Run Chain timeline below names each Run's recorded provider
+source, including an operator's chain-wide or per-state choice.
 
 `GET /issues/:project/:number` (`#859`) also renders that issue's Run Chain history as a readable
 FSM timeline, server-rendered with no graph JavaScript required. Every Run on the (Project, issue)

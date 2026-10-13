@@ -14,6 +14,7 @@ import {
   ensureSession,
   type CsrfSecret
 } from "./csrf.js";
+import type { AgentProviderName } from "../provider.js";
 import type {
   MergePullRequestFn,
   PollNowFn,
@@ -142,7 +143,8 @@ import {
 import type {
   ProviderStartOutcome,
   ProviderStartPreview,
-  ProviderStartService
+  ProviderStartService,
+  ProviderStartState
 } from "../issues/provider-start.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
 import {
@@ -1044,7 +1046,8 @@ export function registerPages(options: RegisterPagesOptions): void {
               provider: readOptionalFormField(body, "provider") ?? "",
               snapshotPolledAt:
                 readOptionalFormField(body, "snapshot_polled_at") ?? "",
-              snapshotRepository: readSnapshotRepository(body)
+              snapshotRepository: readSnapshotRepository(body),
+              stateProviders: readStateProviderFields(body)
             });
       return renderStartPage(context, projectName, numberParam, {
         action: "start",
@@ -5222,7 +5225,10 @@ async function loadIssueRunChainViews(
           actionKind: findWorkflowStateNode(graph, row.stateId)?.action?.kind,
           attempts: runStore.listAttempts(row.run.id),
           graphAvailable: graph !== undefined,
-          providerSource: resolveProviderSource(graph, row.stateId),
+          providerSource: resolveProviderSource(graph, row.stateId, {
+            provider: row.run.provider,
+            source: row.run.providerSource
+          }),
           row
         };
       });
@@ -5299,6 +5305,10 @@ function describeProviderSource(
       return graphAvailable
         ? "not recorded (state not found in the captured workflow graph)"
         : "not recorded (workflow graph unavailable for this Run)";
+    case "operator_state":
+      return "operator choice for this state";
+    case "operator_chain":
+      return "operator choice for the Run Chain";
     case "project_default":
       return "project default";
     case "workflow_state":
@@ -5602,7 +5612,7 @@ function renderIssueStartPage(input: {
   const planForms =
     plan === undefined
       ? ""
-      : `<section><h2>Provider plan</h2><p>${labelPill(plan.status, plan.status === "consumed" ? "ok" : plan.status === "label_failed" || plan.status === "expired" ? "blocked" : "neutral")} <code>${escapeHtml(plan.provider)}</code> · attempt ${plan.attemptCount}${plan.lastError === null ? "" : ` · ${escapeHtml(plan.lastError)}`}</p>${
+      : `<section><h2>Provider plan</h2><p>${labelPill(plan.status, plan.status === "consumed" ? "ok" : plan.status === "label_failed" || plan.status === "expired" ? "blocked" : "neutral")} <code>${escapeHtml(plan.provider)}</code> · attempt ${plan.attemptCount}${plan.lastError === null ? "" : ` · ${escapeHtml(plan.lastError)}`}</p>${renderPlanStateProviders(plan)}${
           plan.status === "label_failed" || plan.status === "expired"
             ? `<p class="note">This plan blocks the Issue from dispatching until you retry or cancel it.</p><form method="post" action="${escapeHtml(`${base}/retry`)}">${common}${hidden("plan_id", plan.id)}<button class="btn" type="submit">Retry</button></form>`
             : ""
@@ -5625,8 +5635,43 @@ function renderIssueStartPage(input: {
       ? ""
       : context.providers.length === 0
         ? `<p class="muted">No provider is configured and registered.</p>`
-        : `<form method="post" action="${escapeHtml(base)}">${common}${hidden("graph_fingerprint", context.graphFingerprint)}${hidden("snapshot_polled_at", detail.snapshot.polledAt)}<fieldset><legend>Provider for the whole Run Chain</legend>${radios}</fieldset><button class="btn" type="submit">Start work</button></form>`;
+        : `<form method="post" action="${escapeHtml(base)}">${common}${hidden("graph_fingerprint", context.graphFingerprint)}${hidden("snapshot_polled_at", detail.snapshot.polledAt)}<fieldset><legend>Provider for the whole Run Chain</legend>${radios}</fieldset>${renderStartStateProviders(context.states, context.providers)}<button class="btn" type="submit">Start work</button></form>`;
   return `<h1 class="page-title">Start #${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)}</p>${input.outcome === undefined ? "" : renderIssueStartBanner(input.outcome)}${facts}${verdict}${planForms}${startForm}<p class="note"><a href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}">← Back to the Issue</a></p>`;
+}
+
+// #862: the workflow preview's per-state exceptions. Only agent states get a
+// selector; the blank default means the state runs on the chain-wide choice.
+function renderStartStateProviders(
+  states: ProviderStartState[],
+  providers: AgentProviderName[]
+): string {
+  if (!states.some((state) => state.selectable)) {
+    return "";
+  }
+  const rows = states
+    .map((state) => {
+      const kind =
+        state.actionKind === undefined
+          ? `<span class="muted">no action</span>`
+          : escapeHtml(state.actionKind);
+      const declared =
+        state.declaredProvider === undefined
+          ? ""
+          : ` <span class="muted">(workflow declares ${escapeHtml(state.declaredProvider)})</span>`;
+      const choice = state.selectable
+        ? `<select name="${escapeHtml(`${STATE_PROVIDER_FIELD_PREFIX}${state.id}`)}" aria-label="${escapeHtml(`Provider for state ${state.id}`)}"><option value="" selected>Chain-wide choice</option>${providers.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("")}</select>${declared}`
+        : "—";
+      return `<tr><td><code>${escapeHtml(state.id)}</code></td><td>${kind}</td><td>${choice}</td></tr>`;
+    })
+    .join("");
+  return `<fieldset><legend>Per-state exceptions</legend><p class="note">An agent state set here runs on that provider instead of the chain-wide choice, at first claim, at every State Advance and on retries.</p><table><thead><tr><th>State</th><th>Action</th><th>Provider</th></tr></thead><tbody>${rows}</tbody></table></fieldset>`;
+}
+
+function renderPlanStateProviders(plan: ProviderPlan): string {
+  const entries = Object.entries(plan.stateProviders);
+  return entries.length === 0
+    ? ""
+    : `<p class="note">Per-state exceptions: ${entries.map(([stateId, provider]) => `<code>${escapeHtml(stateId)}</code> → <code>${escapeHtml(provider)}</code>`).join(", ")}</p>`;
 }
 
 function hasChainGraphs(chains: IssueRunChainView[]): boolean {
@@ -6471,6 +6516,25 @@ function readOptionalFormField(
 ): string | undefined {
   const value = body[key];
   return typeof value === "string" ? value : undefined;
+}
+
+// #862's per-state provider selectors, one `state_provider:<state id>` field
+// per agent state. Blank means "chain-wide"; the service validates the rest.
+const STATE_PROVIDER_FIELD_PREFIX = "state_provider:";
+
+function readStateProviderFields(
+  body: Record<string, unknown>
+): Record<string, string> {
+  const stateProviders: Record<string, string> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (
+      key.startsWith(STATE_PROVIDER_FIELD_PREFIX) &&
+      typeof value === "string"
+    ) {
+      stateProviders[key.slice(STATE_PROVIDER_FIELD_PREFIX.length)] = value;
+    }
+  }
+  return stateProviders;
 }
 
 function readSnapshotRepository(

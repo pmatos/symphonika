@@ -277,6 +277,7 @@ function runFixture(overrides: Partial<RunStatus> = {}): RunStatus {
     project: "alpha",
     provider: "codex",
     providerScopeCleanupPending: false,
+    providerSource: null,
     retryCount: 0,
     state: "failed",
     stateTransitionReason: null,

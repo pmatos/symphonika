@@ -48,8 +48,34 @@ function rawIssue(overrides: Partial<RawGitHubIssue> = {}): RawGitHubIssue {
   };
 }
 
+const FSM_STATES = [
+  {
+    action: { kind: "agent", prompt: "implement" },
+    completeWhen: {},
+    id: "implement",
+    transitions: [{ to: "review" }]
+  },
+  {
+    action: { kind: "agent", prompt: "review", provider: "claude" },
+    completeWhen: {},
+    id: "review",
+    transitions: [{ to: "await_checks" }]
+  },
+  {
+    action: { kind: "wait" },
+    completeWhen: {},
+    id: "await_checks",
+    transitions: [{ to: "done" }]
+  },
+  { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
+];
+
 function projectConfig(
-  options: { fingerprint?: string; repo?: string } = {}
+  options: {
+    fingerprint?: string;
+    repo?: string;
+    sourceKind?: "raw_fsm" | "markdown";
+  } = {}
 ): RunControllerProjectConfig {
   return {
     agent: { provider: "codex" },
@@ -76,8 +102,8 @@ function projectConfig(
         contentHash: options.fingerprint ?? "sha256:graph-a",
         initial: "implement",
         name: "default",
-        source: { kind: "raw_fsm", path: "workflow.yml" },
-        states: []
+        source: { kind: options.sourceKind ?? "raw_fsm", path: "workflow.yml" },
+        states: FSM_STATES
       },
       format: "auto",
       path: "workflow.yml"
@@ -889,5 +915,127 @@ describe("ProviderStartService refusal paths", () => {
     expect(harness.runStore.getProviderPlan("plan-1")?.status).toBe(
       "label_written"
     );
+  });
+});
+
+describe("ProviderStartService per-state choices (#862)", () => {
+  it("previews every state and makes only raw-FSM agent states selectable", async () => {
+    const { service } = await createService();
+    expect(service.preview("widgets", 7)?.context.states).toEqual([
+      {
+        actionKind: "agent",
+        declaredProvider: undefined,
+        id: "implement",
+        selectable: true
+      },
+      {
+        actionKind: "agent",
+        declaredProvider: "claude",
+        id: "review",
+        selectable: true
+      },
+      {
+        actionKind: "wait",
+        declaredProvider: undefined,
+        id: "await_checks",
+        selectable: false
+      },
+      {
+        actionKind: undefined,
+        declaredProvider: undefined,
+        id: "done",
+        selectable: false
+      }
+    ]);
+  });
+
+  it("offers no per-state choice on a contract workflow", async () => {
+    const { service } = await createService({
+      project: () => projectConfig({ sourceKind: "markdown" })
+    });
+    expect(
+      service
+        .preview("widgets", 7)
+        ?.context.states.some((state) => state.selectable)
+    ).toBe(false);
+  });
+
+  it("persists per-state choices and drops blank (chain-wide) entries", async () => {
+    const { runStore, service } = await createService();
+
+    const outcome = await service.start({
+      ...startRequest,
+      stateProviders: { implement: "", review: "codex" }
+    });
+
+    expect(outcome).toMatchObject({ kind: "started" });
+    expect(runStore.getProviderPlan("plan-1")?.stateProviders).toEqual({
+      review: "codex"
+    });
+  });
+
+  it("stores no exceptions when every state keeps the chain-wide choice", async () => {
+    const { runStore, service } = await createService();
+
+    await service.start({ ...startRequest, stateProviders: { review: "" } });
+
+    expect(runStore.getProviderPlan("plan-1")?.stateProviders).toEqual({});
+  });
+
+  it.each([
+    [{ await_checks: "codex" }, "state await_checks is not an agent state"],
+    [{ ghost: "codex" }, "state ghost is not in the previewed workflow"],
+    [{ review: "gpt" }, "gpt for state review is not configured and registered"]
+  ])("refuses %j without writing anything", async (choice, error) => {
+    const { addLabelsToIssue, runStore, service } = await createService();
+
+    const outcome = await service.start({
+      ...startRequest,
+      stateProviders: choice
+    });
+
+    expect(outcome).toMatchObject({ kind: "refused" });
+    expect(JSON.stringify(outcome)).toContain(error);
+    expect(runStore.getProviderPlan("plan-1")).toBeUndefined();
+    expect(addLabelsToIssue).not.toHaveBeenCalled();
+  });
+
+  it("refuses a per-state provider that is configured but not registered", async () => {
+    const { service } = await createService({ registered: ["omp", "codex"] });
+
+    const outcome = await service.start({
+      ...startRequest,
+      stateProviders: { review: "claude" }
+    });
+
+    expect(JSON.stringify(outcome)).toContain(
+      "claude for state review is not configured and registered"
+    );
+  });
+
+  it("refuses to retry once a per-state provider is no longer registered", async () => {
+    const registered = ["codex", "claude", "omp"];
+    const addLabelsToIssue = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue(undefined);
+    const { service } = await createService({ addLabelsToIssue, registered });
+    await service.start({
+      ...startRequest,
+      stateProviders: { review: "claude" }
+    });
+    registered.splice(registered.indexOf("claude"), 1);
+
+    const outcome = await service.retry({
+      issueNumber: 7,
+      planId: "plan-1",
+      projectName: "widgets",
+      snapshotRepository: repository
+    });
+
+    expect(JSON.stringify(outcome)).toContain(
+      "claude for state review is no longer configured and registered"
+    );
+    expect(addLabelsToIssue).toHaveBeenCalledTimes(1);
   });
 });

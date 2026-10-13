@@ -237,6 +237,62 @@ describe("RunStore provider plans", () => {
     }
   });
 
+  it("round-trips per-state choices and defaults to none (#862)", async () => {
+    const { store } = await openTempStore();
+    try {
+      expect(store.createProviderPlan(planInput()).stateProviders).toEqual({});
+      const plan = store.createProviderPlan(
+        planInput({
+          id: "plan-2",
+          stateProviders: { implement: "claude", review: "codex" }
+        })
+      );
+      expect(plan.stateProviders).toEqual({
+        implement: "claude",
+        review: "codex"
+      });
+      seedRun(store, "root");
+      store.consumeProviderPlan("plan-2", "root");
+      seedRun(store, "child", "root");
+      expect(store.getChainProviderPlan("child")?.stateProviders).toEqual({
+        implement: "claude",
+        review: "codex"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("records the provider source on a Run (#862)", async () => {
+    const { store } = await openTempStore();
+    try {
+      store.createRun({
+        id: "sourced",
+        issue: {
+          body: "",
+          created_at: "2026-10-09T09:00:00Z",
+          id: 7,
+          labels: [],
+          number: 7,
+          priority: 0,
+          state: "open",
+          title: "Issue",
+          updated_at: "2026-10-09T09:00:00Z",
+          url: "https://github.com/Acme/Widgets/issues/7"
+        },
+        projectName: "widgets",
+        providerCommand: "echo",
+        providerName: "omp",
+        providerSource: "operator_state"
+      });
+      seedRun(store, "unsourced");
+      expect(store.getRun("sourced")?.providerSource).toBe("operator_state");
+      expect(store.getRun("unsourced")?.providerSource).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
   it("survives reopening the database", async () => {
     const { store, root } = await openTempStore();
     store.createProviderPlan(planInput());

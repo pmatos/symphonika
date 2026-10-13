@@ -611,6 +611,14 @@ chain plan, then `action.provider`, then `projects[].agent.provider` — for the
 and every later State Advance of that chain. Non-FSM Continuations and PR review follow-ups keep
 the Project default. See ADR-2026-10-09-0743.
 
+The same page can also set a provider for individual `agent` states of a raw FSM. A per-state
+choice outranks the chain-wide one for that state only, so the full precedence is per-state choice,
+chain-wide choice, `action.provider`, `projects[].agent.provider`. A state left on "Chain-wide
+choice" uses the next level down. Retries of an Attempt keep the provider the Run started with.
+Choices are keyed by state id: renaming a state after Start drops its choice back to the chain-wide
+one. The Issue page's Run Chain timeline shows which level picked each Run's provider. See
+ADR-2026-10-13-0659.
+
 ### Retries and failure transitions
 
 Transient provider or infrastructure failures consume the normal retry budget before a transition

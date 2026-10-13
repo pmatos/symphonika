@@ -1,14 +1,34 @@
 import type { AgentProviderName } from "../provider.js";
-import type { ProviderPlan } from "../run-store.js";
+import type { ProviderPlan, ProviderSelectionSource } from "../run-store.js";
 
-// A Run-Chain Provider Plan (the operator's chain-wide choice) outranks a
-// state's own `action.provider`, which outranks the Project default.
+export type EffectiveProvider = {
+  provider: AgentProviderName;
+  source: ProviderSelectionSource;
+};
+
+// An operator's per-state choice (#862) outranks their chain-wide choice
+// (#861), which outranks a state's own `action.provider`, which outranks the
+// Project default. An unset level reveals the next one down.
 export function resolveEffectiveProvider(input: {
   actionProvider: AgentProviderName | undefined;
-  planProvider: AgentProviderName | undefined;
+  plan: Pick<ProviderPlan, "provider" | "stateProviders"> | undefined;
   projectDefault: AgentProviderName;
-}): AgentProviderName {
-  return input.planProvider ?? input.actionProvider ?? input.projectDefault;
+  stateId: string | undefined;
+}): EffectiveProvider {
+  const stateProvider =
+    input.stateId === undefined
+      ? undefined
+      : input.plan?.stateProviders[input.stateId];
+  if (stateProvider !== undefined) {
+    return { provider: stateProvider, source: "operator_state" };
+  }
+  if (input.plan !== undefined) {
+    return { provider: input.plan.provider, source: "operator_chain" };
+  }
+  if (input.actionProvider !== undefined) {
+    return { provider: input.actionProvider, source: "workflow_action" };
+  }
+  return { provider: input.projectDefault, source: "project_default" };
 }
 
 // `pending` and `label_written` are what a claim may consume. `label_failed`

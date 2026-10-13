@@ -70,7 +70,11 @@ import {
   type EmailNotificationConfig
 } from "../notifications/config.js";
 import { redactAll, redactValueDeep } from "../redaction.js";
-import type { CancelReason, RunStore } from "../run-store.js";
+import type {
+  CancelReason,
+  ProviderSelectionSource,
+  RunStore
+} from "../run-store.js";
 import {
   TERMINAL_RUN_STATES,
   WATCHDOG_TERMINAL_REASONS
@@ -1174,6 +1178,7 @@ export class RunController {
     // back to the project default for contract workflows or when the
     // initial agent action declares no provider.
     let initialAction: WorkflowAction | undefined;
+    let initialStateId: string | undefined;
     try {
       const loaded = await this.loadWorkflow(target.project.workflow);
       if (
@@ -1187,16 +1192,19 @@ export class RunController {
         if (initialState?.action !== undefined) {
           initialAction = initialState.action;
         }
+        initialStateId = initialState?.id;
       }
     } catch {
       // Workflow load failure falls back to the project default; the same
       // error surfaces from runAttemptLifecycle's reload during the attempt.
     }
 
-    // A Run-Chain Provider Plan (#861) outranks the initial state's own
-    // action.provider and the Project default. A live plan that cannot be
-    // consumed (label write failed or lapsed) blocks the candidate outright:
-    // claiming it with the default provider is the bug the plan prevents.
+    // A Run-Chain Provider Plan (#861) -- its per-state choice for the
+    // initial state (#862) first, then its chain-wide choice -- outranks the
+    // initial state's own action.provider and the Project default. A live
+    // plan that cannot be consumed (label write failed or lapsed) blocks the
+    // candidate outright: claiming it with the default provider is the bug
+    // the plan prevents.
     const providerPlan = this.runStore.getActiveProviderPlan({
       issueNumber: target.candidate.issue.number,
       repository
@@ -1210,12 +1218,14 @@ export class RunController {
         }
       };
     }
-    const providerName = resolveEffectiveProvider({
-      actionProvider:
-        initialAction?.kind === "agent" ? initialAction.provider : undefined,
-      planProvider: providerPlan?.provider,
-      projectDefault: target.project.agent.provider
-    });
+    const { provider: providerName, source: providerSource } =
+      resolveEffectiveProvider({
+        actionProvider:
+          initialAction?.kind === "agent" ? initialAction.provider : undefined,
+        plan: providerPlan,
+        projectDefault: target.project.agent.provider,
+        stateId: initialAction?.kind === "agent" ? initialStateId : undefined
+      });
     const providerCommand = (
       providersConfig as Partial<RunControllerProvidersConfig>
     )[providerName]?.command;
@@ -1285,6 +1295,7 @@ export class RunController {
         project: target.project,
         providerCommand,
         providerName,
+        providerSource,
         ...(target.rawFsmWorkflow === undefined
           ? {}
           : { rawFsmWorkflow: target.rawFsmWorkflow }),
@@ -3193,15 +3204,17 @@ export class RunController {
       return;
     }
 
-    const providerName = resolveEffectiveProvider({
-      actionProvider:
-        targetState.action?.kind === "agent"
-          ? targetState.action.provider
-          : undefined,
-      planProvider: this.runStore.getChainProviderPlan(payload.parentRunId)
-        ?.provider,
-      projectDefault: project.agent.provider
-    });
+    const { provider: providerName, source: providerSource } =
+      resolveEffectiveProvider({
+        actionProvider:
+          targetState.action?.kind === "agent"
+            ? targetState.action.provider
+            : undefined,
+        plan: this.runStore.getChainProviderPlan(payload.parentRunId),
+        projectDefault: project.agent.provider,
+        stateId:
+          targetState.action?.kind === "agent" ? targetState.id : undefined
+      });
     const providerConfig = (
       providersConfig as Partial<RunControllerProvidersConfig>
     )[providerName];
@@ -3273,6 +3286,7 @@ export class RunController {
         provider,
         providerCommand,
         providerName,
+        providerSource,
         repository,
         runId
       });
@@ -4078,6 +4092,8 @@ export class RunController {
     project: DispatchProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
+    // Which precedence level chose providerName (#862); persisted on the Run.
+    providerSource?: ProviderSelectionSource;
     // Undefined for continuation/state-advance/PR-followup callers, which
     // claimAndPersistRun's own wait-park recheck skips regardless -- see
     // issue #737.
@@ -4124,6 +4140,7 @@ export class RunController {
     provider: AgentProvider;
     providerCommand: string;
     providerName: AgentProviderName;
+    providerSource?: ProviderSelectionSource;
     repository: GitHubIssueRepositoryInput;
     respectsIssueLabels?: boolean;
     runId: string;
@@ -4398,6 +4415,7 @@ export class RunController {
     project: RunControllerProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
+    providerSource?: ProviderSelectionSource;
     // Undefined for continuation/state-advance/PR-followup callers, which the
     // wait-park recheck below skips regardless (isContinuation gate). See
     // issue #737.
@@ -4605,7 +4623,10 @@ export class RunController {
         issue: input.issue,
         projectName: input.project.name,
         providerCommand: input.providerCommand,
-        providerName: input.providerName
+        providerName: input.providerName,
+        ...(input.providerSource === undefined
+          ? {}
+          : { providerSource: input.providerSource })
       };
       if (input.isContinuation && input.parentRunId !== null) {
         this.runStore.createContinuationRun({

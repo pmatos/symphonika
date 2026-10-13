@@ -243,7 +243,10 @@ describe("chain-wide provider plan at the fresh claim boundary", () => {
     );
 
     expect(batch.claims).toEqual([{ dispatched: true, runId: "run-1" }]);
-    expect(harness.runStore.getRun("run-1")?.provider).toBe("omp");
+    expect(harness.runStore.getRun("run-1")).toMatchObject({
+      provider: "omp",
+      providerSource: "operator_chain"
+    });
     expect(harness.runStore.getProviderPlan("plan-1")).toMatchObject({
       consumedRunId: "run-1",
       status: "consumed"
@@ -258,7 +261,10 @@ describe("chain-wide provider plan at the fresh claim boundary", () => {
 
     await dispatch(harness, pollStatus([{ issueNumber: 1, project: "alpha" }]));
 
-    expect(harness.runStore.getRun("run-1")?.provider).toBe("codex");
+    expect(harness.runStore.getRun("run-1")).toMatchObject({
+      provider: "codex",
+      providerSource: "project_default"
+    });
     expect(harness.runStore.getChainProviderPlan("run-1")).toBeUndefined();
   });
 

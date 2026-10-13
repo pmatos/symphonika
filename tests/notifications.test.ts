@@ -84,6 +84,57 @@ function fakeFanout(targets: RoutineFanoutTargetStatus[]): RoutineFanoutStatus {
 }
 
 describe("Routine Fan-out notifications", () => {
+  it("falls back to a readable reason for targets with no recorded reason or firing", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        disposition: "skipped",
+        firing: null,
+        firingId: null,
+        projectName: "skipped-project"
+      }),
+      fakeFanoutTarget({
+        disposition: "missed",
+        firing: null,
+        firingId: null,
+        projectName: "missed-project"
+      }),
+      fakeFanoutTarget({
+        deferredAttempts: 1,
+        disposition: "missed",
+        firing: null,
+        firingId: null,
+        projectName: "retried-project",
+        skipReason: "target_unavailable"
+      }),
+      fakeFanoutTarget({
+        disposition: "held",
+        firing: null,
+        firingId: null,
+        projectName: "held-project"
+      }),
+      fakeFanoutTarget({
+        disposition: "pending",
+        firing: null,
+        firingId: null,
+        projectName: "pending-project"
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain("- skipped-project: skipped (unspecified)");
+    expect(message.text).toContain(
+      "- missed-project: did not run (unspecified)\n"
+    );
+    expect(message.text).toContain(
+      "- retried-project: did not run (target_unavailable) after 1 admission attempt\n"
+    );
+    expect(message.text).toContain(
+      "- held-project: held (provider unavailable)"
+    );
+    expect(message.text).toContain("- pending-project: pending");
+  });
+
   it("links a discovered pull request instead of leaving it as a bare number", () => {
     const fanout = fakeFanout([
       fakeFanoutTarget({

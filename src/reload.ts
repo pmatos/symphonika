@@ -10,7 +10,6 @@ import type { WorkflowFormat } from "./config-schemas.js";
 import {
   epicLabelsSchema,
   issueFiltersSchema,
-  pathStringSchema,
   projectDispatchSchema,
   projectProgressGuardSchema,
   projectWorkspaceSchema,
@@ -46,6 +45,10 @@ import {
   validateExpandedWorkflowReferences
 } from "./workflow/fsm-expansion.js";
 import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
+import {
+  rejectProjectRoutineDeclarations,
+  routineServiceConfigFields
+} from "./routines/service-config.js";
 import { renderProviderCommandTemplate } from "./provider-command-template.js";
 import type {
   RoutineExecutionOverrides,
@@ -188,15 +191,6 @@ const providerCommandSchema = z
   })
   .passthrough();
 
-const routineExecutionDefaultsSchema = z
-  .object({
-    model: z.string().trim().min(1).optional(),
-    effort: z.string().trim().min(1).optional(),
-    permission_mode: z.string().trim().min(1).optional(),
-    timeout_minutes: z.number().positive().optional()
-  })
-  .strict();
-
 // Host pressure-stall thresholds (ADR 0088). Percentages of the PSI
 // `full avg60` window, so 0 would defer every dispatch on a host that has
 // ever stalled — hence `positive()`, not `nonnegative()`. Omitting a
@@ -338,7 +332,7 @@ const pollingProjectSchema = z
     agent: agentSchema
   })
   .passthrough()
-  .superRefine(rejectPerProjectRoutines)
+  .superRefine(rejectProjectRoutineDeclarations)
   .superRefine(rejectEpicLabelOverlap);
 
 // A Routine Host: never polled for issues, exists only to host Routine Firings.
@@ -356,7 +350,7 @@ const routineHostProjectSchema = z
     agent: agentSchema
   })
   .passthrough()
-  .superRefine(rejectPerProjectRoutines)
+  .superRefine(rejectProjectRoutineDeclarations)
   .superRefine(rejectDispatchOnlyKeysOnRoutineHost);
 
 // Runtime detail that varies by mode. Dispatch Projects need workspace +
@@ -379,49 +373,6 @@ const runtimeRoutineHostDetailSchema = z
     workspace: projectWorkspaceSchema
   })
   .passthrough();
-
-// A service-level routine entry fans one declaration file out to an explicit,
-// non-empty list of declared Projects. The transitional ADR 0063 `project:`
-// spelling is rejected below with a migration error. See ADR 0069.
-const serviceRoutineSchema = z
-  .object({
-    projects: z.array(z.string().trim().min(1)).min(1).optional(),
-    path: pathStringSchema
-  })
-  .passthrough()
-  .superRefine((entry, ctx) => {
-    if ("project" in entry) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "service-level `project:` was replaced by the explicit `projects: [<name>, ...]` target list (see ADR 0069)",
-        path: ["project"]
-      });
-    }
-    if (entry.projects === undefined) {
-      if (!("project" in entry)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            "an explicit non-empty `projects: [<name>, ...]` target list is required",
-          path: ["projects"]
-        });
-      }
-      return;
-    }
-    const seen = new Set<string>();
-    for (const [index, projectName] of entry.projects.entries()) {
-      if (seen.has(projectName)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `duplicate target project "${projectName}"`,
-          path: ["projects", index]
-        });
-      }
-      seen.add(projectName);
-    }
-  })
-  .transform((entry) => ({ ...entry, projects: entry.projects! }));
 
 const serviceConfigSchema = z
   .object({
@@ -466,10 +417,7 @@ const serviceConfigSchema = z
         omp: providerCommandSchema.optional()
       })
       .passthrough(),
-    routine_defaults: routineExecutionDefaultsSchema.optional(),
-    // Service-level routine declarations targeting declared Projects. See
-    // ADR 0069. Optional; omitted means no routines.
-    routines: z.array(serviceRoutineSchema).optional(),
+    ...routineServiceConfigFields("model-first"),
     // Opt-in daemon self-update (ADR 0079). Defaults to false; boolean-only
     // in this slice, matching the issue's own proposed `self-update: true`
     // shape with no configurable check interval or channel.
@@ -753,9 +701,7 @@ async function loadRuntimeConfigSnapshot(input: {
   const dispatchProjects: RuntimeProjectConfig[] = [];
   const invalidRoutines: RuntimeConfigSnapshot["invalidRoutines"] = [];
   const projectIndexByProject = new Map<RuntimeProjectConfig, number>();
-  const routineDefaults = normalizeRoutineExecutionDefaults(
-    parsed.data.routine_defaults
-  );
+  const routineDefaults = parsed.data.routine_defaults ?? {};
   const routineProviderCommandsByName: Partial<Record<string, string>> = {
     claude: parsed.data.providers.claude.command,
     codex: parsed.data.providers.codex.command,
@@ -1074,31 +1020,6 @@ function normalizeIssueWorkspaceRetention(
   };
 }
 
-function normalizeRoutineExecutionDefaults(
-  defaults:
-    | {
-        effort?: string | undefined;
-        model?: string | undefined;
-        permission_mode?: string | undefined;
-        timeout_minutes?: number | undefined;
-      }
-    | undefined
-): RoutineExecutionOverrides {
-  if (defaults === undefined) {
-    return {};
-  }
-  return {
-    ...(defaults.effort === undefined ? {} : { effort: defaults.effort }),
-    ...(defaults.model === undefined ? {} : { model: defaults.model }),
-    ...(defaults.permission_mode === undefined
-      ? {}
-      : { permissionMode: defaults.permission_mode }),
-    ...(defaults.timeout_minutes === undefined
-      ? {}
-      : { timeoutMinutes: defaults.timeout_minutes })
-  };
-}
-
 // Outcome of validating one Project: `"ok"` means the project was loaded (or
 // dropped on first-load detail/workflow failure, leaving siblings polling);
 // `"fatal"` means a whole-snapshot last-known-good revert is required, matching
@@ -1133,29 +1054,6 @@ function optionalWatchdogOf(rawProject: unknown): unknown {
     return rawProject.watchdog;
   }
   return undefined;
-}
-
-// Explicitly reject the removed per-project `routines:` key. The project
-// schemas use `.passthrough()`, so without this a legacy `routines:` list
-// would validate silently and then be ignored — its routines would stop
-// firing with no error. Force a migration error pointing at the top-level
-// block. See ADR 0069.
-function rejectPerProjectRoutines(
-  rawProject: unknown,
-  ctx: z.RefinementCtx
-): void {
-  if (
-    rawProject !== null &&
-    typeof rawProject === "object" &&
-    "routines" in rawProject
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message:
-        "per-project `routines:` was removed; move routine entries to the top-level `routines:` block with a `projects: [<name>, ...]` target list (see ADR 0069)",
-      path: ["routines"]
-    });
-  }
 }
 
 // Validates and loads a Dispatch Project: tracker + issue_filters + priority +

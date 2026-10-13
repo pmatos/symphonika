@@ -128,7 +128,9 @@ A fan-out becomes summary-ready only after every expected target is either:
 - associated with a terminal (`succeeded`, `failed`, or `cancelled`) firing.
 
 The grouped subject is shaped as
-`[ptt] <routine> — <PR count> PR, <issue count> issue, <failure count> failed`. Its payload retains
+`[Symphonika] <routine> — <PR count> PR, <issue count> issue, <failure count> failed` (originally
+`[ptt] <routine> — ...`; the legacy tag was dropped so fan-out subjects match every other
+Symphonika email). Its payload retains
 the per-Project disposition and firing result. Skips are visible per Project but do not count as
 failures. Failed and cancelled firings do. Verified issue actions can increase the issue count when
 the structured-outcome slice supplies them; until then it is zero.

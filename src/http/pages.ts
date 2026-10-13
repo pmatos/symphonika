@@ -5657,7 +5657,7 @@ function renderStartStateProviders(
       const declared =
         state.declaredProvider === undefined
           ? ""
-          : ` <span class="muted">(workflow declares ${escapeHtml(state.declaredProvider)})</span>`;
+          : ` <span class="muted">(workflow declares ${escapeHtml(state.declaredProvider)}; an explicit choice here or a chain-wide choice overrides it)</span>`;
       const choice = state.selectable
         ? `<select name="${escapeHtml(`${STATE_PROVIDER_FIELD_PREFIX}${state.id}`)}" aria-label="${escapeHtml(`Provider for state ${state.id}`)}"><option value="" selected>Chain-wide choice</option>${providers.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("")}</select>${declared}`
         : "—";

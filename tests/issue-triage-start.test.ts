@@ -195,7 +195,7 @@ describe("GET /issues/:project/:number/start (#861)", () => {
     expect(html).toContain("Per-state exceptions");
     expect(html).toContain('name="state_provider:implement"');
     expect(html).toContain('name="state_provider:review"');
-    expect(html).toContain("(workflow declares claude)");
+    expect(html).toContain("(workflow declares claude;");
     expect(html).toContain("<code>await_checks</code>");
     expect(html).not.toContain('name="state_provider:await_checks"');
     expect(html).toContain(

@@ -2,16 +2,16 @@ import type { AgentProviderName } from "../provider.js";
 import type { ProviderPlan, ProviderSelectionSource } from "../run-store.js";
 import type { ExpandedWorkflowState } from "../workflow/types.js";
 
-export type EffectiveProvider = {
+type EffectiveProvider = {
   provider: AgentProviderName;
   source: ProviderSelectionSource;
 };
 
 // Only an `agent` state launches a provider of its own, so only it takes a
 // per-state choice or contributes its `action.provider`.
-export function isAgentState(
-  state: Pick<ExpandedWorkflowState, "action"> | undefined
-): boolean {
+export function isAgentState<T extends Pick<ExpandedWorkflowState, "action">>(
+  state: T | undefined
+): state is T {
   return state?.action?.kind === "agent";
 }
 
@@ -28,17 +28,15 @@ export function resolveEffectiveProvider(input: {
   const agentState = isAgentState(input.state) ? input.state : undefined;
   // Own keys only: a state named e.g. `constructor` must not resolve to an
   // inherited Object.prototype member.
-  const stateProvider =
-    agentState === undefined ||
-    input.plan === undefined ||
-    !Object.hasOwn(input.plan.stateProviders, agentState.id)
-      ? undefined
-      : input.plan.stateProviders[agentState.id];
-  if (stateProvider !== undefined) {
-    return { provider: stateProvider, source: "operator_state" };
-  }
   if (input.plan !== undefined) {
-    return { provider: input.plan.provider, source: "operator_chain" };
+    const stateProvider =
+      agentState !== undefined &&
+      Object.hasOwn(input.plan.stateProviders, agentState.id)
+        ? input.plan.stateProviders[agentState.id]
+        : undefined;
+    return stateProvider === undefined
+      ? { provider: input.plan.provider, source: "operator_chain" }
+      : { provider: stateProvider, source: "operator_state" };
   }
   const actionProvider = agentState?.action?.provider;
   if (actionProvider !== undefined) {

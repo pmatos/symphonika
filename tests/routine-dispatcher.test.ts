@@ -41,6 +41,12 @@ import {
 
 const tempRoots: string[] = [];
 
+// Fan-out summaries share the `[Symphonika]` prefix with per-firing emails, so
+// they are told apart by their grouped-count suffix.
+function isFanoutSummarySubject(subject: string): boolean {
+  return /^\[Symphonika\] .+ — \d+ PR, \d+ issue, \d+ failed$/.test(subject);
+}
+
 async function makeTempRoot(): Promise<string> {
   const root = await mkdtemp(
     path.join(tmpdir(), "symphonika-routine-dispatch-")
@@ -1340,7 +1346,7 @@ describe("RoutineFiringDispatcher", () => {
       // this from doubling up in practice for a quiet report firing.
       expect(delivered).toHaveLength(3);
       const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(message.subject)
       );
       expect(fanoutMessages).toHaveLength(1);
       expect(runStore.getRoutineFanout("fanout-1")).toMatchObject({
@@ -1352,7 +1358,7 @@ describe("RoutineFiringDispatcher", () => {
         ]
       });
       expect(fanoutMessages[0]?.subject).toBe(
-        "[ptt] refactor-audit — 0 PR, 0 issue, 0 failed"
+        "[Symphonika] refactor-audit — 0 PR, 0 issue, 0 failed"
       );
       expect(fanoutMessages[0]?.text).toContain("- alpha: succeeded");
       expect(fanoutMessages[0]?.text).toContain("- beta: succeeded");
@@ -1384,7 +1390,7 @@ describe("RoutineFiringDispatcher", () => {
           // must not join this fan-out. Keyed on the fan-out summary's
           // subject (not just "the first delivery") since this routine's own
           // per-firing notification is now also delivered through this sink.
-          if (message.subject.startsWith("[ptt]")) {
+          if (isFanoutSummarySubject(message.subject)) {
             runStore.syncRoutines([
               { ...declaration, projectName: "alpha" },
               { ...declaration, projectName: "beta" }
@@ -1466,7 +1472,7 @@ describe("RoutineFiringDispatcher", () => {
 
       expect(result.fired).toEqual(["fire-alpha"]);
       expect(
-        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+        delivered.filter((message) => isFanoutSummarySubject(message.subject))
       ).toHaveLength(1);
 
       // beta was configured after this clock event began, so the alpha-only
@@ -1534,7 +1540,7 @@ describe("RoutineFiringDispatcher", () => {
         routineName: "refactor-audit"
       });
       expect(
-        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+        delivered.filter((message) => isFanoutSummarySubject(message.subject))
       ).toHaveLength(1);
       expect(runStore.listRoutines({ project: "beta" })[0]).toMatchObject({
         lastSkipReason: "catch_up_window",
@@ -1646,7 +1652,7 @@ describe("RoutineFiringDispatcher", () => {
       // The group is not finished while a leg is still waiting for a slot,
       // so no summary has been sent yet (ADR 0093).
       expect(
-        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+        delivered.filter((message) => isFanoutSummarySubject(message.subject))
       ).toHaveLength(0);
       expect(
         runStore.getRoutineFanout("fanout-cap")?.targets.map((target) => ({
@@ -1684,7 +1690,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(retry.fired).toEqual(["fire-beta"]);
       expect(retry.deferred).toEqual([]);
       const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(message.subject)
       );
       expect(fanoutMessages).toHaveLength(1);
       expect(fanoutMessages[0]?.subject).toContain("0 failed");
@@ -1789,7 +1795,7 @@ describe("RoutineFiringDispatcher", () => {
         skipReason: "concurrency_cap"
       });
       const message = delivered.find((entry) =>
-        entry.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(entry.subject)
       );
       expect(message?.subject).toContain("1 failed");
       expect(message?.text).toContain(
@@ -1940,11 +1946,11 @@ describe("RoutineFiringDispatcher", () => {
         routineName: "refactor-audit"
       });
       const firstFanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(message.subject)
       );
       expect(firstFanoutMessages).toHaveLength(1);
       expect(firstFanoutMessages[0]?.subject).toBe(
-        "[ptt] refactor-audit — 0 PR, 0 issue, 1 failed"
+        "[Symphonika] refactor-audit — 0 PR, 0 issue, 1 failed"
       );
       expect(firstFanoutMessages[0]?.text).toContain("- alpha: succeeded");
       expect(firstFanoutMessages[0]?.text).toContain(
@@ -2009,7 +2015,7 @@ describe("RoutineFiringDispatcher", () => {
         state: "succeeded"
       });
       const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(message.subject)
       );
       expect(fanoutMessages).toHaveLength(1);
       expect(
@@ -4563,11 +4569,11 @@ describe("RoutineFiringDispatcher", () => {
         })
       ]);
       const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(message.subject)
       );
       expect(fanoutMessages).toHaveLength(1);
       expect(fanoutMessages[0]?.subject).toBe(
-        "[ptt] dependency-update — 1 PR, 0 issue, 0 failed"
+        "[Symphonika] dependency-update — 1 PR, 0 issue, 0 failed"
       );
     } finally {
       runStore.close();
@@ -4811,7 +4817,7 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(
-        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+        delivered.filter((message) => isFanoutSummarySubject(message.subject))
       ).toHaveLength(0);
       expect(runStore.getRoutineFanout("fanout-source-muted")).toMatchObject({
         notificationState: "skipped"
@@ -5020,7 +5026,7 @@ describe("RoutineFiringDispatcher", () => {
         })
       );
       const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(message.subject)
       );
       expect(fanoutMessages).toHaveLength(1);
       expect(runStore.getRoutineFanout("fanout-name-reuse")).toMatchObject({
@@ -5111,7 +5117,7 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       expect(
-        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+        delivered.filter((message) => isFanoutSummarySubject(message.subject))
       ).toHaveLength(0);
       expect(runStore.getRoutineFanout("fanout-no-failures")).toMatchObject({
         notificationState: "skipped"
@@ -5202,11 +5208,11 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(message.subject)
       );
       expect(fanoutMessages).toHaveLength(1);
       expect(fanoutMessages[0]?.subject).toBe(
-        "[ptt] daily-report — 0 PR, 0 issue, 1 failed"
+        "[Symphonika] daily-report — 0 PR, 0 issue, 1 failed"
       );
       expect(runStore.getRoutineFanout("fanout-with-failure")).toMatchObject({
         notificationState: "sent"
@@ -5297,7 +5303,7 @@ describe("RoutineFiringDispatcher", () => {
 
       // No failures, no PRs, no issues: the group has nothing to report.
       expect(
-        delivered.filter((message) => message.subject.startsWith("[ptt]"))
+        delivered.filter((message) => isFanoutSummarySubject(message.subject))
       ).toHaveLength(0);
       expect(runStore.getRoutineFanout("fanout-no-changes")).toMatchObject({
         notificationState: "skipped"
@@ -5401,11 +5407,11 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(message.subject)
       );
       expect(fanoutMessages).toHaveLength(1);
       expect(fanoutMessages[0]?.subject).toBe(
-        "[ptt] dependency-update — 1 PR, 0 issue, 0 failed"
+        "[Symphonika] dependency-update — 1 PR, 0 issue, 0 failed"
       );
       expect(runStore.getRoutineFanout("fanout-changes-pr")).toMatchObject({
         notificationState: "sent"
@@ -5486,7 +5492,7 @@ describe("RoutineFiringDispatcher", () => {
         expect.objectContaining({ action: "issue_closed" })
       );
       const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(message.subject)
       );
       expect(fanoutMessages).toHaveLength(1);
       expect(runStore.getRoutineFanout("fanout-issue-outcome")).toMatchObject({
@@ -5582,7 +5588,7 @@ describe("RoutineFiringDispatcher", () => {
       });
 
       const fanoutMessages = delivered.filter((message) =>
-        message.subject.startsWith("[ptt]")
+        isFanoutSummarySubject(message.subject)
       );
       expect(fanoutMessages).toHaveLength(1);
       expect(fanoutMessages[0]?.text).toContain("[REDACTED]");
@@ -9274,7 +9280,7 @@ describe("RoutineFiringDispatcher", () => {
       expect(provider.runAttempt).not.toHaveBeenCalled();
       expect(delivered).toHaveLength(1);
       expect(delivered[0]).toMatchObject({
-        subject: "[ptt] minute-report — 0 PR, 0 issue, 0 failed"
+        subject: "[Symphonika] minute-report — 0 PR, 0 issue, 0 failed"
       });
       expect(delivered[0]?.text).toContain(
         "- alpha: skipped (catch_up_window)"

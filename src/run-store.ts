@@ -10,6 +10,7 @@ import type {
 } from "./issue-polling.js";
 import { normalizeProjectWeight } from "./issue-priority.js";
 import { isNoWorkspaceChangesReason } from "./lifecycle/terminal-reason.js";
+import { symphonikaSubject } from "./notifications/message.js";
 import { isPathInside } from "./path-safety.js";
 import {
   decodeJsonArrayColumn,
@@ -3674,7 +3675,9 @@ export class RunStore {
       pullRequestCount,
       routineName: row.routine_name,
       scheduledAt: row.scheduled_at,
-      subject: `[ptt] ${row.routine_name} — ${pullRequestCount} PR, ${issueCount} issue, ${failureCount} failed`,
+      subject: symphonikaSubject(
+        `${row.routine_name} — ${pullRequestCount} PR, ${issueCount} issue, ${failureCount} failed`
+      ),
       targets: mappedTargets,
       updatedAt: row.updated_at
     };

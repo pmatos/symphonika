@@ -239,6 +239,16 @@ describe("dispatch continuation cap", () => {
             run["terminalReason"] === "cap_reached:no_commits"
         )
       );
+      // The cap-reached row is persisted before markFailed posts the comment
+      // and release drops sym:claimed, so wait for that last step too rather
+      // than racing the assertions below against it.
+      const claimedReleases = (): string[][] =>
+        githubIssuesApi.removeLabelsFromIssue.mock.calls
+          .map(([call]) => (call as { labels: string[] }).labels)
+          .filter((labels) => labels[0] === "sym:claimed");
+      await vi.waitFor(() => {
+        expect(claimedReleases()).not.toHaveLength(0);
+      });
 
       const status = (await fetch(`${daemon.url}/api/status`).then((r) =>
         r.json()
@@ -300,11 +310,7 @@ describe("dispatch continuation cap", () => {
       // Only once the cap is finally reached does scheduleNext's cap-reached
       // branch release the claim -- so exactly one release call, not zero
       // (the pre-fix bug) and not one-per-success (the race this fix closes).
-      const claimedRemoveLabelArgs =
-        githubIssuesApi.removeLabelsFromIssue.mock.calls
-          .map(([call]) => (call as { labels: string[] }).labels)
-          .filter((labels) => labels[0] === "sym:claimed");
-      expect(claimedRemoveLabelArgs).toEqual([["sym:claimed", "sym:stale"]]);
+      expect(claimedReleases()).toEqual([["sym:claimed", "sym:stale"]]);
 
       const database = new Database(
         path.join(root, ".symphonika", "symphonika.db"),

@@ -1629,7 +1629,7 @@ describe("RunStore routines", () => {
         failureCount: 1,
         issueCount: 0,
         pullRequestCount: 1,
-        subject: "[ptt] refactor-audit — 1 PR, 0 issue, 1 failed"
+        subject: "[Symphonika] refactor-audit — 1 PR, 0 issue, 1 failed"
       });
     } finally {
       store.close();

@@ -16,7 +16,7 @@ import {
 } from "../src/routines/outcome.js";
 
 describe("Routine Outcome reconciliation", () => {
-  it("renders an unverified action in ptt's one-line-per-project style", () => {
+  it("renders an unverified action in one-line-per-project style", () => {
     expect(
       formatRoutineOutcomeLine("rightkey", {
         action: "pr",

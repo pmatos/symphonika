@@ -1075,7 +1075,7 @@ Skipped clock events create no firing row, but Routine status records the attemp
 rolling 24-hour counts per Project. Fan-out admission is per Project: siblings that have capacity
 run concurrently while a capped or overlapping Project is recorded as skipped. Once every sibling
 is terminal or skipped, Symphonika sends one grouped summary with a per-Project result and a subject
-such as `[ptt] refactor-audit — 3 PR, 0 issue, 1 failed`. The correlation and pending delivery are
+such as `[Symphonika] refactor-audit — 3 PR, 0 issue, 1 failed`. The correlation and pending delivery are
 durable across daemon restarts. There is no early partial-summary deadline; the configured firing
 timeout and startup reconciliation bound unfinished provider work.
 

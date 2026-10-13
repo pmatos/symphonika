@@ -6,7 +6,8 @@ import type {
 import {
   escapeHtml,
   formatPullRequestReference,
-  htmlShell
+  htmlShell,
+  type PullRequestReference
 } from "../notifications/message.js";
 import { unverifiedOutcomeSuffix } from "./outcome.js";
 
@@ -98,16 +99,47 @@ function targetSummary(target: RoutineFanoutTargetStatus): {
   // as an explained outcome rather than a silent gap. The verified/unverified
   // suffix is shared with formatRoutineOutcomeLine so an error or unverified
   // claim never reads as an explained success here.
-  if (pullRequests.length === 0) {
+  //
+  // A verified `pr` outcome whose PR was opened from a branch other than the
+  // firing's own (ADR-2026-09-11-1001: e.g. forseti's pm-deepen falling back
+  // to its own `pm-deepen/<slug>` branch) never reaches `pullRequests`, which
+  // branch-scoped discovery alone fills. Render it from the verified URL in
+  // the same `PR #N` form so the summary reads the same for every project.
+  const references: PullRequestReference[] =
+    pullRequests.length > 0
+      ? pullRequests
+      : verifiedOutcomePullRequests(firing.outcome);
+  if (references.length === 0) {
     return plain(`${prefix}${outcomeDetail(firing.outcome)}`);
   }
-  const items = pullRequests.map((pullRequest) =>
+  const items = references.map((pullRequest) =>
     formatPullRequestReference(pullRequest)
   );
   return {
     html: `${escapeHtml(prefix)} — PR ${items.map((item) => item.html).join(", ")}`,
     text: `${prefix} — PR ${items.map((item) => item.text).join(", ")}`
   };
+}
+
+function verifiedOutcomePullRequests(
+  outcome: RoutineFiringStatus["outcome"]
+): PullRequestReference[] {
+  if (
+    outcome === null ||
+    !outcome.verified ||
+    outcome.status === "error" ||
+    outcome.action !== "pr" ||
+    outcome.url === null
+  ) {
+    return [];
+  }
+  const match = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)$/.exec(
+    outcome.url
+  );
+  if (match === null) {
+    return [];
+  }
+  return [{ prNumber: Number(match[1]), prUrl: outcome.url }];
 }
 
 function outcomeDetail(outcome: RoutineFiringStatus["outcome"]): string {

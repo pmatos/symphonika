@@ -112,6 +112,61 @@ describe("Routine Fan-out notifications", () => {
     );
   });
 
+  it("renders a verified PR opened from another branch like a discovered one", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "pr",
+            source: "claude",
+            status: "success",
+            summary:
+              "Opened the PR from pm-deepen/observed-ladder-consumption.",
+            title: "Deepen verification ladder consumption",
+            url: "https://github.com/pmatos/forseti/pull/350",
+            verified: true
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain(
+      "succeeded — PR #350 (https://github.com/pmatos/forseti/pull/350)"
+    );
+    expect(message.html).toContain(
+      'succeeded — PR <a href="https://github.com/pmatos/forseti/pull/350">#350</a>'
+    );
+    expect(message.text).not.toContain("Deepen verification ladder");
+  });
+
+  it("keeps an unverified PR claim as an explained claim rather than a PR link", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "pr",
+            source: "claude",
+            status: "success",
+            summary: "Opened a PR.",
+            title: "Claimed refactor",
+            url: "https://github.com/pmatos/alpha/pull/12",
+            verified: false
+          },
+          pullRequests: []
+        })
+      })
+    ]);
+
+    const message = renderRoutineFanoutNotification(fanout);
+
+    expect(message.text).toContain(
+      "succeeded — Claimed refactor https://github.com/pmatos/alpha/pull/12 (unverified)"
+    );
+  });
+
   it("explains a succeeded firing that opened no PR instead of leaving it unexplained", () => {
     const fanout = fakeFanout([
       fakeFanoutTarget({

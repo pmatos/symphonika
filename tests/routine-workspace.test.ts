@@ -38,6 +38,57 @@ afterEach(async () => {
 });
 
 describe("Routine workspace preparation", () => {
+  it("creates the firing branch without an upstream even when the cache maps remote-tracking refs", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const workspaceRoot = path.join(root, "workspaces", "alpha");
+    const input = {
+      configDir: root,
+      kind: "git" as const,
+      project: {
+        name: "alpha",
+        workspace: {
+          git: { base_branch: "main", remote: remotePath },
+          root: workspaceRoot
+        }
+      },
+      routineName: "refactor-audit"
+    };
+    const first = await prepareRoutineWorkspace({
+      ...input,
+      firingId: "01JABCDEFGHJKMNPQRSTVWXYZ12"
+    });
+    // Worktrees share the bare cache's config, so a `git config` run inside
+    // any firing workspace can add the standard fetch refspec. With it,
+    // git's default branch.autoSetupMerge would make every later firing
+    // branch track origin/main, and a skill that refuses to adopt an
+    // upstream-tracking branch opens its PR from a branch PR discovery
+    // cannot see.
+    await git([
+      "-C",
+      first.cachePath,
+      "config",
+      "remote.origin.fetch",
+      "+refs/heads/*:refs/remotes/origin/*"
+    ]);
+
+    const prepared = await prepareRoutineWorkspace({
+      ...input,
+      firingId: "01KABCDEFGHJKMNPQRSTVWXYZ12"
+    });
+
+    await expect(
+      git([
+        "-C",
+        prepared.workspacePath,
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}"
+      ])
+    ).rejects.toThrow(/no upstream/);
+  });
+
   it("cancels clone and fetch helper process trees without poisoning the shared cache", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

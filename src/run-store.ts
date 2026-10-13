@@ -8,6 +8,7 @@ import type {
   IssueSnapshot,
   RawGitHubIssueDependencyRef
 } from "./issue-polling.js";
+import { isAgentProviderName } from "./human-resume-command.js";
 import { normalizeProjectWeight } from "./issue-priority.js";
 import { isNoWorkspaceChangesReason } from "./lifecycle/terminal-reason.js";
 import { isPathInside } from "./path-safety.js";
@@ -1512,7 +1513,7 @@ const PROVIDER_PLAN_PENDING_TTL_MS = 60 * 60 * 1000;
 
 // Written only by createProviderPlan from validated input; still parsed
 // defensively so a hand-edited row cannot route a state to an unknown name.
-function parseStateProviders(
+function parseStoredStateProviders(
   json: string | null
 ): Readonly<Record<string, AgentProviderName>> {
   if (json === null) {
@@ -1531,7 +1532,7 @@ function parseStateProviders(
   for (const [stateId, provider] of Object.entries(
     parsed as Record<string, unknown>
   )) {
-    if (provider === "omp" || provider === "claude" || provider === "codex") {
+    if (typeof provider === "string" && isAgentProviderName(provider)) {
       result[stateId] = provider;
     }
   }
@@ -1552,7 +1553,7 @@ function mapProviderPlanRow(row: ProviderPlanDbRow): ProviderPlan {
     readyLabel: row.ready_label,
     repository: { owner: row.repository_owner, repo: row.repository_name },
     snapshotPolledAt: row.snapshot_polled_at,
-    stateProviders: parseStateProviders(row.state_providers_json),
+    stateProviders: parseStoredStateProviders(row.state_providers_json),
     status: row.status as ProviderPlanStatus,
     updatedAt: row.updated_at
   };

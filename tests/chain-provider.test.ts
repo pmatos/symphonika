@@ -30,6 +30,19 @@ describe("resolveEffectiveProvider", () => {
     ).toEqual({ provider: "omp", source: "operator_chain" });
   });
 
+  it("ignores inherited Object.prototype keys as state ids", () => {
+    for (const stateId of ["constructor", "toString", "hasOwnProperty"]) {
+      expect(
+        resolveEffectiveProvider({
+          actionProvider: undefined,
+          plan,
+          projectDefault: "codex",
+          stateId
+        })
+      ).toEqual({ provider: "omp", source: "operator_chain" });
+    }
+  });
+
   it("uses the chain-wide choice when no state id is known", () => {
     expect(
       resolveEffectiveProvider({

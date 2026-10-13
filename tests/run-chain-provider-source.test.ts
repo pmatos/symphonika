@@ -14,6 +14,12 @@ const graph: ExpandedWorkflow = {
       completeWhen: {},
       id: "implement",
       transitions: []
+    },
+    {
+      action: { kind: "wait" },
+      completeWhen: {},
+      id: "await_checks",
+      transitions: []
     }
   ]
 };
@@ -41,5 +47,14 @@ describe("resolveProviderSource (#862)", () => {
       declaredProvider: "claude",
       kind: "workflow_state"
     });
+  });
+
+  it("keeps a non-agent state at no provider even with a recorded source", () => {
+    expect(
+      resolveProviderSource(graph, "await_checks", {
+        provider: "codex",
+        source: "project_default"
+      })
+    ).toEqual({ kind: "no_provider" });
   });
 });

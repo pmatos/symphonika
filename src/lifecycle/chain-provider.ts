@@ -15,10 +15,14 @@ export function resolveEffectiveProvider(input: {
   projectDefault: AgentProviderName;
   stateId: string | undefined;
 }): EffectiveProvider {
+  // Own keys only: a state named e.g. `constructor` must not resolve to an
+  // inherited Object.prototype member.
   const stateProvider =
-    input.stateId === undefined
+    input.stateId === undefined ||
+    input.plan === undefined ||
+    !Object.hasOwn(input.plan.stateProviders, input.stateId)
       ? undefined
-      : input.plan?.stateProviders[input.stateId];
+      : input.plan.stateProviders[input.stateId];
   if (stateProvider !== undefined) {
     return { provider: stateProvider, source: "operator_state" };
   }

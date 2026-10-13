@@ -320,6 +320,12 @@ export function resolveProviderSource(
   stateId: string | undefined,
   recorded?: { provider: string; source: ProviderSelectionSource | null }
 ): ProviderSource {
+  const node = findWorkflowStateNode(graph, stateId);
+  // A state the captured graph knows has no agent action launched no
+  // provider of its own, whatever its Run row recorded at the claim.
+  if (node !== undefined && node.action?.kind !== "agent") {
+    return { kind: "no_provider" };
+  }
   switch (recorded?.source) {
     case "operator_state":
     case "operator_chain":
@@ -331,14 +337,10 @@ export function resolveProviderSource(
     case null:
       break;
   }
-  const node = findWorkflowStateNode(graph, stateId);
   if (node === undefined) {
     return { kind: "not_recorded" };
   }
-  if (node.action?.kind !== "agent") {
-    return { kind: "no_provider" };
-  }
-  return node.action.provider === undefined
+  return node.action?.provider === undefined
     ? { kind: "project_default" }
     : { declaredProvider: node.action.provider, kind: "workflow_state" };
 }

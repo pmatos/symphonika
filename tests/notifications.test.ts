@@ -175,6 +175,79 @@ describe("Routine Fan-out notifications", () => {
     expect(message.text).toContain("- beta: succeeded — Off-GitHub refactor");
   });
 
+  it("falls back to defaults for legs and outcomes missing their reasons", () => {
+    const fanout = fakeFanout([
+      fakeFanoutTarget({
+        disposition: "skipped",
+        firing: null,
+        projectName: "skipped-leg"
+      }),
+      fakeFanoutTarget({
+        disposition: "missed",
+        firing: null,
+        projectName: "missed-leg"
+      }),
+      fakeFanoutTarget({
+        deferredAttempts: 1,
+        disposition: "missed",
+        firing: null,
+        projectName: "missed-once",
+        skipReason: "concurrency_cap"
+      }),
+      fakeFanoutTarget({
+        deferredAttempts: 3,
+        disposition: "missed",
+        firing: null,
+        projectName: "missed-thrice",
+        skipReason: "concurrency_cap"
+      }),
+      fakeFanoutTarget({
+        disposition: "held",
+        firing: null,
+        projectName: "held-leg"
+      }),
+      fakeFanoutTarget({
+        disposition: "pending",
+        firing: null,
+        projectName: "pending-leg"
+      }),
+      fakeFanoutTarget({
+        firing: fakeFiring({ outcome: null, pullRequests: [] }),
+        projectName: "no-outcome"
+      }),
+      fakeFanoutTarget({
+        firing: fakeFiring({
+          outcome: {
+            action: "pr",
+            source: "claude",
+            status: "error",
+            summary: "",
+            title: "Opened PR",
+            url: null,
+            verified: false
+          },
+          pullRequests: []
+        }),
+        projectName: "empty-error"
+      })
+    ]);
+
+    const lines = renderRoutineFanoutNotification(fanout).text.split("\n");
+
+    expect(lines).toEqual(
+      expect.arrayContaining([
+        "- skipped-leg: skipped (unspecified)",
+        "- missed-leg: did not run (unspecified)",
+        "- missed-once: did not run (concurrency_cap) after 1 admission attempt",
+        "- missed-thrice: did not run (concurrency_cap) after 3 admission attempts",
+        "- held-leg: held (provider unavailable)",
+        "- pending-leg: pending",
+        "- no-outcome: succeeded",
+        "- empty-error: succeeded — error (unverified)"
+      ])
+    );
+  });
+
   it("keeps an unverified PR claim as an explained claim rather than a PR link", () => {
     const fanout = fakeFanout([
       fakeFanoutTarget({

@@ -1440,15 +1440,15 @@ type ProviderPlanStatus =
 // at launch so the timeline never has to re-derive it from a graph that may
 // have changed since: an operator's per-state choice, their chain-wide
 // choice, the state's own `action.provider`, or the Project default.
-export type ProviderSelectionSource =
-  "operator_state" | "operator_chain" | "workflow_action" | "project_default";
-
-const PROVIDER_SELECTION_SOURCES: readonly ProviderSelectionSource[] = [
+const PROVIDER_SELECTION_SOURCES = [
   "operator_state",
   "operator_chain",
   "workflow_action",
   "project_default"
-];
+] as const;
+
+export type ProviderSelectionSource =
+  (typeof PROVIDER_SELECTION_SOURCES)[number];
 
 function parseProviderSelectionSource(
   value: string | null
@@ -1662,11 +1662,7 @@ export class RunStore {
           readyLabel: input.readyLabel,
           repo: input.repository.repo,
           snapshotPolledAt: input.snapshotPolledAt,
-          stateProvidersJson:
-            input.stateProviders === undefined ||
-            Object.keys(input.stateProviders).length === 0
-              ? null
-              : JSON.stringify(input.stateProviders)
+          stateProvidersJson: JSON.stringify(input.stateProviders ?? {})
         });
     });
     apply();

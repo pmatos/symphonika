@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveEffectiveProvider } from "../src/lifecycle/chain-provider.js";
+import {
+  isAgentState,
+  resolveEffectiveProvider
+} from "../src/lifecycle/chain-provider.js";
+
+const agent = (id: string, provider?: "claude" | "codex" | "omp") => ({
+  action: {
+    kind: "agent" as const,
+    ...(provider === undefined ? {} : { provider })
+  },
+  id
+});
 
 describe("resolveEffectiveProvider", () => {
   const plan = {
@@ -11,10 +22,9 @@ describe("resolveEffectiveProvider", () => {
   it("prefers the operator's per-state choice over everything else", () => {
     expect(
       resolveEffectiveProvider({
-        actionProvider: "claude",
         plan,
         projectDefault: "claude",
-        stateId: "review"
+        state: agent("review", "claude")
       })
     ).toEqual({ provider: "codex", source: "operator_state" });
   });
@@ -22,10 +32,9 @@ describe("resolveEffectiveProvider", () => {
   it("reveals the chain-wide choice for a state with no per-state choice", () => {
     expect(
       resolveEffectiveProvider({
-        actionProvider: "claude",
         plan,
         projectDefault: "codex",
-        stateId: "implement"
+        state: agent("implement", "claude")
       })
     ).toEqual({ provider: "omp", source: "operator_chain" });
   });
@@ -34,22 +43,30 @@ describe("resolveEffectiveProvider", () => {
     for (const stateId of ["constructor", "toString", "hasOwnProperty"]) {
       expect(
         resolveEffectiveProvider({
-          actionProvider: undefined,
           plan,
           projectDefault: "codex",
-          stateId
+          state: agent(stateId)
         })
       ).toEqual({ provider: "omp", source: "operator_chain" });
     }
   });
 
-  it("uses the chain-wide choice when no state id is known", () => {
+  it("never applies a per-state choice to a non-agent state", () => {
     expect(
       resolveEffectiveProvider({
-        actionProvider: undefined,
         plan,
         projectDefault: "codex",
-        stateId: undefined
+        state: { action: { kind: "wait" }, id: "review" }
+      })
+    ).toEqual({ provider: "omp", source: "operator_chain" });
+  });
+
+  it("uses the chain-wide choice when no state is known", () => {
+    expect(
+      resolveEffectiveProvider({
+        plan,
+        projectDefault: "codex",
+        state: undefined
       })
     ).toEqual({ provider: "omp", source: "operator_chain" });
   });
@@ -57,10 +74,9 @@ describe("resolveEffectiveProvider", () => {
   it("prefers the workflow action over the project default", () => {
     expect(
       resolveEffectiveProvider({
-        actionProvider: "claude",
         plan: undefined,
         projectDefault: "codex",
-        stateId: "review"
+        state: agent("review", "claude")
       })
     ).toEqual({ provider: "claude", source: "workflow_action" });
   });
@@ -68,11 +84,19 @@ describe("resolveEffectiveProvider", () => {
   it("falls back to the project default", () => {
     expect(
       resolveEffectiveProvider({
-        actionProvider: undefined,
         plan: undefined,
         projectDefault: "codex",
-        stateId: "review"
+        state: agent("review")
       })
     ).toEqual({ provider: "codex", source: "project_default" });
+  });
+});
+
+describe("isAgentState", () => {
+  it("is true only for an agent action", () => {
+    expect(isAgentState(agent("x"))).toBe(true);
+    expect(isAgentState({ action: { kind: "wait" } })).toBe(false);
+    expect(isAgentState({})).toBe(false);
+    expect(isAgentState(undefined)).toBe(false);
   });
 });

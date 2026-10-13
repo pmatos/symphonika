@@ -1034,7 +1034,7 @@ describe("ProviderStartService per-state choices (#862)", () => {
     });
 
     expect(JSON.stringify(outcome)).toContain(
-      "claude for state review is no longer configured and registered"
+      "cannot retry: claude for state review is not configured and registered"
     );
     expect(addLabelsToIssue).toHaveBeenCalledTimes(1);
   });

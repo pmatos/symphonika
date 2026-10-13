@@ -24,16 +24,17 @@ plan exists, level 3 is reached only by Runs the plan does not cover.
 
 ### Storage
 
-`run_chain_provider_plans.state_providers_json` holds a `{stateId: provider}` object, or `NULL` for
-none. Start validates it against the previewed graph: the state must exist and be selectable, and
-the provider must be configured and registered; blank entries mean chain-wide and are dropped.
-Retry re-checks that every per-state provider is still configured and registered.
+`run_chain_provider_plans.state_providers_json` holds a `{stateId: provider}` object (`{}` for
+none; `NULL` only on plans written before this change). Start validates it against the previewed
+graph: the state must exist and be selectable, and the provider must be configured and registered;
+blank entries mean chain-wide and are dropped. Retry re-runs the same validation.
 
 `runs.provider_source` records which level chose the Run's provider at launch:
-`operator_state`, `operator_chain`, `workflow_action` or `project_default`. It is written for the
-fresh claim and State Advance, the two paths that resolve precedence. Runs from paths that don't
-resolve it (non-FSM Continuations, PR review follow-ups) and Runs from before this change leave it
-`NULL`.
+`operator_state`, `operator_chain`, `workflow_action` or `project_default`. Every path that launches
+a provider through the fresh lifecycle must supply it: the fresh claim and State Advance resolve it
+through `resolveEffectiveProvider`, and non-FSM Continuations and PR review follow-ups, which keep
+Project routing, record `project_default`. Runs from before this change, and Runs that never
+launched a provider, leave it `NULL`.
 
 ### Launch boundaries
 

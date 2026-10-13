@@ -14,6 +14,7 @@
 // executed is only recoverable from its *parent's* row (or, for a chain's
 // root, from that root's own captured graph's `initial`).
 
+import { isAgentState } from "../lifecycle/chain-provider.js";
 import { findWorkflowState } from "../lifecycle/state-machine-dispatch.js";
 import type { ProviderSelectionSource, RunStatus } from "../run-store.js";
 import type {
@@ -323,19 +324,13 @@ export function resolveProviderSource(
   const node = findWorkflowStateNode(graph, stateId);
   // A state the captured graph knows has no agent action launched no
   // provider of its own, whatever its Run row recorded at the claim.
-  if (node !== undefined && node.action?.kind !== "agent") {
+  if (node !== undefined && !isAgentState(node)) {
     return { kind: "no_provider" };
   }
-  switch (recorded?.source) {
-    case "operator_state":
-    case "operator_chain":
-    case "project_default":
-      return { kind: recorded.source };
-    case "workflow_action":
-      return { declaredProvider: recorded.provider, kind: "workflow_state" };
-    case undefined:
-    case null:
-      break;
+  if (recorded?.source != null) {
+    return recorded.source === "workflow_action"
+      ? { declaredProvider: recorded.provider, kind: "workflow_state" }
+      : { kind: recorded.source };
   }
   if (node === undefined) {
     return { kind: "not_recorded" };

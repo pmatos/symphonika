@@ -9,6 +9,7 @@ import {
 } from "../issue-polling.js";
 import { isAgentProviderName } from "../human-resume-command.js";
 import type { AsyncMutex } from "../lifecycle/async-mutex.js";
+import { isAgentState } from "../lifecycle/chain-provider.js";
 import {
   isDispatchProject,
   type DispatchProjectConfig,
@@ -241,10 +242,11 @@ export function createProviderStartService(
       // synthesized states run on the chain-wide choice (or the default).
       states: workflow.expandedWorkflow.states.map((state) => ({
         actionKind: state.action?.kind,
-        declaredProvider:
-          state.action?.kind === "agent" ? state.action.provider : undefined,
+        declaredProvider: isAgentState(state)
+          ? state.action?.provider
+          : undefined,
         id: state.id,
-        selectable: isRawFsm && state.action?.kind === "agent"
+        selectable: isRawFsm && isAgentState(state)
       })),
       workflowName: workflow.expandedWorkflow.name
     };
@@ -609,12 +611,11 @@ export function createProviderStartService(
     if (!context.providers.includes(plan.provider)) {
       return refuse(`${plan.provider} is no longer configured and registered`);
     }
-    for (const [stateId, provider] of Object.entries(plan.stateProviders)) {
-      if (!context.providers.includes(provider)) {
-        return refuse(
-          `${provider} for state ${stateId} is no longer configured and registered`
-        );
-      }
+    // Same rules as Start; the fingerprint check above guarantees the
+    // previewed states still match the plan's.
+    const stillValid = parseStateProviders(plan.stateProviders, context);
+    if ("error" in stillValid) {
+      return refuse(`cannot retry: ${stillValid.error}`);
     }
     const live = await readLive(project, context, input.issueNumber, token);
     if (live.kind === "error") {

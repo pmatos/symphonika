@@ -1177,22 +1177,17 @@ export class RunController {
     // loading it once here pays only on actually-selected dispatches. Falls
     // back to the project default for contract workflows or when the
     // initial agent action declares no provider.
-    let initialAction: WorkflowAction | undefined;
-    let initialStateId: string | undefined;
+    let initialState: ExpandedWorkflowState | undefined;
     try {
       const loaded = await this.loadWorkflow(target.project.workflow);
       if (
         loaded.errors.length === 0 &&
         loaded.expandedWorkflow.source.kind === "raw_fsm"
       ) {
-        const initialState = findWorkflowState(
+        initialState = findWorkflowState(
           loaded.expandedWorkflow,
           loaded.expandedWorkflow.initial
         );
-        if (initialState?.action !== undefined) {
-          initialAction = initialState.action;
-        }
-        initialStateId = initialState?.id;
       }
     } catch {
       // Workflow load failure falls back to the project default; the same
@@ -1220,11 +1215,9 @@ export class RunController {
     }
     const { provider: providerName, source: providerSource } =
       resolveEffectiveProvider({
-        actionProvider:
-          initialAction?.kind === "agent" ? initialAction.provider : undefined,
         plan: providerPlan,
         projectDefault: target.project.agent.provider,
-        stateId: initialAction?.kind === "agent" ? initialStateId : undefined
+        state: initialState
       });
     const providerCommand = (
       providersConfig as Partial<RunControllerProvidersConfig>
@@ -3206,14 +3199,9 @@ export class RunController {
 
     const { provider: providerName, source: providerSource } =
       resolveEffectiveProvider({
-        actionProvider:
-          targetState.action?.kind === "agent"
-            ? targetState.action.provider
-            : undefined,
         plan: this.runStore.getChainProviderPlan(payload.parentRunId),
         projectDefault: project.agent.provider,
-        stateId:
-          targetState.action?.kind === "agent" ? targetState.id : undefined
+        state: targetState
       });
     const providerConfig = (
       providersConfig as Partial<RunControllerProvidersConfig>
@@ -3688,6 +3676,8 @@ export class RunController {
         provider,
         providerCommand,
         providerName,
+        // Non-FSM Continuations keep Project routing (ADR-2026-10-09-0743).
+        providerSource: "project_default",
         repository,
         ...(payload.respectsIssueLabels === undefined
           ? {}
@@ -3865,6 +3855,8 @@ export class RunController {
         provider,
         providerCommand,
         providerName,
+        // PR review follow-ups keep Project routing (ADR-2026-10-09-0743).
+        providerSource: "project_default",
         repository,
         respectsIssueLabels: false,
         runId
@@ -4093,7 +4085,7 @@ export class RunController {
     providerCommand: string;
     providerName: AgentProviderName;
     // Which precedence level chose providerName (#862); persisted on the Run.
-    providerSource?: ProviderSelectionSource;
+    providerSource: ProviderSelectionSource;
     // Undefined for continuation/state-advance/PR-followup callers, which
     // claimAndPersistRun's own wait-park recheck skips regardless -- see
     // issue #737.
@@ -4140,7 +4132,7 @@ export class RunController {
     provider: AgentProvider;
     providerCommand: string;
     providerName: AgentProviderName;
-    providerSource?: ProviderSelectionSource;
+    providerSource: ProviderSelectionSource;
     repository: GitHubIssueRepositoryInput;
     respectsIssueLabels?: boolean;
     runId: string;
@@ -4415,7 +4407,7 @@ export class RunController {
     project: RunControllerProjectConfig;
     providerCommand: string;
     providerName: AgentProviderName;
-    providerSource?: ProviderSelectionSource;
+    providerSource: ProviderSelectionSource;
     // Undefined for continuation/state-advance/PR-followup callers, which the
     // wait-park recheck below skips regardless (isContinuation gate). See
     // issue #737.
@@ -4624,9 +4616,7 @@ export class RunController {
         projectName: input.project.name,
         providerCommand: input.providerCommand,
         providerName: input.providerName,
-        ...(input.providerSource === undefined
-          ? {}
-          : { providerSource: input.providerSource })
+        providerSource: input.providerSource
       };
       if (input.isContinuation && input.parentRunId !== null) {
         this.runStore.createContinuationRun({

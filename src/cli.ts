@@ -197,6 +197,42 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
   const registerSignalHandlers = dependencies.registerSignalHandlers ?? true;
   const program = new Command();
 
+  async function requireDaemonForMutation(
+    command: "poll-now" | "update" | "fire-now" | "cancel" | "adopt-pr",
+    options: { config?: string; daemonUrl?: string }
+  ): Promise<string> {
+    const stateRoot = resolveStateRoot(
+      withConfigPath(options.config)
+    ).stateRoot;
+    const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
+    if (daemonUrl === undefined) {
+      writeErr(
+        program,
+        `${command} failed: daemon endpoint not found at ${daemonEndpointPath(stateRoot)}\n`
+      );
+      if (command === "update") {
+        writeErr(
+          program,
+          "the update runs inside the daemon so it shares the drain gate; start the daemon first\n"
+        );
+      }
+      return program.error(`${command} failed: daemon endpoint not found`, {
+        exitCode: 1
+      });
+    }
+
+    // Read-only status can degrade to persisted evidence. A mutation must
+    // verify the live endpoint's state root before its command can POST.
+    const daemonStatus = await fetchDaemonStatus(fetcher, daemonUrl, stateRoot);
+    if (daemonStatus.kind === "unavailable") {
+      writeErr(program, `${command} failed: ${daemonStatus.error}\n`);
+      return program.error(`${command} failed: ${daemonStatus.error}`, {
+        exitCode: 1
+      });
+    }
+    return daemonUrl;
+  }
+
   program
     .name("symphonika")
     .description(
@@ -1037,34 +1073,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .option("--config <path>", "service config path")
     .option("--daemon-url <url>", "local daemon base URL")
     .action(async (options: { config?: string; daemonUrl?: string }) => {
-      const stateRoot = resolveStateRoot(
-        withConfigPath(options.config)
-      ).stateRoot;
-      const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
-      if (daemonUrl === undefined) {
-        const descriptorPath = daemonEndpointPath(stateRoot);
-        writeErr(
-          program,
-          `poll-now failed: daemon endpoint not found at ${descriptorPath}\n`
-        );
-        program.error("poll-now failed: daemon endpoint not found", {
-          exitCode: 1
-        });
-        return;
-      }
-
-      const daemonStatus = await fetchDaemonStatus(
-        fetcher,
-        daemonUrl,
-        stateRoot
-      );
-      if (daemonStatus.kind === "unavailable") {
-        writeErr(program, `poll-now failed: ${daemonStatus.error}\n`);
-        program.error(`poll-now failed: ${daemonStatus.error}`, {
-          exitCode: 1
-        });
-        return;
-      }
+      const daemonUrl = await requireDaemonForMutation("poll-now", options);
 
       const outcome = await postPollNow(fetcher, daemonUrl);
       if (!outcome.ok) {
@@ -1093,38 +1102,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
         config?: string;
         daemonUrl?: string;
       }) => {
-        const stateRoot = resolveStateRoot(
-          withConfigPath(options.config)
-        ).stateRoot;
-        const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
-        if (daemonUrl === undefined) {
-          const descriptorPath = daemonEndpointPath(stateRoot);
-          writeErr(
-            program,
-            `update failed: daemon endpoint not found at ${descriptorPath}\n`
-          );
-          writeErr(
-            program,
-            "the update runs inside the daemon so it shares the drain gate; start the daemon first\n"
-          );
-          program.error("update failed: daemon endpoint not found", {
-            exitCode: 1
-          });
-          return;
-        }
-
-        const daemonStatus = await fetchDaemonStatus(
-          fetcher,
-          daemonUrl,
-          stateRoot
-        );
-        if (daemonStatus.kind === "unavailable") {
-          writeErr(program, `update failed: ${daemonStatus.error}\n`);
-          program.error(`update failed: ${daemonStatus.error}`, {
-            exitCode: 1
-          });
-          return;
-        }
+        const daemonUrl = await requireDaemonForMutation("update", options);
 
         const outcome = await postUpdateNow(fetcher, daemonUrl, {
           checkOnly: options.check === true
@@ -1162,34 +1140,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           wait?: boolean;
         }
       ) => {
-        const stateRoot = resolveStateRoot(
-          withConfigPath(options.config)
-        ).stateRoot;
-        const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
-        if (daemonUrl === undefined) {
-          const descriptorPath = daemonEndpointPath(stateRoot);
-          writeErr(
-            program,
-            `fire-now failed: daemon endpoint not found at ${descriptorPath}\n`
-          );
-          program.error("fire-now failed: daemon endpoint not found", {
-            exitCode: 1
-          });
-          return;
-        }
-
-        const daemonStatus = await fetchDaemonStatus(
-          fetcher,
-          daemonUrl,
-          stateRoot
-        );
-        if (daemonStatus.kind === "unavailable") {
-          writeErr(program, `fire-now failed: ${daemonStatus.error}\n`);
-          program.error(`fire-now failed: ${daemonStatus.error}`, {
-            exitCode: 1
-          });
-          return;
-        }
+        const daemonUrl = await requireDaemonForMutation("fire-now", options);
 
         const outcome = await postFireRoutine(fetcher, daemonUrl, routine, {
           force: options.force === true,
@@ -1808,34 +1759,8 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
     .option("--daemon-url <url>", "local daemon base URL")
     .action(
       async (id: string, options: { config?: string; daemonUrl?: string }) => {
-        const stateRoot = resolveStateRoot(
-          withConfigPath(options.config)
-        ).stateRoot;
-        const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
-        if (daemonUrl === undefined) {
-          const descriptorPath = daemonEndpointPath(stateRoot);
-          writeErr(
-            program,
-            `cancel failed: daemon endpoint not found at ${descriptorPath}\n`
-          );
-          program.error("cancel failed: daemon endpoint not found", {
-            exitCode: 1
-          });
-          return;
-        }
+        const daemonUrl = await requireDaemonForMutation("cancel", options);
 
-        const daemonStatus = await fetchDaemonStatus(
-          fetcher,
-          daemonUrl,
-          stateRoot
-        );
-        if (daemonStatus.kind === "unavailable") {
-          writeErr(program, `cancel failed: ${daemonStatus.error}\n`);
-          program.error(`cancel failed: ${daemonStatus.error}`, {
-            exitCode: 1
-          });
-          return;
-        }
         const outcome = await postCancel(fetcher, daemonUrl, id);
         if (outcome.kind === "cancelled") {
           writeOut(program, `cancelled ${id}\n`);
@@ -1885,34 +1810,7 @@ export function buildCli(dependencies: CliDependencies = {}): Command {
           issue: number;
         }
       ) => {
-        const stateRoot = resolveStateRoot(
-          withConfigPath(options.config)
-        ).stateRoot;
-        const daemonUrl = resolveDaemonUrl(stateRoot, options.daemonUrl);
-        if (daemonUrl === undefined) {
-          const descriptorPath = daemonEndpointPath(stateRoot);
-          writeErr(
-            program,
-            `adopt-pr failed: daemon endpoint not found at ${descriptorPath}\n`
-          );
-          program.error("adopt-pr failed: daemon endpoint not found", {
-            exitCode: 1
-          });
-          return;
-        }
-
-        const daemonStatus = await fetchDaemonStatus(
-          fetcher,
-          daemonUrl,
-          stateRoot
-        );
-        if (daemonStatus.kind === "unavailable") {
-          writeErr(program, `adopt-pr failed: ${daemonStatus.error}\n`);
-          program.error(`adopt-pr failed: ${daemonStatus.error}`, {
-            exitCode: 1
-          });
-          return;
-        }
+        const daemonUrl = await requireDaemonForMutation("adopt-pr", options);
 
         const outcome = await postAdoptPr(
           fetcher,

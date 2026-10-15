@@ -18,6 +18,8 @@ import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ActiveRunRegistry } from "../src/lifecycle/active-runs.js";
+import { createAsyncMutex } from "../src/lifecycle/async-mutex.js";
+import type { GitHubIssueLabelInput } from "../src/issue-polling.js";
 import { RunController } from "../src/lifecycle/run-controller.js";
 import type {
   RunControllerOptions,
@@ -1714,6 +1716,203 @@ describe("Run slot deadline", () => {
   });
 });
 
+describe.each(["claim repair", "attempt completion"] as const)(
+  "terminal Run completion through %s",
+  (source) => {
+    it.each(["exhausted", "retryable", "scheduler throws"] as const)(
+      "preserves publication, labels, diagnostics and scheduling when %s",
+      async (scenario) => {
+        const root = await makeTempRoot();
+        await writeProject(root);
+        const reloader = new RuntimeConfigReloader({
+          configPath: path.join(root, "symphonika.yml")
+        });
+        await reloader.reload();
+        const project = reloader.projectsByName().get("symphonika");
+        if (project === undefined) {
+          throw new Error("expected test project");
+        }
+
+        const activeRuns = new ActiveRunRegistry();
+        const dispatchMutex = createAsyncMutex();
+        const runStore = openRunStore({
+          stateRoot: path.join(root, ".symphonika")
+        });
+        const runId = "run-completion";
+        const failure = new Error("temporary completion failure");
+        const provider: AgentProvider = {
+          cancel: vi.fn().mockResolvedValue(undefined),
+          name: "codex",
+          runAttempt: vi.fn(successfulAttempt),
+          validate: vi.fn().mockRejectedValue(failure)
+        };
+        const { lines, logger } = createCapturingLogger();
+        const trace: string[] = [];
+        let labelObservation:
+          | {
+              run: ReturnType<RunStore["getRun"]>;
+              pending: string[];
+              mutexHeld: boolean;
+              normalLog: boolean;
+              repairLog: boolean;
+            }
+          | undefined;
+        let mutexHeldAfterLabelAwait: boolean | undefined;
+        let scheduleObservation:
+          { trace: string[]; mutexHeld: boolean } | undefined;
+        const retryable = scenario !== "exhausted";
+        const addLabelsToIssue = vi
+          .fn<(input: GitHubIssueLabelInput) => Promise<void>>()
+          .mockResolvedValue(undefined);
+        const removeLabelsFromIssue = vi.fn(
+          async (input: GitHubIssueLabelInput) => {
+            if (!input.labels.includes("sym:running")) {
+              return;
+            }
+            trace.push("labels");
+            labelObservation = {
+              run: runStore.getRun(runId),
+              pending: runStore
+                .listPendingRunNotifications()
+                .map((run) => run.id),
+              mutexHeld: dispatchMutex.held,
+              normalLog: lines.some(
+                (line) => line.msg === "symphonika run terminated"
+              ),
+              repairLog: lines.some(
+                (line) =>
+                  line.msg ===
+                  "symphonika reconciled Run after claim persistence failed"
+              )
+            };
+            await Promise.resolve();
+            mutexHeldAfterLabelAwait = dispatchMutex.held;
+          }
+        );
+        const schedule = vi.fn<RunControllerOptions["schedule"]>(() => {
+          scheduleObservation = {
+            trace: [...trace],
+            mutexHeld: dispatchMutex.held
+          };
+          trace.push("schedule");
+          if (scenario === "scheduler throws") {
+            throw new Error("scheduler unavailable");
+          }
+          return true;
+        });
+        const controller = makeRunController(
+          {
+            activeRuns,
+            onTerminated: vi.fn(),
+            project,
+            provider,
+            reloader,
+            root,
+            runStore
+          },
+          {
+            createRunId: () => runId,
+            dispatchMutex,
+            githubIssuesApi: {
+              addLabelsToIssue,
+              listOpenIssues: vi.fn().mockResolvedValue([]),
+              removeLabelsFromIssue
+            },
+            lifecyclePolicy: {
+              continuation: { cap: 0, delayMs: 0 },
+              retry: {
+                cap: retryable ? 1 : 0,
+                delaysMs: [25],
+                maxBackoffMs: 25
+              }
+            },
+            logger,
+            schedule
+          }
+        );
+        if (source === "claim repair") {
+          vi.spyOn(activeRuns, "reserveSlot").mockImplementationOnce(() => {
+            throw failure;
+          });
+        }
+
+        try {
+          await expect(
+            controller.dispatchOneFresh(pollStatus())
+          ).rejects.toThrow(failure.message);
+          // Assert observations after dispatch: label writes and scheduling
+          // contain their own errors, so assertions inside them could be swallowed.
+          expect(labelObservation).toMatchObject({
+            run: {
+              failureClassification: "transient",
+              retryCount: 0,
+              state: "failed",
+              terminalReason: failure.message
+            },
+            pending: retryable ? [] : [runId],
+            mutexHeld: true,
+            normalLog: source === "attempt completion",
+            repairLog: false
+          });
+          expect(mutexHeldAfterLabelAwait).toBe(true);
+          expect(scheduleObservation).toEqual(
+            retryable ? { trace: ["labels"], mutexHeld: true } : undefined
+          );
+          expect(trace).toEqual(
+            retryable ? ["labels", "schedule"] : ["labels"]
+          );
+          expect(runStore.getRun(runId)).toMatchObject({
+            failureClassification: "transient",
+            retryCount: scenario === "retryable" ? 1 : 0,
+            state: "failed",
+            terminalReason: failure.message
+          });
+          expect(
+            addLabelsToIssue.mock.calls.some(([input]) =>
+              input.labels.includes("sym:failed")
+            )
+          ).toBe(!retryable);
+          expect(
+            runStore.listPendingRunNotifications().map((run) => run.id)
+          ).toEqual(retryable ? [] : [runId]);
+          expect(schedule).toHaveBeenCalledTimes(retryable ? 1 : 0);
+          if (retryable) {
+            expect(schedule).toHaveBeenCalledWith(
+              expect.objectContaining({
+                delayMs: 25,
+                issueNumber: 611,
+                kind: "retry",
+                projectName: "symphonika",
+                runId
+              })
+            );
+          }
+          expect(
+            lines.some(
+              (line) =>
+                line.msg === "symphonika scheduleNext failed" &&
+                (line.err as { message?: string } | undefined)?.message ===
+                  "scheduler unavailable"
+            )
+          ).toBe(scenario === "scheduler throws");
+          expect(
+            lines.some(
+              (line) =>
+                line.msg ===
+                "symphonika reconciled Run after claim persistence failed"
+            )
+          ).toBe(source === "claim repair");
+          expect(dispatchMutex.held).toBe(false);
+          expect(activeRuns.countInFlight()).toBe(0);
+          expect(provider.runAttempt).not.toHaveBeenCalled();
+        } finally {
+          runStore.close();
+        }
+      }
+    );
+  }
+);
+
 function makeRunController(
   deps: {
     activeRuns: ActiveRunRegistry;
@@ -1726,6 +1925,7 @@ function makeRunController(
   },
   overrides: {
     createRunId?: RunControllerOptions["createRunId"];
+    dispatchMutex?: RunControllerOptions["dispatchMutex"];
     githubIssuesApi?: RunControllerOptions["githubIssuesApi"];
     lifecyclePolicy?: RunControllerOptions["lifecyclePolicy"];
     logger?: RunControllerOptions["logger"];
@@ -1744,6 +1944,9 @@ function makeRunController(
     ...(overrides.createRunId === undefined
       ? {}
       : { createRunId: overrides.createRunId }),
+    ...(overrides.dispatchMutex === undefined
+      ? {}
+      : { dispatchMutex: overrides.dispatchMutex }),
     githubIssuesApi: overrides.githubIssuesApi ?? {
       addLabelsToIssue: vi.fn().mockResolvedValue(undefined),
       listOpenIssues: vi.fn().mockResolvedValue([]),

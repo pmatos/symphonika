@@ -43,6 +43,15 @@ module (`src/routines/service-config.ts`); each reader retains its own enclosing
 reporting policy.
 _Avoid_: workflow when referring to the multi-project registry
 
+**Daemon Mutation Preflight**:
+The CLI's required check before a daemon-backed mutation: resolve the state root from the selected
+Service Config, discover the daemon endpoint (or use an explicit URL), and verify that its live
+status reports the same state root. `requireDaemonForMutation` in `src/cli.ts` owns that sequence
+and command-specific refusal diagnostics for `poll-now`, `update`, `fire-now`, `cancel`, and
+`adopt-pr`. Each command retains its request and result handling; read-only `status` retains its
+separate fallback to persisted evidence when the daemon is unavailable.
+_Avoid_: provider validation, runtime reload when referring to this endpoint identity check
+
 **Runtime Config Snapshot**:
 The atomic, fully validated effective view built from the Service Config, referenced Workflow
 Contracts, and Routine declarations. A failed reload keeps the last-known-good snapshot; a

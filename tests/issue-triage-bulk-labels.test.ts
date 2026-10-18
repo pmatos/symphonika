@@ -700,7 +700,7 @@ describe("POST /api/issues/bulk-labels dependency gate", () => {
     };
   }
 
-  it("refuses to add the project's required label to a dependency-blocked issue, but still applies it to an unblocked one in the same batch", async () => {
+  it("refuses the whole add/remove operation for a dependency-blocked issue, but applies both halves to an unblocked one", async () => {
     const test = await setupOneBlockedOneClear();
     try {
       const received: unknown[] = [];
@@ -718,6 +718,7 @@ describe("POST /api/issues/bulk-labels dependency gate", () => {
       const response = await app.request("/api/issues/bulk-labels", {
         body: JSON.stringify({
           addLabels: ["agent-ready"],
+          removeLabels: ["needs-triage", "absent-from-snapshot"],
           operations: [
             { issueNumber: 7, projectName: "alpha" },
             { issueNumber: 8, projectName: "alpha" }
@@ -758,7 +759,7 @@ describe("POST /api/issues/bulk-labels dependency gate", () => {
           add: ["agent-ready"],
           kind: "issue",
           projectName: "alpha",
-          remove: [],
+          remove: ["needs-triage", "absent-from-snapshot"],
           subjectNumber: 8
         }
       ]);

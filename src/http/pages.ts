@@ -60,6 +60,11 @@ import {
 } from "./project-settings.js";
 import { createSaveConfirmer, renderStaleSaveNotice } from "./save-confirm.js";
 import {
+  createOperatorLabelEditor,
+  isOrchestratorLabel,
+  type BulkIssueOperation
+} from "./operator-label-edit.js";
+import {
   createEditorPreviewer,
   providerCommandsDiffer,
   type EditorPreviewRenderInput,
@@ -217,7 +222,7 @@ export type RegisterPagesOptions = {
   // HttpAppOptions.getProjectRepoAliases (src/http/app.ts) — the resolver
   // itself needs runtimeConfig.projectsByName(), which only daemon.ts has.
   getProjectRepoAliases?: (projectName: string) => string[];
-  // The project's configured issue_filters.ready_label — handleIssueLabelWrite's
+  // The project's configured issue_filters.ready_label — Operator Label Edit's
   // dependency gate only blocks adding a label in this set. See
   // HttpAppOptions.getProjectRequiredLabels (src/http/app.ts).
   getProjectRequiredLabels?: (projectName: string) => string[];
@@ -398,6 +403,13 @@ const BLOCKED_STATES: ReadonlySet<RunState> = new Set(["blocked"]);
 const EVENT_TAIL_LIMIT = 500;
 
 export function registerPages(options: RegisterPagesOptions): void {
+  const labelEditor = createOperatorLabelEditor({
+    issueSnapshotsFor: (projectName) =>
+      options.runStore.listProjectIssueSnapshots(projectName),
+    readyLabelsFor: (projectName) =>
+      options.getProjectRequiredLabels?.(projectName) ?? [],
+    writeLabels: options.writeIssueLabels
+  });
   const now = options.now ?? Date.now;
   const getWatchdogConfig =
     options.getWatchdogConfig ?? (() => DEFAULT_WATCHDOG_CONFIG);
@@ -1105,76 +1117,22 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
 
     const body = (await context.req.parseBody()) as Record<string, unknown>;
-    const label = (readOptionalFormField(body, "label") ?? "").trim();
-    const snapshotRepository = readSnapshotRepository(body);
-
-    let banner: IssueLabelWriteBanner;
-    if (label.length === 0) {
-      banner = {
-        action,
-        error: "a label is required",
-        kind: "label_write",
-        label,
-        ok: false
-      };
-    } else if (isOrchestratorLabel(label)) {
-      banner = {
-        action,
-        error:
-          "sym:* labels are managed by Symphonika and can't be edited here (ADR 0002/0024)",
-        kind: "label_write",
-        label,
-        ok: false
-      };
-    } else if (
-      action === "add" &&
-      (options.getProjectRequiredLabels?.(projectName) ?? [])
-        .map((requiredLabel) => requiredLabel.toLowerCase())
-        .includes(label.toLowerCase()) &&
-      issueDependencyGateBlocks(detail.snapshot)
-    ) {
-      // Hard block, no override (see docs/adr, issue dependency gating):
-      // the only way past this is to actually resolve the dependency on
-      // GitHub. This is best-effort UX against a snapshot that can be up
-      // to ~30s stale (ADR 0073) — the authoritative gate is
-      // evaluateProjectEligibility, re-evaluated every poll regardless of
-      // what this route allowed. offerPollNow lets an operator who just
-      // closed the blocker refresh immediately rather than wait it out.
-      banner = {
-        action,
-        error: `${issueDependencyGateMessage(detail.snapshot)} -- resolve on GitHub, then poll now`,
-        kind: "label_write",
-        label,
-        offerPollNow: true,
-        ok: false
-      };
-    } else if (options.writeIssueLabels === undefined) {
-      banner = {
-        action,
-        error: "label writes are unavailable",
-        kind: "label_write",
-        label,
-        ok: false
-      };
-    } else {
-      const result = await options.writeIssueLabels({
-        add: action === "add" ? [label] : [],
+    const result = await labelEditor.single({
+      action,
+      label: readOptionalFormField(body, "label"),
+      target: {
+        dependencySnapshot: detail.snapshot,
         kind: "issue",
         projectName,
-        remove: action === "remove" ? [label] : [],
-        snapshotRepository,
+        snapshotRepository: readSnapshotRepository(body),
         subjectNumber: issueNumber
-      });
-      banner = result.ok
-        ? { action, kind: "label_write", label, ok: true }
-        : {
-            action,
-            error: result.error,
-            kind: "label_write",
-            label,
-            ok: false
-          };
-    }
+      }
+    });
+    const banner: IssueLabelWriteBanner = {
+      action,
+      kind: "label_write",
+      ...result
+    };
 
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
     const chains = await loadIssueRunChainViews(
@@ -1249,43 +1207,18 @@ export function registerPages(options: RegisterPagesOptions): void {
       const addLabels = addLabelsResult.values;
       const removeLabels = removeLabelsResult.values;
       const operations = operationsResult.values;
-      const orchestratorLabel = [...addLabels, ...removeLabels].find((label) =>
-        isOrchestratorLabel(label)
-      );
-      if (orchestratorLabel !== undefined) {
-        return context.json(
-          {
-            error:
-              "sym:* labels are managed by Symphonika and can't be edited here (ADR 0002/0024)"
-          },
-          400
-        );
-      }
-      if (operations.length === 0) {
-        return context.json(
-          { error: "at least one issue in operations is required" },
-          400
-        );
-      }
-      if (addLabels.length === 0 && removeLabels.length === 0) {
-        return context.json(
-          { error: "at least one label to add or remove is required" },
-          400
-        );
-      }
-      if (options.writeIssueLabels === undefined) {
-        return context.json({ error: "label writes are unavailable" }, 503);
-      }
-      const results = await runBulkIssueLabelWrites({
+      const result = await labelEditor.bulk({
         addLabels,
-        getProjectRequiredLabels: (projectName) =>
-          options.getProjectRequiredLabels?.(projectName) ?? [],
         operations,
-        removeLabels,
-        runStore: options.runStore,
-        writeIssueLabels: options.writeIssueLabels
+        removeLabels
       });
-      return context.json({ results }, 200);
+      if (result.kind !== "completed") {
+        return context.json(
+          { error: result.error },
+          result.kind === "unavailable" ? 503 : 400
+        );
+      }
+      return context.json({ results: result.results }, 200);
     }
   );
 
@@ -1507,54 +1440,21 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
 
     const body = (await context.req.parseBody()) as Record<string, unknown>;
-    const label = (readOptionalFormField(body, "label") ?? "").trim();
-    const snapshotRepository = readSnapshotRepository(body);
-
-    let banner: PullRequestLabelWriteBanner;
-    if (label.length === 0) {
-      banner = {
-        action,
-        error: "a label is required",
-        kind: "label_write",
-        label,
-        ok: false
-      };
-    } else if (isOrchestratorLabel(label)) {
-      banner = {
-        action,
-        error:
-          "sym:* labels are managed by Symphonika and can't be edited here (ADR 0002/0024)",
-        kind: "label_write",
-        label,
-        ok: false
-      };
-    } else if (options.writeIssueLabels === undefined) {
-      banner = {
-        action,
-        error: "label writes are unavailable",
-        kind: "label_write",
-        label,
-        ok: false
-      };
-    } else {
-      const result = await options.writeIssueLabels({
-        add: action === "add" ? [label] : [],
+    const result = await labelEditor.single({
+      action,
+      label: readOptionalFormField(body, "label"),
+      target: {
         kind: "pull_request",
         projectName,
-        remove: action === "remove" ? [label] : [],
-        snapshotRepository,
+        snapshotRepository: readSnapshotRepository(body),
         subjectNumber: prNumber
-      });
-      banner = result.ok
-        ? { action, kind: "label_write", label, ok: true }
-        : {
-            action,
-            error: result.error,
-            kind: "label_write",
-            label,
-            ok: false
-          };
-    }
+      }
+    });
+    const banner: PullRequestLabelWriteBanner = {
+      action,
+      kind: "label_write",
+      ...result
+    };
 
     const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
     const html = layout(
@@ -4495,7 +4395,7 @@ function renderIssueSearchRowDeps(row: IssueSearchRow): string {
   // A truncated fetch means openCount is a lower bound, not the true
   // count — the "+" signals more blockers exist than could be checked,
   // so this never reads as "0 open" (eligible) for an issue the gate
-  // (issueDependencyGateBlocks) is actually treating as blocked.
+  // in Operator Label Edit is actually treating as blocked.
   const label = row.blockedByTruncated
     ? `${openCount}+ open`
     : `${openCount} open`;
@@ -4697,64 +4597,6 @@ const DEPS_GRAPH_STYLES = `
 .deps-graph-detail { flex:0 0 320px; border:1px solid #e2e8f0; border-radius:10px; padding:.8rem .9rem; }
 `;
 
-// #308 part 2: orchestrator-owned labels (ADR 0002/0024) render as read-only
-// evidence of dispatch state, never as something the triage UI can add or
-// remove — hand-editing one invites the double-dispatch / silent-block ADR
-// 0077 documents. Enforced server-side here, not just hidden client-side.
-const SYM_LABEL_PREFIX = "sym:";
-
-// GitHub label names are matched case-insensitively (two labels differing
-// only by case can't coexist in one repo), so a case-sensitive prefix check
-// alone lets a caller-submitted "SYM:claimed" bypass this guard while still
-// resolving to the real orchestrator-owned sym:claimed label on GitHub's
-// side.
-function isOrchestratorLabel(label: string): boolean {
-  return label.toLowerCase().startsWith(SYM_LABEL_PREFIX);
-}
-
-// The label-write dependency gate's own read of "resolved" (state ===
-// CLOSED, regardless of stateReason) — kept in lockstep with
-// evaluateProjectEligibility's identical rule (src/issue-polling.ts) since
-// this route is a best-effort UX gate against the same snapshot data, not
-// a second source of truth. See docs/adr/0081-issue-dependency-gating-and-graph-view.md.
-function unresolvedIssueDependencies(
-  snapshot: ProjectIssueSnapshotRow
-): RawGitHubIssueDependencyRef[] {
-  return snapshot.blockedBy.filter((blocker) => blocker.state !== "CLOSED");
-}
-
-// A truncated fetch (more blockedBy links than
-// ISSUE_DEPENDENCIES_MAX_BLOCKERS_PER_ISSUE, src/issue-polling.ts) gates
-// exactly like an open blocker — fail closed on the unfetched overflow
-// rather than gating only on the state of the blockers that happened to
-// fit, which would silently allow dispatch when the true state is
-// unknown.
-function issueDependencyGateBlocks(snapshot: ProjectIssueSnapshotRow): boolean {
-  return (
-    snapshot.blockedByTruncated ||
-    unresolvedIssueDependencies(snapshot).length > 0
-  );
-}
-
-function issueDependencyGateMessage(snapshot: ProjectIssueSnapshotRow): string {
-  const unresolved = unresolvedIssueDependencies(snapshot);
-  if (unresolved.length === 0 && snapshot.blockedByTruncated) {
-    return "blocked: this issue has more dependency links than could be checked";
-  }
-  return `blocked by open ${dependencyList(unresolved)}`;
-}
-
-function dependencyList(blockers: RawGitHubIssueDependencyRef[]): string {
-  const refs = blockers
-    .map((blocker) => `${blocker.owner}/${blocker.repo}#${blocker.number}`)
-    .join(", ");
-  return blockers.length === 1 ? `dependency ${refs}` : `dependencies ${refs}`;
-}
-
-type BulkIssueLabelResult =
-  | { issueNumber: number; ok: true; projectName: string }
-  | { error: string; issueNumber: number; ok: false; projectName: string };
-
 // Array.isArray's lib.es5.d.ts signature narrows to `any[]`, not
 // `unknown[]` — these normalize a parsed JSON body's fields to properly
 // typed arrays. A malformed element (wrong type, missing field) makes the
@@ -4788,12 +4630,6 @@ function asStringArray(
   }
   return { ok: true, values };
 }
-
-type BulkIssueOperation = {
-  issueNumber: number;
-  projectName: string;
-  snapshotRepository?: ProjectSnapshotRepository;
-};
 
 function asBulkIssueOperations(
   value: unknown
@@ -4842,129 +4678,6 @@ function asBulkIssueOperations(
     });
   }
   return { ok: true, values };
-}
-
-// Fast without bursting the GitHub API: a worker pool rather than fully
-// sequential or fully parallel writes across a potentially large selection.
-const BULK_LABEL_WRITE_CONCURRENCY = 4;
-
-async function runBulkIssueLabelWrites(input: {
-  addLabels: string[];
-  getProjectRequiredLabels: (projectName: string) => string[];
-  operations: BulkIssueOperation[];
-  removeLabels: string[];
-  runStore: RunStore;
-  writeIssueLabels: WriteIssueLabelsFn;
-}): Promise<BulkIssueLabelResult[]> {
-  const {
-    addLabels,
-    getProjectRequiredLabels,
-    operations,
-    removeLabels,
-    runStore,
-    writeIssueLabels
-  } = input;
-  const results = new Array<BulkIssueLabelResult>(operations.length);
-  let nextIndex = 0;
-  // Cached per project (not per operation) since a bulk selection commonly
-  // spans many issues in the same project — avoids re-scanning
-  // listProjectIssueSnapshots once per operation.
-  const snapshotsByProject = new Map<string, ProjectIssueSnapshotRow[]>();
-
-  function snapshotFor(
-    projectName: string,
-    issueNumber: number
-  ): ProjectIssueSnapshotRow | undefined {
-    let snapshots = snapshotsByProject.get(projectName);
-    if (snapshots === undefined) {
-      snapshots = runStore.listProjectIssueSnapshots(projectName);
-      snapshotsByProject.set(projectName, snapshots);
-    }
-    return snapshots.find((row) => row.issueNumber === issueNumber);
-  }
-
-  async function worker(): Promise<void> {
-    for (;;) {
-      const index = nextIndex;
-      nextIndex += 1;
-      const operation = operations[index];
-      if (operation === undefined) {
-        return;
-      }
-      // Mirrors handleIssueLabelWrite's hard block on the single-issue
-      // form: adding a configured required label to a dependency-blocked
-      // issue is refused here too — the bulk toolbar is a second
-      // label-write path and must not bypass the same gate (see
-      // docs/adr/0081-issue-dependency-gating-and-graph-view.md). Both add
-      // and remove are skipped for this operation when blocked, since a
-      // single writeIssueLabels call can't apply just one half of a
-      // combined add+remove request.
-      const requiredLabels = getProjectRequiredLabels(
-        operation.projectName
-      ).map((requiredLabel) => requiredLabel.toLowerCase());
-      const addsRequiredLabel = addLabels.some((label) =>
-        requiredLabels.includes(label.toLowerCase())
-      );
-      if (addsRequiredLabel) {
-        const snapshot = snapshotFor(
-          operation.projectName,
-          operation.issueNumber
-        );
-        // A missing snapshot (not yet polled, or a stale/incorrect issue
-        // number posted straight to the API) is unknown dependency state,
-        // not clear dependency state — fail closed the same way a
-        // truncated fetch does (ADR 0081), rather than letting the add
-        // through unchecked because there's nothing to gate against.
-        if (snapshot === undefined || issueDependencyGateBlocks(snapshot)) {
-          results[index] = {
-            error:
-              snapshot === undefined
-                ? `issue #${operation.issueNumber} is not in the current poll snapshot -- poll now, then retry`
-                : `${issueDependencyGateMessage(snapshot)} -- resolve on GitHub, then poll now`,
-            issueNumber: operation.issueNumber,
-            ok: false,
-            projectName: operation.projectName
-          };
-          continue;
-        }
-      }
-      // The full requested removeLabels goes to every issue, not narrowed
-      // against the persisted poll snapshot — the snapshot can lag live
-      // GitHub state indefinitely (ADR 0073), so filtering against it can
-      // silently drop a legitimate removal (e.g. add-then-immediate-remove
-      // of the same label) and report false success. Removing a label an
-      // issue doesn't have is instead made idempotent at the source
-      // (tryRemoveLabelsFromIssue, src/issue-polling.ts, swallows the
-      // resulting 404), which is safe against live state regardless of
-      // snapshot staleness. Every operation runs regardless of earlier
-      // outcomes — best-effort, so one issue's GitHub-side failure
-      // doesn't block the rest of the batch.
-      const outcome = await writeIssueLabels({
-        add: addLabels,
-        kind: "issue",
-        projectName: operation.projectName,
-        remove: removeLabels,
-        snapshotRepository: operation.snapshotRepository,
-        subjectNumber: operation.issueNumber
-      });
-      results[index] = outcome.ok
-        ? {
-            issueNumber: operation.issueNumber,
-            ok: true,
-            projectName: operation.projectName
-          }
-        : {
-            error: outcome.error,
-            issueNumber: operation.issueNumber,
-            ok: false,
-            projectName: operation.projectName
-          };
-    }
-  }
-
-  const workerCount = Math.min(BULK_LABEL_WRITE_CONCURRENCY, operations.length);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
 }
 
 type IssueDetail = {

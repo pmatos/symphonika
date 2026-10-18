@@ -1,5 +1,18 @@
 # Changelog
 
+# [0.11.0](https://github.com/pmatos/symphonika/compare/v0.10.0...v0.11.0) (2026-10-18)
+
+
+### Bug Fixes
+
+* drop the legacy [ptt] tag from routine fan-out email subjects ([#897](https://github.com/pmatos/symphonika/issues/897)) ([fdbf1be](https://github.com/pmatos/symphonika/commit/fdbf1bed2ae972d9f9bf761539c4f078a49c0a2d))
+* render cross-branch routine prs uniformly in fan-out summaries ([#898](https://github.com/pmatos/symphonika/issues/898)) ([c60cf66](https://github.com/pmatos/symphonika/commit/c60cf664d25ac1a45521da5cc8743507f2491a20))
+
+
+### Features
+
+* route each fsm agent state by its chosen provider ([#899](https://github.com/pmatos/symphonika/issues/899)) ([be1e4e7](https://github.com/pmatos/symphonika/commit/be1e4e784f345cb3ea18c4dfb8ef6a258cb1ba00))
+
 # [0.10.0](https://github.com/pmatos/symphonika/compare/v0.9.2...v0.10.0) (2026-10-11)
 
 

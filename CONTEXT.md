@@ -300,6 +300,15 @@ _Avoid_: normalized event log
 Provider-neutral run events used by the orchestrator, observability surfaces, and tests.
 _Avoid_: raw provider log
 
+**Provider Completion**:
+The interpretation of an Agent Provider's normalized terminal events into a clean exit, cancellation,
+input request, or classified failure. `classifyProviderCompletion`
+(`src/providers/provider-completion.ts`) owns event precedence, first-event selection, and stderr
+explanations for missing or unclean exits. A clean exit is evidence rather than Run or Routine Firing
+success: callers retain cancellation/error precedence, Workspace acceptance, lifecycle projection,
+and their existing credential redaction before persisting terminal reasons.
+_Avoid_: Routine Outcome, Run success when describing only provider exit evidence
+
 **Provider Event Reducer**:
 The per-Run mapping that turns one Coding Agent's raw protocol messages (its Provider Event
 Log) into Normalized Event Log entries, owning any cross-message carry-forward state privately

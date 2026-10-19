@@ -30,6 +30,55 @@ afterEach(async () => {
 });
 
 describe("classifyFailure", () => {
+  it("lets cancellation beat a caught error and higher-priority provider events", async () => {
+    expect(
+      await classifyFailure({
+        cancelRequested: true,
+        error: new Error("connection reset"),
+        events: [{ type: "input_required", message: "ask the operator" }],
+        redactSecrets: []
+      })
+    ).toEqual({ kind: "cancelled", reason: "cancelled" });
+  });
+
+  it("lets a caught error beat provider events", async () => {
+    expect(
+      await classifyFailure({
+        cancelRequested: false,
+        error: new Error("connection reset"),
+        events: [{ type: "input_required", message: "ask the operator" }],
+        redactSecrets: []
+      })
+    ).toEqual({
+      classification: "transient",
+      kind: "failed",
+      reason: "connection reset"
+    });
+  });
+
+  it("selects the first input-required event before other terminal events without rewriting discriminators", async () => {
+    const events = [
+      { type: "process_exit" as const, exitCode: 0 },
+      { type: "turn_failed" as const, message: "turn failure" },
+      { type: "malformed_event" as const },
+      { type: "input_required" as const, message: "ask process" },
+      { type: "input_required" as const, message: "later input" }
+    ];
+    const original = structuredClone(events);
+    expect(
+      await classifyFailure({
+        cancelRequested: false,
+        events,
+        redactSecrets: ["process"]
+      })
+    ).toEqual({
+      classification: "input_required",
+      kind: "input_required",
+      reason: "ask [REDACTED]"
+    });
+    expect(events).toEqual(original);
+  });
+
   it("classifies a clean process_exit code 0 as success when the workspace is ahead of base", async () => {
     const root = await makeTempRoot();
     const workspacePath = path.join(root, "workspace");

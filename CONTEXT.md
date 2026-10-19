@@ -170,6 +170,16 @@ _Avoid_: workflow label
 A GitHub issue label owned by the repository workflow or coding agent to express product/work handoff state.
 _Avoid_: operational label
 
+**Operator Label Edit**:
+An operator-requested label addition or removal through the single-Issue form, bulk-Issue selection,
+or pull-request form. `createOperatorLabelEditor` (`src/http/operator-label-edit.ts`) owns protected
+Operational Label refusal, write availability, and the persisted-snapshot Dependency Gate when an
+Issue gains its Ready Label. It also owns ordered, bounded, best-effort bulk execution; routes retain
+authorization, request parsing, and response rendering. The daemon's write adapter separately binds
+the submitted repository identity to the current snapshot and tracker (ADR 0077). Clear-stale-claim
+is a distinct, sanctioned Operational Label action rather than a generic Operator Label Edit.
+_Avoid_: Dispatch Eligibility (the live admission rule), optimistic label update
+
 **Stale Claim**:
 A durable orchestrator claim on an issue for which no live local run exists.
 _Avoid_: failed run

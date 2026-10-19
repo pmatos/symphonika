@@ -36,20 +36,20 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.133.0",
-    "@hono/node-server": "^2.1.4",
+    "@anthropic-ai/sdk": "^0.135.0",
+    "@hono/node-server": "^2.1.5",
     "@octokit/rest": "^22.0.1",
     "@types/better-sqlite3": "^9.6.0",
     "better-sqlite3": "^13.0.3",
     "commander": "^15.0.0",
     "cron-parser": "^5.10.2",
-    "cytoscape": "^3.34.3",
+    "cytoscape": "^3.34.4",
     "hono": "^4.13.13",
-    "nodemailer": "^10.0.16",
+    "nodemailer": "^10.1.1",
     "pino": "^10.4.0",
     "smol-toml": "^1.9.1",
     "yaml": "^2.9.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // The RunStore watermark this test pins against is written by a synchronous
-// SQLite call that persistProviderEvent (run-controller.ts) now issues
+// SQLite call that the Run Provider Evidence Writer issues
 // *before* awaiting the JSONL append for the same event. Blocking that
 // append here — without also blocking the SQLite write — is what lets the
 // test observe the watermark while the append is still in flight. Hoisted
@@ -102,51 +102,68 @@ afterEach(async () => {
   );
 });
 
-describe("persistProviderEvent ordering", () => {
-  it("advances the provider stream watermark before the JSONL append for the same event resolves", async () => {
-    // Armed before dispatch: the very first provider event this attempt
-    // receives is raw-only (normalized: undefined), which routes through
-    // recordProviderStreamReceipt and appends only to the raw log — so
-    // gating provider.raw.jsonl blocks exactly that append.
-    providerAppendGate.arm("provider.raw.jsonl");
+describe("Run Provider Evidence Writer ordering", () => {
+  it.each([false, true])(
+    "advances the provider stream watermark before the JSONL append resolves (normalized: %s)",
+    async (normalized) => {
+      // Both raw-only and normalized events must advance SQLite evidence
+      // before their raw JSONL append finishes. Block that append on the
+      // first event so each Run Store branch is observable in flight.
+      providerAppendGate.arm("provider.raw.jsonl");
 
-    const provider: AgentProvider = {
-      cancel: vi.fn().mockResolvedValue(undefined),
-      name: "codex",
-      async *runAttempt(): AsyncGenerator<ProviderEvent> {
-        await Promise.resolve();
-        yield { raw: { chunk: "partial provider output" } };
-        yield {
-          normalized: { exitCode: 0, type: "process_exit" },
-          raw: { code: 0, kind: "exit" }
-        };
-      },
-      validate: vi.fn().mockResolvedValue(undefined)
-    };
+      const provider: AgentProvider = {
+        cancel: vi.fn().mockResolvedValue(undefined),
+        name: "codex",
+        async *runAttempt(): AsyncGenerator<ProviderEvent> {
+          await Promise.resolve();
+          yield {
+            ...(normalized
+              ? {
+                  normalized: {
+                    type: "message" as const,
+                    text: "provider output"
+                  }
+                }
+              : {}),
+            raw: { chunk: "partial provider output" },
+            receivedAt: "2026-08-01T01:02:03.000Z"
+          };
+          yield {
+            normalized: { exitCode: 0, type: "process_exit" },
+            raw: { code: 0, kind: "exit" }
+          };
+        },
+        validate: vi.fn().mockResolvedValue(undefined)
+      };
 
-    const harness = await createHarness(provider);
-    // Matches runFreshLifecycle's fixed attemptId shape (`${runId}-attempt-
-    // ${attemptNumber}`) for a first attempt against this harness's
-    // deterministic createRunId.
-    const attemptId = "run-1-attempt-1";
+      const harness = await createHarness(provider);
+      // Matches runFreshLifecycle's fixed attemptId shape (`${runId}-attempt-
+      // ${attemptNumber}`) for a first attempt against this harness's
+      // deterministic createRunId.
+      const attemptId = "run-1-attempt-1";
 
-    const dispatchPromise = harness.controller.dispatchOneFresh(pollStatus());
+      const dispatchPromise = harness.controller.dispatchOneFresh(pollStatus());
 
-    await providerAppendGate.waitUntilBlocked();
+      await providerAppendGate.waitUntilBlocked();
 
-    try {
-      const receipt = harness.runStore.getProviderStreamReceipt(attemptId);
-      expect(receipt).toBeDefined();
-      expect(receipt?.lastEventSequence).toBe(1);
-    } finally {
-      // Release even if the assertions above throw, so the attempt still
-      // drains instead of leaving a dangling append behind for this test.
-      providerAppendGate.release();
+      try {
+        const receipt = harness.runStore.getProviderStreamReceipt(attemptId);
+        expect(receipt).toBeDefined();
+        expect(receipt?.lastEventSequence).toBe(1);
+        expect(receipt?.lastEventAt).toBe("2026-08-01T01:02:03.000Z");
+        expect(
+          harness.runStore.listProviderEvents("run-1", { limit: 100 })
+        ).toHaveLength(normalized ? 1 : 0);
+      } finally {
+        // Release even if the assertions above throw, so the attempt still
+        // drains instead of leaving a dangling append behind for this test.
+        providerAppendGate.release();
+      }
+
+      const result = await dispatchPromise;
+      expect(result).toEqual({ dispatched: true, runId: "run-1" });
     }
-
-    const result = await dispatchPromise;
-    expect(result).toEqual({ dispatched: true, runId: "run-1" });
-  });
+  );
 
   it("persists provider-scope cleanup reports independently of the terminal run outcome", async () => {
     const provider: AgentProvider = {

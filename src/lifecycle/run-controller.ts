@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -57,8 +57,7 @@ import type {
   AgentProvider,
   AgentProviderName,
   AgentProviderRegistry,
-  NormalizedProviderEvent,
-  ProviderEvent
+  NormalizedProviderEvent
 } from "../provider.js";
 import {
   secretsForMaestroConfig,
@@ -69,7 +68,8 @@ import {
   secretsForEmailConfig,
   type EmailNotificationConfig
 } from "../notifications/config.js";
-import { redactAll, redactValueDeep } from "../redaction.js";
+import { redactAll } from "../redaction.js";
+import { createRunProviderEvidenceWriter } from "../providers/provider-evidence.js";
 import type {
   CancelReason,
   ProviderSelectionSource,
@@ -5779,7 +5779,14 @@ export class RunController {
       scratchIdentity
     );
     let scratchPath: string | undefined;
-    let sequence = 0;
+    const evidenceWriter = createRunProviderEvidenceWriter({
+      attemptId: input.attemptId,
+      normalizedLogPath: input.evidence.normalizedLogPath,
+      rawLogPath: input.evidence.rawLogPath,
+      redactSecrets: input.runtime.redactSecrets,
+      runId: input.runId,
+      runStore: this.runStore
+    });
     try {
       scratchPath = await input.deadline.race(scratchOperation);
       const { maxInFlight: globalMaxInFlight } = await input.deadline.race(
@@ -5833,16 +5840,7 @@ export class RunController {
         stderrRedactSecrets: input.runtime.redactSecrets,
         workspacePath: input.evidence.workspacePath
       })) {
-        sequence += 1;
-        const normalized = await this.persistProviderEvent({
-          attemptId: input.attemptId,
-          event,
-          normalizedLogPath: input.evidence.normalizedLogPath,
-          rawLogPath: input.evidence.rawLogPath,
-          redactSecrets: input.runtime.redactSecrets,
-          runId: input.runId,
-          sequence
-        });
+        const normalized = await evidenceWriter.write(event);
         if (normalized !== undefined) {
           input.runtime.events.push(normalized);
         }
@@ -5897,77 +5895,6 @@ export class RunController {
         )
       )
       .catch(() => undefined);
-  }
-
-  private async persistProviderEvent(input: {
-    attemptId: string;
-    event: ProviderEvent;
-    normalizedLogPath: string;
-    rawLogPath: string;
-    redactSecrets: readonly string[];
-    runId: string;
-    sequence: number;
-  }): Promise<NormalizedProviderEvent | undefined> {
-    // Prefer the provider's own queue-ingestion stamp (set by adapters whose
-    // transport queue observes receipt independent of consumer speed, e.g.
-    // jsonl-process-queue.ts) over this method's own clock: awaiting a slow
-    // state-root write for the *previous* event before this one is even
-    // dequeued would otherwise charge that latency to this event's receipt
-    // time. The fallback covers orchestrator-synthesized events and adapters
-    // with no queue to timestamp. See ADR 0090.
-    const receivedAt = input.event.receivedAt ?? new Date().toISOString();
-    const raw = redactValueDeep(input.event.raw, input.redactSecrets);
-    // Redact only the copies that get persisted (JSONL + SQLite). The
-    // returned value feeds runtime.events for classifyFailure's lifecycle
-    // interpretation, which matches on protocol discriminators like
-    // `type: "process_exit"`; deep-redacting that object in place could
-    // rewrite a discriminator into something unmatchable if a configured
-    // secret happens to be a substring of it (e.g. an SMTP password of
-    // "process"). classifyFailure already redacts its derived terminal
-    // reason before that reason is persisted, so nothing unredacted reaches
-    // evidence through this path.
-    const redactedNormalized =
-      input.event.normalized === undefined
-        ? undefined
-        : redactValueDeep(input.event.normalized, input.redactSecrets);
-    // The Run Store write happens before the JSONL appends below, not after:
-    // recordProviderEvent/recordProviderStreamReceipt are synchronous SQLite
-    // writes that embed the full raw/normalized payload in the row (they do
-    // not depend on the JSONL file), and the live status APIs derive their
-    // watermark from this row. Awaiting the (slower, purely supplementary)
-    // JSONL appends first would delay that watermark by the same write
-    // latency this whole method exists to keep out of receivedAt -- the
-    // Watchdog already tails the normalized log independently by its own
-    // byte offset, so nothing depends on the JSONL line preceding this row.
-    // A failed append can therefore now leave a Run Store row with no
-    // corresponding JSONL line, which the previous ordering could not: this
-    // append is still awaited and its rejection still propagates out of
-    // iterateAttempt exactly as before, but the row is no longer rolled back
-    // with it. See ADR 0090.
-    if (redactedNormalized === undefined) {
-      this.runStore.recordProviderStreamReceipt({
-        attemptId: input.attemptId,
-        receivedAt,
-        runId: input.runId,
-        sequence: input.sequence
-      });
-    } else {
-      this.runStore.recordProviderEvent({
-        attemptId: input.attemptId,
-        normalized: redactedNormalized,
-        raw,
-        receivedAt,
-        runId: input.runId,
-        sequence: input.sequence
-      });
-    }
-    await Promise.all([
-      appendJsonl(input.rawLogPath, raw),
-      ...(redactedNormalized === undefined
-        ? []
-        : [appendJsonl(input.normalizedLogPath, redactedNormalized)])
-    ]);
-    return input.event.normalized;
   }
 
   private async resolveRunDiagnostics(input: {
@@ -6539,10 +6466,6 @@ function resolveTokenFromEnv(
   }
   const value = env[match[1] ?? ""];
   return value === undefined || value.length === 0 ? undefined : value;
-}
-
-async function appendJsonl(filePath: string, value: unknown): Promise<void> {
-  await appendFile(filePath, `${JSON.stringify(value)}\n`, "utf8");
 }
 
 function normalizeRawIssue(

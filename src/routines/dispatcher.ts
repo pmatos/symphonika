@@ -1,4 +1,4 @@
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { Logger } from "pino";
@@ -25,8 +25,7 @@ import {
 import type {
   AgentProviderName,
   AgentProviderRegistry,
-  NormalizedProviderEvent,
-  ProviderEvent
+  NormalizedProviderEvent
 } from "../provider.js";
 import { classifyProviderCompletion } from "../providers/provider-completion.js";
 import { withProviderStderrTail } from "../providers/provider-stderr.js";
@@ -46,7 +45,8 @@ import type { NotificationDeliveryTracker } from "../notifications/delivery-trac
 import { deliverRoutineFanoutNotification } from "../notifications/routine-fanout.js";
 import { deliverRoutineFiringNotification } from "../notifications/routine-firing.js";
 import type { NotificationSink } from "../notifications/types.js";
-import { redactAll, redactValueDeep } from "../redaction.js";
+import { redactAll } from "../redaction.js";
+import { createRoutineProviderEvidenceWriter } from "../providers/provider-evidence.js";
 import type {
   CancelReason,
   RoutineFanoutHoldReason,
@@ -75,10 +75,7 @@ import {
   renderRoutinePrompt,
   RoutinePromptRenderError
 } from "./prompt-renderer.js";
-import {
-  encodeRoutineEventIndexRecord,
-  routineEvidencePaths
-} from "./evidence.js";
+import { routineEvidencePaths } from "./evidence.js";
 import type {
   RoutineDeferralReason,
   RoutineSchedule,
@@ -1303,11 +1300,8 @@ async function runRoutineFiring(input: {
   let providerAttempt: Promise<void> | undefined;
   let rawLogPath: string | undefined;
   let stderrLogPath: string | undefined;
-  let normalizedIndexPath: string | undefined;
   let normalizedLogPath: string | undefined;
   let outcomeClaimPath: string | undefined;
-  let normalizedLogOffset = 0;
-  let normalizedLogSequence = 1;
   let githubBefore: RoutineGithubCapture | null = null;
   let githubObserver:
     ReturnType<typeof createRoutineGithubObservation> | undefined;
@@ -1365,7 +1359,6 @@ async function runRoutineFiring(input: {
     );
     rawLogPath = evidence.rawLogPath;
     stderrLogPath = evidence.stderrLogPath;
-    normalizedIndexPath = evidence.normalizedIndexPath;
     normalizedLogPath = evidence.normalizedLogPath;
     outcomeClaimPath = evidence.outcomeClaimPath;
     input.runStore.updateRoutineFiringWorkspace({
@@ -1442,6 +1435,12 @@ async function runRoutineFiring(input: {
       input.stateRoot,
       scratchIdentity
     );
+    const evidenceWriter = createRoutineProviderEvidenceWriter({
+      normalizedIndexPath: evidence.normalizedIndexPath,
+      normalizedLogPath: evidence.normalizedLogPath,
+      rawLogPath: evidence.rawLogPath,
+      redactSecrets
+    });
     providerAttempt = (async () => {
       for await (const event of input.provider.runAttempt({
         branchName: prepared.branchName,
@@ -1472,19 +1471,9 @@ async function runRoutineFiring(input: {
         stderrRedactSecrets: redactSecrets(),
         workspacePath: prepared.workspacePath
       })) {
-        const normalizedLogCursor = await appendRoutineEvent({
-          event,
-          normalizedIndexPath,
-          normalizedLogPath,
-          normalizedLogOffset,
-          normalizedLogSequence,
-          rawLogPath,
-          redactSecrets
-        });
-        normalizedLogOffset = normalizedLogCursor.offset;
-        normalizedLogSequence = normalizedLogCursor.sequence;
-        if (event.normalized !== undefined) {
-          events.push(event.normalized);
+        const normalized = await evidenceWriter.write(event);
+        if (normalized !== undefined) {
+          events.push(normalized);
         }
       }
     })();
@@ -2322,40 +2311,6 @@ async function prepareRoutineEvidence(input: {
   };
 }
 
-async function appendRoutineEvent(input: {
-  event: ProviderEvent;
-  normalizedIndexPath: string;
-  normalizedLogPath: string;
-  normalizedLogOffset: number;
-  normalizedLogSequence: number;
-  rawLogPath: string;
-  redactSecrets: () => string[];
-}): Promise<{ offset: number; sequence: number }> {
-  const redactSecrets = input.redactSecrets();
-  if (input.event.normalized === undefined) {
-    await appendJsonl(input.rawLogPath, input.event.raw, redactSecrets);
-    return {
-      offset: input.normalizedLogOffset,
-      sequence: input.normalizedLogSequence
-    };
-  }
-  const [, offset] = await Promise.all([
-    appendJsonl(input.rawLogPath, input.event.raw, redactSecrets),
-    appendIndexedJsonl({
-      filePath: input.normalizedLogPath,
-      indexPath: input.normalizedIndexPath,
-      offset: input.normalizedLogOffset,
-      redactSecrets,
-      sequence: input.normalizedLogSequence,
-      value: input.event.normalized
-    })
-  ]);
-  return {
-    offset,
-    sequence: input.normalizedLogSequence + 1
-  };
-}
-
 async function classifyRoutineOutcome(
   events: NormalizedProviderEvent[],
   workspace: {
@@ -2634,41 +2589,6 @@ function logRoutineSkip(
     },
     "routine.skipped"
   );
-}
-
-async function appendJsonl(
-  filePath: string,
-  value: unknown,
-  redactSecrets: string[]
-): Promise<void> {
-  await appendFile(filePath, serializeJsonl(value, redactSecrets));
-}
-
-async function appendIndexedJsonl(input: {
-  filePath: string;
-  indexPath: string;
-  offset: number;
-  redactSecrets: string[];
-  sequence: number;
-  value: unknown;
-}): Promise<number> {
-  const line = serializeJsonl(input.value, input.redactSecrets);
-  const record = encodeRoutineEventIndexRecord(input.offset, input.sequence);
-  await Promise.all([
-    appendFile(input.filePath, line),
-    appendFile(input.indexPath, record)
-  ]);
-  return input.offset + line.length;
-}
-
-function serializeJsonl(value: unknown, redactSecrets: string[]): Buffer {
-  // Redact string values BEFORE serializing, not after: JSON.stringify
-  // escapes quotes, backslashes, and control characters, so a secret
-  // containing any of them no longer appears as a contiguous substring of
-  // the serialized text and a post-serialization redact silently misses it.
-  const redacted =
-    redactSecrets.length === 0 ? value : redactValueDeep(value, redactSecrets);
-  return Buffer.from(`${JSON.stringify(redacted)}\n`, "utf8");
 }
 
 function redactRoutineOutcomeClaim(

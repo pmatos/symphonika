@@ -1316,4 +1316,109 @@ describe("Routine Firing GitHub observation assessment", () => {
       });
     });
   });
+  describe("success phase claim-verified PR recording", () => {
+    function verifiedCrossBranchPullRequest(
+      overrides: Partial<RawGitHubPullRequest> = {}
+    ): RawGitHubPullRequest {
+      return {
+        head: { ref: "pm-deepen/elsewhere", sha: "sha-99" },
+        html_url: "https://github.com/pmatos/alpha/pull/99",
+        number: 99,
+        state: "open",
+        title: "Fix from elsewhere",
+        ...overrides
+      };
+    }
+
+    it("records a claim-verified pr opened from a different branch", async () => {
+      const getPullRequest = vi
+        .fn<NonNullable<GitHubIssuesApi["getPullRequest"]>>()
+        .mockResolvedValue(verifiedCrossBranchPullRequest());
+      const { observation, recordRoutinePullRequest } = makeObservation({
+        api: fullApi({ getPullRequest }),
+        firingState: "running"
+      });
+
+      await observation.assess({
+        after: capture({}),
+        before: capture({}),
+        claim: claim(),
+        phase: "success"
+      });
+
+      expect(recordRoutinePullRequest).toHaveBeenCalledTimes(1);
+      expect(recordRoutinePullRequest).toHaveBeenCalledWith({
+        firingId: "fire-1",
+        headSha: "sha-99",
+        prNumber: 99,
+        prUrl: "https://github.com/pmatos/alpha/pull/99",
+        projectName: "alpha",
+        routineName: "audit"
+      });
+    });
+
+    it("does not record a claim-verified pr that already closed", async () => {
+      const getPullRequest = vi
+        .fn<NonNullable<GitHubIssuesApi["getPullRequest"]>>()
+        .mockResolvedValue(verifiedCrossBranchPullRequest({ state: "closed" }));
+      const { observation, recordRoutinePullRequest } = makeObservation({
+        api: fullApi({ getPullRequest }),
+        firingState: "running"
+      });
+
+      await observation.assess({
+        after: capture({}),
+        before: capture({}),
+        claim: claim(),
+        phase: "success"
+      });
+
+      expect(recordRoutinePullRequest).not.toHaveBeenCalled();
+    });
+
+    it.each([["completed"], [undefined]])(
+      "refuses to record a claim-verified pr onto a firing whose stored state is %s",
+      async (state) => {
+        const logger = fakeLogger();
+        const getPullRequest = vi
+          .fn<NonNullable<GitHubIssuesApi["getPullRequest"]>>()
+          .mockResolvedValue(verifiedCrossBranchPullRequest());
+        const { observation, recordRoutinePullRequest } = makeObservation({
+          api: fullApi({ getPullRequest }),
+          firingState: state,
+          logger
+        });
+
+        await observation.assess({
+          after: capture({}),
+          before: capture({}),
+          claim: claim(),
+          phase: "success"
+        });
+
+        expect(recordRoutinePullRequest).not.toHaveBeenCalled();
+        expect(warnings(logger)).toContain(
+          "symphonika routine claim-verified PR recording abandoned after firing already completed"
+        );
+      }
+    );
+
+    it("records nothing when verification confirms only an issue claim", async () => {
+      const { observation, recordRoutinePullRequest } = makeObservation({
+        firingState: "running"
+      });
+
+      await observation.assess({
+        after: capture({ issues: { 77: { createdAt: inWindow } } }),
+        before: capture({}),
+        claim: claim({
+          action: "issue_opened",
+          url: "https://github.com/pmatos/alpha/issues/77"
+        }),
+        phase: "success"
+      });
+
+      expect(recordRoutinePullRequest).not.toHaveBeenCalled();
+    });
+  });
 });

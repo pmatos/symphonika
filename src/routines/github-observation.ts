@@ -146,16 +146,24 @@ export function createRoutineGithubObservation(input: ObservationInput) {
               windowStart: input.since
             })
           : Promise.resolve(null);
-      const [fallbackDiscoveredPr, claimUrlVerification] = await Promise.all([
+      const [fallbackDiscoveredPr, claimVerification] = await Promise.all([
         discoveryDone,
         verification
       ]);
+      recordClaimVerifiedPullRequest({
+        firingId: input.firingId,
+        logger: input.logger,
+        projectName: input.project.name,
+        routineName: input.routineName,
+        runStore: input.runStore,
+        verification: claimVerification
+      });
       return {
         githubObservationAvailable: comparison.available,
-        observedAction: claimUrlVerification ?? comparison.action,
+        observedAction: claimVerification?.action ?? comparison.action,
         pullRequestObserved:
           comparison.action?.action === "pr" ||
-          claimUrlVerification?.action === "pr" ||
+          claimVerification?.action.action === "pr" ||
           fallbackDiscoveredPr
       };
     }
@@ -300,6 +308,15 @@ function routineGithubObservation(
   };
 }
 
+// The result of confirming a claim by its own URL: the canonical action the
+// reconciliation consumes, plus — for a confirmed `pr` claim only — the raw
+// pull request the confirming GET returned, so the caller can record it into
+// routine_pull_requests (ADR-2026-10-20-1021).
+type VerifiedRoutineClaim = {
+  action: ObservedRoutineAction;
+  pullRequest: RawGitHubPullRequest | null;
+};
+
 // Independently confirms (or refutes) a claimed pr/issue_opened/issue_closed
 // action by looking its own URL up directly, rather than relying on the
 // branch-scoped before/after diff above. That diff only ever matches a
@@ -333,7 +350,7 @@ async function verifyRoutineOutcomeClaimUrl(input: {
   // issue no network call of their own.
   timeoutMs: number;
   windowStart: string;
-}): Promise<ObservedRoutineAction | null> {
+}): Promise<VerifiedRoutineClaim | null> {
   const claim = input.claim;
   if (
     claim === null ||
@@ -376,9 +393,12 @@ async function verifyRoutineOutcomeClaimUrl(input: {
         return null;
       }
       return {
-        action: "pr",
-        title: pullRequestTitle(pullRequest),
-        url: pullRequest.html_url ?? claim.url
+        action: {
+          action: "pr",
+          title: pullRequestTitle(pullRequest),
+          url: pullRequest.html_url ?? claim.url
+        },
+        pullRequest
       };
     }
     if (reference.kind !== "issue") {
@@ -423,9 +443,12 @@ async function verifyRoutineOutcomeClaimUrl(input: {
       return null;
     }
     return {
-      action: claim.action,
-      title: confirmed.title,
-      url: confirmed.url ?? claim.url
+      action: {
+        action: claim.action,
+        title: confirmed.title,
+        url: confirmed.url ?? claim.url
+      },
+      pullRequest: null
     };
   } catch (error) {
     input.logger?.warn(
@@ -628,7 +651,53 @@ function recordRoutinePullRequests(input: {
     });
   }
 }
-
+// A claim-verified PR opened from any branch other than the firing's own can
+// never satisfy isOpenPullRequestForBranch, so the branch-scoped recording
+// above skips it and routine_pull_requests — read by the firing page, the CLI
+// status line, the per-firing notification, and fan-out summaries and counts
+// — renders a firing whose verified outcome says `pr` as PR-less (the
+// divergence ADR-2026-09-11-1001 recorded and left out of scope). Record the
+// verified PR here under the same informational, open-only bar as
+// branch-scoped recording, storing the PR's own observed head sha — the same
+// semantics branch-scoped rows carry, for a head branch this firing never
+// produced (ADR-2026-10-20-1021). The store's upsert dedupes against any row
+// branch-scoped recording already wrote for the same PR.
+function recordClaimVerifiedPullRequest(input: {
+  firingId: string;
+  logger: Logger | undefined;
+  projectName: string;
+  routineName: string;
+  runStore: RoutineGithubStore;
+  verification: VerifiedRoutineClaim | null;
+}): void {
+  const { verification } = input;
+  if (verification === null || verification.action.action !== "pr") {
+    return;
+  }
+  const pullRequest = verification.pullRequest;
+  if (pullRequest === null || !isOpenPullRequest(pullRequest)) {
+    return;
+  }
+  // Mirror the fallback-discovery guard above: this runs after awaited
+  // network I/O and can resolve after an operator cancel or a deadline
+  // already terminalized the firing and sent its summary. Never record onto
+  // a firing whose outcome has already been reported.
+  if (input.runStore.getRoutineFiring(input.firingId)?.state !== "running") {
+    input.logger?.warn(
+      { firingId: input.firingId, routine: input.routineName },
+      "symphonika routine claim-verified PR recording abandoned after firing already completed"
+    );
+    return;
+  }
+  input.runStore.recordRoutinePullRequest({
+    firingId: input.firingId,
+    headSha: pullRequest.head.sha,
+    prNumber: pullRequest.number,
+    prUrl: pullRequest.html_url ?? null,
+    projectName: input.projectName,
+    routineName: input.routineName
+  });
+}
 // Unlike isOpenPullRequestForBranch, this admits a closed/merged PR: outcome
 // observation needs to detect a PR that was opened AND closed within the same
 // firing window, not just associate currently-open ones (see
@@ -649,6 +718,21 @@ function isPullRequestForBranch(
   );
 }
 
+function isOpenPullRequest(
+  pullRequest: RawGitHubPullRequest
+): pullRequest is RawGitHubPullRequest & {
+  head: { sha: string };
+  number: number;
+} {
+  return (
+    pullRequest.state === "open" &&
+    pullRequest.number !== undefined &&
+    pullRequest.number > 0 &&
+    pullRequest.head?.sha !== undefined &&
+    pullRequest.head.sha.length > 0
+  );
+}
+
 function isOpenPullRequestForBranch(
   pullRequest: RawGitHubPullRequest,
   branchName: string
@@ -656,14 +740,7 @@ function isOpenPullRequestForBranch(
   head: { ref: string; sha: string };
   number: number;
 } {
-  return (
-    pullRequest.state === "open" &&
-    pullRequest.number !== undefined &&
-    pullRequest.number > 0 &&
-    pullRequest.head?.ref === branchName &&
-    pullRequest.head.sha !== undefined &&
-    pullRequest.head.sha.length > 0
-  );
+  return isOpenPullRequest(pullRequest) && pullRequest.head?.ref === branchName;
 }
 
 // Mirrors diffRoutineGithubSnapshots' own newPullRequest bar (reusing the same

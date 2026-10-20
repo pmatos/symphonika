@@ -651,6 +651,7 @@ function recordRoutinePullRequests(input: {
     });
   }
 }
+
 // A claim-verified PR opened from any branch other than the firing's own can
 // never satisfy isOpenPullRequestForBranch, so the branch-scoped recording
 // above skips it and routine_pull_requests — read by the firing page, the CLI
@@ -698,6 +699,7 @@ function recordClaimVerifiedPullRequest(input: {
     routineName: input.routineName
   });
 }
+
 // Unlike isOpenPullRequestForBranch, this admits a closed/merged PR: outcome
 // observation needs to detect a PR that was opened AND closed within the same
 // firing window, not just associate currently-open ones (see

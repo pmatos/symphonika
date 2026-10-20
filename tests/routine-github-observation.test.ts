@@ -1318,16 +1318,13 @@ describe("Routine Firing GitHub observation assessment", () => {
   });
   describe("success phase claim-verified PR recording", () => {
     function verifiedCrossBranchPullRequest(
-      overrides: Partial<RawGitHubPullRequest> = {}
+      overrides: WithUndefined<RawGitHubPullRequest> = {}
     ): RawGitHubPullRequest {
-      return {
+      return branchPullRequest(99, {
         head: { ref: "pm-deepen/elsewhere", sha: "sha-99" },
-        html_url: "https://github.com/pmatos/alpha/pull/99",
-        number: 99,
-        state: "open",
         title: "Fix from elsewhere",
         ...overrides
-      };
+      });
     }
 
     it("records a claim-verified pr opened from a different branch", async () => {

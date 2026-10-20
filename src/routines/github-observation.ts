@@ -600,16 +600,16 @@ async function discoverRoutinePullRequests(input: {
     return false;
   }
 
-  // The cancellation settlement window races this call rather than aborting
-  // it: a discovery abandoned there keeps running and can resolve after the
-  // firing already went terminal and its fan-out summary was sent. Re-check
-  // the firing is still `running` before writing so a late discovery never
-  // records PRs onto a firing whose outcome has already been reported.
-  if (input.runStore.getRoutineFiring(input.firingId)?.state !== "running") {
-    input.logger?.warn(
-      { firingId: input.firingId, routine: input.routineName },
-      "symphonika routine PR discovery abandoned after firing already completed"
-    );
+  // Late-write guard — see firingStillRunning.
+  if (
+    !firingStillRunning({
+      firingId: input.firingId,
+      logger: input.logger,
+      routineName: input.routineName,
+      runStore: input.runStore,
+      subject: "PR discovery"
+    })
+  ) {
     return false;
   }
 
@@ -663,6 +663,31 @@ function recordRoutinePullRequests(input: {
 // semantics branch-scoped rows carry, for a head branch this firing never
 // produced (ADR-2026-10-20-1021). The store's upsert dedupes against any row
 // branch-scoped recording already wrote for the same PR.
+
+// Shared late-write guard for every recording path that runs after awaited
+// network I/O: the cancellation settlement window races those calls rather
+// than aborting them, so one can resolve after the firing already went
+// terminal and its fan-out summary was sent. Returns whether the firing is
+// still `running` — the caller must abandon the write when it is not, so a
+// late discovery never records PRs onto a firing whose outcome has already
+// been reported.
+function firingStillRunning(input: {
+  firingId: string;
+  logger: Logger | undefined;
+  routineName: string;
+  runStore: RoutineGithubStore;
+  subject: string;
+}): boolean {
+  if (input.runStore.getRoutineFiring(input.firingId)?.state === "running") {
+    return true;
+  }
+  input.logger?.warn(
+    { firingId: input.firingId, routine: input.routineName },
+    `symphonika routine ${input.subject} abandoned after firing already completed`
+  );
+  return false;
+}
+
 function recordClaimVerifiedPullRequest(input: {
   firingId: string;
   logger: Logger | undefined;
@@ -679,15 +704,15 @@ function recordClaimVerifiedPullRequest(input: {
   if (pullRequest === null || !isOpenPullRequest(pullRequest)) {
     return;
   }
-  // Mirror the fallback-discovery guard above: this runs after awaited
-  // network I/O and can resolve after an operator cancel or a deadline
-  // already terminalized the firing and sent its summary. Never record onto
-  // a firing whose outcome has already been reported.
-  if (input.runStore.getRoutineFiring(input.firingId)?.state !== "running") {
-    input.logger?.warn(
-      { firingId: input.firingId, routine: input.routineName },
-      "symphonika routine claim-verified PR recording abandoned after firing already completed"
-    );
+  if (
+    !firingStillRunning({
+      firingId: input.firingId,
+      logger: input.logger,
+      routineName: input.routineName,
+      runStore: input.runStore,
+      subject: "claim-verified PR recording"
+    })
+  ) {
     return;
   }
   input.runStore.recordRoutinePullRequest({
@@ -698,6 +723,20 @@ function recordClaimVerifiedPullRequest(input: {
     projectName: input.projectName,
     routineName: input.routineName
   });
+}
+
+function isPullRequest(
+  pullRequest: RawGitHubPullRequest
+): pullRequest is RawGitHubPullRequest & {
+  head: { sha: string };
+  number: number;
+} {
+  return (
+    pullRequest.number !== undefined &&
+    pullRequest.number > 0 &&
+    pullRequest.head?.sha !== undefined &&
+    pullRequest.head.sha.length > 0
+  );
 }
 
 // Unlike isOpenPullRequestForBranch, this admits a closed/merged PR: outcome
@@ -711,13 +750,7 @@ function isPullRequestForBranch(
   head: { ref: string; sha: string };
   number: number;
 } {
-  return (
-    pullRequest.number !== undefined &&
-    pullRequest.number > 0 &&
-    pullRequest.head?.ref === branchName &&
-    pullRequest.head.sha !== undefined &&
-    pullRequest.head.sha.length > 0
-  );
+  return isPullRequest(pullRequest) && pullRequest.head?.ref === branchName;
 }
 
 function isOpenPullRequest(
@@ -726,13 +759,7 @@ function isOpenPullRequest(
   head: { sha: string };
   number: number;
 } {
-  return (
-    pullRequest.state === "open" &&
-    pullRequest.number !== undefined &&
-    pullRequest.number > 0 &&
-    pullRequest.head?.sha !== undefined &&
-    pullRequest.head.sha.length > 0
-  );
+  return pullRequest.state === "open" && isPullRequest(pullRequest);
 }
 
 function isOpenPullRequestForBranch(

@@ -2369,7 +2369,7 @@ async function classifyRoutineOutcome(
     baseBranch: string;
     kind: RoutineStatus["kind"];
     redactSecrets: readonly string[];
-    stderrLogPath?: string;
+    stderrLogPath: string;
     workspacePath: string;
   }
 ): Promise<RoutineTerminalOutcome> {
@@ -2382,9 +2382,7 @@ async function classifyRoutineOutcome(
       cancelRequested: false,
       events,
       redactSecrets: workspace.redactSecrets,
-      ...(workspace.stderrLogPath === undefined
-        ? {}
-        : { stderrLogPath: workspace.stderrLogPath }),
+      stderrLogPath: workspace.stderrLogPath,
       successWorkspace: {
         allowZeroCommits: workspace.allowZeroCommits,
         baseBranch: workspace.baseBranch,
@@ -2410,9 +2408,7 @@ async function classifyRoutineOutcome(
   }
   const completion = await classifyProviderCompletion({
     events,
-    ...(workspace.stderrLogPath === undefined
-      ? {}
-      : { stderrLogPath: workspace.stderrLogPath })
+    stderrLogPath: workspace.stderrLogPath
   });
   if (completion.kind === "clean_exit") {
     return { commitsAhead: false, kind: "succeeded", reason: "" };

@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 
 import { contentHash } from "../content-hash.js";
 import type { NormalizedProviderEvent } from "../provider.js";
-import { withProviderStderrTail } from "../providers/provider-stderr.js";
+import { classifyProviderCompletion } from "../providers/provider-completion.js";
 import { redactAll } from "../redaction.js";
 import type { FailureClassification } from "../run-store.js";
 import { WorkspacePreparationError } from "../workspace.js";
@@ -80,71 +80,15 @@ async function classifyFailureUnredacted(
     return classifyError(input.error);
   }
 
-  const inputRequired = input.events.find(
-    (event) => event.type === "input_required"
-  );
-  if (inputRequired !== undefined) {
-    return {
-      classification: "input_required",
-      kind: "input_required",
-      reason: extractMessage(inputRequired) ?? "provider requested input"
-    };
-  }
-
-  const malformed = input.events.find(
-    (event) => event.type === "malformed_event"
-  );
-  if (malformed !== undefined) {
-    return {
-      classification: "deterministic",
-      kind: "failed",
-      reason: "malformed_provider_event"
-    };
-  }
-
-  const turnFailed = input.events.find((event) => event.type === "turn_failed");
-  if (turnFailed !== undefined) {
-    return {
-      classification: "transient",
-      kind: "failed",
-      reason: extractMessage(turnFailed) ?? "turn_failed"
-    };
-  }
-
-  const exit = input.events.find((event) => event.type === "process_exit");
-  if (exit === undefined) {
-    return {
-      classification: "transient",
-      kind: "failed",
-      reason: await withProviderStderrTail(
-        "no_process_exit_event",
-        input.stderrLogPath
-      )
-    };
-  }
-
-  if (exit.cancelled === true) {
-    return {
-      kind: "cancelled",
-      reason: "provider_cancelled"
-    };
-  }
-
-  const exitCode = numberField(exit, "exitCode");
-  if (exitCode === 0) {
-    return verifyWorkspaceSuccess(input.successWorkspace);
-  }
-
-  return {
-    classification: "transient",
-    kind: "failed",
-    reason: await withProviderStderrTail(
-      exitCode === undefined
-        ? `process_exit_signal_${stringField(exit, "signal") ?? "unknown"}`
-        : `process_exit_${exitCode}`,
-      input.stderrLogPath
-    )
-  };
+  const completion = await classifyProviderCompletion({
+    events: input.events,
+    ...(input.stderrLogPath === undefined
+      ? {}
+      : { stderrLogPath: input.stderrLogPath })
+  });
+  return completion.kind === "clean_exit"
+    ? verifyWorkspaceSuccess(input.successWorkspace)
+    : completion;
 }
 
 async function verifyWorkspaceSuccess(
@@ -299,30 +243,6 @@ function classifyError(error: unknown): ClassifiedTerminal {
     kind: "failed",
     reason: message
   };
-}
-
-function extractMessage(event: NormalizedProviderEvent): string | undefined {
-  return stringField(event, "message");
-}
-
-function stringField(value: unknown, key: string): string | undefined {
-  if (typeof value === "object" && value !== null && key in value) {
-    const inner = (value as Record<string, unknown>)[key];
-    if (typeof inner === "string") {
-      return inner;
-    }
-  }
-  return undefined;
-}
-
-function numberField(value: unknown, key: string): number | undefined {
-  if (typeof value === "object" && value !== null && key in value) {
-    const inner = (value as Record<string, unknown>)[key];
-    if (typeof inner === "number") {
-      return inner;
-    }
-  }
-  return undefined;
 }
 
 function errorMessage(error: unknown): string {

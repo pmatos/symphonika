@@ -28,6 +28,7 @@ import type {
   NormalizedProviderEvent,
   ProviderEvent
 } from "../provider.js";
+import { classifyProviderCompletion } from "../providers/provider-completion.js";
 import { withProviderStderrTail } from "../providers/provider-stderr.js";
 import type {
   RunControllerProjectConfig,
@@ -2368,7 +2369,7 @@ async function classifyRoutineOutcome(
     baseBranch: string;
     kind: RoutineStatus["kind"];
     redactSecrets: readonly string[];
-    stderrLogPath?: string;
+    stderrLogPath: string;
     workspacePath: string;
   }
 ): Promise<RoutineTerminalOutcome> {
@@ -2381,9 +2382,7 @@ async function classifyRoutineOutcome(
       cancelRequested: false,
       events,
       redactSecrets: workspace.redactSecrets,
-      ...(workspace.stderrLogPath === undefined
-        ? {}
-        : { stderrLogPath: workspace.stderrLogPath }),
+      stderrLogPath: workspace.stderrLogPath,
       successWorkspace: {
         allowZeroCommits: workspace.allowZeroCommits,
         baseBranch: workspace.baseBranch,
@@ -2407,49 +2406,16 @@ async function classifyRoutineOutcome(
         return { kind: "failed", reason: classified.reason };
     }
   }
-  const inputRequired = events.find((event) => event.type === "input_required");
-  if (inputRequired !== undefined) {
-    return {
-      kind: "failed",
-      reason:
-        stringField(inputRequired, "message") ?? "provider requested input"
-    };
-  }
-  if (events.some((event) => event.type === "malformed_event")) {
-    return { kind: "failed", reason: "malformed_provider_event" };
-  }
-  const turnFailed = events.find((event) => event.type === "turn_failed");
-  if (turnFailed !== undefined) {
-    return {
-      kind: "failed",
-      reason: stringField(turnFailed, "message") ?? "turn_failed"
-    };
-  }
-  const exit = events.find((event) => event.type === "process_exit");
-  if (exit === undefined) {
-    return {
-      kind: "failed",
-      reason: await withProviderStderrTail(
-        "no_process_exit_event",
-        workspace.stderrLogPath
-      )
-    };
-  }
-  if (exit.cancelled === true) {
-    return { kind: "cancelled", reason: "provider_cancelled" };
-  }
-  const exitCode = numberField(exit, "exitCode");
-  if (exitCode === 0) {
+  const completion = await classifyProviderCompletion({
+    events,
+    stderrLogPath: workspace.stderrLogPath
+  });
+  if (completion.kind === "clean_exit") {
     return { commitsAhead: false, kind: "succeeded", reason: "" };
   }
   return {
-    kind: "failed",
-    reason: await withProviderStderrTail(
-      exitCode === undefined
-        ? `process_exit_signal_${stringField(exit, "signal") ?? "unknown"}`
-        : `process_exit_${exitCode}`,
-      workspace.stderrLogPath
-    )
+    kind: completion.kind === "cancelled" ? "cancelled" : "failed",
+    reason: completion.reason
   };
 }
 
@@ -2759,22 +2725,6 @@ function resolveRedactSecrets(
       : secretsForEmailConfig(notification.resolveConfig(), env)),
     ...secretsForMaestroConfig(maestroConfigLoader?.(), env)
   ];
-}
-
-function stringField(value: unknown, key: string): string | undefined {
-  if (typeof value === "object" && value !== null && key in value) {
-    const field = (value as Record<string, unknown>)[key];
-    return typeof field === "string" ? field : undefined;
-  }
-  return undefined;
-}
-
-function numberField(value: unknown, key: string): number | undefined {
-  if (typeof value === "object" && value !== null && key in value) {
-    const field = (value as Record<string, unknown>)[key];
-    return typeof field === "number" ? field : undefined;
-  }
-  return undefined;
 }
 
 function errorMessage(error: unknown): string {

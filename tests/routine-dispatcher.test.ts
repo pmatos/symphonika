@@ -17,6 +17,7 @@ import type {
 } from "../src/lifecycle/run-controller.js";
 import type {
   AgentProvider,
+  NormalizedProviderEvent,
   ProviderEvent,
   ProviderRunInput
 } from "../src/provider.js";
@@ -93,6 +94,116 @@ async function dispatchDueRoutinesAndDrain(
 }
 
 describe("RoutineFiringDispatcher", () => {
+  it.each([
+    {
+      name: "first input request before malformed output and turn failure",
+      events: [
+        { type: "process_exit", exitCode: 0 },
+        { type: "turn_failed", message: "turn failure" },
+        { type: "malformed_event" },
+        { type: "input_required", message: "ask process" },
+        { type: "input_required", message: "later input" }
+      ],
+      reason: "ask [REDACTED]",
+      state: "failed"
+    },
+    {
+      name: "malformed output before a failed turn or cancelled exit",
+      events: [
+        { type: "process_exit", cancelled: true, exitCode: 0 },
+        { type: "turn_failed", message: "turn failure" },
+        { type: "malformed_event" }
+      ],
+      reason: "malformed_provider_event",
+      state: "failed"
+    },
+    {
+      name: "first failed turn before a cancelled exit",
+      events: [
+        { type: "process_exit", cancelled: true },
+        { type: "turn_failed", message: "first failure" },
+        { type: "turn_failed", message: "second failure" }
+      ],
+      reason: "first failure",
+      state: "failed"
+    },
+    {
+      name: "cancellation before the first exit code",
+      events: [
+        { type: "process_exit", cancelled: true, exitCode: 0 },
+        { type: "process_exit", exitCode: 1 }
+      ],
+      reason: "provider_cancelled",
+      state: "cancelled"
+    },
+    {
+      name: "first clean report exit without Git workspace acceptance",
+      events: [
+        { type: "process_exit", exitCode: 0 },
+        { type: "process_exit", exitCode: 1 }
+      ],
+      reason: null,
+      state: "succeeded"
+    }
+  ] satisfies Array<{
+    name: string;
+    events: NormalizedProviderEvent[];
+    reason: string | null;
+    state: "failed" | "cancelled" | "succeeded";
+  }>)(
+    "preserves report completion: $name",
+    async ({ events, reason, state }) => {
+      const root = await makeTempRoot();
+      const stateRoot = path.join(root, ".symphonika");
+      const runStore = openRunStore({ stateRoot });
+      const provider = {
+        ...quietProvider(),
+        runAttempt: vi.fn(async function* (): AsyncGenerator<ProviderEvent> {
+          await Promise.resolve();
+          for (const normalized of events) {
+            yield { normalized, raw: normalized };
+          }
+        })
+      } satisfies AgentProvider;
+
+      try {
+        await dispatchDueRoutinesAndDrain({
+          activeRuns: new ActiveRunRegistry(),
+          agentProviders: { codex: provider },
+          configDir: root,
+          createFiringId: () => "fire-completion",
+          env: { GITHUB_TOKEN: "process" },
+          globalConcurrency: { maxInFlight: undefined },
+          now: new Date("2026-05-22T10:00:01.000Z"),
+          prepareRoutineWorkspace: () =>
+            Promise.resolve({
+              branchName: "main",
+              branchRef: "refs/remotes/origin/main",
+              cachePath: path.join(root, ".cache", "repo.git"),
+              reused: false,
+              workspacePath: path.join(root, "workspace")
+            }),
+          projects: new Map([
+            ["alpha", dueRoutineProjectFixture(root, "codex")]
+          ]),
+          providersConfig: {
+            claude: { command: "claude fake" },
+            codex: { command: "codex fake" }
+          },
+          runStore,
+          stateRoot
+        });
+        expect(runStore.getRoutineFiring("fire-completion")).toMatchObject({
+          commitsAhead: false,
+          state,
+          terminalReason: reason
+        });
+      } finally {
+        runStore.close();
+      }
+    }
+  );
+
   it("manually fires a not-due Routine through the normal provider lifecycle", async () => {
     const root = await makeTempRoot();
     const stateRoot = path.join(root, ".symphonika");

@@ -42,7 +42,7 @@ export type ProviderEvent = {
   // jsonl-process-queue.ts). Optional rather than required: forcing every
   // AgentProvider implementation (including every test double across the
   // suite) to invent a transport-receipt timestamp would say something false
-  // about providers that have no queue to timestamp. persistProviderEvent
+  // about providers that have no queue to timestamp. The Run Provider Evidence Writer
   // falls back to its own clock when this is absent.
   receivedAt?: string;
 };

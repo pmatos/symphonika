@@ -300,6 +300,17 @@ _Avoid_: normalized event log
 Provider-neutral run events used by the orchestrator, observability surfaces, and tests.
 _Avoid_: raw provider log
 
+**Provider Evidence Writer**:
+The per-Attempt or per-Routine Firing module that persists one Agent Provider event at a time.
+`src/providers/provider-evidence.ts` owns redacted evidence copies, JSONL serialization, and sequence
+bookkeeping. The Run writer records SQLite receipts before file appends using the Attempt's
+captured Project credential inventory; the Routine writer refreshes that inventory per event and
+maintains its normalized-log byte-offset index. Both return the original normalized event for
+lifecycle interpretation, await evidence writes before the next event, and propagate write failures.
+Evidence paths and initialization remain with the orchestration callers, outside the Workspace.
+_Avoid_: Provider Event Reducer (which interprets provider protocol), Provider Completion (which
+classifies terminal evidence)
+
 **Provider Completion**:
 The interpretation of an Agent Provider's normalized terminal events into a clean exit, cancellation,
 input request, or classified failure. `classifyProviderCompletion`

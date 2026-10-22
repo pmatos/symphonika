@@ -1,11 +1,6 @@
-import { execFile } from "node:child_process";
-import { stat } from "node:fs/promises";
-import path from "node:path";
-import { promisify } from "node:util";
-
+import { reclaimIssueWorkspace } from "./workspace-reclamation.js";
 import type { IssueWorkspacePruneCandidate, RunStore } from "./run-store.js";
 
-const execFileAsync = promisify(execFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export type IssueWorkspaceRetentionPolicy = {
@@ -68,12 +63,12 @@ export async function pruneIssueWorkspaces(input: {
   for (const run of runs) {
     const entry = pruneEntry(run);
     try {
-      await reclaimRegisteredWorktree(run);
+      await reclaimIssueWorkspace(run);
       // A concurrent prune (daemon vs. manual `prune-workspaces`, or vice
       // versa) may have already reclaimed and marked this run, so
       // markIssueWorkspacePruned's write can no-op (row already has
       // workspace_pruned_at set). Either way the workspace ends up reclaimed
-      // once reclaimRegisteredWorktree returns without throwing, so report it
+      // once reclaimIssueWorkspace returns without throwing, so report it
       // as pruned regardless of which process's write won.
       input.runStore.markIssueWorkspacePruned({
         id: run.runId,
@@ -90,110 +85,6 @@ export async function pruneIssueWorkspaces(input: {
   return report;
 }
 
-async function reclaimRegisteredWorktree(
-  candidate: IssueWorkspacePruneCandidate
-): Promise<void> {
-  const { cachePath, workspacePath } = issueWorkspacePlan(
-    candidate.workspacePath
-  );
-  try {
-    await git([
-      "-C",
-      cachePath,
-      "worktree",
-      "remove",
-      "--force",
-      workspacePath
-    ]);
-  } catch (removeError) {
-    const workspaceExists = await exists(workspacePath);
-    if (!workspaceExists && !(await isUsableRepositoryCache(cachePath))) {
-      return;
-    }
-    if (workspaceExists) {
-      throw removeError;
-    }
-    const registered = await listRegisteredWorktreePaths(cachePath);
-    if (registered.includes(workspacePath)) {
-      throw removeError;
-    }
-    return;
-  }
-}
-
-async function isUsableRepositoryCache(cachePath: string): Promise<boolean> {
-  try {
-    return (
-      (await git(["-C", cachePath, "rev-parse", "--is-bare-repository"])) ===
-      "true"
-    );
-  } catch {
-    return false;
-  }
-}
-
-// Mirrors routines/workspace-retention.ts's routineWorkspacePlan, but Issue
-// Workspaces have no per-run identity check available: the worktree's leaf
-// directory name is derived from the issue number and title (see
-// planWorkspacePaths), not the run id, so there is no analogous
-// basename-matches-id assertion to make here.
-function issueWorkspacePlan(workspacePath: string): {
-  cachePath: string;
-  workspacePath: string;
-} {
-  const resolvedWorkspacePath = path.resolve(workspacePath);
-  const issuesDirectory = path.dirname(resolvedWorkspacePath);
-  if (
-    workspacePath.length === 0 ||
-    path.basename(issuesDirectory) !== "issues"
-  ) {
-    throw new Error(
-      `refusing to prune run workspace ${workspacePath}: path does not match <root>/issues/<issue-dir>`
-    );
-  }
-  const workspaceRoot = path.dirname(issuesDirectory);
-  return {
-    cachePath: path.join(workspaceRoot, ".cache", "repo.git"),
-    workspacePath: resolvedWorkspacePath
-  };
-}
-
-async function listRegisteredWorktreePaths(
-  cachePath: string
-): Promise<string[]> {
-  const output = await git([
-    "-C",
-    cachePath,
-    "worktree",
-    "list",
-    "--porcelain"
-  ]);
-  const paths: string[] = [];
-  for (const line of output.split(/\r?\n/)) {
-    if (line.startsWith("worktree ")) {
-      paths.push(path.resolve(line.slice("worktree ".length)));
-    }
-  }
-  return paths;
-}
-
-async function exists(filePath: string): Promise<boolean> {
-  try {
-    await stat(filePath);
-    return true;
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") {
-      return false;
-    }
-    throw error;
-  }
-}
-
-async function git(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args);
-  return stdout.trim();
-}
-
 function cutoff(now: Date, days: number): string {
   return new Date(now.getTime() - days * DAY_MS).toISOString();
 }
@@ -205,8 +96,4 @@ function pruneEntry(
     runId: candidate.runId,
     workspacePath: candidate.workspacePath
   };
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error;
 }

@@ -26,6 +26,7 @@ const graph: ExpandedWorkflow = {
 
 describe("resolveProviderSource (#862)", () => {
   it.each([
+    ["operator_recovery", { kind: "operator_recovery" }],
     ["operator_state", { kind: "operator_state" }],
     ["operator_chain", { kind: "operator_chain" }],
     ["project_default", { kind: "project_default" }],

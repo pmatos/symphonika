@@ -130,6 +130,7 @@ import {
 } from "./artifact-probe.js";
 import { probeStateClaim, stateGatesOnClaim } from "./claim-probe.js";
 import {
+  isAgentState,
   isConsumableProviderPlan,
   resolveEffectiveProvider
 } from "./chain-provider.js";
@@ -516,6 +517,9 @@ type StateAdvancePayload = {
   issue: IssueSnapshot;
   parentRunId: string;
   projectName: string;
+  // Set only by scheduleRecovery (#863): the operator's provider for this one
+  // state. Wins over every other level for `toStateId` alone.
+  recovery?: { interventionId: string; provider: AgentProviderName };
   // Set only by scheduleShutdownResume. It makes executeStateAdvance's
   // contention reschedule re-arm through that same wrapper, so the resume
   // stays accounted for across every retry. See hasPendingShutdownResume.
@@ -700,6 +704,10 @@ export class RunController {
   private readonly activeRuns: ActiveRunRegistry;
   private readonly agentProviders: AgentProviderRegistry;
   private readonly claimLabels: ClaimLabelWriter;
+  // Interventions whose launch hit claim contention and re-armed itself, so
+  // the wrapper around executeStateAdvance does not mistake the quiet return
+  // for a dropped launch.
+  private readonly contendedRecoveries = new Set<string>();
   private readonly configDir: string;
   private readonly createRunId: () => string;
   private readonly dispatchMutex: AsyncMutex;
@@ -3024,7 +3032,101 @@ export class RunController {
     return (this.shutdownResumesPending.get(parentRunId) ?? 0) > 0;
   }
 
+  // Re-enters a stopped Run's state on the operator's provider (#863). Same
+  // route as a shutdown resume: a State Advance whose parent is the stopped
+  // Run, scheduled rather than awaited (the attempt runs the provider to
+  // completion) so the Issue is visibly reserved from this moment. Returns
+  // false when the daemon is shutting down and refused the work.
+  scheduleRecovery(input: {
+    interventionId: string;
+    issue: IssueSnapshot;
+    parentRunId: string;
+    projectName: string;
+    provider: AgentProviderName;
+    toStateId: string;
+  }): boolean {
+    const payload: StateAdvancePayload = {
+      issue: input.issue,
+      parentRunId: input.parentRunId,
+      projectName: input.projectName,
+      recovery: {
+        interventionId: input.interventionId,
+        provider: input.provider
+      },
+      toStateId: input.toStateId
+    };
+    return this.schedule({
+      delayMs: 0,
+      fire: () => this.executeStateAdvance(payload),
+      issueNumber: input.issue.number,
+      kind: "state_advance",
+      projectName: input.projectName,
+      runId: input.parentRunId
+    });
+  }
+
+  // Every exit of a scheduled recovery settles its intervention: the launch
+  // itself settles it at the claim, and anything that ends without a Run
+  // (closed Issue, dropped Project, shutdown, an error) is recorded here
+  // rather than left `scheduled` forever.
   async executeStateAdvance(payload: StateAdvancePayload): Promise<void> {
+    const interventionId = payload.recovery?.interventionId;
+    if (interventionId === undefined) {
+      await this.advanceState(payload);
+      return;
+    }
+    try {
+      await this.advanceState(payload);
+    } catch (error) {
+      this.logger?.error(
+        { err: error, interventionId },
+        "symphonika provider recovery failed"
+      );
+      this.runStore.settleProviderIntervention(
+        { id: interventionId },
+        {
+          error: "the recovery launch raised an error; see the daemon log",
+          outcome: "failed"
+        }
+      );
+      throw error;
+    }
+    if (this.contendedRecoveries.delete(interventionId)) {
+      return;
+    }
+    this.runStore.settleProviderIntervention(
+      { id: interventionId },
+      {
+        error:
+          "the launch ended before a Run was created (Issue closed or ineligible, Project dropped, or daemon shutting down)",
+        outcome: "dropped"
+      }
+    );
+  }
+
+  // A shutdown resume of a Run that a recovery launched keeps the operator's
+  // provider while it re-enters that same state: the resume's parent is that
+  // Run, and without this the re-entry would fall back to the plan or the
+  // Project default and silently undo the operator's choice. A Run that
+  // advanced past the recovered state resumes at a different state and so
+  // matches nothing.
+  private recoveryChoiceFor(
+    payload: StateAdvancePayload
+  ): { interventionId?: string; provider: AgentProviderName } | undefined {
+    if (payload.recovery !== undefined) {
+      return payload.recovery;
+    }
+    if (payload.shutdownResume !== true) {
+      return undefined;
+    }
+    const provider = this.runStore.findRecoveryProvider(
+      payload.parentRunId,
+      payload.toStateId
+    );
+    return provider === undefined ? undefined : { provider };
+  }
+
+  private async advanceState(payload: StateAdvancePayload): Promise<void> {
     const resolved = await this.resolveDispatchProject(payload.projectName);
     if (resolved.kind === "dropped") {
       this.logger?.warn(
@@ -3174,6 +3276,31 @@ export class RunController {
       return;
     }
 
+    const recoveryChoice = this.recoveryChoiceFor(payload);
+    if (recoveryChoice !== undefined && !isAgentState(targetState)) {
+      // A workflow edit between the operator's confirm and this launch made
+      // the position something no provider can be chosen for.
+      if (recoveryChoice.interventionId !== undefined) {
+        this.runStore.settleProviderIntervention(
+          { id: recoveryChoice.interventionId },
+          {
+            error: `state ${payload.toStateId} is no longer an agent state in the workflow`,
+            outcome: "failed"
+          }
+        );
+      }
+      this.logger?.warn(
+        {
+          issueNumber: refreshed.number,
+          parentRunId: payload.parentRunId,
+          project: project.name,
+          stateId: payload.toStateId
+        },
+        "symphonika provider recovery dropped: state is no longer an agent state"
+      );
+      return;
+    }
+
     // Mirror the schedule-time terminal short-circuit in executeWaitPark
     // (see the `next?.terminal !== undefined` branch above). When a workflow
     // edit during the continuation delay rewrites payload.toStateId into a
@@ -3201,6 +3328,10 @@ export class RunController {
       resolveEffectiveProvider({
         plan: this.runStore.getChainProviderPlan(payload.parentRunId),
         projectDefault: project.agent.provider,
+        recovery:
+          recoveryChoice === undefined
+            ? undefined
+            : { provider: recoveryChoice.provider, stateId: targetState.id },
         state: targetState
       });
     const providerConfig = (
@@ -3239,8 +3370,20 @@ export class RunController {
       return;
     }
 
+    const recoveryInterventionId = payload.recovery?.interventionId;
     try {
       await this.runFreshLifecycle({
+        ...(recoveryInterventionId === undefined
+          ? {}
+          : {
+              afterClaim: () =>
+                this.settleRecoveryLaunch({
+                  interventionId: recoveryInterventionId,
+                  issueNumber: refreshed.number,
+                  repository,
+                  runId
+                })
+            }),
         attemptNumber: 1,
         ...(payload.extraInstructions === undefined
           ? {}
@@ -3331,6 +3474,9 @@ export class RunController {
           this.scheduleShutdownResume(payload);
           return;
         }
+        if (recoveryInterventionId !== undefined) {
+          this.contendedRecoveries.add(recoveryInterventionId);
+        }
         await this.scheduleRunWork({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
           fire: () => this.executeStateAdvance(payload),
@@ -3348,6 +3494,35 @@ export class RunController {
       }
       throw error;
     }
+  }
+
+  // Runs once the recovery's Run row exists and `sym:claimed` is back on the
+  // Issue. The stopped verdict the earlier Run left behind is withdrawn only
+  // now, so nothing about the Issue reads "failed" while it is running again
+  // and nothing is freshly dispatchable before the claim holds.
+  private async settleRecoveryLaunch(input: {
+    interventionId: string;
+    issueNumber: number;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    // Past the claim the Run holds a reserved slot that only the attempt's
+    // own cleanup releases, so nothing here may throw into that gap.
+    try {
+      this.runStore.settleProviderIntervention(
+        { id: input.interventionId },
+        { outcome: "launched", toRunId: input.runId }
+      );
+    } catch (error) {
+      this.logger?.error(
+        { err: error, interventionId: input.interventionId },
+        "symphonika failed to record a launched provider recovery"
+      );
+    }
+    await this.claimLabels.clearStoppedVerdict({
+      issueNumber: input.issueNumber,
+      repository: input.repository
+    });
   }
 
   // Rolls back a sym:claimed written before the shutdown gate closed.
@@ -3435,6 +3610,12 @@ export class RunController {
       "deterministic"
     );
     this.runStore.updateRunState(input.runId, "failed");
+    // A scheduled recovery of this parent ended in this failed Run rather than
+    // an attempt; a no-op for every other advance.
+    this.runStore.settleProviderIntervention(
+      { fromRunId: input.parentRunId, kind: "recovery" },
+      { error: input.reason, outcome: "failed", toRunId: input.runId }
+    );
     this.logger?.warn(
       {
         issueNumber: input.issue.number,
@@ -4122,6 +4303,8 @@ export class RunController {
   }
 
   private async runFreshLifecycle(input: {
+    // Runs between the claim and the attempt, once the Run row exists.
+    afterClaim?: () => Promise<void>;
     attemptNumber: number;
     claimGuard?: () => boolean;
     extraInstructions?: string;
@@ -4144,6 +4327,7 @@ export class RunController {
     verifyFileOverlap?: boolean;
   }): Promise<void> {
     const deadline = await this.claimFreshTarget(input);
+    await input.afterClaim?.();
 
     await this.runAttemptLifecycle({
       attemptNumber: input.attemptNumber,

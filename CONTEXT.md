@@ -371,6 +371,19 @@ Project's `agent.provider` (ADR-2026-10-09-0743). May also carry per-state choic
 chain-wide choice for individual agent states (ADR-2026-10-13-0659).
 _Avoid_: provider override, provider pin
 
+**Provider Recovery**:
+An explicit, audited operator action that re-enters the FSM state a Run chain stopped at (`failed`,
+`blocked` or `input_required`) on a different provider. It is a new Continuation Run parented to the
+stopped Run, so the Run Chain, position, branch and Workspace carry over and earlier states are not
+replayed; the stopped Run and its Attempts are left untouched. The provider applies to that one
+state through a precedence level above the per-state choice (`operator_recovery`, recorded on the
+new Run's `provider_source`), and the Run-Chain Provider Plan is not rewritten. Refused while any
+Issue Reservation is live, for a closed Issue, a held or stale claim, a Run that a later Run
+superseded, or a position that is not an agent state of the current workflow. Each request is a
+`chain_provider_interventions` row (kind, chain, from/to Run, state, from/to provider, outcome)
+(ADR-2026-10-23-0903).
+_Avoid_: retry with another provider, attempt switch
+
 **Run Chain**:
 The full lineage of Runs linked by `continuation_parent_run_id`: one root Run (created fresh, with no
 parent) plus every Continuation, State Advance, and waiting Run that descends from it. Chain

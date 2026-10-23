@@ -619,6 +619,13 @@ Choices are keyed by state id: renaming a state after Start drops its choice bac
 one. The Issue page's Run Chain timeline shows which level picked each Run's provider. See
 ADR-2026-10-13-0659.
 
+A state a Run stopped at (`failed`, `blocked` or `input_required`) can be recovered on a different
+provider with `POST /api/issues/:project/:number/recover`. That launches a new Continuation Run at
+the same state and sits above every other level for that one state, so the full precedence is
+recovery, per-state choice, chain-wide choice, `action.provider`, `projects[].agent.provider`. The
+chain plan is not rewritten, earlier states do not run again, and a later pass through the same
+state resolves from the plan as before. See ADR-2026-10-23-0903.
+
 ### Retries and failure transitions
 
 Transient provider or infrastructure failures consume the normal retry budget before a transition

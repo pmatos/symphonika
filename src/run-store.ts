@@ -1448,9 +1448,11 @@ type ProviderPlanStatus =
 
 // Which precedence level chose a Run's provider (#862), recorded on the Run
 // at launch so the timeline never has to re-derive it from a graph that may
-// have changed since: an operator's per-state choice, their chain-wide
-// choice, the state's own `action.provider`, or the Project default.
+// have changed since: an operator's recovery of a stopped state (#863), their
+// per-state choice, their chain-wide choice, the state's own
+// `action.provider`, or the Project default.
 const PROVIDER_SELECTION_SOURCES = [
+  "operator_recovery",
   "operator_state",
   "operator_chain",
   "workflow_action",
@@ -1568,6 +1570,33 @@ function mapProviderPlanRow(row: ProviderPlanDbRow): ProviderPlan {
     updatedAt: row.updated_at
   };
 }
+
+export type InterventionKind = "override_review" | "recovery";
+
+export type CreateProviderInterventionInput = {
+  fromProvider: string | null;
+  fromRunId: string;
+  id: string;
+  issueNumber: number;
+  kind: InterventionKind;
+  projectName: string;
+  repository: { owner: string; repo: string };
+  requestedVia: string;
+  stateId: string;
+  toProvider: AgentProviderName;
+};
+
+// An intervention's outcome starts `scheduled` (accepted and queued, no Run
+// yet) and settles once: `launched` (the new Run row exists), `failed` (the
+// work ran into a refusal after acceptance) or `dropped` (it never reached a
+// Run: Issue closed, daemon restarted, ...).
+export type InterventionSettlement =
+  | { outcome: "launched"; toRunId: string }
+  | {
+      error: string;
+      outcome: "dropped" | "failed";
+      toRunId?: string;
+    };
 
 export class RunStore {
   private readonly changeListeners = new Set<(event: ChangeEvent) => void>();
@@ -1807,6 +1836,151 @@ export class RunStore {
       )
       .get(runId) as ProviderPlanDbRow | undefined;
     return row === undefined ? undefined : mapProviderPlanRow(row);
+  }
+
+  // The first Run of the chain `runId` belongs to.
+  getChainRootRunId(runId: string): string | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "with recursive chain(id, parent_id) as (",
+          "  select id, continuation_parent_run_id from runs where id = ?",
+          "  union all",
+          "  select r.id, r.continuation_parent_run_id",
+          "  from chain join runs r on r.id = chain.parent_id",
+          ")",
+          "select id from chain where parent_id is null"
+        ].join(" ")
+      )
+      .get(runId) as { id: string } | undefined;
+    return row?.id;
+  }
+
+  // True when nothing was created after `runId` for its Issue: no Run
+  // continues it and no later Run exists for the same (Project, Issue). A Run
+  // that is not the head of its Issue's history cannot be re-entered without
+  // forking the walk.
+  isIssueHeadRun(runId: string): boolean {
+    const row = this.database
+      .prepare(
+        [
+          "select 1 as found from runs me",
+          "where me.id = @runId",
+          "and not exists (",
+          "  select 1 from runs child where child.continuation_parent_run_id = me.id",
+          ")",
+          "and not exists (",
+          "  select 1 from runs later",
+          "  where later.project_name = me.project_name",
+          "  and later.issue_number = me.issue_number",
+          "  and later.id <> me.id",
+          "  and (later.created_at > me.created_at",
+          "       or (later.created_at = me.created_at and later.rowid > me.rowid))",
+          ")"
+        ].join(" ")
+      )
+      .get({ runId }) as { found: number } | undefined;
+    return row !== undefined;
+  }
+
+  // At most one `scheduled` intervention per (from Run, kind): the partial
+  // unique index turns a double submit into a throw instead of two launches.
+  createProviderIntervention(input: CreateProviderInterventionInput): void {
+    const apply = this.database.transaction(() => {
+      const chainRootRunId = this.getChainRootRunId(input.fromRunId);
+      if (chainRootRunId === undefined) {
+        throw new Error(`run ${input.fromRunId} does not exist`);
+      }
+      const now = timestamp();
+      this.database
+        .prepare(
+          [
+            "insert into chain_provider_interventions (",
+            "id, kind, project_name, issue_number, repository_owner, repository_name,",
+            "chain_root_run_id, from_run_id, state_id, from_provider, to_provider,",
+            "requested_via, outcome, created_at, updated_at",
+            ") values (",
+            "@id, @kind, @projectName, @issueNumber, @owner, @repo,",
+            "@chainRootRunId, @fromRunId, @stateId, @fromProvider, @toProvider,",
+            "@requestedVia, 'scheduled', @now, @now)"
+          ].join(" ")
+        )
+        .run({
+          chainRootRunId,
+          fromProvider: input.fromProvider,
+          fromRunId: input.fromRunId,
+          id: input.id,
+          issueNumber: input.issueNumber,
+          kind: input.kind,
+          now,
+          owner: input.repository.owner,
+          projectName: input.projectName,
+          repo: input.repository.repo,
+          requestedVia: input.requestedVia,
+          stateId: input.stateId,
+          toProvider: input.toProvider
+        });
+    });
+    apply();
+  }
+
+  // Conditional on `scheduled` so a later write can never rewrite a settled
+  // row. Returns whether this call settled it.
+  settleProviderIntervention(
+    selector: { fromRunId: string; kind: InterventionKind } | { id: string },
+    settlement: InterventionSettlement
+  ): boolean {
+    const where =
+      "id" in selector ? "id = @key" : "from_run_id = @key and kind = @kind";
+    const changes = this.database
+      .prepare(
+        [
+          "update chain_provider_interventions set",
+          "outcome = @outcome, to_run_id = coalesce(@toRunId, to_run_id),",
+          "last_error = @lastError, updated_at = @now",
+          `where ${where} and outcome = 'scheduled'`
+        ].join(" ")
+      )
+      .run({
+        key: "id" in selector ? selector.id : selector.fromRunId,
+        kind: "id" in selector ? null : selector.kind,
+        lastError: settlement.outcome === "launched" ? null : settlement.error,
+        now: timestamp(),
+        outcome: settlement.outcome,
+        toRunId: settlement.toRunId ?? null
+      }).changes;
+    return changes > 0;
+  }
+
+  // The provider an operator's recovery chose for `stateId`, when `runId` is
+  // the Run that recovery launched. Lets a shutdown resume of that Run keep the
+  // choice; any other Run, or any other state, matches nothing.
+  findRecoveryProvider(
+    runId: string,
+    stateId: string
+  ): AgentProviderName | undefined {
+    const row = this.database
+      .prepare(
+        [
+          "select to_provider from chain_provider_interventions",
+          "where kind = 'recovery' and outcome = 'launched'",
+          "and to_run_id = ? and state_id = ?"
+        ].join(" ")
+      )
+      .get(runId, stateId) as { to_provider: string } | undefined;
+    return row !== undefined && isAgentProviderName(row.to_provider)
+      ? row.to_provider
+      : undefined;
+  }
+
+  // Startup sweep: a `scheduled` intervention never survives its process,
+  // because the scheduled work that would settle it is in-memory.
+  dropUnsettledProviderInterventions(error: string): number {
+    return this.database
+      .prepare(
+        "update chain_provider_interventions set outcome = 'dropped', last_error = ?, updated_at = ? where outcome = 'scheduled'"
+      )
+      .run(error, timestamp()).changes;
   }
 
   createRun(input: CreateRunInput): void {
@@ -7720,6 +7894,38 @@ export class RunStore {
           lower(repository_owner), lower(repository_name), issue_number
         )
         where status in ('pending', 'label_written', 'label_failed', 'expired');
+
+      create table if not exists chain_provider_interventions (
+        id text primary key,
+        kind text not null,
+        project_name text not null,
+        issue_number integer not null,
+        repository_owner text not null,
+        repository_name text not null,
+        chain_root_run_id text not null,
+        from_run_id text not null,
+        to_run_id text,
+        state_id text not null,
+        from_provider text,
+        to_provider text not null,
+        requested_via text not null,
+        outcome text not null,
+        last_error text,
+        created_at text not null,
+        updated_at text not null
+      );
+
+      create index if not exists chain_provider_interventions_chain_idx
+        on chain_provider_interventions(chain_root_run_id, created_at);
+
+      create index if not exists chain_provider_interventions_issue_idx
+        on chain_provider_interventions(
+          lower(repository_owner), lower(repository_name), issue_number
+        );
+
+      create unique index if not exists chain_provider_interventions_open_idx
+        on chain_provider_interventions(from_run_id, kind)
+        where outcome = 'scheduled';
     `);
 
     const additions: Array<[string, string, string]> = [

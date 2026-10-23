@@ -5000,6 +5000,8 @@ function describeProviderSource(
       return graphAvailable
         ? "not recorded (state not found in the captured workflow graph)"
         : "not recorded (workflow graph unavailable for this Run)";
+    case "operator_recovery":
+      return "operator recovery of this state";
     case "operator_state":
       return "operator choice for this state";
     case "operator_chain":

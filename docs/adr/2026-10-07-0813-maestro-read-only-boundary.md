@@ -46,10 +46,13 @@ be counted by `/api/status`, `/runs`, or a notification digest as completed work
 
 ## Scope of this slice
 
-#865 covers the dashboard-scope conversation only. Project-scope focus (#866), grounding Maestro in a
-read-only Maestro Workspace over repository content (#867), and evidence-linked briefings/history
-(#868) are separate issues per epic #844's own split of the original #852 slice; none of Maestro's
-tools in this slice call GitHub live — every tool reads only already-persisted `RunStore` snapshots.
+#865 covered the dashboard-scope conversation only. Project-scope focus (#866) has since landed on the
+same boundary: a Project conversation uses the same fixed tool list and the same tables (one durable
+conversation per scope), and its focus only defaults omitted tool arguments and adds a prompt paragraph —
+it adds no tool and never restricts which Project a call may name. Grounding in a read-only Maestro
+Workspace over repository content (#867) and evidence-linked briefings/history (#868) are separate issues
+per epic #844's own split of the original #852 slice; apart from #867's workspace tools, no Maestro tool
+calls GitHub live — every other tool reads only already-persisted `RunStore` snapshots.
 
 ## Consequences
 

@@ -527,3 +527,51 @@ describe("Maestro conversation turn orchestrator (#865)", () => {
     });
   });
 });
+
+describe("Maestro Project focus in a turn (#866)", () => {
+  it("tells the model which Project is focused and defaults tool calls to it", async () => {
+    const test = await setup();
+    try {
+      const { model, offered } = scriptedModel([
+        {
+          kind: "tool_use",
+          toolUses: [{ id: "t1", input: {}, name: "list_issues" }]
+        },
+        { kind: "message", text: "done" }
+      ]);
+
+      const result = await runMaestroTurn({
+        focus: { projectName: "symphonika" },
+        history: [],
+        model,
+        reader: createMaestroEvidenceReader(test.runStore),
+        userMessage: "What is eligible?"
+      });
+
+      expect(offered[0]?.systemPrompt).toContain('"symphonika"');
+      expect(result.citations).toEqual([
+        expect.objectContaining({ href: "/issues/symphonika/42" })
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("sends the unfocused prompt when no focus is given", async () => {
+    const test = await setup();
+    try {
+      const { model, offered } = scriptedModel([
+        { kind: "message", text: "done" }
+      ]);
+      await runMaestroTurn({
+        history: [],
+        model,
+        reader: createMaestroEvidenceReader(test.runStore),
+        userMessage: "What is eligible?"
+      });
+      expect(offered[0]?.systemPrompt).not.toContain("focused on the Project");
+    } finally {
+      test.cleanup();
+    }
+  });
+});

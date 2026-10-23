@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 
-import { createAsyncMutex } from "../lifecycle/async-mutex.js";
+import { createAsyncMutex, type AsyncMutex } from "../lifecycle/async-mutex.js";
 import {
   MAESTRO_READ_ONLY_BOUNDARY_NOTICE,
   repositoryContentNotice,
@@ -68,21 +68,49 @@ function renderMessage(message: MaestroMessageRow): string {
   );
 }
 
+// A conversation is owned by exactly one scope (#866): the dashboard, or one
+// Project. The scope fixes the route base, the stored conversation, and the
+// focus handed to the turn.
+type MaestroScope =
+  { kind: "dashboard" } | { kind: "project"; projectName: string };
+
+function scopeBasePath(scope: MaestroScope): string {
+  return scope.kind === "dashboard"
+    ? "/maestro"
+    : `/projects/${encodeURIComponent(scope.projectName)}/maestro`;
+}
+
+function scopeKey(scope: MaestroScope): string {
+  return scope.kind === "dashboard"
+    ? "dashboard"
+    : `project:${scope.projectName}`;
+}
+
+function scopeHeading(scope: MaestroScope): string {
+  return scope.kind === "dashboard"
+    ? `<h1 class="page-title">Maestro</h1>`
+    : `<h1 class="page-title">Maestro: ${escapeHtml(scope.projectName)}</h1>` +
+        `<p class="note"><a href="/projects/${encodeURIComponent(scope.projectName)}">Back to ${escapeHtml(scope.projectName)}</a> · <a href="/maestro">Dashboard conversation</a></p>` +
+        `<p class="note">This conversation is focused on ${escapeHtml(scope.projectName)}. Ask about another Project by name and Maestro may inspect and cite it. Its history is separate from the dashboard and other Projects.</p>`;
+}
+
 function renderMaestroPage(input: {
   config: MaestroConfig | undefined;
   csrfToken: string;
   error?: string;
   messages: MaestroMessageRow[];
+  scope: MaestroScope;
 }): string {
+  const heading = scopeHeading(input.scope);
   const boundaryNotice = `<p class="note">${escapeHtml(MAESTRO_READ_ONLY_BOUNDARY_NOTICE)}</p>`;
 
   if (input.config === undefined) {
     return (
-      `<h1 class="page-title">Maestro</h1>` +
+      heading +
       boundaryNotice +
       `<p class="note">Maestro is not configured. Add a <code>maestro:</code> ` +
       `block to symphonika.yml (model, and optionally api_key_env / ` +
-      `max_output_tokens) to enable the dashboard chat.</p>`
+      `max_output_tokens) to enable chat.</p>`
     );
   }
 
@@ -97,12 +125,12 @@ function renderMaestroPage(input: {
       : `<p class="note maestro-error">${escapeHtml(input.error)}</p>`;
 
   return (
-    `<h1 class="page-title">Maestro</h1>` +
+    heading +
     boundaryNotice +
     `<p class="note maestro-repository-content">${escapeHtml(repositoryContentNotice(input.config.repositoryContent))}</p>` +
     history +
     errorHtml +
-    `<form method="post" action="/maestro/messages" class="maestro-form">` +
+    `<form method="post" action="${escapeHtml(scopeBasePath(input.scope))}/messages" class="maestro-form">` +
     `<input type="hidden" name="${CSRF_FIELD_NAME}" value="${escapeHtml(input.csrfToken)}">` +
     `<textarea name="message" rows="3" required></textarea>` +
     `<button class="btn" type="submit">Ask Maestro</button>` +
@@ -115,36 +143,79 @@ function errorQuery(reason: string): string {
 }
 
 export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
-  // Serializes turns on the single dashboard conversation (#865). Without
-  // this, a double-submit or two browser tabs can both pass the
-  // synchronous user-message append below before either's model call
-  // resolves, interleaving the persisted history out of strict
-  // user/assistant order — the next turn would then resend consecutive
-  // same-role messages to the Messages API.
-  const turnMutex = createAsyncMutex();
+  // Serializes turns per conversation (#865, #866). Without this, a
+  // double-submit or two browser tabs can both pass the synchronous
+  // user-message append below before either's model call resolves,
+  // interleaving the persisted history out of strict user/assistant order —
+  // the next turn would then resend consecutive same-role messages to the
+  // Messages API. Keyed by scope (one conversation per scope) so a slow
+  // answer in one Project does not block chatting in another.
+  const turnMutexes = new Map<string, AsyncMutex>();
+  const turnMutexFor = (scope: MaestroScope): AsyncMutex => {
+    const key = scopeKey(scope);
+    let mutex = turnMutexes.get(key);
+    if (mutex === undefined) {
+      mutex = createAsyncMutex();
+      turnMutexes.set(key, mutex);
+    }
+    return mutex;
+  };
 
-  options.app.get("/maestro", (context) => {
-    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
-    const config = options.getMaestroConfig?.();
-    const conversation = options.runStore.findDashboardMaestroConversation();
-    const messages =
-      conversation === undefined
-        ? []
-        : options.runStore.listMaestroMessages(conversation.id);
-    const errorParam = context.req.query("error");
-    const html = layout(
-      "Maestro",
-      renderMaestroPage({
-        config,
-        csrfToken,
-        ...(errorParam === undefined ? {} : { error: errorParam }),
-        messages
-      })
+  const findConversationId = (scope: MaestroScope): string | undefined =>
+    (scope.kind === "dashboard"
+      ? options.runStore.findDashboardMaestroConversation()
+      : options.runStore.findProjectMaestroConversation(scope.projectName)
+    )?.id;
+
+  const ensureConversationId = (scope: MaestroScope): string =>
+    scope.kind === "dashboard"
+      ? options.runStore.ensureDashboardMaestroConversation({
+          id: randomUUID()
+        })
+      : options.runStore.ensureProjectMaestroConversation({
+          id: randomUUID(),
+          projectName: scope.projectName
+        });
+
+  const projectNotFound = (context: Context, projectName: string) =>
+    context.html(
+      layout(
+        "Project not found",
+        `<h1 class="page-title">Project not found</h1><p class="lede">Project <code>${escapeHtml(projectName)}</code> was not found.</p>`
+      ),
+      404
     );
-    return context.html(html);
-  });
 
-  options.app.post("/maestro/messages", async (context) => {
+  const projectExists = (projectName: string): boolean =>
+    options.runStore
+      .getProjectStatesByName({ includeInactive: true })
+      .has(projectName);
+
+  const renderScopePage = (context: Context, scope: MaestroScope) => {
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const conversationId = findConversationId(scope);
+    const messages =
+      conversationId === undefined
+        ? []
+        : options.runStore.listMaestroMessages(conversationId);
+    const errorParam = context.req.query("error");
+    return context.html(
+      layout(
+        scope.kind === "dashboard"
+          ? "Maestro"
+          : `Maestro: ${scope.projectName}`,
+        renderMaestroPage({
+          config: options.getMaestroConfig?.(),
+          csrfToken,
+          ...(errorParam === undefined ? {} : { error: errorParam }),
+          messages,
+          scope
+        })
+      )
+    );
+  };
+
+  const postScopeMessage = async (context: Context, scope: MaestroScope) => {
     const authorization = await checkMutationAuthorized(
       context,
       options.csrfSecret
@@ -153,10 +224,15 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
       return context.json({ error: authorization.reason }, 403);
     }
 
+    const basePath = scopeBasePath(scope);
+    if (scope.kind === "project" && !projectExists(scope.projectName)) {
+      return projectNotFound(context, scope.projectName);
+    }
+
     const config = options.getMaestroConfig?.();
     if (config === undefined) {
       return context.redirect(
-        `/maestro${errorQuery("Maestro is not configured.")}`,
+        `${basePath}${errorQuery("Maestro is not configured.")}`,
         303
       );
     }
@@ -166,14 +242,15 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
     const userMessage = typeof rawMessage === "string" ? rawMessage.trim() : "";
     if (userMessage.length === 0) {
       return context.redirect(
-        `/maestro${errorQuery("Enter a message first.")}`,
+        `${basePath}${errorQuery("Enter a message first.")}`,
         303
       );
     }
 
+    const turnMutex = turnMutexFor(scope);
     if (!turnMutex.tryAcquire()) {
       return context.redirect(
-        `/maestro${errorQuery(
+        `${basePath}${errorQuery(
           "Maestro is still answering the previous message. Try again in a moment."
         )}`,
         303
@@ -181,10 +258,7 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
     }
 
     try {
-      const conversationId =
-        options.runStore.ensureDashboardMaestroConversation({
-          id: randomUUID()
-        });
+      const conversationId = ensureConversationId(scope);
       const history = options.runStore.listMaestroMessages(
         conversationId,
         MAX_HISTORY_MESSAGES
@@ -209,6 +283,9 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
       // user/assistant alternation for the next turn's history.
       try {
         const result = await runMaestroTurn({
+          ...(scope.kind === "project"
+            ? { focus: { projectName: scope.projectName } }
+            : {}),
           history,
           model,
           reader,
@@ -241,9 +318,29 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
         });
       }
 
-      return context.redirect("/maestro", 303);
+      return context.redirect(basePath, 303);
     } finally {
       turnMutex.release();
     }
+  };
+
+  options.app.get("/maestro", (context) =>
+    renderScopePage(context, { kind: "dashboard" })
+  );
+  options.app.post("/maestro/messages", (context) =>
+    postScopeMessage(context, { kind: "dashboard" })
+  );
+
+  options.app.get("/projects/:name/maestro", (context) => {
+    const projectName = context.req.param("name");
+    return projectExists(projectName)
+      ? renderScopePage(context, { kind: "project", projectName })
+      : projectNotFound(context, projectName);
   });
+  options.app.post("/projects/:name/maestro/messages", (context) =>
+    postScopeMessage(context, {
+      kind: "project",
+      projectName: context.req.param("name")
+    })
+  );
 }

@@ -734,15 +734,17 @@ A coding-agent run expected to proceed without asking the operator for interacti
 _Avoid_: chat session
 
 **Maestro**:
-The operator-facing, read-only conversational assistant on the dashboard (`GET /maestro`). It answers
+The operator-facing, read-only conversational assistant on the dashboard (`GET /maestro`) and, focused
+on one Project, on that Project's page (`GET /projects/:name/maestro`). It answers
 from persisted Issue, Run, and pull-request evidence RunStore already holds, citing the Project,
 Issue/Run/PR, and observed timestamp behind every claim. Its model-facing tool surface is a fixed,
 hand-written list of read-only lookups (`maestroToolsFor`); no GitHub-write, shell, or local-file
 tool is ever offered to it, a structural boundary independent of which model is configured (ADR
 2026-10-07-0813). A Maestro reply is a proposal for the operator, never completed work, and is never
-counted as a Run. This bootstrap slice is dashboard-scope only, over configured Projects' own evidence
-— repository content is read only through the Maestro Workspace when the operator enables it; Project-focused chat
-and evidence-linked briefings are separate, not-yet-built slices of epic #844.
+counted as a Run. The dashboard and each Project have separate durable histories; a Project-focused
+conversation defaults to that Project's evidence but may inspect and cite another configured Project the
+operator names. Repository content is read only through the Maestro Workspace when the operator enables
+it; evidence-linked briefings are a separate, not-yet-built slice of epic #844.
 _Avoid_: Orchestrator, Coding Agent — Maestro never dispatches, claims, or executes issue work, and has
 no provider-execution posture of its own; chat session, which names an Autonomous Run's own property
 of needing no interactive input, not this assistant

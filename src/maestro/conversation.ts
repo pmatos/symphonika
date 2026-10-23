@@ -52,6 +52,17 @@ const SYSTEM_PROMPT =
   `from memory as if you had read it. Only inspect an outside repository ` +
   `when the operator names it; never try to list or discover repositories.`;
 
+function focusParagraph(projectName: string): string {
+  return (
+    ` This conversation is focused on the Project "${projectName}". ` +
+    `Unless the operator names a different Project, answer from that ` +
+    `Project's Issue, Run, and pull-request evidence. If the operator ` +
+    `asks about another configured Project, you may inspect and cite it ` +
+    `by passing that Project's name explicitly; say which Project each ` +
+    `claim comes from.`
+  );
+}
+
 export type MaestroTurnResult = {
   citations: MaestroCitation[];
   text: string;
@@ -89,6 +100,7 @@ export type MaestroTurnWorkspace = {
 };
 
 export async function runMaestroTurn(input: {
+  focus?: { projectName: string } | undefined;
   history: MaestroMessageRow[];
   model: MaestroModel;
   reader: MaestroEvidenceReader;
@@ -108,6 +120,10 @@ export async function runMaestroTurn(input: {
   const tools = maestroToolsFor(
     workspaceAccess === undefined ? "none" : repositoryContent
   );
+  const systemPrompt =
+    input.focus === undefined
+      ? SYSTEM_PROMPT
+      : SYSTEM_PROMPT + focusParagraph(input.focus.projectName);
   const turns: MaestroConversationTurn[] = [
     ...historyToTurns(input.history),
     { content: input.userMessage, role: "user" }
@@ -117,7 +133,7 @@ export async function runMaestroTurn(input: {
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const modelTurn = await input.model.nextTurn({
       history: turns,
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt,
       tools
     });
 
@@ -141,6 +157,7 @@ export async function runMaestroTurn(input: {
       let outcome: MaestroToolOutcome;
       try {
         outcome = await executeMaestroTool({
+          focusProjectName: input.focus?.projectName,
           input: toolUse.input,
           name: toolUse.name,
           reader: input.reader,

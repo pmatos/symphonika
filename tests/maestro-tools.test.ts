@@ -826,3 +826,177 @@ describe("Maestro workspace tools (#867)", () => {
     }
   });
 });
+
+describe("Maestro Project focus defaults (#866)", () => {
+  function addOtherProject(runStore: RunStore): void {
+    runStore.syncProjectStates([{ name: "symphonika" }, { name: "other" }]);
+    runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-10-06T12:00:00.000Z",
+      projectName: "other",
+      rows: [
+        {
+          blockedBy: [],
+          blockedByTruncated: false,
+          issueNumber: 9,
+          kind: "candidate",
+          labels: [],
+          priority: 0,
+          reasons: [],
+          title: "Other issue"
+        }
+      ]
+    });
+    runStore.createRun({
+      id: "run-other",
+      issue: {
+        body: "",
+        created_at: "2026-10-06T11:00:00Z",
+        id: 2,
+        labels: [],
+        number: 9,
+        priority: 0,
+        state: "open",
+        title: "Other issue",
+        updated_at: "2026-10-06T11:00:00Z",
+        url: "https://example.invalid/9"
+      },
+      projectName: "other",
+      providerCommand: "codex",
+      providerName: "codex"
+    });
+  }
+
+  it("defaults an omitted project_name to the focus Project for evidence tools", async () => {
+    const test = await setup();
+    try {
+      addOtherProject(test.runStore);
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const hrefs = async (name: string, input: unknown): Promise<string[]> => {
+        const outcome = await executeMaestroTool({
+          focusProjectName: "symphonika",
+          input,
+          name,
+          reader
+        });
+        return outcome.kind === "ok"
+          ? outcome.citations.map((citation) => citation.href)
+          : ["refused"];
+      };
+
+      expect(await hrefs("list_runs", {})).toEqual(["/runs/run-1"]);
+      expect(await hrefs("list_issues", {})).toEqual(["/issues/symphonika/42"]);
+      expect(await hrefs("list_pull_requests", {})).toEqual([
+        "/prs/symphonika/7"
+      ]);
+      expect(await hrefs("get_issue", { issue_number: 42 })).toEqual([
+        "/issues/symphonika/42"
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("still inspects and cites another Project when it is named explicitly", async () => {
+    const test = await setup();
+    try {
+      addOtherProject(test.runStore);
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const runs = await executeMaestroTool({
+        focusProjectName: "symphonika",
+        input: { project_name: "other" },
+        name: "list_runs",
+        reader
+      });
+      const issues = await executeMaestroTool({
+        focusProjectName: "symphonika",
+        input: { project_name: "other" },
+        name: "list_issues",
+        reader
+      });
+
+      expect(runs).toMatchObject({
+        citations: [{ href: "/runs/run-other" }],
+        kind: "ok"
+      });
+      expect(issues).toMatchObject({
+        citations: [{ href: "/issues/other/9" }],
+        kind: "ok"
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("without a focus, list_runs stays unscoped and list_issues still requires a project_name", async () => {
+    const test = await setup();
+    try {
+      addOtherProject(test.runStore);
+      const reader = createMaestroEvidenceReader(test.runStore);
+      const runs = await executeMaestroTool({
+        input: {},
+        name: "list_runs",
+        reader
+      });
+      const issues = await executeMaestroTool({
+        input: {},
+        name: "list_issues",
+        reader
+      });
+
+      expect(runs.kind === "ok" ? runs.citations.length : 0).toBe(2);
+      expect(issues.kind).toBe("refused");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("targets the focus Project's repository when a workspace tool names no target, but honours an explicit one", async () => {
+    const test = await setup();
+    try {
+      const { access, resolveCalls } = fakeWorkspace({});
+      const reader = createMaestroEvidenceReader(test.runStore);
+
+      const defaulted = await executeMaestroTool({
+        focusProjectName: "symphonika",
+        input: { path: "README.md" },
+        name: "workspace_read_file",
+        reader,
+        workspace: access
+      });
+      const explicit = await executeMaestroTool({
+        focusProjectName: "symphonika",
+        input: { path: "README.md", repository: "someone/else" },
+        name: "workspace_read_file",
+        reader,
+        workspace: access
+      });
+
+      expect(defaulted.kind).toBe("ok");
+      expect(explicit.kind).toBe("ok");
+      expect(resolveCalls.map((call) => `${call.owner}/${call.repo}`)).toEqual([
+        "pmatos/symphonika",
+        "someone/else"
+      ]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("still refuses a write-shaped tool name under a focus", async () => {
+    const test = await setup();
+    try {
+      const outcome = await executeMaestroTool({
+        focusProjectName: "symphonika",
+        input: { issue_number: 42, labels: ["done"] },
+        name: "add_label",
+        reader: createMaestroEvidenceReader(test.runStore)
+      });
+      expect(outcome).toEqual({
+        kind: "refused",
+        reason: 'unknown tool "add_label"'
+      });
+    } finally {
+      test.cleanup();
+    }
+  });
+});

@@ -189,3 +189,81 @@ describe("RunStore Maestro conversation persistence (#865)", () => {
     }
   });
 });
+
+describe("RunStore Project-scope Maestro conversations (#866)", () => {
+  it("has no Project conversation until one is ensured, and reuses it afterwards", async () => {
+    const stateRoot = await makeTempRoot();
+    const runStore = openRunStore({ stateRoot });
+    try {
+      expect(runStore.findProjectMaestroConversation("alpha")).toBeUndefined();
+      const first = runStore.ensureProjectMaestroConversation({
+        id: "conv-a",
+        projectName: "alpha"
+      });
+      const second = runStore.ensureProjectMaestroConversation({
+        id: "conv-a2",
+        projectName: "alpha"
+      });
+      expect(first).toBe("conv-a");
+      expect(second).toBe("conv-a");
+      expect(runStore.findProjectMaestroConversation("alpha")).toEqual({
+        id: "conv-a"
+      });
+      expect(runStore.findProjectMaestroConversation("beta")).toBeUndefined();
+    } finally {
+      runStore.close();
+    }
+  });
+
+  it("keeps the dashboard and every Project history separate, across a restart", async () => {
+    const stateRoot = await makeTempRoot();
+    const firstStore = openRunStore({ stateRoot });
+    const append = (conversationId: string, content: string): void => {
+      firstStore.appendMaestroMessage({
+        citations: [],
+        content,
+        conversationId,
+        id: `msg-${content}`,
+        role: "user"
+      });
+    };
+    append(
+      firstStore.ensureDashboardMaestroConversation({ id: "conv-dash" }),
+      "dashboard question"
+    );
+    append(
+      firstStore.ensureProjectMaestroConversation({
+        id: "conv-alpha",
+        projectName: "alpha"
+      }),
+      "alpha question"
+    );
+    append(
+      firstStore.ensureProjectMaestroConversation({
+        id: "conv-beta",
+        projectName: "beta"
+      }),
+      "beta question"
+    );
+    firstStore.close();
+
+    const reopened = openRunStore({ stateRoot });
+    try {
+      const contentOf = (id: string | undefined): string[] =>
+        id === undefined
+          ? []
+          : reopened.listMaestroMessages(id).map((message) => message.content);
+      expect(
+        contentOf(reopened.findDashboardMaestroConversation()?.id)
+      ).toEqual(["dashboard question"]);
+      expect(
+        contentOf(reopened.findProjectMaestroConversation("alpha")?.id)
+      ).toEqual(["alpha question"]);
+      expect(
+        contentOf(reopened.findProjectMaestroConversation("beta")?.id)
+      ).toEqual(["beta question"]);
+    } finally {
+      reopened.close();
+    }
+  });
+});

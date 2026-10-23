@@ -89,3 +89,28 @@ function describeReason(
 
   return reason;
 }
+
+export function issueVerdictFamily(
+  verdict: string
+): "ok" | "fail" | "blocked" | "progress" | "neutral" {
+  if (verdict === "eligible") {
+    return "ok";
+  }
+  // describeIssueVerdict joins multiple reasons with "; " (e.g. an issue
+  // both missing its required label and blocked by an open dependency
+  // reads "filtered: missing ...; blocked: dependency ..."), so a
+  // whole-string prefix check would miss a blocked/claimed segment that
+  // isn't first. Scan segments in order instead — first non-neutral wins,
+  // which preserves today's "claimed by run" precedence since operational
+  // label reasons are always pushed before dependency reasons (see
+  // evaluateProjectEligibility, src/issue-polling.ts).
+  for (const segment of verdict.split("; ")) {
+    if (segment.startsWith("blocked:")) {
+      return "blocked";
+    }
+    if (segment.startsWith("claimed by run")) {
+      return "progress";
+    }
+  }
+  return "neutral";
+}

@@ -128,8 +128,18 @@ _Avoid_: dependency graph (the `/issues/graph` display) when referring to this g
 An Issue's GitHub-native parent/sub-issue link (`Issue.parent`), recorded on each poll's issue snapshot
 as present, none, or unavailable evidence. Display evidence only: it is fetched separately from
 `blockedBy`, never feeds the Dependency Gate, and a failed read is `unavailable`, never "no parent".
-See ADR-2026-10-23-0852.
+See ADR-2026-10-23-0852. The Epic View groups Issues by this link alone.
 _Avoid_: epic membership or blocker when referring to this link
+
+**Epic View**:
+The Project page's "Epics" section: each open Issue carrying an Epic Label, with the Issues whose
+Native Parent points at it listed beneath, plus the repository and poll freshness the evidence came
+from. Membership comes only from Native Parent; `blockedBy` links are shown in a separate "Blocked by"
+column and never create membership, and the `## Parent` heading parse is not consulted. Missing,
+unavailable, cross-repository, and closed-parent evidence is listed visibly under "Not grouped under
+an epic" without inventing a parent. It is additive: every Issue stays in the Project page's Issues
+table. See ADR-2026-10-23-1112.
+_Avoid_: epic dependency graph (the `/issues/graph` display), epic gate
 
 **Continuation Eligibility**:
 The question "may this already-owned Run lifecycle keep going?", including open state for every Run,

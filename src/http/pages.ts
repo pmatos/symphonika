@@ -30,7 +30,7 @@ import {
   buildProviderStreamStatus,
   type ProviderStreamStatus
 } from "../provider-stream-status.js";
-import { describeIssueVerdict } from "../issues/verdict.js";
+import { describeIssueVerdict, issueVerdictFamily } from "../issues/verdict.js";
 import {
   buildChainGraphEvidence,
   type ChainGraphEvidence
@@ -152,6 +152,7 @@ import type {
   ProviderStartState
 } from "../issues/provider-start.js";
 import { BUNDLED_FONTS, getBundledFont, getFontHash } from "./fonts.js";
+import { renderEpicViewSection } from "./epic-view.js";
 import {
   buildWorkOverview,
   renderWorkOverviewSection
@@ -1693,6 +1694,16 @@ export function registerPages(options: RegisterPagesOptions): void {
         })
       );
 
+    const queuePolicy = options.getProjectQueuePolicy?.(name);
+    const firstSnapshot = snapshotByIssue.values().next().value;
+    const epicViewRepository =
+      firstSnapshot === undefined
+        ? undefined
+        : options.runStore.getProjectIssueSnapshotRepository(
+            name,
+            firstSnapshot.issueNumber
+          );
+
     const html = layout(
       name,
       [
@@ -1707,7 +1718,31 @@ export function registerPages(options: RegisterPagesOptions): void {
           options.startedAtMs,
           nowMs
         ),
-        renderProjectQueuePolicy(name, options.getProjectQueuePolicy?.(name)),
+        renderProjectQueuePolicy(name, queuePolicy),
+        queuePolicy === undefined
+          ? ""
+          : renderEpicViewSection({
+              epicLabels: queuePolicy.epicLabels,
+              lastPollError: projectState.lastPollError,
+              lastPollOk: projectState.lastPollOk,
+              lastSuccessfulPollAt: projectState.lastSuccessfulPollAt,
+              nowMs,
+              projectName: name,
+              repository: epicViewRepository,
+              snapshots: Array.from(snapshotByIssue.values()),
+              startedAtMs: options.startedAtMs,
+              verdictFor: (snapshot) =>
+                describeIssueVerdict(
+                  snapshot,
+                  resolveClaimedRunId(
+                    options.runStore,
+                    name,
+                    snapshot.issueNumber,
+                    snapshot.reasons,
+                    scheduled
+                  )
+                )
+            }),
         renderProjectIssuesTable(name, issueRows),
         renderProjectFiringsBlock(firings),
         options.getProjectWorkflowPath?.(name) === undefined
@@ -3042,6 +3077,8 @@ td code { color: var(--ink-2); }
 .label-list { list-style: none; margin: 0 0 var(--sp-4); padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .label-list li { display: flex; align-items: center; gap: var(--sp-2); }
 .label-list form { display: inline; }
+.epic-list { list-style: none; margin: 0 0 var(--sp-4); padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.epic-list li { overflow-wrap: anywhere; }
 
 .empty {
   padding: var(--sp-5);
@@ -4298,31 +4335,6 @@ function searchIssueSnapshots(input: {
       b.issueNumber - a.issueNumber
   );
   return rows;
-}
-
-function issueVerdictFamily(
-  verdict: string
-): "ok" | "fail" | "blocked" | "progress" | "neutral" {
-  if (verdict === "eligible") {
-    return "ok";
-  }
-  // describeIssueVerdict joins multiple reasons with "; " (e.g. an issue
-  // both missing its required label and blocked by an open dependency
-  // reads "filtered: missing ...; blocked: dependency ..."), so a
-  // whole-string prefix check would miss a blocked/claimed segment that
-  // isn't first. Scan segments in order instead — first non-neutral wins,
-  // which preserves today's "claimed by run" precedence since operational
-  // label reasons are always pushed before dependency reasons (see
-  // evaluateProjectEligibility, src/issue-polling.ts).
-  for (const segment of verdict.split("; ")) {
-    if (segment.startsWith("blocked:")) {
-      return "blocked";
-    }
-    if (segment.startsWith("claimed by run")) {
-      return "progress";
-    }
-  }
-  return "neutral";
 }
 
 function renderIssueSearchFilters(

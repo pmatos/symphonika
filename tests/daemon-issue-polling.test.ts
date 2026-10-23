@@ -336,6 +336,97 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("renders native sub-issues under their epic on the Project page, ignoring the heading parse and blockers", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { epicLabels: ["epic"] });
+    const githubIssuesApi = {
+      getIssueDependencies: vi.fn().mockResolvedValue(
+        new Map([
+          [
+            52,
+            {
+              blockedBy: [
+                {
+                  number: 60,
+                  owner: "pmatos",
+                  repo: "symphonika",
+                  state: "OPEN",
+                  title: "the epic as a blocker"
+                }
+              ],
+              truncated: false
+            }
+          ]
+        ])
+      ),
+      getIssueHierarchy: vi.fn().mockResolvedValue(
+        new Map([
+          [
+            50,
+            {
+              availability: "present",
+              crossRepository: false,
+              number: 60,
+              owner: "pmatos",
+              repo: "symphonika",
+              state: "OPEN",
+              title: "epic"
+            }
+          ],
+          [51, { availability: "none" }],
+          [52, { availability: "none" }],
+          [60, { availability: "none" }]
+        ])
+      ),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({ labels: ["epic"], number: 60, title: "Epic umbrella" }),
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 50,
+          title: "Native sub-issue"
+        }),
+        issueFixture({
+          body: "## Parent\n\n#60\n",
+          labels: ["agent-ready"],
+          number: 51,
+          title: "Heading-only child"
+        }),
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 52,
+          title: "Blocked by the epic"
+        })
+      ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    try {
+      const html = await (
+        await fetch(`${daemon.url}/projects/symphonika`)
+      ).text();
+      const start = html.indexOf('data-epic="60"');
+      expect(start).toBeGreaterThan(-1);
+      const group = html.slice(start, html.indexOf("</section>", start));
+
+      expect(group).toContain("Epic umbrella");
+      expect(group).toContain("pmatos/symphonika");
+      expect(group).toContain("Native sub-issue");
+      expect(group).not.toContain("Heading-only child");
+      expect(group).not.toContain("Blocked by the epic");
+      expect(html).toMatch(/last successful poll[\s\S]{0,60}ago/);
+      expect(html).toContain('href="/issues/symphonika/51"');
+      expect(html).toContain('href="/issues/symphonika/52"');
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("shows a tracker-less Routine Host targeted by a git Routine as invalid on the live dashboard", async () => {
     const root = await makeTempRoot();
     await writeTrackerLessGitRoutineHost(root);
@@ -1708,6 +1799,7 @@ function makeExitingCodexProvider(): AgentProvider {
 }
 
 function issueFixture(overrides: {
+  body?: string;
   labels: unknown[];
   number: number;
   title: string;
@@ -1723,7 +1815,7 @@ function issueFixture(overrides: {
   updated_at: string;
 } {
   return {
-    body: `${overrides.title} body.`,
+    body: overrides.body ?? `${overrides.title} body.`,
     created_at: "2026-04-20T10:00:00Z",
     html_url: `https://github.com/pmatos/symphonika/issues/${overrides.number}`,
     id: 5000 + overrides.number,
@@ -1737,7 +1829,11 @@ function issueFixture(overrides: {
 
 async function writeValidProject(
   root: string,
-  options: { disabled?: boolean; pollingIntervalMs?: number } = {}
+  options: {
+    disabled?: boolean;
+    epicLabels?: string[];
+    pollingIntervalMs?: number;
+  } = {}
 ): Promise<void> {
   await mkdir(root, { recursive: true });
   await writeFile(
@@ -1765,6 +1861,9 @@ async function writeValidProject(
       '      states: ["open"]',
       '      labels_all: ["agent-ready"]',
       '      labels_none: ["blocked", "needs-human"]',
+      ...(options.epicLabels === undefined
+        ? []
+        : [`    epic_labels: ${JSON.stringify(options.epicLabels)}`]),
       "    priority:",
       "      labels:",
       '        "priority:critical": 0',

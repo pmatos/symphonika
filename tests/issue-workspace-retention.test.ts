@@ -85,6 +85,68 @@ describe("issue workspace retention", () => {
     }
   });
 
+  it("keeps a locked workspace registered and retries it after the lock is released", async () => {
+    const root = await makeTempRoot();
+    const remotePath = await createRemoteRepository(root);
+    const prepared = await prepareIssueWorkspace({
+      configDir: root,
+      issue: { number: 795, title: "Locked workspace" },
+      project: alphaProject({
+        remotePath,
+        workspaceRoot: path.join(root, "workspaces", "alpha")
+      })
+    });
+    const store = openRunStore({ stateRoot: path.join(root, "state") });
+    const input = {
+      now: new Date("2100-01-01T00:00:00.000Z"),
+      policy: { enabled: true, failedDays: 3, succeededDays: 0 },
+      runStore: store
+    };
+    try {
+      createTerminalRun(store, {
+        id: "run-locked",
+        issue: { number: 795, title: "Locked workspace" },
+        prepared,
+        state: "succeeded"
+      });
+      await execFileAsync("git", [
+        "-C",
+        prepared.cachePath,
+        "worktree",
+        "lock",
+        prepared.workspacePath
+      ]);
+
+      const locked = await pruneIssueWorkspaces(input);
+      expect(locked.pruned).toEqual([]);
+      expect(locked.failures).toHaveLength(1);
+      expect(locked.failures[0]?.runId).toBe("run-locked");
+      expect(locked.failures[0]?.error).toContain("locked");
+      await expect(access(prepared.workspacePath)).resolves.toBeUndefined();
+      expect(await worktreePaths(prepared.cachePath)).toContain(
+        prepared.workspacePath
+      );
+
+      await execFileAsync("git", [
+        "-C",
+        prepared.cachePath,
+        "worktree",
+        "unlock",
+        prepared.workspacePath
+      ]);
+      const retried = await pruneIssueWorkspaces(input);
+      expect(retried.failures).toEqual([]);
+      expect(retried.pruned.map((entry) => entry.runId)).toEqual([
+        "run-locked"
+      ]);
+      await expect(
+        branchExists(prepared.cachePath, prepared.branchName)
+      ).resolves.toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
   it("withholds a workspace_path when any sibling row is still non-terminal, even one whose updated_at ranks behind a stale terminal row", async () => {
     const root = await makeTempRoot();
     const remotePath = await createRemoteRepository(root);

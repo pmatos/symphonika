@@ -470,7 +470,10 @@ The Service Config policy that reclaims terminal Routine Firing worktrees after 
 age windows while preserving their Run Store rows and state-root evidence. Firings with persisted
 commits-ahead evidence are withheld until a separate durable-publication signal exists. Only a
 verified zero-commits inspection permits age-based reclamation; an inspection failure is retained
-conservatively.
+conservatively. Both retention policies delegate path validation and physical Git reclamation to
+`src/workspace-reclamation.ts`; candidate selection, age windows, durable pruning marks, and reports
+remain with their respective retention modules. Reclamation preserves locks and unrelated worktree
+registrations, and deletes a Routine Firing's eligible local branch only after its worktree is gone.
 _Avoid_: evidence retention, issue Workspace cleanup
 
 **Issue Workspace Retention**:
@@ -478,7 +481,8 @@ The Service Config policy that reclaims terminal Issue Workspace worktrees after
 age windows while preserving their Run Store rows and state-root evidence. Unlike Routine Workspace
 Retention, it never deletes the issue branch ref: an Issue Workspace's Issue Branch is deliberately
 reused across retries and continuations until explicit cleanup, and Symphonika does not yet verify a
-succeeded run's commits reached durable remote state before reclaiming its worktree.
+succeeded run's commits reached durable remote state before reclaiming its worktree. The shared
+reclamation module always preserves Issue Branch refs.
 _Avoid_: Routine Workspace Retention, evidence retention
 
 **Routine Firing Deadline**:

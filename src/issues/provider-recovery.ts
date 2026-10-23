@@ -16,7 +16,18 @@ import {
 } from "../lifecycle/run-controller.js";
 import { findWorkflowState } from "../lifecycle/state-machine-dispatch.js";
 import type { AgentProviderName } from "../provider.js";
-import type { RunState, RunStore } from "../run-store.js";
+import type {
+  AttemptStatus,
+  RunState,
+  RunStatus,
+  RunStore
+} from "../run-store.js";
+
+const PROVIDER_CHOICES: readonly AgentProviderName[] = [
+  "omp",
+  "claude",
+  "codex"
+];
 
 const DEFAULT_GITHUB_TIMEOUT_MS = 15_000;
 
@@ -34,7 +45,7 @@ const RECOVERABLE_RUN_STATES: ReadonlySet<RunState> = new Set([
 // the operator (clear-stale-claim), never by a recovery.
 const CLAIM_LABELS = ["sym:claimed", "sym:running", "sym:stale"] as const;
 
-type ProviderRecoveryRefusalReason =
+export type ProviderRecoveryRefusalReason =
   | "claim-held"
   | "duplicate"
   | "invalid-position"
@@ -50,7 +61,7 @@ type ProviderRecoveryRefusalReason =
   | "superseded"
   | "workflow-not-fsm";
 
-type ProviderRecoveryOutcome =
+export type ProviderRecoveryOutcome =
   | {
       kind: "accepted";
       fromRunId: string;
@@ -80,7 +91,50 @@ type RecoverStoppedStateRequest = {
   stateId: string;
 };
 
+// What the operator reviews before confirming. Built from local state only
+// (no GitHub call), so the Issue page can ask whether to offer a recovery on
+// every render; the live Issue read happens when the operator confirms.
+export type ProviderRecoveryPreview = {
+  // Why the Issue cannot be recovered right now, in operator terms. Empty
+  // means a confirm would be attempted; GitHub is still read live then.
+  blockers: string[];
+  // The provider the form proposes: the first available one other than the
+  // stopped Run's, preferring the Project default.
+  defaultProvider: AgentProviderName | undefined;
+  lastAttempt: AttemptStatus | undefined;
+  projectDefaultProvider: AgentProviderName;
+  providers: AgentProviderName[];
+  repository: { owner: string; repo: string };
+  run: RunStatus;
+  state: {
+    actionKind: string | undefined;
+    declaredProvider: AgentProviderName | undefined;
+    id: string | undefined;
+  };
+  workflowName: string | undefined;
+};
+
+export function recoveryHttpStatus(
+  outcome: ProviderRecoveryOutcome
+): 202 | 409 | 422 | 500 {
+  if (outcome.kind === "accepted") {
+    return 202;
+  }
+  if (outcome.kind === "error") {
+    return 500;
+  }
+  return outcome.reason === "live-run" ||
+    outcome.reason === "claim-held" ||
+    outcome.reason === "duplicate"
+    ? 409
+    : 422;
+}
+
 export type ProviderRecoveryService = {
+  preview(
+    projectName: string,
+    issueNumber: number
+  ): ProviderRecoveryPreview | undefined;
   recover(
     request: RecoverStoppedStateRequest
   ): Promise<ProviderRecoveryOutcome>;
@@ -110,6 +164,16 @@ export type ProviderRecoveryDeps = {
     toStateId: string;
   }) => boolean;
 };
+
+function claimHeldMessage(held: readonly string[]): string {
+  return `the Issue still carries ${held.join(", ")}; clear the stale claim first, or wait for the live Run it belongs to`;
+}
+
+function heldClaimLabels(labels: readonly string[]): string[] {
+  return CLAIM_LABELS.filter((claimLabel) =>
+    labels.some((label) => label.toLowerCase() === claimLabel)
+  );
+}
 
 function refuse(
   reason: ProviderRecoveryRefusalReason,
@@ -253,13 +317,9 @@ export function createProviderRecoveryService(
       );
     }
     const provider = request.provider;
-    const providersConfig = deps.getProvidersConfig() as Partial<
-      Record<AgentProviderName, { command: string }>
-    >;
     if (
       !isAgentProviderName(provider) ||
-      (providersConfig[provider]?.command ?? "").trim().length === 0 ||
-      !deps.isProviderRegistered(provider)
+      !availableProviders().includes(provider)
     ) {
       return refuse(
         "provider-unavailable",
@@ -310,14 +370,9 @@ export function createProviderRecoveryService(
       );
     }
     const issue = normalizeIssueSnapshot(rawIssue, project);
-    const held = CLAIM_LABELS.filter((claimLabel) =>
-      issue.labels.some((label) => label.toLowerCase() === claimLabel)
-    );
+    const held = heldClaimLabels(issue.labels);
     if (held.length > 0) {
-      return refuse(
-        "claim-held",
-        `the Issue still carries ${held.join(", ")}; clear the stale claim first, or wait for the live Run it belongs to`
-      );
+      return refuse("claim-held", claimHeldMessage(held));
     }
 
     const interventionId = deps.createInterventionId();
@@ -387,5 +442,97 @@ export function createProviderRecoveryService(
     };
   }
 
-  return { recover };
+  function availableProviders(): AgentProviderName[] {
+    const providersConfig = deps.getProvidersConfig() as Partial<
+      Record<AgentProviderName, { command: string }>
+    >;
+    return PROVIDER_CHOICES.filter(
+      (name) =>
+        (providersConfig[name]?.command ?? "").trim().length > 0 &&
+        deps.isProviderRegistered(name)
+    );
+  }
+
+  // The candidate is the Issue's newest Run: recovery only ever re-enters the
+  // head of the history, and localRefusal says why a newer Run supersedes an
+  // older one. A preview exists whenever the Issue has a Run to describe, even
+  // one that cannot be recovered, so the page can say why.
+  function preview(
+    projectName: string,
+    issueNumber: number
+  ): ProviderRecoveryPreview | undefined {
+    const project = dispatchProject(projectName);
+    const run = deps.runStore.listRuns({
+      issueNumber,
+      limit: 1,
+      project: projectName
+    })[0];
+    if (project === undefined || run === undefined) {
+      return undefined;
+    }
+    const request = {
+      issueNumber,
+      projectName,
+      provider: "",
+      requestedVia: "preview",
+      runId: run.id,
+      stateId: run.currentStateId ?? ""
+    };
+    const blockers: string[] = [];
+    const local = localRefusal(project, request);
+    if (local?.kind === "refused") {
+      blockers.push(local.error);
+    }
+    const live = liveRefusal(projectName, request);
+    if (live?.kind === "refused") {
+      blockers.push(live.error);
+    }
+    const snapshot = deps.runStore.getProjectIssueSnapshot(
+      projectName,
+      issueNumber
+    );
+    const held = heldClaimLabels(snapshot?.labels ?? []);
+    if (held.length > 0) {
+      blockers.push(claimHeldMessage(held));
+    }
+    const providers = availableProviders();
+    if (providers.length === 0) {
+      blockers.push("no provider is configured and registered");
+    }
+    const workflow = project.workflow;
+    const expanded =
+      "expandedWorkflow" in workflow ? workflow.expandedWorkflow : undefined;
+    const state =
+      run.currentStateId === null || expanded === undefined
+        ? undefined
+        : findWorkflowState(expanded, run.currentStateId);
+    const projectDefaultProvider = project.agent.provider;
+    const alternatives = providers.filter((name) => name !== run.provider);
+    const defaultProvider = alternatives.includes(projectDefaultProvider)
+      ? projectDefaultProvider
+      : (alternatives[0] ?? providers[0]);
+    return {
+      blockers,
+      defaultProvider,
+      lastAttempt: deps.runStore.listAttempts(run.id).at(-1),
+      projectDefaultProvider,
+      providers,
+      repository: {
+        owner: project.tracker.owner,
+        repo: project.tracker.repo
+      },
+      run,
+      state: {
+        actionKind: state?.action?.kind,
+        declaredProvider:
+          state !== undefined && isAgentState(state)
+            ? state.action?.provider
+            : undefined,
+        id: run.currentStateId ?? undefined
+      },
+      workflowName: expanded?.name
+    };
+  }
+
+  return { preview, recover };
 }

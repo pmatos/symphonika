@@ -1490,3 +1490,247 @@ describe("GET /issues/:project/:number — graph drill-down (#860)", () => {
     }
   });
 });
+
+describe("GET /issues/:project/:number — operator recovery interventions (#863)", () => {
+  type StopKind = "blocked" | "failed" | "input_required";
+
+  async function seedStoppedThenRecovered(
+    test: TestSetup,
+    input: {
+      issueNumber: number;
+      outcome: "dropped" | "failed" | "launched" | "scheduled";
+      stop: StopKind;
+    }
+  ): Promise<void> {
+    const graphPath = await writeGraph(test.stateRoot, "stopped", {
+      ...IMPLEMENT_THEN_WAIT_GRAPH,
+      initial: "implement"
+    });
+    seedSnapshot(test.runStore, input.issueNumber, "Recover me");
+    const issue = sampleIssue({
+      number: input.issueNumber,
+      title: "Recover me"
+    });
+    test.runStore.createRun({
+      id: "stopped",
+      issue,
+      projectName: "alpha",
+      providerCommand: "codex",
+      providerName: "codex"
+    });
+    test.runStore.createAttempt({
+      attemptNumber: 1,
+      branchName: "sym/alpha/1",
+      branchRef: "refs/heads/sym/alpha/1",
+      id: "stopped-attempt-1",
+      issueSnapshotPath: "",
+      metadataPath: "",
+      normalizedLogPath: "",
+      promptPath: "",
+      providerCommand: "codex",
+      providerName: "codex",
+      rawLogPath: "",
+      runId: "stopped",
+      state: "failed",
+      workflowGraphPath: graphPath,
+      workspacePath: test.stateRoot
+    });
+    test.runStore.updateRunEvidence("stopped", {
+      branchName: "sym/alpha/1",
+      branchRef: "refs/heads/sym/alpha/1",
+      issueSnapshotPath: "",
+      metadataPath: "",
+      normalizedLogPath: "",
+      promptPath: "",
+      rawLogPath: "",
+      workflowGraphPath: graphPath,
+      workspacePath: test.stateRoot
+    });
+    test.runStore.setRunCurrentState("stopped", "implement");
+    test.runStore.updateRunState("stopped", input.stop);
+    test.runStore.createProviderIntervention({
+      fromProvider: "codex",
+      fromRunId: "stopped",
+      id: "intervention-1",
+      issueNumber: input.issueNumber,
+      kind: "recovery",
+      projectName: "alpha",
+      repository: { owner: "pmatos", repo: "alpha" },
+      requestedVia: "http",
+      stateId: "implement",
+      toProvider: "claude"
+    });
+    if (input.outcome === "scheduled") {
+      return;
+    }
+    if (input.outcome === "launched") {
+      test.runStore.createContinuationRun({
+        id: "recovery",
+        issue,
+        parentRunId: "stopped",
+        projectName: "alpha",
+        providerCommand: "claude",
+        providerName: "claude",
+        providerSource: "operator_recovery"
+      });
+      test.runStore.settleProviderIntervention(
+        { id: "intervention-1" },
+        { outcome: "launched", toRunId: "recovery" }
+      );
+      test.runStore.createAttempt({
+        attemptNumber: 1,
+        branchName: "sym/alpha/1",
+        branchRef: "refs/heads/sym/alpha/1",
+        id: "recovery-attempt-1",
+        issueSnapshotPath: "",
+        metadataPath: "",
+        normalizedLogPath: "",
+        promptPath: "",
+        providerCommand: "claude",
+        providerName: "claude",
+        rawLogPath: "",
+        runId: "recovery",
+        state: "running",
+        workflowGraphPath: graphPath,
+        workspacePath: test.stateRoot
+      });
+      test.runStore.updateRunState("recovery", "running");
+      return;
+    }
+    test.runStore.settleProviderIntervention(
+      { id: "intervention-1" },
+      {
+        error: "the Issue closed before a Run was created",
+        outcome: input.outcome
+      }
+    );
+  }
+
+  async function fetchRows(test: TestSetup, issueNumber: number) {
+    const app = createHttpApp({
+      runStore: test.runStore,
+      stateRoot: test.stateRoot,
+      version: "0.1.0"
+    });
+    const html = await (
+      await app.request(`/issues/alpha/${issueNumber}`)
+    ).text();
+    return {
+      html,
+      rows: [...html.matchAll(/<tr id="chain-[^"]*">.*?<\/tr>/g)].map(
+        (match) => match[0]
+      )
+    };
+  }
+
+  for (const stop of ["failed", "blocked", "input_required"] as const) {
+    it(`keeps a recovered ${stop} Run as its own row and continues the state in place`, async () => {
+      const test = await setup();
+      try {
+        await seedStoppedThenRecovered(test, {
+          issueNumber: 61,
+          outcome: "launched",
+          stop
+        });
+
+        const { html, rows } = await fetchRows(test, 61);
+
+        const stopped = rows.find((row) => row.includes("/runs/stopped"));
+        const recovered = rows.find((row) => row.includes("/runs/recovery"));
+        expect(stopped).toContain("<code>implement</code>");
+        expect(stopped).not.toContain("Completed");
+        expect(stopped).toContain(
+          {
+            blocked: "Blocked",
+            failed: "Failed",
+            input_required: "Needs operator input"
+          }[stop]
+        );
+        // The Continuation re-enters the same state: the executed state is
+        // known and the walk records it as continued in place.
+        expect(recovered).toContain("<code>implement</code>");
+        expect(recovered).toContain("Running now");
+        expect(recovered).toContain("operator recovery of this state");
+        expect(html).toContain(
+          "Operator recovery</strong> at <code>implement</code>"
+        );
+        expect(html).toContain("codex → claude");
+        expect(html).toContain("Recovery launched");
+        expect(html).toMatch(
+          /New Run <a href="\/runs\/recovery">.*?is running/
+        );
+        expect(html).toMatch(
+          /"visits":\[\{"anchors":\["chain-stopped-state-0","chain-stopped-state-1"\],"stateId":"implement"\}\]/
+        );
+      } finally {
+        test.cleanup();
+      }
+    });
+  }
+
+  for (const outcome of ["dropped", "failed"] as const) {
+    it(`shows a ${outcome} recovery with its reason while the stopped Run stays the failure`, async () => {
+      const test = await setup();
+      try {
+        await seedStoppedThenRecovered(test, {
+          issueNumber: 62,
+          outcome,
+          stop: "failed"
+        });
+
+        const { html, rows } = await fetchRows(test, 62);
+
+        expect(rows.filter((row) => row.includes("/runs/"))).toHaveLength(1);
+        expect(rows[0]).toContain("Failed");
+        expect(html).toContain(`Recovery ${outcome}`);
+        expect(html).toContain("the Issue closed before a Run was created");
+        expect(html).toContain("The stopped Run above is unchanged");
+        expect(html).not.toContain("New Run");
+      } finally {
+        test.cleanup();
+      }
+    });
+  }
+
+  it("shows a scheduled recovery as pending beside the stopped Run", async () => {
+    const test = await setup();
+    try {
+      await seedStoppedThenRecovered(test, {
+        issueNumber: 63,
+        outcome: "scheduled",
+        stop: "blocked"
+      });
+
+      const { html } = await fetchRows(test, 63);
+
+      expect(html).toContain("Recovery scheduled");
+      expect(html).toContain("Accepted; the new Run has not been claimed yet.");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("reads a stopped leaf Run as Failed, not as handed off, even before any recovery", async () => {
+    const test = await setup();
+    try {
+      seedSnapshot(test.runStore, 64, "Plain failure");
+      test.runStore.createRun({
+        id: "plain",
+        issue: sampleIssue({ number: 64, title: "Plain failure" }),
+        projectName: "alpha",
+        providerCommand: "codex",
+        providerName: "codex"
+      });
+      test.runStore.setRunCurrentState("plain", "implement");
+      test.runStore.updateRunState("plain", "failed");
+
+      const { html } = await fetchRows(test, 64);
+
+      expect(html).toContain("Failed");
+      expect(html).not.toContain("Handed off");
+      expect(html).not.toContain('class="chain-intervention"');
+    } finally {
+      test.cleanup();
+    }
+  });
+});

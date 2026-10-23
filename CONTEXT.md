@@ -391,7 +391,10 @@ new Run's `provider_source`), and the Run-Chain Provider Plan is not rewritten. 
 Issue Reservation is live, for a closed Issue, a held or stale claim, a Run that a later Run
 superseded, or a position that is not an agent state of the current workflow. Each request is a
 `chain_provider_interventions` row (kind, chain, from/to Run, state, from/to provider, outcome)
-(ADR-2026-10-23-0903).
+(ADR-2026-10-23-0903). The operator reviews a preview before confirming (position, stopped Attempt
+and terminal reason, preserved Workspace and branch, proposed provider, consequences), and the Issue's
+Run Chain timeline shows the original failure and each intervention with its outcome as rows of
+their own.
 _Avoid_: retry with another provider, attempt switch
 
 **Run Chain**:

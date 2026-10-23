@@ -55,7 +55,7 @@ function stateExecutedAt(
     return graph.initial;
   }
   const parent = rows[index - 1];
-  return parent?.kind === "completed"
+  return parent?.kind === "completed" || parent?.recovered === true
     ? (parent.run.currentStateId ?? undefined)
     : undefined;
 }

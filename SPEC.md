@@ -654,8 +654,7 @@ Non-FSM Continuations and PR review follow-ups are not covered and keep Project 
 
 An operator can **recover** a stopped state with a different provider (ADR-2026-10-23-0903):
 `POST /api/issues/:project/:number/recover` with `{runId, stateId, provider}` is authenticated and
-CSRF-protected like every mutating route (ADR 0075), JSON-only like adopt-pr (the preview/confirm
-page is a later slice), and answers `202` when accepted, `409` for a live Issue Reservation, a held
+CSRF-protected like every mutating route (ADR 0075), and answers `202` when accepted, `409` for a live Issue Reservation, a held
 or stale claim or a duplicate request, and `422` for any other refusal. The recovery is a new
 Continuation Run parented to the stopped Run, launched through the scheduled State Advance route so
 it inherits the Run Chain, `current_state_id`, branch and Workspace; earlier states are not
@@ -666,6 +665,19 @@ Issue Reservation (in-flight, scheduled retry, waiting) may exist. The new Run r
 `provider_source = operator_recovery`, and each request is audited in `chain_provider_interventions`
 (`scheduled` -> `launched`, `failed` or `dropped`). Once the recovery's own claim lands, `sym:failed`,
 `sym:blocked` and `sym:human-needed` are removed.
+
+The dashboard front for this is `GET`/`POST /issues/:project/:number/recover` (same same-origin and
+CSRF gate as Start). The `GET` preview is built from local state only (no GitHub call) for the
+Issue's newest Run, and shows the current FSM position, the stopped Run and its last Attempt with the
+terminal reason and failure classification, the preserved Workspace path and branch, the configured
+and registered providers with a proposed one (the Project default when it differs from the provider
+that stopped, otherwise the first other available provider), and the consequences, including that the
+Workspace is inherited as it is with no reset. A recovery that local state already blocks (an
+executing or scheduled attempt, a stopped Run that is not the Issue's head, a claim label in the last
+poll snapshot) renders its reason in place of the form. The `POST` takes `run_id`, `state_id` and
+`provider`, calls the same service as the JSON route, and renders each refusal as a titled message
+ending "Nothing was written." The Issue page offers a link to the preview only while the preview has
+no blockers.
 
 Raw FSM workflows declare every state under `workflow.states`; there is no template, import, or
 sub-graph mechanism (ADR-2026-09-30-0848). A `workflow.use` block is a Workflow Contract validation
@@ -3363,11 +3375,20 @@ pair is grouped into Run Chains by walking `continuation_parent_run_id`; two Run
 link (e.g. an earlier dispatch that failed, followed by a fresh one after re-labeling) render as
 separate chain sections rather than one merged walk — the newest chain's section is open, older ones
 collapse into `<details>`. Within a chain, each Run becomes one state row: completed rows for every
-earlier Run, then the current chain leaf — running, durably waiting, blocked, reached an FSM
+earlier Run, then the current chain leaf — running, durably waiting, failed, blocked, reached an FSM
 terminal, awaiting operator input (`input_required`), or handed off to a continuation that was never
 created (a crash between the forward-stamp write and the continuation's own row). The leaf's state
 also gets a one-hop "upcoming" list of its declared transitions and their `when` predicates — never a
 multi-hop guess, since predicates decide branching only at run time.
+
+A Run that stopped at an agent state (`failed`, or `blocked` before any workflow terminal) is its own
+"Failed" or "Blocked" row with its terminal reason as evidence, whether it is the leaf or an operator
+recovery (ADR-2026-10-23-0903) continued from it; the original failure never reads "Completed"
+because a Continuation now exists, and the Continuation is recorded as re-entering the same state.
+Each recorded intervention is its own row right after the Run it acted on, naming the state, the
+provider change (labelled "operator recovery of this state"), how it was requested, and its outcome:
+`scheduled` (accepted, not claimed yet), `launched` (linking the new Run and its current state), or
+`failed`/`dropped` with the recorded reason, in which case the stopped Run above remains the failure.
 
 The tricky part this surface accounts for: `runs.current_state_id` is forward-stamped onto a Run's
 *own* row with the state it handed off to, before the continuation that actually executes that state

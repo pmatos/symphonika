@@ -40,6 +40,7 @@ function row(
 ): ChainStateRow {
   return {
     kind,
+    recovered: false,
     run: { currentStateId } as unknown as RunStatus,
     stateId,
     terminalKind: undefined,

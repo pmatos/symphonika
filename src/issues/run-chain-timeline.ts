@@ -101,6 +101,7 @@ export type ChainStateRowKind =
   | "completed"
   | "current_running"
   | "current_waiting"
+  | "failed"
   | "input_required"
   | "not_recorded"
   | "pending_handoff"
@@ -108,6 +109,10 @@ export type ChainStateRowKind =
 
 export type ChainStateRow = {
   kind: ChainStateRowKind;
+  // True for a stopped Run an operator recovery (#863) continued from. Its
+  // child re-enters the same state, so the child's executed state is this
+  // Run's own position even though the Run never "completed".
+  recovered: boolean;
   run: RunStatus;
   // The FSM terminal flavor ("success" | "blocked" | "failure") when `kind`
   // is "terminal" and the graph confirms it; undefined otherwise, including
@@ -123,17 +128,23 @@ export type ChainStateRow = {
 // `graphForRun(runId)` returns the ExpandedWorkflow captured by that Run's
 // own latest attempt, or undefined if it has none (waiting/system-action
 // Runs dispatch no provider and so capture no graph of their own).
+// `recoveredRunIds` names the stopped Runs an operator recovery continued
+// from: their failure stays a row of its own instead of reading "Completed"
+// just because a Continuation now exists.
 export function deriveChainStateRows(
   chainRuns: readonly RunStatus[],
-  graphForRun: (runId: string) => ExpandedWorkflow | undefined
+  graphForRun: (runId: string) => ExpandedWorkflow | undefined,
+  recoveredRunIds: ReadonlySet<string> = new Set()
 ): ChainStateRow[] {
   return chainRuns.map((run, index) => {
+    const recovered = recoveredRunIds.has(run.id);
     const row = (
       kind: ChainStateRowKind,
       stateId: string | undefined,
       terminalKind?: string
     ): ChainStateRow => ({
       kind,
+      recovered,
       run,
       stateId,
       terminalKind,
@@ -172,7 +183,21 @@ export function deriveChainStateRows(
     // *this* Run executed.
     const parentForwardStamped =
       parent === undefined ||
-      leafActiveKindOrUndefined(parent.state) === undefined;
+      leafActiveKindOrUndefined(parent.state) === undefined ||
+      recoveredRunIds.has(parent.id);
+    // A Run that stopped at an FSM position (provider failure, or a block
+    // before any workflow terminal) is its own row: its current_state_id is
+    // the position it stopped at, which is exactly what a recovery re-enters.
+    // A leaf reads this way whether or not a recovery was attempted; a
+    // non-leaf only when a recovery continued from it, so the original
+    // failure never reads "Completed" because a Continuation now exists.
+    const stoppedKind = stoppedRowKind(run);
+    if (stoppedKind !== undefined && (isLeaf || recovered)) {
+      return row(
+        stoppedKind,
+        run.terminalStateId ?? run.currentStateId ?? undefined
+      );
+    }
     if (!isLeaf) {
       // This Run concluded and has a continuation, full stop — that much is
       // RunState fact, not FSM-position knowledge. An unresolved stateId
@@ -235,6 +260,16 @@ export function deriveChainStateRows(
       ? row("not_recorded", undefined)
       : row("pending_handoff", initial);
   });
+}
+
+function stoppedRowKind(run: RunStatus): ChainStateRowKind | undefined {
+  if (run.currentStateId === null) {
+    return undefined;
+  }
+  if (run.state === "failed") {
+    return "failed";
+  }
+  return run.state === "blocked" ? "blocked" : undefined;
 }
 
 // A Run is "current" — still moving (queued/preparing/running) or durably

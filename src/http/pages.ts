@@ -107,6 +107,7 @@ import type {
   RunArtifactDescriptor,
   RunArtifactKind,
   RunState,
+  ProviderIntervention,
   ProviderPlan,
   RunStatus,
   RunStore,
@@ -145,6 +146,13 @@ import {
   buildHumanResumeCommand,
   isAgentProviderName
 } from "../human-resume-command.js";
+import {
+  recoveryHttpStatus,
+  type ProviderRecoveryOutcome,
+  type ProviderRecoveryPreview,
+  type ProviderRecoveryRefusalReason,
+  type ProviderRecoveryService
+} from "../issues/provider-recovery.js";
 import type {
   ProviderStartOutcome,
   ProviderStartPreview,
@@ -271,6 +279,9 @@ export type RegisterPagesOptions = {
   // #861's guarded start-with-a-provider action. See
   // HttpAppOptions.providerStart (src/http/app.ts).
   providerStart?: ProviderStartService;
+  // #863's recovery of a stopped state with another provider. See
+  // HttpAppOptions.providerRecovery (src/http/app.ts).
+  providerRecovery?: ProviderRecoveryService;
   // #308 part 2's label-write action. See HttpAppOptions.writeIssueLabels
   // (src/http/app.ts).
   writeIssueLabels?: WriteIssueLabelsFn;
@@ -945,12 +956,27 @@ export function registerPages(options: RegisterPagesOptions): void {
         csrfToken,
         detail,
         pollNowAvailable: options.pollNow !== undefined,
+        recoveryOffer: loadRecoveryOffer(detail),
         startAvailable: options.providerStart !== undefined,
         startPlan: loadStartPlan(detail)
       })
     );
     return context.html(html);
   });
+
+  // The entry point exists only while a recovery could be confirmed, judged
+  // from local state; the confirm step re-reads GitHub.
+  function loadRecoveryOffer(
+    detail: IssueDetail
+  ): IssueRecoveryOffer | undefined {
+    const preview = options.providerRecovery?.preview(
+      detail.projectName,
+      detail.issueNumber
+    );
+    return preview === undefined || preview.blockers.length > 0
+      ? undefined
+      : { stateId: preview.state.id ?? "" };
+  }
 
   function loadStartPlan(detail: IssueDetail): ProviderPlan | undefined {
     return options.providerStart === undefined ||
@@ -1071,6 +1097,87 @@ export function registerPages(options: RegisterPagesOptions): void {
     );
   }
 
+  function renderRecoverPage(
+    context: Context,
+    projectName: string,
+    issueNumberParam: string,
+    outcome: ProviderRecoveryOutcome | undefined
+  ): Response {
+    const issueNumber = Number.parseInt(issueNumberParam, 10);
+    const preview =
+      options.providerRecovery !== undefined &&
+      Number.isInteger(issueNumber) &&
+      issueNumber > 0
+        ? options.providerRecovery.preview(projectName, issueNumber)
+        : undefined;
+    if (preview === undefined) {
+      return context.html(
+        layout(
+          "Recovery unavailable",
+          `<h1 class="page-title">Recovery unavailable</h1><p class="lede">${escapeHtml(projectName)}#${escapeHtml(issueNumberParam)} has no Run to recover here: it has never run, the Project is not a dispatch Project, or the action is not wired.</p><p class="note"><a href="${escapeHtml(issueDetailHref(projectName, Number.isInteger(issueNumber) ? issueNumber : 0))}">← Back to the Issue</a></p>`
+        ),
+        404
+      );
+    }
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const status = outcome === undefined ? 200 : recoveryHttpStatus(outcome);
+    return context.html(
+      layout(
+        `Recover #${issueNumber} on another provider`,
+        renderIssueRecoverPage({
+          csrfToken,
+          issueNumber,
+          outcome,
+          preview,
+          projectName
+        })
+      ),
+      status
+    );
+  }
+
+  options.app.get("/issues/:project/:number/recover", (context) =>
+    renderRecoverPage(
+      context,
+      context.req.param("project"),
+      context.req.param("number"),
+      undefined
+    )
+  );
+
+  options.app.post(
+    "/issues/:project/:number/recover",
+    requireAuthorizedMutation,
+    async (context) => {
+      const projectName = context.req.param("project");
+      const numberParam = context.req.param("number");
+      const issueNumber = Number.parseInt(numberParam, 10);
+      const body = (await context.req.parseBody()) as Record<string, unknown>;
+      const provider = readOptionalFormField(body, "provider") ?? "";
+      const outcome: ProviderRecoveryOutcome =
+        options.providerRecovery === undefined
+          ? {
+              error: "recovery is not available on this daemon",
+              kind: "error"
+            }
+          : provider === ""
+            ? {
+                error: "choose the provider to recover on",
+                kind: "refused",
+                reason: "provider-unavailable"
+              }
+            : await options.providerRecovery.recover({
+                issueNumber,
+                projectName,
+                provider,
+                requestedVia: "http",
+                runId: readOptionalFormField(body, "run_id") ?? "",
+                stateId: readOptionalFormField(body, "state_id") ?? ""
+              });
+      return renderRecoverPage(context, projectName, numberParam, outcome);
+    }
+  );
+
   async function handleIssueLabelWrite(
     context: Context,
     projectName: string,
@@ -1123,6 +1230,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         csrfToken,
         detail,
         pollNowAvailable: options.pollNow !== undefined,
+        recoveryOffer: loadRecoveryOffer(detail),
         startAvailable: options.providerStart !== undefined,
         startPlan: loadStartPlan(detail)
       })
@@ -1299,6 +1407,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         csrfToken,
         detail,
         pollNowAvailable: options.pollNow !== undefined,
+        recoveryOffer: loadRecoveryOffer(detail),
         startAvailable: options.providerStart !== undefined,
         startPlan: loadStartPlan(detail)
       })
@@ -3074,6 +3183,9 @@ td code { color: var(--ink-2); }
 .alert strong { display: block; margin-bottom: var(--sp-1); }
 .alert ul { margin: 0; padding-left: 1.2em; }
 .alert--ok { border-color: var(--ok-ink); background: var(--ok-bg); color: var(--ok-ink); }
+.facts dt { color: var(--ink-muted); font-size: var(--fs-label); }
+.facts dd { margin: 0 0 var(--sp-2); overflow-wrap: anywhere; }
+.chain-intervention td { background: var(--surface-2); }
 .label-list { list-style: none; margin: 0 0 var(--sp-4); padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .label-list li { display: flex; align-items: center; gap: var(--sp-2); }
 .label-list form { display: inline; }
@@ -4873,10 +4985,18 @@ type IssueRunChainRowView = {
   row: ChainStateRow;
 };
 
+// An operator intervention (#863) shown beside the Run it acted on, with the
+// Run it produced when one exists so the outcome reads without a click.
+type IssueRunChainIntervention = {
+  intervention: ProviderIntervention;
+  toRun: RunStatus | undefined;
+};
+
 type IssueRunChainView = {
   evidence: ChainGraphEvidence | undefined;
   graph: ExpandedWorkflow | undefined;
   group: RunChainGroup;
+  interventions: IssueRunChainIntervention[];
   leafIsActive: boolean;
   rows: IssueRunChainRowView[];
   trackedPR: TrackedPullRequest | undefined;
@@ -4908,6 +5028,17 @@ async function loadIssueRunChainViews(
   const graphForRun = (id: string): ExpandedWorkflow | undefined =>
     graphByRunId.get(id);
 
+  const runsById = new Map(runs.map((run) => [run.id, run]));
+  const interventions = runStore.listProviderInterventions({
+    issueNumber,
+    projectName
+  });
+  const recoveredRunIds = new Set(
+    interventions
+      .filter((intervention) => intervention.kind === "recovery")
+      .map((intervention) => intervention.fromRunId)
+  );
+
   const groups = groupRunsIntoChains(runs);
   return groups
     .slice()
@@ -4917,7 +5048,11 @@ async function loadIssueRunChainViews(
       return (bLeaf?.createdAt ?? "").localeCompare(aLeaf?.createdAt ?? "");
     })
     .map((group) => {
-      const stateRows = deriveChainStateRows(group.runs, graphForRun);
+      const stateRows = deriveChainStateRows(
+        group.runs,
+        graphForRun,
+        recoveredRunIds
+      );
       // One forward pass carrying the nearest graph seen so far, rather than
       // a backward scan per row — same result as calling resolveNearestGraph
       // per row, without the O(chain length squared) rescans.
@@ -4966,6 +5101,17 @@ async function loadIssueRunChainViews(
         evidence: buildChainGraphEvidence(stateRows, graph),
         graph,
         group,
+        interventions: interventions
+          .filter(
+            (intervention) => intervention.chainRootRunId === group.rootRunId
+          )
+          .map((intervention) => ({
+            intervention,
+            toRun:
+              intervention.toRunId === null
+                ? undefined
+                : runsById.get(intervention.toRunId)
+          })),
         leafIsActive,
         rows,
         trackedPR,
@@ -4983,6 +5129,7 @@ const CHAIN_ROW_KIND_LABELS: Record<
   completed: { family: "ok", text: "Completed" },
   current_running: { family: "progress", text: "Running now" },
   current_waiting: { family: "progress", text: "Waiting" },
+  failed: { family: "fail", text: "Failed" },
   input_required: { family: "blocked", text: "Needs operator input" },
   not_recorded: { family: "neutral", text: "Not recorded" },
   pending_handoff: {
@@ -5036,6 +5183,66 @@ function describeRowProvider(view: IssueRunChainRowView): string {
     : `${escapeHtml(effectiveProvider)} <span class="muted">— ${describeProviderSource(view.providerSource, view.graphAvailable)}</span>`;
 }
 
+// A stopped Run's terminal reason is the evidence of why it stopped; it
+// leads, followed by the transition reason the controller recorded.
+function chainRowEvidence(row: ChainStateRow): string {
+  const stopped = row.kind === "failed" || row.kind === "blocked";
+  const reasons = [
+    stopped ? row.run.terminalReason : null,
+    row.transitionReason
+  ].filter((reason): reason is string => reason !== null && reason !== "");
+  return reasons.length === 0 ? "—" : reasons.join(" — ");
+}
+
+const INTERVENTION_OUTCOME_LABELS: Record<
+  ProviderIntervention["outcome"],
+  { family: "ok" | "fail" | "blocked" | "progress" | "neutral"; text: string }
+> = {
+  dropped: { family: "fail", text: "Recovery dropped" },
+  failed: { family: "fail", text: "Recovery failed" },
+  launched: { family: "progress", text: "Recovery launched" },
+  scheduled: { family: "progress", text: "Recovery scheduled" }
+};
+
+function renderInterventionOutcomeDetail(
+  entry: IssueRunChainIntervention
+): string {
+  const { intervention, toRun } = entry;
+  const runLink =
+    intervention.toRunId === null
+      ? ""
+      : `<a href="/runs/${encodeURIComponent(intervention.toRunId)}"><code>${escapeHtml(intervention.toRunId)}</code></a>`;
+  switch (intervention.outcome) {
+    case "scheduled":
+      return "Accepted; the new Run has not been claimed yet.";
+    case "launched":
+      return `New Run ${runLink}${toRun === undefined ? "" : ` is ${escapeHtml(toRun.state)}`}.`;
+    case "failed":
+    case "dropped":
+      return `${escapeHtml(intervention.lastError ?? "no reason recorded")}${runLink === "" ? "" : ` (Run ${runLink})`}. The stopped Run above is unchanged.`;
+  }
+}
+
+// One timeline row per recorded intervention, placed right after the Run it
+// acted on so the original failure and its recovery read in order.
+function renderInterventionRows(
+  view: IssueRunChainView,
+  fromRunId: string
+): string {
+  return view.interventions
+    .filter((entry) => entry.intervention.fromRunId === fromRunId)
+    .map((entry) => {
+      const { intervention } = entry;
+      const label = INTERVENTION_OUTCOME_LABELS[intervention.outcome];
+      const kind =
+        intervention.kind === "recovery"
+          ? "Operator recovery"
+          : "Operator intervention";
+      return `<tr class="chain-intervention" id="${escapeHtml(`chain-${view.group.rootRunId}-intervention-${intervention.id}`)}"><td colspan="8"><strong>${kind}</strong> at <code>${escapeHtml(intervention.stateId)}</code>: ${escapeHtml(intervention.fromProvider ?? "unknown provider")} → ${escapeHtml(intervention.toProvider)} <span class="muted">(${describeProviderSource({ kind: "operator_recovery" }, true)}; requested via ${escapeHtml(intervention.requestedVia)} at ${renderTimestamp(intervention.createdAt)})</span> ${labelPill(label.text, label.family)} ${renderInterventionOutcomeDetail(entry)}</td></tr>`;
+    })
+    .join("");
+}
+
 function renderChainRow(
   view: IssueRunChainRowView,
   rowIndex: number,
@@ -5051,8 +5258,7 @@ function renderChainRow(
     view.attempts.length === 0
       ? "—"
       : `${view.attempts.length} attempt${view.attempts.length === 1 ? "" : "s"}`;
-  const evidenceCell =
-    row.transitionReason === null ? "—" : escapeHtml(row.transitionReason);
+  const evidenceCell = escapeHtml(chainRowEvidence(row));
   return `<tr id="${escapeHtml(chainRowAnchor(rootRunId, rowIndex))}"><td>${stateCell}</td><td>${renderChainRowStatusPill(row)}</td><td>${providerCell}</td><td>${attemptsCell}</td><td><code>${renderTimestamp(row.run.createdAt)}</code></td><td><code>${renderTimestamp(row.run.updatedAt)}</code></td><td>${evidenceCell}</td><td><a href="/runs/${encodeURIComponent(row.run.id)}"><code>${escapeHtml(row.run.id)}</code></a></td></tr>`;
 }
 
@@ -5094,8 +5300,10 @@ function renderUpcomingSection(
 
 function renderIssueRunChainView(view: IssueRunChainView): string {
   const rowsHtml = view.rows
-    .map((rowView, index) =>
-      renderChainRow(rowView, index, view.group.rootRunId)
+    .map(
+      (rowView, index) =>
+        renderChainRow(rowView, index, view.group.rootRunId) +
+        renderInterventionRows(view, rowView.row.run.id)
     )
     .join("");
   const table = tableSection(
@@ -5278,6 +5486,8 @@ function issueDetailHref(projectName: string, issueNumber: number): string {
   return `/issues/${encodeURIComponent(projectName)}/${issueNumber}`;
 }
 
+type IssueRecoveryOffer = { stateId: string };
+
 type IssueStartBannerInput = {
   action: "cancel" | "retry" | "start";
   outcome: ProviderStartOutcome;
@@ -5346,6 +5556,133 @@ function renderIssueStartPage(input: {
         ? `<p class="muted">No provider is configured and registered.</p>`
         : `<form method="post" action="${escapeHtml(base)}">${common}${hidden("graph_fingerprint", context.graphFingerprint)}${hidden("snapshot_polled_at", detail.snapshot.polledAt)}<fieldset><legend>Provider for the whole Run Chain</legend>${radios}</fieldset>${renderStartStateProviders(context.states, context.providers)}<button class="btn" type="submit">Start work</button></form>`;
   return `<h1 class="page-title">Start #${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)}</p>${input.outcome === undefined ? "" : renderIssueStartBanner(input.outcome)}${facts}${verdict}${planForms}${startForm}<p class="note"><a href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}">← Back to the Issue</a></p>`;
+}
+
+const RECOVERY_REFUSAL_TITLES: Record<ProviderRecoveryRefusalReason, string> = {
+  "claim-held": "The Issue still holds a claim",
+  duplicate: "A recovery of this Run is already in progress",
+  "invalid-position": "This position cannot be recovered",
+  "issue-closed": "The Issue is closed",
+  "live-run": "Work is still executing or scheduled",
+  "not-a-dispatch-project": "Not a dispatch Project",
+  "position-mismatch": "This preview is out of date",
+  "provider-unavailable": "That provider is not available",
+  "repository-mismatch": "The Run belongs to another repository",
+  "run-not-found": "No such Run for this Issue",
+  "run-not-stopped": "The Run is not stopped",
+  "shutting-down": "The daemon is shutting down",
+  superseded: "A later Run exists",
+  "workflow-not-fsm": "The workflow is not a raw FSM"
+};
+
+function renderRecoverBanner(
+  outcome: ProviderRecoveryOutcome,
+  issueHref: string
+): string {
+  switch (outcome.kind) {
+    case "accepted":
+      return `<div class="alert alert--ok" role="status"><strong>Recovery accepted</strong><p>State <code>${escapeHtml(outcome.stateId)}</code> will be re-entered on <code>${escapeHtml(outcome.toProvider)}</code> as a new Continuation Run of <a href="/runs/${encodeURIComponent(outcome.fromRunId)}"><code>${escapeHtml(outcome.fromRunId)}</code></a>. Follow it in the <a href="${escapeHtml(issueHref)}">Issue's Run Chain timeline</a>.</p></div>`;
+    case "refused":
+      return `<div class="alert" role="alert"><strong>Recovery refused: ${escapeHtml(RECOVERY_REFUSAL_TITLES[outcome.reason])}</strong><p>${escapeHtml(outcome.error)}</p><p>Nothing was written.</p></div>`;
+    case "error":
+      return `<div class="alert" role="alert"><strong>Recovery could not be started</strong><p>${escapeHtml(outcome.error)}</p><p>No new Run was launched.</p></div>`;
+  }
+}
+
+function renderRecoverPageFacts(preview: ProviderRecoveryPreview): string {
+  const { lastAttempt, run, state } = preview;
+  const fact = (term: string, value: string): string =>
+    `<dt>${term}</dt><dd>${value}</dd>`;
+  const position =
+    state.id === undefined
+      ? "no FSM position recorded"
+      : `<code>${escapeHtml(state.id)}</code>${state.actionKind === undefined ? "" : ` <span class="muted">(${escapeHtml(state.actionKind)}${state.declaredProvider === undefined ? "" : `; workflow declares ${escapeHtml(state.declaredProvider)}`})</span>`}`;
+  const attempt =
+    lastAttempt === undefined
+      ? "no Attempt recorded"
+      : `attempt ${lastAttempt.attemptNumber} on ${escapeHtml(lastAttempt.providerName)}, ${statePill(lastAttempt.state)}`;
+  return `<dl class="facts">${[
+    fact(
+      "Issue",
+      escapeHtml(
+        `${preview.repository.owner}/${preview.repository.repo}#${run.issueNumber}`
+      )
+    ),
+    fact(
+      "Workflow",
+      preview.workflowName === undefined
+        ? "—"
+        : escapeHtml(preview.workflowName)
+    ),
+    fact("Current FSM position", position),
+    fact(
+      "Latest Run",
+      `<a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a> ${statePill(run.state)} on ${escapeHtml(run.provider)}`
+    ),
+    fact("Failed or stopped attempt", attempt),
+    fact(
+      "Terminal reason",
+      run.terminalReason === null ? "—" : escapeHtml(run.terminalReason)
+    ),
+    fact(
+      "Failure classification",
+      run.failureClassification === null
+        ? "—"
+        : escapeHtml(run.failureClassification)
+    ),
+    fact(
+      "Preserved Workspace",
+      `<code>${escapeHtml(run.workspacePath)}</code>`
+    ),
+    fact("Preserved branch", `<code>${escapeHtml(run.branchName)}</code>`)
+  ].join("")}</dl>`;
+}
+
+function renderRecoverConsequences(preview: ProviderRecoveryPreview): string {
+  const stateId = preview.state.id ?? "the stopped state";
+  const items = [
+    `Same Run Chain: the recovery continues this chain at <code>${escapeHtml(stateId)}</code>. The Issue is not restarted and earlier states are not replayed.`,
+    `A new Continuation Run, parented to <code>${escapeHtml(preview.run.id)}</code>, runs that state on the provider you choose. The stopped Run keeps its terminal state, reason and Attempts.`,
+    "Previous evidence is preserved: logs, prompts and Attempts of every earlier Run stay linked from the timeline, and the recovery is recorded as an auditable intervention.",
+    "The Workspace is inherited exactly as it is, with no reset: same path, same branch, and whatever the failed attempt left in the working tree. The new provider starts from that tree.",
+    "The choice applies to this one re-entry. The Run Chain's saved Provider Plan is not rewritten, and later states resolve their providers as before.",
+    "GitHub is read again when you confirm. The Issue must still be open with no sym:claimed, sym:running or sym:stale label, and nothing may be executing or scheduled for it."
+  ];
+  return `<section id="recover-consequences"><h2>Consequences</h2><ul>${items.map((item) => `<li>${item}</li>`).join("")}</ul></section>`;
+}
+
+function renderIssueRecoverPage(input: {
+  csrfToken: string;
+  issueNumber: number;
+  outcome: ProviderRecoveryOutcome | undefined;
+  preview: ProviderRecoveryPreview;
+  projectName: string;
+}): string {
+  const { csrfToken, issueNumber, outcome, preview, projectName } = input;
+  const issueHref = issueDetailHref(projectName, issueNumber);
+  const hidden = (name: string, value: string): string =>
+    `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`;
+  const radios = preview.providers
+    .map((name) => {
+      const notes = [
+        name === preview.run.provider ? "the provider that stopped" : "",
+        name === preview.projectDefaultProvider ? "Project default" : ""
+      ].filter((note) => note !== "");
+      return `<label><input type="radio" name="provider" value="${escapeHtml(name)}"${name === preview.defaultProvider ? " checked" : ""}> ${escapeHtml(name)}${notes.length === 0 ? "" : ` <span class="muted">(${notes.join(", ")})</span>`}</label>`;
+    })
+    .join(" ");
+  const verdict =
+    preview.blockers.length === 0
+      ? `<p>${labelPill("recoverable", "ok")} Nothing in local state blocks this recovery. GitHub is re-checked when you confirm.</p>`
+      : `<div class="alert" role="alert"><strong>Cannot be recovered right now</strong><ul>${preview.blockers.map((blocker) => `<li>${escapeHtml(blocker)}</li>`).join("")}</ul></div>`;
+  const showForm =
+    outcome?.kind !== "accepted" &&
+    preview.blockers.length === 0 &&
+    preview.state.id !== undefined;
+  const form = showForm
+    ? `<form method="post" action="${escapeHtml(`${issueHref}/recover`)}" aria-describedby="recover-consequences">${hidden(CSRF_FIELD_NAME, csrfToken)}${hidden("run_id", preview.run.id)}${hidden("state_id", preview.state.id ?? "")}<fieldset><legend>Provider to recover <code>${escapeHtml(preview.state.id ?? "")}</code> on</legend>${radios}</fieldset><button class="btn" type="submit">Recover on the chosen provider</button></form>`
+    : "";
+  return `<h1 class="page-title">Recover #${issueNumber} ${escapeHtml(preview.run.issueTitle)}</h1><p class="note">${escapeHtml(projectName)}</p>${outcome === undefined ? "" : renderRecoverBanner(outcome, issueHref)}${renderRecoverPageFacts(preview)}${renderRecoverConsequences(preview)}${verdict}${form}<p class="note"><a href="${escapeHtml(issueHref)}">← Back to the Issue</a></p>`;
 }
 
 // #862: the workflow preview's per-state exceptions. Only agent states get a
@@ -5420,6 +5757,7 @@ function renderIssueDetailPage(input: {
   csrfToken: string;
   detail: IssueDetail;
   pollNowAvailable: boolean;
+  recoveryOffer: IssueRecoveryOffer | undefined;
   startAvailable: boolean;
   startPlan: ProviderPlan | undefined;
 }): string {
@@ -5433,7 +5771,7 @@ function renderIssueDetailPage(input: {
     input.banner === undefined
       ? ""
       : `${renderIssueActionBanner(input.banner)}${offerPollNow && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
-  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${input.startPlan === undefined ? "" : `<div class="alert" role="status"><strong>Provider plan ${escapeHtml(input.startPlan.status)}</strong><p><code>${escapeHtml(input.startPlan.provider)}</code>${input.startPlan.lastError === null ? "" : ` · ${escapeHtml(input.startPlan.lastError)}`}${input.startPlan.status === "label_failed" || input.startPlan.status === "expired" ? " — this Issue will not dispatch until the plan is retried or cancelled." : ""}</p></div>`}${input.startAvailable ? `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/start">Start with a provider…</a></p>` : ""}${renderIssueRunChainSection(input.chains)}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
+  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${input.startPlan === undefined ? "" : `<div class="alert" role="status"><strong>Provider plan ${escapeHtml(input.startPlan.status)}</strong><p><code>${escapeHtml(input.startPlan.provider)}</code>${input.startPlan.lastError === null ? "" : ` · ${escapeHtml(input.startPlan.lastError)}`}${input.startPlan.status === "label_failed" || input.startPlan.status === "expired" ? " — this Issue will not dispatch until the plan is retried or cancelled." : ""}</p></div>`}${input.startAvailable ? `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/start">Start with a provider…</a></p>` : ""}${input.recoveryOffer === undefined ? "" : `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/recover">Recover <code>${escapeHtml(input.recoveryOffer.stateId)}</code> on another provider…</a></p>`}${renderIssueRunChainSection(input.chains)}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,
       issueNumber: detail.issueNumber,

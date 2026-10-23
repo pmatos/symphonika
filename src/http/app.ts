@@ -61,7 +61,10 @@ import {
 import type { ScheduledCallback } from "../work-briefing.js";
 import { registerBriefingPage } from "./briefing-page.js";
 import { registerMaestroPage } from "./maestro-page.js";
-import type { ProviderRecoveryService } from "../issues/provider-recovery.js";
+import {
+  recoveryHttpStatus,
+  type ProviderRecoveryService
+} from "../issues/provider-recovery.js";
 import type { ProviderStartService } from "../issues/provider-start.js";
 import type { MaestroConfig } from "../maestro/config.js";
 import type { MaestroModel } from "../maestro/model.js";
@@ -892,7 +895,8 @@ export function createHttpApp(options: HttpAppOptions): Hono {
     );
 
     // Recovery of a stopped FSM state with another provider (#863, ADR-2026-10-23-0903).
-    // JSON-only like adopt-pr: the preview/confirm page is a later slice.
+    // The JSON route; the dashboard's preview/confirm page is
+    // /issues/:project/:number/recover (src/http/pages.ts).
     app.post(
       "/api/issues/:project/:number/recover",
       requireAuthorizedMutation,
@@ -923,17 +927,7 @@ export function createHttpApp(options: HttpAppOptions): Hono {
           projectName: context.req.param("project"),
           requestedVia: "http"
         });
-        const status =
-          outcome.kind === "accepted"
-            ? 202
-            : outcome.kind === "error"
-              ? 500
-              : outcome.reason === "live-run" ||
-                  outcome.reason === "claim-held" ||
-                  outcome.reason === "duplicate"
-                ? 409
-                : 422;
-        return context.json(outcome, status);
+        return context.json(outcome, recoveryHttpStatus(outcome));
       }
     );
 
@@ -1015,6 +1009,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.providerStart === undefined
         ? {}
         : { providerStart: options.providerStart }),
+      ...(options.providerRecovery === undefined
+        ? {}
+        : { providerRecovery: options.providerRecovery }),
       ...(options.writeIssueLabels === undefined
         ? {}
         : { writeIssueLabels: options.writeIssueLabels })

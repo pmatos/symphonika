@@ -1573,6 +1573,41 @@ function mapProviderPlanRow(row: ProviderPlanDbRow): ProviderPlan {
 
 export type InterventionKind = "override_review" | "recovery";
 
+type ProviderInterventionOutcome =
+  "dropped" | "failed" | "launched" | "scheduled";
+
+export type ProviderIntervention = {
+  chainRootRunId: string;
+  createdAt: string;
+  fromProvider: string | null;
+  fromRunId: string;
+  id: string;
+  kind: InterventionKind;
+  lastError: string | null;
+  outcome: ProviderInterventionOutcome;
+  requestedVia: string;
+  stateId: string;
+  toProvider: string;
+  toRunId: string | null;
+  updatedAt: string;
+};
+
+type ProviderInterventionDbRow = {
+  chain_root_run_id: string;
+  created_at: string;
+  from_provider: string | null;
+  from_run_id: string;
+  id: string;
+  kind: string;
+  last_error: string | null;
+  outcome: string;
+  requested_via: string;
+  state_id: string;
+  to_provider: string;
+  to_run_id: string | null;
+  updated_at: string;
+};
+
 export type CreateProviderInterventionInput = {
   fromProvider: string | null;
   fromRunId: string;
@@ -1950,6 +1985,41 @@ export class RunStore {
         toRunId: settlement.toRunId ?? null
       }).changes;
     return changes > 0;
+  }
+
+  // Every intervention recorded for an Issue, oldest first, for the Run Chain
+  // timeline. Keyed by Project and Issue number like the Run list it joins.
+  listProviderInterventions(input: {
+    issueNumber: number;
+    projectName: string;
+  }): ProviderIntervention[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, kind, chain_root_run_id, from_run_id, to_run_id, state_id,",
+          "from_provider, to_provider, requested_via, outcome, last_error,",
+          "created_at, updated_at",
+          "from chain_provider_interventions",
+          "where project_name = ? and issue_number = ?",
+          "order by created_at, rowid"
+        ].join(" ")
+      )
+      .all(input.projectName, input.issueNumber) as ProviderInterventionDbRow[];
+    return rows.map((row) => ({
+      chainRootRunId: row.chain_root_run_id,
+      createdAt: row.created_at,
+      fromProvider: row.from_provider,
+      fromRunId: row.from_run_id,
+      id: row.id,
+      kind: row.kind as InterventionKind,
+      lastError: row.last_error,
+      outcome: row.outcome as ProviderInterventionOutcome,
+      requestedVia: row.requested_via,
+      stateId: row.state_id,
+      toProvider: row.to_provider,
+      toRunId: row.to_run_id,
+      updatedAt: row.updated_at
+    }));
   }
 
   // The provider an operator's recovery chose for `stateId`, when `runId` is

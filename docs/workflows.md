@@ -626,6 +626,14 @@ recovery, per-state choice, chain-wide choice, `action.provider`, `projects[].ag
 chain plan is not rewritten, earlier states do not run again, and a later pass through the same
 state resolves from the plan as before. See ADR-2026-10-23-0903.
 
+The Issue page links to a preview at `/issues/:project/:number/recover` while a recovery is possible.
+It shows the position, the stopped Run's last Attempt and terminal reason, the preserved Workspace
+and branch, a proposed provider (the Project default when it differs from the provider that stopped,
+otherwise another configured one) and the consequences. The Workspace is inherited as it is, with no
+reset. Confirming it makes the same request as the JSON route and the Run Chain timeline then shows
+the original failure, the intervention and its outcome (including a recovery that failed or was
+dropped) as separate rows.
+
 ### Retries and failure transitions
 
 Transient provider or infrastructure failures consume the normal retry budget before a transition

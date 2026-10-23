@@ -32,8 +32,10 @@ repository as one real Project well enough to help implement later Symphonika is
 - GitHub Projects board integration.
 - Parsing issue-body dependency syntax as a *gating* mechanism: dispatch eligibility depends on
   GitHub's native `blockedBy` issue-dependency links, not on any body-text DSL. A stacked follow-up PR
-  adds a best-effort `## Parent` heading parse for the `/issues/graph` view's display-only clustering
-  — see ADR-0081 — but that parse never influences eligibility.
+  adds a best-effort `## Parent` heading parse, display-only and never influencing eligibility —
+  see ADR-0081. GitHub-native parent evidence supersedes it for the `/issues/graph` view's clustering:
+  the heading is read only as a labelled legacy fallback when native evidence is `unavailable` or
+  unrecorded — see ADR-2026-10-23-1720.
 
 ## 3. Implementation Stack
 
@@ -3168,7 +3170,10 @@ a separate "Blocked by" column (an open blocker renders as gating, a closed one 
 fetch is flagged), the repository, and the row's poll age. The section header shows the Project's last
 successful poll, `(pre-restart)` when it predates the daemon, and a "polling failing" pill with the
 error while the latest poll failed (the last successful snapshot is still shown). Membership is
-native-only: `blockedBy` and the `## Parent` heading parse never create it. An Issue whose evidence is
+native-only: `blockedBy` and the `## Parent` heading parse never create it. The `/issues/graph` view follows
+the same precedence (ADR-2026-10-23-1720): a `present` Native Parent clusters the Issue, `none` leaves it
+ungrouped whatever the heading says, and the heading survives only as a labelled "legacy ## Parent heading"
+fallback when native evidence is `unavailable` or unrecorded. An Issue whose evidence is
 `unavailable`, unrecorded, cross-repository, or has a closed parent is listed under "Not grouped under
 an epic" with an explicit badge; no parent is invented, and a cross-repository parent never matches a
 same-numbered local epic. Snapshots hold open Issues only, so a closed parent is shown as a badge, never

@@ -394,9 +394,10 @@ export type ProjectIssueSnapshotRow = {
   // persisted before this column existed) — which is not the same as a
   // recorded `none` or `unavailable`.
   nativeParent?: IssueNativeParent;
-  // Best-effort "## Parent" heading parse (parseParentIssueNumber,
-  // src/issue-polling.ts) — display-only graph clustering, never a
-  // gating signal. Absent when the body had no parseable heading.
+  // Legacy "## Parent" heading parse (parseParentIssueNumber,
+  // src/issue-polling.ts) — display-only, never a gating signal, and a
+  // labelled graph fallback only when nativeParent is absent or
+  // unavailable (ADR-2026-10-23-1720). Absent when no heading parsed.
   parentIssueNumber?: number;
   polledAt: string;
   priority: number;

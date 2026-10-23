@@ -84,6 +84,7 @@ import { validateSaveContent, type ReloadOutcome } from "./save-pipeline.js";
 import {
   DEFAULT_POLLING_INTERVAL_MS,
   type FilteredProjectIssueSnapshot,
+  type IssueNativeParent,
   type IssuePollStatus,
   type RawGitHubIssueDependencyRef
 } from "../issue-polling.js";
@@ -4569,6 +4570,7 @@ type DependencyGraphEmbedIssue = {
   blockedBy: RawGitHubIssueDependencyRef[];
   blockedByTruncated: boolean;
   issueNumber: number;
+  nativeParent?: IssueNativeParent;
   owner: string;
   parentIssueNumber?: number;
   projectName: string;
@@ -4617,6 +4619,9 @@ function buildDependencyGraphIssues(input: {
         blockedBy: snapshot.blockedBy,
         blockedByTruncated: snapshot.blockedByTruncated,
         issueNumber: snapshot.issueNumber,
+        ...(snapshot.nativeParent === undefined
+          ? {}
+          : { nativeParent: snapshot.nativeParent }),
         owner: repo.owner,
         ...(snapshot.parentIssueNumber === undefined
           ? {}

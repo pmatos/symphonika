@@ -2877,7 +2877,8 @@ The UI is primarily read-only. It shows:
 - a per-run interactive workflow graph
 
 Above everything else, the dashboard (`/`) renders a **Work overview** section
-(`buildWorkOverview`/`renderWorkOverviewSection`, `src/http/work-overview.ts`): every Issue a
+(`buildWorkOverview`/`renderWorkOverviewSection`, `src/http/work-overview.ts`, classifying through the
+shared HTTP-free `classifyWork` in `src/work-briefing.ts`, which the work briefing below reuses): every Issue a
 Dispatch Project's persisted poll snapshot (ADR 0073) or Run history currently knows about, grouped
 into exactly one of four operator-facing buckets by this precedence (highest first): a `waiting` Run
 the Progress Guard has flagged for operator attention without terminalizing it (CONTEXT.md) — checked
@@ -3463,7 +3464,8 @@ Maestro's model-facing tool surface (`maestroToolsFor`, `src/maestro/tools.ts`) 
 list of read-only lookups over already-persisted Project/Issue-snapshot/Run/PR-snapshot evidence —
 `list_projects` (each Project's poll validation state, last successful poll time, and last poll
 ok/error outcome — the same provenance `/projects/:name`'s capacity strip shows), `list_issues`,
-`get_issue`, `list_runs`, `get_run`, `list_pull_requests` in this slice. No tool in that list writes
+`get_issue`, `list_runs`, `get_run`, `list_pull_requests`, and `get_work_briefing` (`#868`, below) in this
+slice. No tool in that list writes
 to GitHub, runs a shell command, or reads a local directory, and `executeMaestroTool` refuses any
 tool name outside that list without executing anything; see ADR-2026-10-07-0813 for why this is a
 structural boundary rather than a prompt instruction. Every citation attached to a reply
@@ -3502,14 +3504,34 @@ CSRF-checked first, exactly like `POST /maestro/messages`). The conversation loc
 answer in one Project does not block another, while a second submit in the same scope is still refused.
 A focused turn (`runMaestroTurn`'s `focus`) appends a paragraph naming the Project to the system prompt and,
 because a prompt alone is advisory, defaults an omitted `project_name` on `list_issues`, `get_issue`,
-`list_runs`, and `list_pull_requests` — and an omitted workspace target (no `project_name`, `repository`, or
+`list_runs`, `list_pull_requests`, and `get_work_briefing` — and an omitted workspace target (no `project_name`, `repository`, or
 `run_id`) — to the focus Project. The focus only fills in an omitted argument and never restricts one: an
 operator who names another configured Project gets that Project's evidence, cited like any other. The tool
 surface and read-only boundary are identical in every scope.
 
-This slice does not add rolling 7/30-day evidence-linked briefings (`#868`). Apart from the `workspace_*`
-tools above, no tool calls GitHub live; every other tool reads only persisted RunStore snapshots from the
-daemon's normal poll cadence.
+Work briefing (`#868`, first slice): `get_work_briefing(project_name?)` and the report routes
+`GET /briefing` (all Projects) and `GET /projects/:name/briefing` (404 on an unknown Project) answer "what
+should I do next?" from the same classification as the dashboard's Work overview (`classifyWork`,
+`src/work-briefing.ts`). Work is grouped into **Needs attention**, **Ready**, **Ongoing / in review** and
+**Not ready**, and unlike the overview every group is ordered by configured priority, then issue age, then
+Project and issue number. Each item carries a `reason` naming the classification step that placed it
+(`basis`) together with a citation to the evidence record it read (the Issue snapshot, the Run, or the
+tracked pull request), the full citation list (Project, Issue, Run, PR, each with its observed time), and a
+freshness block. Freshness is read from the Project's persisted poll state and labels `poll_failed` (the last
+GitHub read failed, with its error, while the last successful observation is still shown), `stale` (the last
+successful poll is older than the daemon-stale threshold: the larger of five minutes and three polling
+intervals, shared with the dashboard's "daemon may be unresponsive" banner), `pre_restart`, and
+`never_polled`. The briefing reads only persisted RunStore snapshots and Runs, plus the daemon's in-memory
+retry/continuation callback schedule so an Issue with a pending retry lands in the same group as on the
+dashboard; it never calls GitHub. The tool caps each group at ten items and reports `omitted`, and an
+omitted `project_name` defaults to the focus Project in a Project conversation like the other evidence tools.
+The two routes are GET-only and render server-side straight from that evidence — never from model prose and
+never from a `maestro_*` table — so a chat claim cannot appear on them as execution evidence, and neither
+route nor the tool writes a Run or any other record. The dashboard and the Project page link to them. Rolling
+last-7/30-day and custom date-range history windows (attributing completed work to its event time, keeping
+pending GitHub observations and Maestro suggestions distinct) are the next slice of `#868`. Apart from the
+`workspace_*` tools above, no tool calls GitHub live; every other tool reads only persisted RunStore
+snapshots from the daemon's normal poll cadence.
 
 Maestro's model configuration lives under the optional `maestro:` Service Config block (§5.1),
 independent of `providers.codex/claude/omp`: selecting or changing Maestro's model never selects or

@@ -156,18 +156,7 @@ import {
   buildWorkOverview,
   renderWorkOverviewSection
 } from "./work-overview.js";
-
-// Shared by RegisterPagesOptions.getScheduled and buildProjectIssueRow's
-// input — one shape, matching HttpAppOptions.getScheduled's own (src/http/
-// app.ts), rather than three independent inline copies of the same four
-// fields.
-export type ScheduledCallback = {
-  dueAt: number;
-  issueNumber: number;
-  kind: "retry" | "continuation" | "state_advance" | "wait_park";
-  projectName: string;
-  runId: string;
-};
+import { staleThresholdMs, type ScheduledCallback } from "../work-briefing.js";
 
 export type RegisterPagesOptions = {
   app: Hono;
@@ -324,22 +313,6 @@ const ACTIVE_NOW_FIRING_STATES_LIST: RoutineFiringState[] = [
   "preparing_workspace",
   "running"
 ];
-
-// Floor for the banner's threshold, well beyond a typical polling interval
-// but far below the multi-hour wedges that motivated this banner (see
-// docs/adr/0065) — an operator should notice within one dashboard visit,
-// not just after the systemd watchdog eventually restarts the unit.
-// polling.interval_ms has no configured upper bound, though, so the actual
-// threshold scales with the live interval (see renderDaemonStaleBanner)
-// rather than using this floor alone — otherwise a healthy daemon with a
-// longer configured interval would show a permanent false positive.
-const DAEMON_STALE_THRESHOLD_FLOOR_MS = 5 * 60_000;
-
-// Same multiplier isTickRecentEnoughForSystemdWatchdog uses for the same
-// reason:
-// a long-configured polling interval must not be indistinguishable from a
-// genuine stall.
-const DAEMON_STALE_THRESHOLD_INTERVAL_MULTIPLIER = 3;
 
 export type PullRequestFollowupAttention = {
   attention: "cap_reached";
@@ -668,6 +641,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderConfigWarningsBanner(snapshot?.reload.warnings ?? []),
         renderHeader(options.version, snapshot),
         DASHBOARD_STREAM_BANNER,
+        `<p class="note"><a href="/briefing">Work briefing: what to do next, with evidence →</a></p>`,
         renderWorkOverviewSection(
           buildWorkOverview({
             nowMs,
@@ -1663,7 +1637,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           `<section>${sectionHead("Issues", 0)}<div class="empty"><strong>No issues — this is a Routine Host</strong>A Routine Host (ADR 0062) never polls or dispatches issues; it only hosts Routine Firings, listed below.</div></section>`,
           renderProjectFiringsBlock(firings),
           `<p class="note"><a href="/runs?project=${encodeURIComponent(name)}">Recent runs →</a></p>`,
-          renderProjectMaestroLink(name)
+          renderProjectAssistantLinks(name)
         ].join("")
       );
       return context.html(html);
@@ -1740,7 +1714,7 @@ export function registerPages(options: RegisterPagesOptions): void {
           ? ""
           : `<p class="note"><a href="/projects/${encodeURIComponent(name)}/workflow/edit">Edit workflow →</a></p>`,
         `<p class="note"><a href="/runs?project=${encodeURIComponent(name)}">Recent runs →</a></p>`,
-        renderProjectMaestroLink(name)
+        renderProjectAssistantLinks(name)
       ].join("")
     );
     return context.html(html);
@@ -3079,6 +3053,8 @@ td code { color: var(--ink-2); }
 .empty strong { display: block; margin-bottom: var(--sp-1); color: var(--ink-2); }
 
 .note { color: var(--ink-2); font-size: var(--fs-meta); margin: var(--sp-2) 0 0; }
+.briefing-evidence { list-style: none; margin: 0; padding: 0; }
+.briefing-evidence li { white-space: normal; }
 
 .banner {
   border: 1px solid var(--fail-ink);
@@ -3675,8 +3651,8 @@ function renderProjectQueuePolicy(
   ].join("");
 }
 
-function renderProjectMaestroLink(name: string): string {
-  return `<p class="note"><a href="/projects/${encodeURIComponent(name)}/maestro">Ask Maestro about this Project →</a></p>`;
+function renderProjectAssistantLinks(name: string): string {
+  return `<p class="note"><a href="/projects/${encodeURIComponent(name)}/briefing">Work briefing for this Project →</a> · <a href="/projects/${encodeURIComponent(name)}/maestro">Ask Maestro about this Project →</a></p>`;
 }
 
 function renderProjectFiringsBlock(firings: RoutineFiringStatus[]): string {
@@ -7115,10 +7091,7 @@ function renderDaemonStaleBanner(
   tickAgeMs: number | null,
   pollingIntervalMs: number
 ): string {
-  const threshold = Math.max(
-    DAEMON_STALE_THRESHOLD_FLOOR_MS,
-    pollingIntervalMs * DAEMON_STALE_THRESHOLD_INTERVAL_MULTIPLIER
-  );
+  const threshold = staleThresholdMs(pollingIntervalMs);
   if (tickAgeMs === null || tickAgeMs < threshold) {
     return "";
   }

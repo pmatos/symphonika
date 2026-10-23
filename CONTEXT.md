@@ -755,7 +755,10 @@ tool is ever offered to it, a structural boundary independent of which model is 
 counted as a Run. The dashboard and each Project have separate durable histories; a Project-focused
 conversation defaults to that Project's evidence but may inspect and cite another configured Project the
 operator names. Repository content is read only through the Maestro Workspace when the operator enables
-it; evidence-linked briefings are a separate, not-yet-built slice of epic #844.
+it. Its `get_work_briefing` tool and the `GET /briefing` and `GET /projects/:name/briefing` reports group work
+into needs-attention, ready, ongoing/in-review and not-ready from persisted evidence, citing the Issue, Run or
+PR behind each reason and labelling stale polls and failed GitHub reads; rolling and custom-range history is
+a later slice of #868.
 _Avoid_: Orchestrator, Coding Agent — Maestro never dispatches, claims, or executes issue work, and has
 no provider-execution posture of its own; chat session, which names an Autonomous Run's own property
 of needing no interactive input, not this assistant

@@ -1,4 +1,5 @@
 import type { MaestroCitation } from "../run-store.js";
+import { BRIEFING_GROUP_ORDER } from "../work-briefing.js";
 import type { MaestroRepositoryContent } from "./config.js";
 import type { MaestroEvidenceReader } from "./reader.js";
 import {
@@ -113,6 +114,25 @@ const EVIDENCE_TOOLS: MaestroToolSpec[] = [
       type: "object"
     },
     name: "list_pull_requests"
+  },
+  {
+    description:
+      "Get the work briefing: Issues grouped into needsAttention " +
+      "(operator action), ready, ongoing (a Run, schedule, or PR in " +
+      "review), and notReady, each ordered by configured priority then " +
+      "age. Every item carries a reason with the evidence it was read " +
+      "from, citations, and freshness (stale poll, failed GitHub read). " +
+      "Read from persisted snapshots only; omit project_name for every " +
+      "Project (or the focus Project). A truncated group reports omitted.",
+    inputSchema: {
+      additionalProperties: false,
+      properties: {
+        project_name: { type: "string" }
+      },
+      required: [],
+      type: "object"
+    },
+    name: "get_work_briefing"
   }
 ];
 
@@ -632,6 +652,25 @@ export async function executeMaestroTool(input: {
     const projectName = projectNameField(input.input, input.focusProjectName);
     const runs = input.reader.listRuns(projectName);
     return { citations: runs.map(runCitation), kind: "ok", output: runs };
+  }
+
+  if (input.name === "get_work_briefing") {
+    const projectName = projectNameField(input.input, input.focusProjectName);
+    const briefing = input.reader.getWorkBriefing(projectName);
+    if (briefing === undefined) {
+      return {
+        citations: [],
+        kind: "ok",
+        output: { found: false, projectName }
+      };
+    }
+    const citations = BRIEFING_GROUP_ORDER.flatMap((group) =>
+      briefing.groups[group].items.flatMap((item) => [
+        item.reason.citation,
+        ...item.citations.filter((citation) => citation.kind === "project")
+      ])
+    );
+    return { citations, kind: "ok", output: briefing };
   }
 
   if (input.name === "get_run") {

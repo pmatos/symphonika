@@ -15,7 +15,10 @@ import type {
   IssuePollStatus,
   ProjectIssuePollReport
 } from "../issue-polling.js";
-import { emptyIssuePollStatus } from "../issue-polling.js";
+import {
+  DEFAULT_POLLING_INTERVAL_MS,
+  emptyIssuePollStatus
+} from "../issue-polling.js";
 import type { AsyncMutex } from "../lifecycle/async-mutex.js";
 import {
   DEFAULT_WATCHDOG_CONFIG,
@@ -53,9 +56,10 @@ import {
   buildPullRequestFollowupAttention,
   buildWorkflowProgressAttention,
   registerPages,
-  type ProjectQueuePolicy,
-  type ScheduledCallback
+  type ProjectQueuePolicy
 } from "./pages.js";
+import type { ScheduledCallback } from "../work-briefing.js";
+import { registerBriefingPage } from "./briefing-page.js";
 import { registerMaestroPage } from "./maestro-page.js";
 import type { ProviderStartService } from "../issues/provider-start.js";
 import type { MaestroConfig } from "../maestro/config.js";
@@ -966,8 +970,26 @@ export function createHttpApp(options: HttpAppOptions): Hono {
         : { writeIssueLabels: options.writeIssueLabels })
     });
 
+    const getPollingIntervalMs = (): number =>
+      options.getPollingIntervalMs?.() ?? DEFAULT_POLLING_INTERVAL_MS;
+
+    registerBriefingPage({
+      app,
+      getPollingIntervalMs,
+      getScheduled,
+      now,
+      runStore,
+      startedAtMs
+    });
+
     registerMaestroPage({
       app,
+      briefingInputs: {
+        getPollingIntervalMs,
+        getScheduled,
+        now,
+        startedAtMs
+      },
       csrfSecret,
       ...(options.createMaestroModel === undefined
         ? {}

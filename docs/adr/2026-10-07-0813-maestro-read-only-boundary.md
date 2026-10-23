@@ -52,7 +52,11 @@ conversation per scope), and its focus only defaults omitted tool arguments and 
 it adds no tool and never restricts which Project a call may name. Grounding in a read-only Maestro
 Workspace over repository content (#867) and evidence-linked briefings/history (#868) are separate issues
 per epic #844's own split of the original #852 slice; apart from #867's workspace tools, no Maestro tool
-calls GitHub live — every other tool reads only already-persisted `RunStore` snapshots.
+calls GitHub live — every other tool reads only already-persisted `RunStore` snapshots. The first #868 slice
+adds `get_work_briefing` on the same terms: it reads persisted snapshots and Runs (plus the daemon's
+in-memory retry/continuation schedule, so it classifies Issues exactly as the dashboard's Work overview does),
+labels how fresh each GitHub observation is, and is rendered for the operator by GET-only report routes that
+read the same evidence directly rather than any chat message.
 
 ## Consequences
 

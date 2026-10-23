@@ -1,4 +1,13 @@
+import { DEFAULT_POLLING_INTERVAL_MS } from "../issue-polling.js";
 import type { RunStore } from "../run-store.js";
+import {
+  BRIEFING_GROUP_ORDER,
+  buildWorkBriefing,
+  type BriefingItem,
+  type ScheduledCallback,
+  type WorkBriefing,
+  type WorkGroup
+} from "../work-briefing.js";
 
 // The narrow read-only surface Maestro's tool registry (src/maestro/
 // tools.ts) and conversation loop are given over RunStore — never RunStore
@@ -17,6 +26,11 @@ import type { RunStore } from "../run-store.js";
 // that the omitted rows don't exist — a reply that needs more should ask a
 // narrower question (e.g. one Project at a time).
 const MAX_EVIDENCE_ITEMS = 25;
+
+// A briefing is four groups, each with up to four citations per item, so it
+// is capped per group more tightly than a single list. `omitted` reports how
+// many more a group holds, so a truncated group never reads as complete.
+const MAX_BRIEFING_ITEMS_PER_GROUP = 10;
 
 type MaestroProjectEvidence = {
   href: string;
@@ -75,6 +89,23 @@ type MaestroRunRevisionEvidence = {
   recordedHeadSha: string | null;
 };
 
+type MaestroWorkBriefing = Omit<WorkBriefing, "groups"> & {
+  groups: Record<WorkGroup, { items: BriefingItem[]; omitted: number }>;
+  notice: string;
+};
+
+// What the briefing needs beyond RunStore rows: the daemon's in-memory
+// callback schedule (so an Issue with a pending retry classifies the same as
+// on the dashboard), its poll interval (the stale-poll threshold), and the
+// clock and start time. All optional so the reader stays constructible from
+// a RunStore alone.
+export type MaestroBriefingInputs = {
+  getPollingIntervalMs?: (() => number | undefined) | undefined;
+  getScheduled?: (() => readonly ScheduledCallback[]) | undefined;
+  now?: (() => number) | undefined;
+  startedAtMs?: number | undefined;
+};
+
 export type MaestroEvidenceReader = {
   getIssue(
     projectName: string,
@@ -82,6 +113,8 @@ export type MaestroEvidenceReader = {
   ): MaestroIssueEvidence | undefined;
   getRun(runId: string): MaestroRunEvidence | undefined;
   getRunRevision(runId: string): MaestroRunRevisionEvidence | undefined;
+  // Undefined when projectName names no Project.
+  getWorkBriefing(projectName?: string): MaestroWorkBriefing | undefined;
   listIssues(projectName: string): MaestroIssueEvidence[];
   listProjects(): MaestroProjectEvidence[];
   listPullRequests(projectName: string): MaestroPullRequestEvidence[];
@@ -150,8 +183,33 @@ function toIssueEvidence(
   };
 }
 
+function capBriefing(briefing: WorkBriefing): MaestroWorkBriefing {
+  const groups = Object.fromEntries(
+    BRIEFING_GROUP_ORDER.map((group) => {
+      const items = briefing.groups[group];
+      return [
+        group,
+        {
+          items: items.slice(0, MAX_BRIEFING_ITEMS_PER_GROUP),
+          omitted: Math.max(0, items.length - MAX_BRIEFING_ITEMS_PER_GROUP)
+        }
+      ];
+    })
+  ) as MaestroWorkBriefing["groups"];
+  return {
+    ...briefing,
+    groups,
+    notice:
+      "Built from persisted snapshots and recorded Runs as of assembledAt; " +
+      "GitHub was not called. Each item's freshness says how old its " +
+      "GitHub observation is. This is a read of recorded state, not a " +
+      "recommendation to act or evidence that work was done."
+  };
+}
+
 export function createMaestroEvidenceReader(
-  runStore: RunStore
+  runStore: RunStore,
+  briefingInputs: MaestroBriefingInputs = {}
 ): MaestroEvidenceReader {
   const listIssues = (projectName: string): MaestroIssueEvidence[] =>
     runStore
@@ -193,6 +251,19 @@ export function createMaestroEvidenceReader(
         projectName: run.project,
         recordedHeadSha: recorded?.headSha ?? null
       };
+    },
+    getWorkBriefing: (projectName) => {
+      const briefing = buildWorkBriefing({
+        nowMs: (briefingInputs.now ?? Date.now)(),
+        pollingIntervalMs:
+          briefingInputs.getPollingIntervalMs?.() ??
+          DEFAULT_POLLING_INTERVAL_MS,
+        projectName,
+        runStore,
+        scheduled: briefingInputs.getScheduled?.() ?? [],
+        startedAtMs: briefingInputs.startedAtMs
+      });
+      return briefing === undefined ? undefined : capBriefing(briefing);
     },
     listIssues,
     // Project status evidence (AC1): poll provenance, age, and failure

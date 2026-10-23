@@ -239,6 +239,7 @@ describe("Maestro evidence reader (#865)", () => {
           "getIssue",
           "getRun",
           "getRunRevision",
+          "getWorkBriefing",
           "listIssues",
           "listProjects",
           "listPullRequests",

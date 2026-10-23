@@ -14,7 +14,10 @@ import {
 } from "../maestro/conversation.js";
 import { createAnthropicMaestroModel } from "../maestro/model.js";
 import type { MaestroModel } from "../maestro/model.js";
-import { createMaestroEvidenceReader } from "../maestro/reader.js";
+import {
+  createMaestroEvidenceReader,
+  type MaestroBriefingInputs
+} from "../maestro/reader.js";
 import type { MaestroWorkspace } from "../maestro/workspace.js";
 import type { MaestroMessageRow, RunStore } from "../run-store.js";
 import {
@@ -31,6 +34,9 @@ export type RegisterMaestroPageOptions = {
   createMaestroModel?: (config: MaestroConfig) => MaestroModel;
   csrfSecret: CsrfSecret;
   getMaestroConfig?: () => MaestroConfig | undefined;
+  // Inputs for get_work_briefing's classification (#868), the same ones the
+  // dashboard's work overview reads.
+  briefingInputs?: MaestroBriefingInputs;
   getProjectRepo?: (
     projectName: string
   ) => { owner: string; repo: string } | undefined;
@@ -274,7 +280,10 @@ export function registerMaestroPage(options: RegisterMaestroPageOptions): void {
       const model = (options.createMaestroModel ?? createAnthropicMaestroModel)(
         config
       );
-      const reader = createMaestroEvidenceReader(options.runStore);
+      const reader = createMaestroEvidenceReader(
+        options.runStore,
+        options.briefingInputs
+      );
 
       // Wrapped separately from the user-message append above: a throw
       // here (a reader/RunStore error, for instance) must not leave the

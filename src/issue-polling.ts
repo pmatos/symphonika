@@ -149,6 +149,9 @@ export type GitHubIssuesApi = {
   getIssueDependencies?: (
     input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
   ) => Promise<Map<number, RawGitHubIssueDependencies>>;
+  getIssueHierarchy?: (
+    input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+  ) => Promise<Map<number, IssueNativeParent>>;
   getPullRequest?: (
     input: GitHubPullRequestInput
   ) => Promise<RawGitHubPullRequest | null>;
@@ -188,6 +191,13 @@ export type IssueSnapshot = {
   id: number;
   labels: string[];
   number: number;
+  // GitHub's native parent/sub-issue relationship (Issue.parent), fetched
+  // separately from blockedBy and never derived from it or from body text.
+  // Absent means no native evidence was recorded for this issue (fetcher not
+  // configured, or a snapshot persisted before the field existed) -- distinct
+  // from `{ availability: "none" }` (confirmed no parent) and
+  // `{ availability: "unavailable" }` (the read failed or was partial).
+  nativeParent?: IssueNativeParent;
   // Best-effort "## Parent" heading parse (see parseParentIssueNumber) --
   // display-only graph clustering, never a gating signal. Undefined when
   // absent or unparseable, same as no epic membership.
@@ -427,6 +437,17 @@ class OctokitGitHubIssuesApi implements GitHubIssuesApi {
   ): Promise<Map<number, RawGitHubIssueDependencies>> {
     const octokit = this.octokit(input.token);
     return fetchIssueDependencies(
+      (query, variables) =>
+        octokit.graphql(query, { ...variables, ...requestOption(input) }),
+      input
+    );
+  }
+
+  async getIssueHierarchy(
+    input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+  ): Promise<Map<number, IssueNativeParent>> {
+    const octokit = this.octokit(input.token);
+    return fetchIssueHierarchy(
       (query, variables) =>
         octokit.graphql(query, { ...variables, ...requestOption(input) }),
       input
@@ -738,6 +759,23 @@ export type RawGitHubIssueDependencies = {
   truncated: boolean;
 };
 
+// Tri-state native parent evidence. `unavailable` is deliberately a distinct
+// value from `none`: a failed or partial read must never be mistaken for a
+// confirmed absence of a parent, nor invent one.
+export type IssueNativeParent =
+  | {
+      availability: "present";
+      // The parent lives in a different repository than the child.
+      crossRepository: boolean;
+      number: number;
+      owner: string;
+      repo: string;
+      state: "CLOSED" | "OPEN";
+      title: string;
+    }
+  | { availability: "none" }
+  | { availability: "unavailable" };
+
 export async function fetchPullRequestFollowupState(
   executeGraphql: GraphqlExecutor,
   input: GitHubPullRequestInput
@@ -1030,6 +1068,138 @@ export async function fetchIssueDependencies(
   return result;
 }
 
+type GraphqlIssueHierarchyParent = {
+  number?: number | null;
+  repository?: {
+    name?: string | null;
+    owner?: { login?: string | null } | null;
+  } | null;
+  state?: string | null;
+  title?: string | null;
+};
+
+type GraphqlIssueHierarchyIssue = {
+  number?: number | null;
+  parent?: GraphqlIssueHierarchyParent | null;
+};
+
+type GraphqlIssueHierarchyResponse = {
+  repository?: Record<string, GraphqlIssueHierarchyIssue | null> | null;
+};
+
+const ISSUE_HIERARCHY_BATCH_SIZE = 20;
+
+function unavailableNativeParent(): IssueNativeParent {
+  return { availability: "unavailable" };
+}
+
+function buildIssueHierarchyQuery(issueNumbers: number[]): string {
+  const fields = issueNumbers
+    .map(
+      (issueNumber) => `
+        i${issueNumber}: issue(number: ${issueNumber}) {
+          number
+          parent {
+            number
+            title
+            state
+            repository {
+              owner {
+                login
+              }
+              name
+            }
+          }
+        }`
+    )
+    .join("\n");
+  return `
+    query IssueHierarchy($owner: String!, $repo: String!) {
+      repository(owner: $owner, name: $repo) {
+        ${fields}
+      }
+    }
+  `;
+}
+
+function sameRepository(
+  left: { owner: string; repo: string },
+  right: { owner: string; repo: string }
+): boolean {
+  return (
+    left.owner.toLowerCase() === right.owner.toLowerCase() &&
+    left.repo.toLowerCase() === right.repo.toLowerCase()
+  );
+}
+
+function nativeParentFromNode(
+  issue: GraphqlIssueHierarchyIssue | null | undefined,
+  childRepository: { owner: string; repo: string }
+): IssueNativeParent {
+  // A missing issue, or a response with no `parent` key at all, is a gap in
+  // the evidence rather than a confirmed "no parent" (which GitHub reports as
+  // an explicit null).
+  if (issue === null || issue === undefined || issue.parent === undefined) {
+    return unavailableNativeParent();
+  }
+  const parent = issue.parent;
+  if (parent === null) {
+    return { availability: "none" };
+  }
+  const owner = parent.repository?.owner?.login;
+  const repo = parent.repository?.name;
+  if (
+    typeof parent.number !== "number" ||
+    typeof owner !== "string" ||
+    owner.length === 0 ||
+    typeof repo !== "string" ||
+    repo.length === 0
+  ) {
+    return unavailableNativeParent();
+  }
+  return {
+    availability: "present",
+    crossRepository: !sameRepository({ owner, repo }, childRepository),
+    number: parent.number,
+    owner,
+    repo,
+    state: normalizeIssueDependencyState(parent.state),
+    title: parent.title ?? ""
+  };
+}
+
+// Never throws: hierarchy is display evidence, so a failed batch degrades its
+// issues to `unavailable` instead of failing the project poll (unlike
+// fetchIssueDependencies, whose result gates dispatch). Batches fail
+// independently so one bad call does not erase the rest of the evidence.
+export async function fetchIssueHierarchy(
+  executeGraphql: GraphqlExecutor,
+  input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+): Promise<Map<number, IssueNativeParent>> {
+  const result = new Map<number, IssueNativeParent>();
+  for (const batch of chunk(input.issueNumbers, ISSUE_HIERARCHY_BATCH_SIZE)) {
+    let response: GraphqlIssueHierarchyResponse;
+    try {
+      response = (await executeGraphql(buildIssueHierarchyQuery(batch), {
+        owner: input.owner,
+        repo: input.repo
+      })) as GraphqlIssueHierarchyResponse;
+    } catch {
+      for (const issueNumber of batch) {
+        result.set(issueNumber, unavailableNativeParent());
+      }
+      continue;
+    }
+    for (const issueNumber of batch) {
+      result.set(
+        issueNumber,
+        nativeParentFromNode(response.repository?.[`i${issueNumber}`], input)
+      );
+    }
+  }
+  return result;
+}
+
 function collectReviewThreads(
   connection: GraphqlReviewThreadConnection | null | undefined
 ): GraphqlReviewThread[] {
@@ -1105,6 +1275,16 @@ export async function tryGetIssueDependencies(
     return undefined;
   }
   return api.getIssueDependencies(input);
+}
+
+async function tryGetIssueHierarchy(
+  api: GitHubIssuesApi,
+  input: GitHubIssueRepositoryInput & { issueNumbers: number[] }
+): Promise<Map<number, IssueNativeParent> | undefined> {
+  if (api.getIssueHierarchy === undefined) {
+    return undefined;
+  }
+  return api.getIssueHierarchy(input);
 }
 
 export async function tryListBranchCommits(
@@ -1490,6 +1670,23 @@ async function pollProject(
     return;
   }
 
+  // Native hierarchy is display evidence only: unlike the dependency fetch
+  // above, a failure here must neither fail the poll nor touch gating, so
+  // every issue is recorded as `unavailable` rather than dropped or guessed.
+  let hierarchy: Map<number, IssueNativeParent> | undefined;
+  try {
+    hierarchy = await tryGetIssueHierarchy(githubIssuesApi, {
+      issueNumbers: issues.map((issue) => issue.number),
+      owner: project.tracker.owner,
+      repo: project.tracker.repo,
+      token
+    });
+  } catch {
+    hierarchy = new Map(
+      issues.map((issue) => [issue.number, unavailableNativeParent()])
+    );
+  }
+
   let fetchedIssues = 0;
   let candidateIssues = 0;
   let filteredIssues = 0;
@@ -1499,6 +1696,10 @@ async function pollProject(
     if (issueDependencies !== undefined) {
       issue.blockedBy = issueDependencies.blockedBy;
       issue.blockedByTruncated = issueDependencies.truncated;
+    }
+    const nativeParent = hierarchy?.get(issue.number);
+    if (nativeParent !== undefined) {
+      issue.nativeParent = nativeParent;
     }
     const reasons = issueFilterReasons(issue, project);
 

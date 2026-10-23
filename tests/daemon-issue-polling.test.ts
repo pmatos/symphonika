@@ -251,6 +251,91 @@ describe("daemon GitHub issue polling", () => {
     }
   });
 
+  it("persists native parent evidence onto the issue poll snapshot, leaving blocker gating untouched", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root);
+    const githubIssuesApi = {
+      getIssueDependencies: vi.fn().mockResolvedValue(
+        new Map([
+          [
+            51,
+            {
+              blockedBy: [
+                {
+                  number: 9,
+                  owner: "pmatos",
+                  repo: "symphonika",
+                  state: "OPEN",
+                  title: "open blocker"
+                }
+              ],
+              truncated: false
+            }
+          ]
+        ])
+      ),
+      getIssueHierarchy: vi.fn().mockResolvedValue(
+        new Map([
+          [
+            50,
+            {
+              availability: "present",
+              crossRepository: false,
+              number: 844,
+              owner: "pmatos",
+              repo: "symphonika",
+              state: "OPEN",
+              title: "epic"
+            }
+          ],
+          [51, { availability: "none" }]
+        ])
+      ),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 50,
+          title: "Native child"
+        }),
+        issueFixture({
+          labels: ["agent-ready"],
+          number: 51,
+          title: "Blocked, no native parent"
+        })
+      ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    try {
+      await fetch(`${daemon.url}/projects/symphonika`);
+      const { stateRoot } = resolveStateRoot({ cwd: root });
+      const runStore = openRunStore({ stateRoot });
+      try {
+        const rows = runStore.listProjectIssueSnapshots("symphonika");
+        const child = rows.find((row) => row.issueNumber === 50);
+        const blocked = rows.find((row) => row.issueNumber === 51);
+        expect(child?.kind).toBe("candidate");
+        expect(child?.nativeParent).toMatchObject({
+          availability: "present",
+          number: 844
+        });
+        expect(blocked?.kind).toBe("filtered");
+        expect(blocked?.reasons).toContain("blocked by open dependency #9");
+        expect(blocked?.nativeParent).toEqual({ availability: "none" });
+      } finally {
+        runStore.close();
+      }
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("shows a tracker-less Routine Host targeted by a git Routine as invalid on the live dashboard", async () => {
     const root = await makeTempRoot();
     await writeTrackerLessGitRoutineHost(root);

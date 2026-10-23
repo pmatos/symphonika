@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { IssueSnapshot } from "../src/issue-polling.js";
+import type { IssueNativeParent, IssueSnapshot } from "../src/issue-polling.js";
 import { databasePath, openRunStore } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
@@ -1411,6 +1411,209 @@ describe("RunStore detail queries", () => {
       ).toBeUndefined();
     } finally {
       store.close();
+    }
+  });
+
+  it("replaceProjectIssueSnapshots round-trips native parent evidence in all three states, absent when not recorded", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    const row = (issueNumber: number, nativeParent?: IssueNativeParent) => ({
+      blockedBy: [],
+      blockedByTruncated: false,
+      issueNumber,
+      kind: "candidate" as const,
+      labels: [],
+      ...(nativeParent === undefined ? {} : { nativeParent }),
+      priority: 1,
+      reasons: [],
+      title: `Issue ${issueNumber}`
+    });
+    const present: IssueNativeParent = {
+      availability: "present",
+      crossRepository: true,
+      number: 844,
+      owner: "pmatos",
+      repo: "other",
+      state: "CLOSED",
+      title: "Epic"
+    };
+    try {
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-23T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          row(1, present),
+          row(2, { availability: "none" }),
+          row(3, { availability: "unavailable" }),
+          row(4)
+        ]
+      });
+
+      const rows = store.listProjectIssueSnapshots("alpha");
+      expect(rows.find((r) => r.issueNumber === 1)?.nativeParent).toEqual(
+        present
+      );
+      expect(rows.find((r) => r.issueNumber === 2)?.nativeParent).toEqual({
+        availability: "none"
+      });
+      expect(rows.find((r) => r.issueNumber === 3)?.nativeParent).toEqual({
+        availability: "unavailable"
+      });
+      expect(
+        rows.find((r) => r.issueNumber === 4)?.nativeParent
+      ).toBeUndefined();
+      expect(store.getProjectIssueSnapshot("alpha", 1)?.nativeParent).toEqual(
+        present
+      );
+      expect(
+        store.getProjectIssueSnapshot("alpha", 4)?.nativeParent
+      ).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("stores native parent evidence beside, not instead of, the heading parse and blockers", async () => {
+    const stateRoot = await makeTempRoot();
+    const store = openRunStore({ stateRoot });
+    try {
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-23T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [
+              {
+                number: 301,
+                owner: "pmatos",
+                repo: "alpha",
+                state: "OPEN",
+                title: "blocker"
+              }
+            ],
+            blockedByTruncated: false,
+            issueNumber: 10,
+            kind: "filtered",
+            labels: [],
+            nativeParent: { availability: "none" },
+            parentIssueNumber: 12,
+            priority: 1,
+            reasons: ["blocked by open dependency #301"],
+            title: "Heading says 12, native says none"
+          }
+        ]
+      });
+
+      const stored = store.getProjectIssueSnapshot("alpha", 10);
+      expect(stored?.nativeParent).toEqual({ availability: "none" });
+      expect(stored?.parentIssueNumber).toBe(12);
+      expect(stored?.blockedBy).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("adds native_parent to a pre-existing snapshot table and reads legacy rows back without evidence", async () => {
+    const root = await makeTempRoot();
+    const writer = new Database(databasePath(root));
+    try {
+      writer.exec(`
+        create table project_issue_snapshots (
+          project_name text not null,
+          issue_number integer not null,
+          kind text not null,
+          title text not null,
+          priority integer not null default 0,
+          reasons text,
+          labels text,
+          polled_at text not null,
+          created_at text not null,
+          updated_at text not null,
+          primary key (project_name, issue_number)
+        );
+        insert into project_issue_snapshots (
+          project_name, issue_number, kind, title, polled_at, created_at, updated_at
+        ) values (
+          'alpha', 7, 'candidate', 'Legacy', '2025-01-01T00:00:00Z',
+          '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
+        );
+      `);
+    } finally {
+      writer.close();
+    }
+
+    const store = openRunStore({ stateRoot: root });
+    try {
+      expect(
+        store.getProjectIssueSnapshot("alpha", 7)?.nativeParent
+      ).toBeUndefined();
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-23T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 7,
+            kind: "candidate",
+            labels: [],
+            nativeParent: { availability: "none" },
+            priority: 1,
+            reasons: [],
+            title: "Legacy"
+          }
+        ]
+      });
+      expect(store.getProjectIssueSnapshot("alpha", 7)?.nativeParent).toEqual({
+        availability: "none"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reads an unrecognised native_parent column back as unavailable, never as a parent or none", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    try {
+      store.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-23T10:00:00.000Z",
+        projectName: "alpha",
+        rows: [1, 2, 3].map((issueNumber) => ({
+          blockedBy: [],
+          blockedByTruncated: false,
+          issueNumber,
+          kind: "candidate" as const,
+          labels: [],
+          priority: 1,
+          reasons: [],
+          title: `Issue ${issueNumber}`
+        }))
+      });
+    } finally {
+      store.close();
+    }
+    const raw = new Database(databasePath(root));
+    try {
+      const update = raw.prepare(
+        "update project_issue_snapshots set native_parent = ? where issue_number = ?"
+      );
+      update.run("not json", 1);
+      update.run('{"availability":"present","number":"x"}', 2);
+      update.run("null", 3);
+    } finally {
+      raw.close();
+    }
+
+    const reopened = openRunStore({ stateRoot: root });
+    try {
+      for (const issueNumber of [1, 2, 3]) {
+        expect(
+          reopened.getProjectIssueSnapshot("alpha", issueNumber)?.nativeParent
+        ).toEqual({ availability: "unavailable" });
+      }
+    } finally {
+      reopened.close();
     }
   });
 

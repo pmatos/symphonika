@@ -4,6 +4,7 @@ import {
   backoffUntil,
   emptyIssuePollStatus,
   fetchIssueDependencies,
+  fetchIssueHierarchy,
   fetchPullRequestFollowupState,
   GITHUB_RATE_LIMIT_BACKOFF_MS,
   isRateLimitError,
@@ -28,6 +29,7 @@ import {
   type GitHubIssuesApi,
   type GitHubPullRequestInput,
   type GraphqlExecutor,
+  type IssueNativeParent,
   type PollingProjectConfig,
   type RawGitHubCommit,
   type RawGitHubIssue,
@@ -1124,6 +1126,355 @@ describe("pollConfiguredGitHubIssuesFromConfig dependency gating", () => {
 
     expect(status.filteredIssues).toEqual([]);
     expect(status.candidateIssues[0]?.issue.blockedBy).toEqual([]);
+  });
+});
+
+describe("fetchIssueHierarchy", () => {
+  const input = {
+    owner: "pmatos",
+    repo: "symphonika",
+    token: "secret"
+  };
+
+  function parentNode(overrides: Record<string, unknown> = {}) {
+    return {
+      number: 844,
+      repository: { name: "symphonika", owner: { login: "pmatos" } },
+      state: "OPEN",
+      title: "epic",
+      ...overrides
+    };
+  }
+
+  it("records a same-repository open parent as present and not cross-repository", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: { i858: { number: 858, parent: parentNode() } }
+      });
+
+    const result = await fetchIssueHierarchy(executor, {
+      ...input,
+      issueNumbers: [858]
+    });
+
+    expect(result.get(858)).toEqual({
+      availability: "present",
+      crossRepository: false,
+      number: 844,
+      owner: "pmatos",
+      repo: "symphonika",
+      state: "OPEN",
+      title: "epic"
+    });
+  });
+
+  it("requests the native parent field, never blockedBy", async () => {
+    const queries: string[] = [];
+    const executor: GraphqlExecutor = (query) => {
+      queries.push(query);
+      return Promise.resolve({
+        repository: { i1: { number: 1, parent: null } }
+      });
+    };
+
+    await fetchIssueHierarchy(executor, { ...input, issueNumbers: [1] });
+
+    expect(queries[0]).toMatch(/parent\s*{/);
+    expect(queries[0]).not.toContain("blockedBy");
+  });
+
+  it("records a null parent as none, distinct from unavailable", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: { i858: { number: 858, parent: null } }
+      });
+
+    const result = await fetchIssueHierarchy(executor, {
+      ...input,
+      issueNumbers: [858]
+    });
+
+    expect(result.get(858)).toEqual({ availability: "none" });
+  });
+
+  it("marks a closed parent and keeps it a parent", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: {
+          i858: { number: 858, parent: parentNode({ state: "CLOSED" }) }
+        }
+      });
+
+    const result = await fetchIssueHierarchy(executor, {
+      ...input,
+      issueNumbers: [858]
+    });
+
+    expect(result.get(858)).toMatchObject({
+      availability: "present",
+      state: "CLOSED"
+    });
+  });
+
+  it("marks a parent in another repository as cross-repository, case-insensitively for the same one", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: {
+          i1: {
+            number: 1,
+            parent: parentNode({
+              number: 9,
+              repository: { name: "other", owner: { login: "pmatos" } }
+            })
+          },
+          i2: {
+            number: 2,
+            parent: parentNode({
+              repository: { name: "Symphonika", owner: { login: "PMatos" } }
+            })
+          }
+        }
+      });
+
+    const result = await fetchIssueHierarchy(executor, {
+      ...input,
+      issueNumbers: [1, 2]
+    });
+
+    expect(result.get(1)).toMatchObject({
+      availability: "present",
+      crossRepository: true,
+      repo: "other"
+    });
+    expect(result.get(2)).toMatchObject({
+      availability: "present",
+      crossRepository: false
+    });
+  });
+
+  it("marks an unresolvable issue as unavailable rather than none", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({ repository: { i858: null } });
+
+    const result = await fetchIssueHierarchy(executor, {
+      ...input,
+      issueNumbers: [858]
+    });
+
+    expect(result.get(858)).toEqual({ availability: "unavailable" });
+  });
+
+  it("marks an issue whose response entry is missing or has no parent field as unavailable", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({ repository: { i2: { number: 2 } } });
+
+    const result = await fetchIssueHierarchy(executor, {
+      ...input,
+      issueNumbers: [1, 2]
+    });
+
+    expect(result.get(1)).toEqual({ availability: "unavailable" });
+    expect(result.get(2)).toEqual({ availability: "unavailable" });
+  });
+
+  it("never invents a parent from a malformed parent node", async () => {
+    const executor: GraphqlExecutor = () =>
+      Promise.resolve({
+        repository: {
+          i1: { number: 1, parent: { state: "OPEN", title: "no number" } },
+          i2: {
+            number: 2,
+            parent: parentNode({ repository: { name: null, owner: null } })
+          }
+        }
+      });
+
+    const result = await fetchIssueHierarchy(executor, {
+      ...input,
+      issueNumbers: [1, 2]
+    });
+
+    expect(result.get(1)).toEqual({ availability: "unavailable" });
+    expect(result.get(2)).toEqual({ availability: "unavailable" });
+  });
+
+  it("degrades only the failed batch to unavailable and keeps other batches' evidence", async () => {
+    const issueNumbers = Array.from({ length: 45 }, (_, index) => index + 1);
+    let call = 0;
+    const executor: GraphqlExecutor = (query) => {
+      call += 1;
+      if (call === 2) {
+        return Promise.reject(new Error("502 Bad Gateway"));
+      }
+      const aliases = [...query.matchAll(/i(\d+): issue/g)].map((match) =>
+        Number(match[1])
+      );
+      return Promise.resolve({
+        repository: Object.fromEntries(
+          aliases.map((number) => [`i${number}`, { number, parent: null }])
+        )
+      });
+    };
+
+    const result = await fetchIssueHierarchy(executor, {
+      ...input,
+      issueNumbers
+    });
+
+    expect(result.size).toBe(45);
+    expect(result.get(1)).toEqual({ availability: "none" });
+    expect(result.get(21)).toEqual({ availability: "unavailable" });
+    expect(result.get(40)).toEqual({ availability: "unavailable" });
+    expect(result.get(41)).toEqual({ availability: "none" });
+  });
+});
+
+describe("pollConfiguredGitHubIssuesFromConfig native hierarchy evidence", () => {
+  const openIssue = (number: number, labels = ["agent-ready"]) => ({
+    body: "",
+    created_at: "2026-08-01T00:00:00Z",
+    id: number,
+    labels: labels.map((name) => ({ name })),
+    number,
+    state: "open",
+    title: `issue ${number}`,
+    updated_at: "2026-08-01T00:00:00Z",
+    url: `https://example/${number}`
+  });
+
+  const presentParent: IssueNativeParent = {
+    availability: "present",
+    crossRepository: false,
+    number: 844,
+    owner: "pmatos",
+    repo: "symphonika",
+    state: "OPEN",
+    title: "epic"
+  };
+
+  const openBlocker = {
+    number: 301,
+    owner: "pmatos",
+    repo: "symphonika",
+    state: "OPEN" as const,
+    title: "sibling"
+  };
+
+  const closedBlocker = {
+    ...openBlocker,
+    number: 295,
+    state: "CLOSED" as const
+  };
+
+  async function poll(
+    dependencies: Awaited<
+      ReturnType<NonNullable<GitHubIssuesApi["getIssueDependencies"]>>
+    >,
+    hierarchy: NonNullable<GitHubIssuesApi["getIssueHierarchy"]> | undefined,
+    issues = [openIssue(299)]
+  ) {
+    return pollConfiguredGitHubIssuesFromConfig({
+      config: { projects: [dependencyGateProject] },
+      env: { GITHUB_TOKEN: "secret" },
+      githubIssuesApi: {
+        getIssueDependencies: () => Promise.resolve(dependencies),
+        ...(hierarchy === undefined ? {} : { getIssueHierarchy: hierarchy }),
+        listOpenIssues: () => Promise.resolve(issues)
+      }
+    });
+  }
+
+  it("stores native parent evidence on the issue snapshot without changing an open blocker's gate", async () => {
+    const status = await poll(
+      new Map([[299, { blockedBy: [openBlocker], truncated: false }]]),
+      () => Promise.resolve(new Map([[299, presentParent]]))
+    );
+
+    expect(status.candidateIssues).toEqual([]);
+    const entry = status.filteredIssues[0];
+    expect(entry?.reasons).toEqual(["blocked by open dependency #301"]);
+    expect(entry?.issue.nativeParent).toEqual(presentParent);
+    expect(entry?.issue.blockedBy).toEqual([openBlocker]);
+  });
+
+  it("keeps an issue eligible when its blockers are closed, with a native parent present", async () => {
+    const status = await poll(
+      new Map([[299, { blockedBy: [closedBlocker], truncated: false }]]),
+      () => Promise.resolve(new Map([[299, presentParent]]))
+    );
+
+    expect(status.filteredIssues).toEqual([]);
+    expect(status.candidateIssues[0]?.issue.nativeParent).toEqual(
+      presentParent
+    );
+  });
+
+  it("still fails closed on a truncated blocker list with a native parent present", async () => {
+    const status = await poll(
+      new Map([[299, { blockedBy: [], truncated: true }]]),
+      () => Promise.resolve(new Map([[299, presentParent]]))
+    );
+
+    expect(status.candidateIssues).toEqual([]);
+    expect(status.filteredIssues[0]?.reasons).toEqual([
+      "has more dependency links than could be checked - treat as unresolved until reviewed"
+    ]);
+    expect(status.filteredIssues[0]?.issue.nativeParent).toEqual(presentParent);
+  });
+
+  it("never derives a native parent from blockedBy", async () => {
+    const status = await poll(
+      new Map([[299, { blockedBy: [openBlocker], truncated: false }]]),
+      () => Promise.resolve(new Map([[299, { availability: "none" as const }]]))
+    );
+
+    expect(status.filteredIssues[0]?.issue.nativeParent).toEqual({
+      availability: "none"
+    });
+  });
+
+  it("records every issue as unavailable, keeps the poll ok and the gate intact, when the hierarchy fetch throws", async () => {
+    const status = await poll(
+      new Map([[299, { blockedBy: [openBlocker], truncated: false }]]),
+      () => Promise.reject(new Error("schema has no Issue.parent")),
+      [openIssue(299), openIssue(300)]
+    );
+
+    expect(status.errors).toEqual([]);
+    expect(status.projects[0]?.ok).toBe(true);
+    expect(status.filteredIssues).toHaveLength(1);
+    expect(status.candidateIssues).toHaveLength(1);
+    expect(status.filteredIssues[0]?.reasons).toEqual([
+      "blocked by open dependency #301"
+    ]);
+    expect(status.filteredIssues[0]?.issue.nativeParent).toEqual({
+      availability: "unavailable"
+    });
+    expect(status.candidateIssues[0]?.issue.nativeParent).toEqual({
+      availability: "unavailable"
+    });
+  });
+
+  it("leaves nativeParent absent when no hierarchy fetcher is configured, and the heading parse intact", async () => {
+    const status = await poll(new Map(), undefined, [
+      { ...openIssue(299), body: "## Parent\n\n#844" }
+    ]);
+
+    const issue = status.candidateIssues[0]?.issue;
+    expect(issue?.nativeParent).toBeUndefined();
+    expect(issue?.parentIssueNumber).toBe(844);
+  });
+
+  it("keeps the heading parse independent of native evidence", async () => {
+    const status = await poll(
+      new Map(),
+      () => Promise.resolve(new Map([[299, presentParent]])),
+      [{ ...openIssue(299), body: "## Parent\n\n#12" }]
+    );
+
+    const issue = status.candidateIssues[0]?.issue;
+    expect(issue?.parentIssueNumber).toBe(12);
+    expect(issue?.nativeParent).toEqual(presentParent);
   });
 });
 

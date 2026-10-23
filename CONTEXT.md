@@ -384,7 +384,9 @@ Project's `agent.provider` (ADR-2026-10-09-0743). May also carry per-state choic
 chain-wide choice for individual agent states (ADR-2026-10-13-0659), each recorded with a digest of
 the state's definition at the time; if that state is later removed or redefined, the chain parks
 before launch as a `blocked` Run with reason `provider_override_review_required` until an operator
-reviews the choice (ADR-2026-10-23-1738).
+reviews the choice (ADR-2026-10-23-1738): keeps the recorded provider, rebinds the state to another,
+or drops the choice, which rewrites that state's entry when the resumed Run claims and records an
+`override_review` intervention (ADR-2026-10-23-1820).
 _Avoid_: provider override, provider pin
 
 **Provider Recovery**:

@@ -18,6 +18,7 @@ import {
   type WriteIssueLabelsResult
 } from "./http/app.js";
 import { findLiveRunIdForIssue } from "./http/pages.js";
+import { createOverrideReviewService } from "./issues/provider-override-review.js";
 import { createProviderRecoveryService } from "./issues/provider-recovery.js";
 import { createProviderStartService } from "./issues/provider-start.js";
 import {
@@ -1636,6 +1637,35 @@ export async function startDaemon(
     scheduleRecovery: (input) => runController.scheduleRecovery(input)
   });
 
+  // Review of a per-state provider choice whose state changed (#864,
+  // ADR-2026-10-23-1738): the same guards and the same launch route as
+  // recovery, with the resolution applied by the resumed Run's claim.
+  const providerOverrideReview = createOverrideReviewService({
+    checkLiveRun: (projectName, issueNumber) =>
+      findLiveRunIdForIssue({
+        getActiveRuns: getActiveRunsForLiveCheck,
+        getProjectRepoAliases: resolveProjectRepoAliases,
+        getScheduled: getScheduledCallbacks,
+        issueNumber,
+        projectName,
+        runStore
+      }),
+    createInterventionId: randomUUID,
+    dispatchMutex,
+    getProject: (name) => runtimeConfig.projectsByName().get(name),
+    getProvidersConfig: () => runtimeConfig.providersConfig(),
+    githubIssuesApi,
+    hasPendingShutdownResume: (runId) =>
+      runController.hasPendingShutdownResume(runId),
+    isProviderRegistered: (name) => agentProviders[name] !== undefined,
+    reloadConfig: async () => {
+      await reloadConfigAndRecordOutcome();
+    },
+    resolveToken: (tokenRef) => resolveToken(tokenRef, env),
+    runStore,
+    scheduleResume: (input) => runController.scheduleOverrideReviewResume(input)
+  });
+
   // adopt-pr (ADR-2026-09-03-1158): attaches an already-open pull request to a
   // fresh Run parked at an operator-chosen wait/merge_pr state. Defined as
   // its own const rather than inline in the createHttpApp options object
@@ -2217,6 +2247,7 @@ export async function startDaemon(
         ? { freshState, ok: true }
         : { error: mergeError, freshState, ok: false };
     },
+    providerOverrideReview,
     providerRecovery,
     providerStart,
     writeIssueLabels: async (input): Promise<WriteIssueLabelsResult> => {

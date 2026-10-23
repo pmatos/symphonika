@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { expandWorkflowDefinition } from "../src/workflow/fsm-expansion.js";
 import {
+  diffStateDefinitions,
   isCurrentStateDefinitionDigest,
   stateDefinitionEvidence
 } from "../src/workflow/state-definition-digest.js";
@@ -182,5 +183,57 @@ describe("state definition digest", () => {
         { to: "implement", when: {} }
       ]
     });
+  });
+});
+
+describe("diffStateDefinitions", () => {
+  function definitionOf(lines: string[]) {
+    const loaded = expandWorkflowDefinition(
+      workflow(lines),
+      "workflow.yml",
+      "auto"
+    );
+    expect(loaded.errors).toEqual([]);
+    const state = loaded.workflow.states.find(
+      (entry) => entry.id === "implement"
+    );
+    return stateDefinitionEvidence(state!).definition;
+  }
+
+  it("reports nothing for equal definitions", () => {
+    expect(
+      diffStateDefinitions(definitionOf(BASE), definitionOf(BASE))
+    ).toEqual([]);
+  });
+
+  it("names each changed part with its before and after values", () => {
+    const edited = BASE.map((line) =>
+      line
+        .replace("prompts/implement.md", "prompts/other.md")
+        .replace("provider: claude", "provider: codex")
+    );
+
+    expect(
+      diffStateDefinitions(definitionOf(BASE), definitionOf(edited))
+    ).toEqual([
+      {
+        after: '"prompts/other.md"',
+        before: '"prompts/implement.md"',
+        field: "action.prompt"
+      },
+      { after: '"codex"', before: '"claude"', field: "action.provider" }
+    ]);
+  });
+
+  it("reports a transition edit as one change to transitions", () => {
+    const edited = [...BASE.slice(0, -1), "  - to: done"];
+
+    const changes = diffStateDefinitions(
+      definitionOf(BASE),
+      definitionOf(edited)
+    );
+
+    expect(changes.map((change) => change.field)).toEqual(["transitions"]);
+    expect(changes[0]?.after).toContain('"to":"done"');
   });
 });

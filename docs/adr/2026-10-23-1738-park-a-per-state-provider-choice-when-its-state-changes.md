@@ -140,6 +140,10 @@ the review: it does not touch the stored choice, and a removed state is refused 
 
 ## What stage 2 needs
 
+Settled by ADR-2026-10-23-1820: the plan entry is rewritten, at the resumed Run's claim, by the one
+audited review action; the recovery link is replaced by the review link for a parked Run; a
+removed-state review is not resolvable in the product. The list below is what stage 1 left for it.
+
 Stage 2 is the guarded review and rebind action (`POST` plus a page) and the timeline entry. This
 stage leaves it everything it must read and one thing it must add:
 

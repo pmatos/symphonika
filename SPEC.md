@@ -666,6 +666,24 @@ different digest, **parks** the Run Chain before any provider launches: a `block
 choices, an unrelated state's edit, a recovery launch, an Attempt retry, and a choice recorded without
 a digest (written before this behaviour) never park.
 
+An operator resolves a parked review (ADR-2026-10-23-1820) with `GET`/`POST
+/issues/:project/:number/review-override` (and `POST /api/issues/:project/:number/review-override`
+with `{runId, stateId, newDigest, resolution, provider?}`; same authentication, CSRF gate and
+`202`/`409`/`422` statuses as recovery). The preview, built after a config reload, shows the
+recorded and current definition digests with a field-by-field diff, the selected provider and the
+chain-wide provider. The resolution is `keep` the recorded provider, `rebind` the state to another
+configured provider, or `drop` the choice (the state then follows the chain-wide provider); none is
+preselected. It reuses recovery's guards (head Run, open Issue, no claim label, no live
+reservation), refuses a stale `newDigest` (`evidence-changed`) and a state that no longer exists
+(`state-removed`), and renders each refusal ending "Nothing was written." Accepting writes a
+`chain_provider_interventions` row of kind `override_review` (adding `resolution`, `old_digest`,
+`new_digest`) and schedules a Continuation Run of the parked Run at the same state. The plan's
+per-state entry is rewritten, to the current definition and the resolved provider or removed, only
+when that Run claims, in the transaction that settles the row `launched`; until then the review
+stays open. The resumed state and later passes through it do not park again, and a later edit of
+the state parks it again. The Issue page links to the review instead of the recovery while the
+newest Run is parked for review.
+
 An operator can **recover** a stopped state with a different provider (ADR-2026-10-23-0903):
 `POST /api/issues/:project/:number/recover` with `{runId, stateId, provider}` is authenticated and
 CSRF-protected like every mutating route (ADR 0075), and answers `202` when accepted, `409` for a live Issue Reservation, a held

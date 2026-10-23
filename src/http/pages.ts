@@ -154,6 +154,13 @@ import {
   type ProviderRecoveryRefusalReason,
   type ProviderRecoveryService
 } from "../issues/provider-recovery.js";
+import {
+  overrideReviewHttpStatus,
+  type OverrideReviewOutcome,
+  type OverrideReviewPreview,
+  type OverrideReviewRefusalReason,
+  type OverrideReviewService
+} from "../issues/provider-override-review.js";
 import type {
   ProviderStartOutcome,
   ProviderStartPreview,
@@ -283,6 +290,9 @@ export type RegisterPagesOptions = {
   // #863's recovery of a stopped state with another provider. See
   // HttpAppOptions.providerRecovery (src/http/app.ts).
   providerRecovery?: ProviderRecoveryService;
+  // #864's review of a per-state provider choice whose state changed. See
+  // HttpAppOptions.providerOverrideReview (src/http/app.ts).
+  providerOverrideReview?: OverrideReviewService;
   // #308 part 2's label-write action. See HttpAppOptions.writeIssueLabels
   // (src/http/app.ts).
   writeIssueLabels?: WriteIssueLabelsFn;
@@ -958,6 +968,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         detail,
         pollNowAvailable: options.pollNow !== undefined,
         recoveryOffer: loadRecoveryOffer(detail),
+        reviewOffer: loadReviewOffer(detail),
         startAvailable: options.providerStart !== undefined,
         startPlan: loadStartPlan(detail)
       })
@@ -970,6 +981,12 @@ export function registerPages(options: RegisterPagesOptions): void {
   function loadRecoveryOffer(
     detail: IssueDetail
   ): IssueRecoveryOffer | undefined {
+    // A chain parked for an override review is resolved through the review,
+    // which also repairs the stored choice; recovery would launch once and
+    // park the same state again the next time the walk enters it.
+    if (loadReviewOffer(detail) !== undefined) {
+      return undefined;
+    }
     const preview = options.providerRecovery?.preview(
       detail.projectName,
       detail.issueNumber
@@ -977,6 +994,15 @@ export function registerPages(options: RegisterPagesOptions): void {
     return preview === undefined || preview.blockers.length > 0
       ? undefined
       : { stateId: preview.state.id ?? "" };
+  }
+
+  // The entry point exists exactly while the Issue's newest Run is parked for
+  // an override review.
+  function loadReviewOffer(detail: IssueDetail): IssueReviewOffer | undefined {
+    return options.providerOverrideReview?.findOpenReview(
+      detail.projectName,
+      detail.issueNumber
+    );
   }
 
   function loadStartPlan(detail: IssueDetail): ProviderPlan | undefined {
@@ -1179,6 +1205,104 @@ export function registerPages(options: RegisterPagesOptions): void {
     }
   );
 
+  async function renderReviewPage(
+    context: Context,
+    projectName: string,
+    issueNumberParam: string,
+    outcome: OverrideReviewOutcome | undefined
+  ): Promise<Response> {
+    const issueNumber = Number.parseInt(issueNumberParam, 10);
+    const preview =
+      options.providerOverrideReview !== undefined &&
+      Number.isInteger(issueNumber) &&
+      issueNumber > 0
+        ? await options.providerOverrideReview.preview(projectName, issueNumber)
+        : undefined;
+    const issueHref = escapeHtml(
+      issueDetailHref(
+        projectName,
+        Number.isInteger(issueNumber) ? issueNumber : 0
+      )
+    );
+    if (preview === undefined) {
+      // A resolved review no longer has a preview; its accepted banner is the
+      // page's whole content then.
+      const accepted = outcome?.kind === "accepted" ? outcome : undefined;
+      const status =
+        outcome === undefined ? 404 : overrideReviewHttpStatus(outcome);
+      return context.html(
+        layout(
+          "No provider override review",
+          `<h1 class="page-title">${accepted === undefined ? "No provider override review" : "Review resolved"}</h1>${outcome === undefined ? "" : renderReviewBanner(outcome, issueHref)}<p class="lede">${escapeHtml(projectName)}#${escapeHtml(issueNumberParam)} ${accepted === undefined ? "has no Run parked for a provider override review here: nothing is waiting, the Project is not a dispatch Project, or the action is not wired." : "was resumed."}</p><p class="note"><a href="${issueHref}">← Back to the Issue</a></p>`
+        ),
+        status
+      );
+    }
+    const csrfToken = csrfTokenFor(options.csrfSecret, ensureSession(context));
+    const status =
+      outcome === undefined ? 200 : overrideReviewHttpStatus(outcome);
+    return context.html(
+      layout(
+        `Review provider override for #${issueNumber}`,
+        renderIssueReviewPage({
+          csrfToken,
+          issueNumber,
+          outcome,
+          preview,
+          projectName
+        })
+      ),
+      status
+    );
+  }
+
+  options.app.get("/issues/:project/:number/review-override", (context) =>
+    renderReviewPage(
+      context,
+      context.req.param("project"),
+      context.req.param("number"),
+      undefined
+    )
+  );
+
+  options.app.post(
+    "/issues/:project/:number/review-override",
+    requireAuthorizedMutation,
+    async (context) => {
+      const projectName = context.req.param("project");
+      const numberParam = context.req.param("number");
+      const issueNumber = Number.parseInt(numberParam, 10);
+      const body = (await context.req.parseBody()) as Record<string, unknown>;
+      // One radio group: `keep`, `drop`, or `rebind:<provider>`.
+      const choice = readOptionalFormField(body, "resolution") ?? "";
+      const [resolution = "", provider = ""] = choice.split(":");
+      const outcome: OverrideReviewOutcome =
+        options.providerOverrideReview === undefined
+          ? {
+              error: "override review is not available on this daemon",
+              kind: "error"
+            }
+          : choice === ""
+            ? {
+                error:
+                  "choose whether to keep the recorded provider, rebind the state to another, or drop the choice",
+                kind: "refused",
+                reason: "invalid-resolution"
+              }
+            : await options.providerOverrideReview.resolve({
+                issueNumber,
+                newDigest: readOptionalFormField(body, "new_digest") ?? "",
+                projectName,
+                provider,
+                requestedVia: "http",
+                resolution,
+                runId: readOptionalFormField(body, "run_id") ?? "",
+                stateId: readOptionalFormField(body, "state_id") ?? ""
+              });
+      return renderReviewPage(context, projectName, numberParam, outcome);
+    }
+  );
+
   async function handleIssueLabelWrite(
     context: Context,
     projectName: string,
@@ -1232,6 +1356,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         detail,
         pollNowAvailable: options.pollNow !== undefined,
         recoveryOffer: loadRecoveryOffer(detail),
+        reviewOffer: loadReviewOffer(detail),
         startAvailable: options.providerStart !== undefined,
         startPlan: loadStartPlan(detail)
       })
@@ -1409,6 +1534,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         detail,
         pollNowAvailable: options.pollNow !== undefined,
         recoveryOffer: loadRecoveryOffer(detail),
+        reviewOffer: loadReviewOffer(detail),
         startAvailable: options.providerStart !== undefined,
         startPlan: loadStartPlan(detail)
       })
@@ -5039,9 +5165,7 @@ async function loadIssueRunChainViews(
     projectName
   });
   const recoveredRunIds = new Set(
-    interventions
-      .filter((intervention) => intervention.kind === "recovery")
-      .map((intervention) => intervention.fromRunId)
+    interventions.map((intervention) => intervention.fromRunId)
   );
 
   const groups = groupRunsIntoChains(runs);
@@ -5200,14 +5324,48 @@ function chainRowEvidence(row: ChainStateRow): string {
 }
 
 const INTERVENTION_OUTCOME_LABELS: Record<
-  ProviderIntervention["outcome"],
-  { family: "ok" | "fail" | "blocked" | "progress" | "neutral"; text: string }
+  ProviderIntervention["kind"],
+  Record<
+    ProviderIntervention["outcome"],
+    { family: "ok" | "fail" | "blocked" | "progress" | "neutral"; text: string }
+  >
 > = {
-  dropped: { family: "fail", text: "Recovery dropped" },
-  failed: { family: "fail", text: "Recovery failed" },
-  launched: { family: "progress", text: "Recovery launched" },
-  scheduled: { family: "progress", text: "Recovery scheduled" }
+  override_review: {
+    dropped: { family: "fail", text: "Review resolution dropped" },
+    failed: { family: "fail", text: "Review resolution failed" },
+    launched: { family: "progress", text: "Review resolved, chain resumed" },
+    scheduled: { family: "progress", text: "Review resolution scheduled" }
+  },
+  recovery: {
+    dropped: { family: "fail", text: "Recovery dropped" },
+    failed: { family: "fail", text: "Recovery failed" },
+    launched: { family: "progress", text: "Recovery launched" },
+    scheduled: { family: "progress", text: "Recovery scheduled" }
+  }
 };
+
+function shortDigest(digest: string | null): string {
+  if (digest === null) {
+    return "absent";
+  }
+  const [, algorithm = "", hex = ""] = digest.split(":");
+  return `${algorithm}:${hex.slice(0, 12)}`;
+}
+
+// What the operator decided for a reviewed provider choice, as one clause.
+function describeReviewDecision(intervention: ProviderIntervention): string {
+  const recorded = intervention.fromProvider ?? "the recorded provider";
+  switch (intervention.resolution) {
+    case "keep":
+      return `kept ${escapeHtml(recorded)} for the changed state`;
+    case "rebind":
+      return `rebound the state from ${escapeHtml(recorded)} to ${escapeHtml(intervention.toProvider)}`;
+    case "drop":
+      return `dropped the ${escapeHtml(recorded)} choice; the state now follows the chain-wide ${escapeHtml(intervention.toProvider)}`;
+    default:
+      return "resolved the review";
+  }
+}
 
 function renderInterventionOutcomeDetail(
   entry: IssueRunChainIntervention
@@ -5224,7 +5382,11 @@ function renderInterventionOutcomeDetail(
       return `New Run ${runLink}${toRun === undefined ? "" : ` is ${escapeHtml(toRun.state)}`}.`;
     case "failed":
     case "dropped":
-      return `${escapeHtml(intervention.lastError ?? "no reason recorded")}${runLink === "" ? "" : ` (Run ${runLink})`}. The stopped Run above is unchanged.`;
+      return `${escapeHtml(intervention.lastError ?? "no reason recorded")}${runLink === "" ? "" : ` (Run ${runLink})`}. ${
+        intervention.kind === "override_review"
+          ? "The parked Run above is unchanged and the stored choice was not rewritten."
+          : "The stopped Run above is unchanged."
+      }`;
   }
 }
 
@@ -5238,11 +5400,12 @@ function renderInterventionRows(
     .filter((entry) => entry.intervention.fromRunId === fromRunId)
     .map((entry) => {
       const { intervention } = entry;
-      const label = INTERVENTION_OUTCOME_LABELS[intervention.outcome];
-      const kind =
-        intervention.kind === "recovery"
-          ? "Operator recovery"
-          : "Operator intervention";
+      const label =
+        INTERVENTION_OUTCOME_LABELS[intervention.kind][intervention.outcome];
+      if (intervention.kind === "override_review") {
+        return `<tr class="chain-intervention" id="${escapeHtml(`chain-${view.group.rootRunId}-intervention-${intervention.id}`)}"><td colspan="8"><strong>Operator override review</strong> at <code>${escapeHtml(intervention.stateId)}</code>: ${describeReviewDecision(intervention)} <span class="muted">(definition <code>${escapeHtml(shortDigest(intervention.oldDigest))}</code> → <code>${escapeHtml(shortDigest(intervention.newDigest))}</code>; requested via ${escapeHtml(intervention.requestedVia)} at ${renderTimestamp(intervention.createdAt)})</span> ${labelPill(label.text, label.family)} ${renderInterventionOutcomeDetail(entry)}</td></tr>`;
+      }
+      const kind = "Operator recovery";
       return `<tr class="chain-intervention" id="${escapeHtml(`chain-${view.group.rootRunId}-intervention-${intervention.id}`)}"><td colspan="8"><strong>${kind}</strong> at <code>${escapeHtml(intervention.stateId)}</code>: ${escapeHtml(intervention.fromProvider ?? "unknown provider")} → ${escapeHtml(intervention.toProvider)} <span class="muted">(${describeProviderSource({ kind: "operator_recovery" }, true)}; requested via ${escapeHtml(intervention.requestedVia)} at ${renderTimestamp(intervention.createdAt)})</span> ${labelPill(label.text, label.family)} ${renderInterventionOutcomeDetail(entry)}</td></tr>`;
     })
     .join("");
@@ -5493,6 +5656,8 @@ function issueDetailHref(projectName: string, issueNumber: number): string {
 
 type IssueRecoveryOffer = { stateId: string };
 
+type IssueReviewOffer = { stateId: string };
+
 type IssueStartBannerInput = {
   action: "cancel" | "retry" | "start";
   outcome: ProviderStartOutcome;
@@ -5690,6 +5855,164 @@ function renderIssueRecoverPage(input: {
   return `<h1 class="page-title">Recover #${issueNumber} ${escapeHtml(preview.run.issueTitle)}</h1><p class="note">${escapeHtml(projectName)}</p>${outcome === undefined ? "" : renderRecoverBanner(outcome, issueHref)}${renderRecoverPageFacts(preview)}${renderRecoverConsequences(preview)}${verdict}${form}<p class="note"><a href="${escapeHtml(issueHref)}">← Back to the Issue</a></p>`;
 }
 
+const REVIEW_REFUSAL_TITLES: Record<OverrideReviewRefusalReason, string> = {
+  "claim-held": "The Issue still holds a claim",
+  duplicate: "A resolution of this review is already in progress",
+  "evidence-changed": "This review is out of date",
+  "invalid-position": "This position cannot be resumed",
+  "invalid-resolution": "That resolution is not valid",
+  "issue-closed": "The Issue is closed",
+  "live-run": "Work is still executing or scheduled",
+  "no-open-review": "No open review for this Run",
+  "not-a-dispatch-project": "Not a dispatch Project",
+  "position-mismatch": "This review is out of date",
+  "provider-unavailable": "That provider is not available",
+  "repository-mismatch": "The Run belongs to another repository",
+  "run-not-found": "No such Run for this Issue",
+  "shutting-down": "The daemon is shutting down",
+  "state-removed": "The state no longer exists",
+  superseded: "A later Run exists",
+  "workflow-not-fsm": "The workflow is not a raw FSM"
+};
+
+function renderReviewBanner(
+  outcome: OverrideReviewOutcome,
+  issueHref: string
+): string {
+  switch (outcome.kind) {
+    case "accepted": {
+      const decision =
+        outcome.resolution === "keep"
+          ? `kept <code>${escapeHtml(outcome.provider)}</code> for`
+          : outcome.resolution === "rebind"
+            ? `rebound to <code>${escapeHtml(outcome.provider)}</code> for`
+            : `dropped the choice, so <code>${escapeHtml(outcome.provider)}</code> (the chain-wide provider) runs`;
+      return `<div class="alert alert--ok" role="status"><strong>Review resolved</strong><p>You ${decision} state <code>${escapeHtml(outcome.stateId)}</code>. It will be re-entered as a new Continuation Run of <a href="/runs/${encodeURIComponent(outcome.fromRunId)}"><code>${escapeHtml(outcome.fromRunId)}</code></a>. Follow it in the <a href="${issueHref}">Issue's Run Chain timeline</a>.</p></div>`;
+    }
+    case "refused":
+      return `<div class="alert" role="alert"><strong>Review not resolved: ${escapeHtml(REVIEW_REFUSAL_TITLES[outcome.reason])}</strong><p>${escapeHtml(outcome.error)}</p><p>Nothing was written.</p></div>`;
+    case "error":
+      return `<div class="alert" role="alert"><strong>Review could not be resolved</strong><p>${escapeHtml(outcome.error)}</p><p>Nothing was written and no Run was launched.</p></div>`;
+  }
+}
+
+function renderReviewFacts(preview: OverrideReviewPreview): string {
+  const { run } = preview;
+  const fact = (term: string, value: string): string =>
+    `<dt>${term}</dt><dd>${value}</dd>`;
+  const graph = preview.capturedGraph;
+  return `<dl class="facts">${[
+    fact(
+      "Issue",
+      escapeHtml(
+        `${preview.repository.owner}/${preview.repository.repo}#${run.issueNumber}`
+      )
+    ),
+    fact(
+      "State under review",
+      `<code>${escapeHtml(preview.stateId)}</code>${preview.current === undefined ? ' <span class="muted">(no longer in the workflow)</span>' : ""}`
+    ),
+    fact(
+      "Selected provider",
+      `<code>${escapeHtml(preview.recordedProvider)}</code> <span class="muted">(your choice for this state when the Run Chain started)</span>`
+    ),
+    fact(
+      "Chain-wide provider",
+      `<code>${escapeHtml(preview.chainProvider)}</code> <span class="muted">(what the state follows if the choice is dropped)</span>`
+    ),
+    fact(
+      "Parked Run",
+      `<a href="/runs/${encodeURIComponent(run.id)}"><code>${escapeHtml(run.id)}</code></a> ${statePill(run.state)}`
+    ),
+    fact(
+      "Why it is parked",
+      run.terminalReason === null ? "—" : escapeHtml(run.terminalReason)
+    ),
+    fact(
+      "Workflow now",
+      preview.workflowName === undefined
+        ? "—"
+        : escapeHtml(preview.workflowName)
+    ),
+    fact(
+      "Graph the chain walked",
+      graph === undefined
+        ? "no captured workflow graph (nothing has launched in this chain yet)"
+        : `${escapeHtml(graph.workflowName)}, <code>${escapeHtml(graph.contentHash)}</code> captured by <a href="/runs/${encodeURIComponent(graph.runId)}"><code>${escapeHtml(graph.runId)}</code></a>; <code>${escapeHtml(preview.stateId)}</code> there: ${graph.stateDigest === null ? "absent" : `<code>${escapeHtml(shortDigest(graph.stateDigest))}</code>`}`
+    )
+  ].join("")}</dl>`;
+}
+
+function renderReviewEvidence(preview: OverrideReviewPreview): string {
+  const { current, recorded } = preview;
+  const digests = `<dl class="facts"><dt>Recorded definition</dt><dd><code>${escapeHtml(recorded.digest)}</code></dd><dt>Current definition</dt><dd>${current === undefined ? "absent" : `<code>${escapeHtml(current.digest)}</code>`}</dd></dl>`;
+  const changes =
+    current === undefined
+      ? `<p>The state no longer exists in the current workflow.</p>`
+      : preview.changes.length === 0
+        ? `<p>The definition matches the recorded one again: the workflow edit was reverted since the Run parked.</p>`
+        : `<div class="table-wrap"><table><caption>What changed in <code>${escapeHtml(preview.stateId)}</code></caption><thead><tr><th scope="col">Part</th><th scope="col">Recorded</th><th scope="col">Now</th></tr></thead><tbody>${preview.changes.map((change) => `<tr><th scope="row"><code>${escapeHtml(change.field)}</code></th><td><code>${escapeHtml(change.before)}</code></td><td><code>${escapeHtml(change.after)}</code></td></tr>`).join("")}</tbody></table></div>`;
+  const full = `<details><summary>Full definitions</summary><h3 class="subhead">Recorded</h3><pre>${escapeHtml(JSON.stringify(recorded.definition, null, 2))}</pre><h3 class="subhead">Current</h3><pre>${escapeHtml(current === undefined ? "absent" : JSON.stringify(current.definition, null, 2))}</pre></details>`;
+  return `<section id="review-evidence"><h2>Workflow evidence</h2>${digests}${changes}${full}</section>`;
+}
+
+function renderReviewConsequences(preview: OverrideReviewPreview): string {
+  const items = [
+    `Same Run Chain: the chain resumes at <code>${escapeHtml(preview.stateId)}</code> as a new Continuation Run parented to <code>${escapeHtml(preview.run.id)}</code>. The Issue is not restarted and earlier states are not replayed.`,
+    "The Workspace and branch are inherited exactly as they are. The parked Run keeps its blocked state and reason, so the timeline reads park, review, resume.",
+    "Keep binds the recorded provider to the state as it is now. Rebind binds the provider you pick to it. Drop removes the choice, so the state follows the chain-wide provider like any state without one.",
+    "Your decision is recorded as an auditable intervention. The stored choice is rewritten only when the resumed Run claims; if the resume does not launch, the review stays open and nothing changes.",
+    "Later states are unaffected. If the state is edited again after this review, the chain parks for review again.",
+    "GitHub is read again when you resolve. The Issue must still be open with no sym:claimed, sym:running or sym:stale label, and nothing may be executing or scheduled for it."
+  ];
+  return `<section id="review-consequences"><h2>Consequences</h2><ul>${items.map((item) => `<li>${item}</li>`).join("")}</ul></section>`;
+}
+
+function renderIssueReviewPage(input: {
+  csrfToken: string;
+  issueNumber: number;
+  outcome: OverrideReviewOutcome | undefined;
+  preview: OverrideReviewPreview;
+  projectName: string;
+}): string {
+  const { csrfToken, issueNumber, outcome, preview, projectName } = input;
+  const issueHref = escapeHtml(issueDetailHref(projectName, issueNumber));
+  const hidden = (name: string, value: string): string =>
+    `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`;
+  const verdict =
+    preview.blockers.length === 0
+      ? `<p>${labelPill("resolvable", "ok")} Nothing in local state blocks this review. GitHub is re-checked when you resolve.</p>`
+      : `<div class="alert" role="alert"><strong>Cannot be resolved right now</strong><ul>${preview.blockers.map((blocker) => `<li>${escapeHtml(blocker)}</li>`).join("")}</ul></div>`;
+  const radio = (value: string, label: string): string =>
+    `<label><input type="radio" name="resolution" value="${escapeHtml(value)}" required> ${label}</label>`;
+  const choices = [
+    radio(
+      "keep",
+      `Keep <code>${escapeHtml(preview.recordedProvider)}</code> for the changed state`
+    ),
+    ...preview.providers
+      .filter((name) => name !== preview.recordedProvider)
+      .map((name) =>
+        radio(
+          `rebind:${name}`,
+          `Rebind the state to <code>${escapeHtml(name)}</code>`
+        )
+      ),
+    radio(
+      "drop",
+      `Drop the choice (the state follows the chain-wide <code>${escapeHtml(preview.chainProvider)}</code>)`
+    )
+  ].join(" ");
+  const showForm =
+    outcome?.kind !== "accepted" &&
+    preview.blockers.length === 0 &&
+    preview.current !== undefined;
+  const form = showForm
+    ? `<form method="post" action="${issueHref}/review-override" aria-describedby="review-consequences">${hidden(CSRF_FIELD_NAME, csrfToken)}${hidden("run_id", preview.run.id)}${hidden("state_id", preview.stateId)}${hidden("new_digest", preview.current?.digest ?? "")}<fieldset><legend>Provider for <code>${escapeHtml(preview.stateId)}</code> from here on</legend>${choices}</fieldset><button class="btn" type="submit">Record the decision and resume</button></form>`
+    : "";
+  return `<h1 class="page-title">Review provider choice for #${issueNumber} ${escapeHtml(preview.run.issueTitle)}</h1><p class="note">${escapeHtml(projectName)}</p>${outcome === undefined ? "" : renderReviewBanner(outcome, issueHref)}<p class="lede">You chose <code>${escapeHtml(preview.recordedProvider)}</code> for <code>${escapeHtml(preview.stateId)}</code>. The workflow has changed that state since, so Symphonika paused before launching a provider on it.</p>${renderReviewFacts(preview)}${renderReviewEvidence(preview)}${renderReviewConsequences(preview)}${verdict}${form}<p class="note"><a href="${issueHref}">← Back to the Issue</a></p>`;
+}
+
 // #862: the workflow preview's per-state exceptions. Only agent states get a
 // selector; the blank default means the state runs on the chain-wide choice.
 function renderStartStateProviders(
@@ -5763,6 +6086,7 @@ function renderIssueDetailPage(input: {
   detail: IssueDetail;
   pollNowAvailable: boolean;
   recoveryOffer: IssueRecoveryOffer | undefined;
+  reviewOffer: IssueReviewOffer | undefined;
   startAvailable: boolean;
   startPlan: ProviderPlan | undefined;
 }): string {
@@ -5776,7 +6100,7 @@ function renderIssueDetailPage(input: {
     input.banner === undefined
       ? ""
       : `${renderIssueActionBanner(input.banner)}${offerPollNow && input.pollNowAvailable ? renderPollNowForm(input.csrfToken, "/issues") : ""}`;
-  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${input.startPlan === undefined ? "" : `<div class="alert" role="status"><strong>Provider plan ${escapeHtml(input.startPlan.status)}</strong><p><code>${escapeHtml(input.startPlan.provider)}</code>${input.startPlan.lastError === null ? "" : ` · ${escapeHtml(input.startPlan.lastError)}`}${input.startPlan.status === "label_failed" || input.startPlan.status === "expired" ? " — this Issue will not dispatch until the plan is retried or cancelled." : ""}</p></div>`}${input.startAvailable ? `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/start">Start with a provider…</a></p>` : ""}${input.recoveryOffer === undefined ? "" : `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/recover">Recover <code>${escapeHtml(input.recoveryOffer.stateId)}</code> on another provider…</a></p>`}${renderIssueRunChainSection(input.chains)}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
+  return `<h1 class="page-title">#${detail.issueNumber} ${escapeHtml(detail.snapshot.title)}</h1><p class="note">${escapeHtml(detail.projectName)} · ${labelPill(detail.verdict, issueVerdictFamily(detail.verdict))}</p>${bannerHtml}${input.startPlan === undefined ? "" : `<div class="alert" role="status"><strong>Provider plan ${escapeHtml(input.startPlan.status)}</strong><p><code>${escapeHtml(input.startPlan.provider)}</code>${input.startPlan.lastError === null ? "" : ` · ${escapeHtml(input.startPlan.lastError)}`}${input.startPlan.status === "label_failed" || input.startPlan.status === "expired" ? " — this Issue will not dispatch until the plan is retried or cancelled." : ""}</p></div>`}${input.startAvailable ? `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/start">Start with a provider…</a></p>` : ""}${input.reviewOffer === undefined ? "" : `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/review-override">Review the provider choice for <code>${escapeHtml(input.reviewOffer.stateId)}</code>…</a></p>`}${input.recoveryOffer === undefined ? "" : `<p><a class="btn" href="${escapeHtml(issueDetailHref(detail.projectName, detail.issueNumber))}/recover">Recover <code>${escapeHtml(input.recoveryOffer.stateId)}</code> on another provider…</a></p>`}${renderIssueRunChainSection(input.chains)}${renderIssueDependenciesSection(detail.snapshot.blockedBy, detail.snapshot.blockedByTruncated)}${renderIssueLabelsSection(
     {
       csrfToken: input.csrfToken,
       issueNumber: detail.issueNumber,

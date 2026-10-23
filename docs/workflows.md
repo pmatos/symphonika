@@ -624,6 +624,17 @@ definition then differs, or which no longer exists, the chain parks before any p
 position kept, instead of binding the choice to the edited state. A chain-wide choice never parks,
 nor does a workflow without per-state choices, an edit to a different state, or a choice made before
 this check existed. Renaming a state that the walk no longer heads for just leaves its choice unused.
+
+The Issue page then links to **Review the provider choice for <state>…**
+(`/issues/:project/:number/review-override`). It shows the provider you chose, the recorded and the
+current definition (digests and what changed, field by field) and offers three outcomes: keep the
+recorded provider, rebind the state to another configured provider, or drop the choice so the state
+follows the chain-wide provider. Resolving it records the decision as an audited intervention and
+resumes the same Run Chain at the same state, on a new Continuation Run, without replaying earlier
+states. The stored choice is updated when that Run claims, so the state does not park again as the
+walk passes through it, while a later edit of the state does. If the state no longer exists the
+review cannot be resolved: restore it or start the Issue again. The JSON equivalent is `POST
+/api/issues/:project/:number/review-override`. See ADR-2026-10-23-1820.
 The Issue page's Run Chain timeline shows which level picked each Run's provider. See
 ADR-2026-10-13-0659 and ADR-2026-10-23-1738.
 

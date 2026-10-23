@@ -2,7 +2,8 @@ import type { AgentProviderName } from "../provider.js";
 import type { ProviderPlan, ProviderSelectionSource } from "../run-store.js";
 import {
   isCurrentStateDefinitionDigest,
-  stateDefinitionEvidence
+  stateDefinitionEvidence,
+  type StateDefinitionEvidence
 } from "../workflow/state-definition-digest.js";
 import type { ExpandedWorkflowState } from "../workflow/types.js";
 
@@ -124,6 +125,36 @@ export function findStaleStateOverride(input: {
         provider,
         stateId
       };
+}
+
+// What an operator's review of a stale per-state choice leaves in the plan
+// for that state: the provider and the definition it now describes, or null
+// to drop the choice so the state falls back to the chain-wide one.
+export type ReviewedOverride = {
+  evidence: StateDefinitionEvidence;
+  provider: AgentProviderName;
+} | null;
+
+// The plan as it will read once the review is persisted. The launch that
+// resumes the chain evaluates the detector and the precedence against this,
+// so a workflow edit that lands between the operator's confirm and the launch
+// parks the chain again instead of binding the choice to an unseen definition.
+export function withReviewedOverride<
+  T extends Pick<ProviderPlan, "stateDefinitions" | "stateProviders">
+>(plan: T, stateId: string, override: ReviewedOverride): T {
+  const without = <V>(record: Readonly<Record<string, V>>): Record<string, V> =>
+    Object.fromEntries(Object.entries(record).filter(([id]) => id !== stateId));
+  return {
+    ...plan,
+    stateDefinitions:
+      override === null
+        ? without(plan.stateDefinitions)
+        : { ...without(plan.stateDefinitions), [stateId]: override.evidence },
+    stateProviders:
+      override === null
+        ? without(plan.stateProviders)
+        : { ...without(plan.stateProviders), [stateId]: override.provider }
+  };
 }
 
 // `pending` and `label_written` are what a claim may consume. `label_failed`

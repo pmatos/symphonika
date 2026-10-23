@@ -128,8 +128,8 @@ export type ChainStateRow = {
 // `graphForRun(runId)` returns the ExpandedWorkflow captured by that Run's
 // own latest attempt, or undefined if it has none (waiting/system-action
 // Runs dispatch no provider and so capture no graph of their own).
-// `recoveredRunIds` names the stopped Runs an operator recovery continued
-// from: their failure stays a row of its own instead of reading "Completed"
+// `recoveredRunIds` names the stopped Runs an operator intervention (a
+// recovery, or the resolution of an override review) continued from: their failure stays a row of its own instead of reading "Completed"
 // just because a Continuation now exists.
 export function deriveChainStateRows(
   chainRuns: readonly RunStatus[],

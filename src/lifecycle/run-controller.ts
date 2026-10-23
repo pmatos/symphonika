@@ -132,9 +132,11 @@ import { probeStateClaim, stateGatesOnClaim } from "./claim-probe.js";
 import {
   isAgentState,
   findStaleStateOverride,
+  withReviewedOverride,
   isConsumableProviderPlan,
   resolveEffectiveProvider,
-  type ProviderOverrideReviewFinding
+  type ProviderOverrideReviewFinding,
+  type ReviewedOverride
 } from "./chain-provider.js";
 import {
   DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS,
@@ -523,6 +525,14 @@ type StateAdvancePayload = {
   // Set only by scheduleRecovery (#863): the operator's provider for this one
   // state. Wins over every other level for `toStateId` alone.
   recovery?: { interventionId: string; provider: AgentProviderName };
+  // Set only by scheduleOverrideReviewResume (#864): the operator's resolved
+  // review of a stale per-state choice. `override` is what the plan entry for
+  // `toStateId` becomes once this launch claims; until then the stored plan is
+  // untouched and the launch decides against the plan as it will read.
+  overrideReview?: {
+    interventionId: string;
+    override: ReviewedOverride;
+  };
   // Set only by scheduleShutdownResume. It makes executeStateAdvance's
   // contention reschedule re-arm through that same wrapper, so the resume
   // stays accounted for across every retry. See hasPendingShutdownResume.
@@ -3322,12 +3332,46 @@ export class RunController {
     });
   }
 
+  // Resumes a Run chain parked for an override review (#864) at the parked
+  // state, as a Continuation of the parked Run. Same route as a recovery, but
+  // the provider is not named here: it comes out of the plan, which the launch
+  // reads as the operator's resolution leaves it.
+  scheduleOverrideReviewResume(input: {
+    interventionId: string;
+    issue: IssueSnapshot;
+    override: ReviewedOverride;
+    parentRunId: string;
+    projectName: string;
+    toStateId: string;
+  }): boolean {
+    const payload: StateAdvancePayload = {
+      issue: input.issue,
+      overrideReview: {
+        interventionId: input.interventionId,
+        override: input.override
+      },
+      parentRunId: input.parentRunId,
+      projectName: input.projectName,
+      toStateId: input.toStateId
+    };
+    return this.schedule({
+      delayMs: 0,
+      fire: () => this.executeStateAdvance(payload),
+      issueNumber: input.issue.number,
+      kind: "state_advance",
+      projectName: input.projectName,
+      runId: input.parentRunId
+    });
+  }
+
   // Every exit of a scheduled recovery settles its intervention: the launch
   // itself settles it at the claim, and anything that ends without a Run
   // (closed Issue, dropped Project, shutdown, an error) is recorded here
   // rather than left `scheduled` forever.
   async executeStateAdvance(payload: StateAdvancePayload): Promise<void> {
-    const interventionId = payload.recovery?.interventionId;
+    const interventionId =
+      payload.recovery?.interventionId ??
+      payload.overrideReview?.interventionId;
     if (interventionId === undefined) {
       await this.advanceState(payload);
       return;
@@ -3519,10 +3563,19 @@ export class RunController {
     // An operator's per-state choice for this state was made against a
     // definition that has since changed or vanished (#864). A recovery names
     // its own provider for this one launch, so the stale choice is moot then.
+    const storedPlan = this.runStore.getChainProviderPlan(payload.parentRunId);
+    const plan =
+      payload.overrideReview === undefined || storedPlan === undefined
+        ? storedPlan
+        : withReviewedOverride(
+            storedPlan,
+            payload.toStateId,
+            payload.overrideReview.override
+          );
     const overrideReview =
       recoveryChoice === undefined
         ? findStaleStateOverride({
-            plan: this.runStore.getChainProviderPlan(payload.parentRunId),
+            plan,
             state: targetState,
             stateId: payload.toStateId
           })
@@ -3541,6 +3594,20 @@ export class RunController {
         repository,
         runId
       });
+      if (
+        payload.overrideReview !== undefined &&
+        this.runStore.getRun(runId) !== undefined
+      ) {
+        this.runStore.settleProviderIntervention(
+          { id: payload.overrideReview.interventionId },
+          {
+            error:
+              "the state's definition changed again before the resumed Run launched; the chain was parked for another review",
+            outcome: "failed",
+            toRunId: runId
+          }
+        );
+      }
       return;
     }
 
@@ -3612,7 +3679,7 @@ export class RunController {
 
     const { provider: providerName, source: providerSource } =
       resolveEffectiveProvider({
-        plan: this.runStore.getChainProviderPlan(payload.parentRunId),
+        plan,
         projectDefault: project.agent.provider,
         recovery:
           recoveryChoice === undefined
@@ -3657,11 +3724,13 @@ export class RunController {
     }
 
     const recoveryInterventionId = payload.recovery?.interventionId;
+    const reviewResume = payload.overrideReview;
+    const launchInterventionId =
+      recoveryInterventionId ?? reviewResume?.interventionId;
     try {
       await this.runFreshLifecycle({
-        ...(recoveryInterventionId === undefined
-          ? {}
-          : {
+        ...(recoveryInterventionId !== undefined
+          ? {
               afterClaim: () =>
                 this.settleRecoveryLaunch({
                   interventionId: recoveryInterventionId,
@@ -3669,7 +3738,21 @@ export class RunController {
                   repository,
                   runId
                 })
-            }),
+            }
+          : reviewResume !== undefined && plan !== undefined
+            ? {
+                afterClaim: () =>
+                  this.settleOverrideReviewLaunch({
+                    interventionId: reviewResume.interventionId,
+                    issueNumber: refreshed.number,
+                    override: reviewResume.override,
+                    planId: plan.id,
+                    repository,
+                    runId,
+                    stateId: targetState.id
+                  })
+              }
+            : {}),
         attemptNumber: 1,
         ...(payload.extraInstructions === undefined
           ? {}
@@ -3760,8 +3843,8 @@ export class RunController {
           this.scheduleShutdownResume(payload);
           return;
         }
-        if (recoveryInterventionId !== undefined) {
-          this.contendedRecoveries.add(recoveryInterventionId);
+        if (launchInterventionId !== undefined) {
+          this.contendedRecoveries.add(launchInterventionId);
         }
         await this.scheduleRunWork({
           delayMs: this.lifecyclePolicy.continuation.delayMs,
@@ -3803,6 +3886,38 @@ export class RunController {
       this.logger?.error(
         { err: error, interventionId: input.interventionId },
         "symphonika failed to record a launched provider recovery"
+      );
+    }
+    await this.claimLabels.clearStoppedVerdict({
+      issueNumber: input.issueNumber,
+      repository: input.repository
+    });
+  }
+
+  // The review counterpart of settleRecoveryLaunch: the plan entry changes
+  // here, in the transaction that records the launch, never earlier, so a
+  // resume that does not reach its claim leaves the review open.
+  private async settleOverrideReviewLaunch(input: {
+    interventionId: string;
+    issueNumber: number;
+    override: ReviewedOverride;
+    planId: string;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+    stateId: string;
+  }): Promise<void> {
+    try {
+      this.runStore.settleOverrideReviewLaunch({
+        interventionId: input.interventionId,
+        override: input.override,
+        planId: input.planId,
+        stateId: input.stateId,
+        toRunId: input.runId
+      });
+    } catch (error) {
+      this.logger?.error(
+        { err: error, interventionId: input.interventionId },
+        "symphonika failed to record a launched override review"
       );
     }
     await this.claimLabels.clearStoppedVerdict({
@@ -3898,10 +4013,12 @@ export class RunController {
     this.runStore.updateRunState(input.runId, "failed");
     // A scheduled recovery of this parent ended in this failed Run rather than
     // an attempt; a no-op for every other advance.
-    this.runStore.settleProviderIntervention(
-      { fromRunId: input.parentRunId, kind: "recovery" },
-      { error: input.reason, outcome: "failed", toRunId: input.runId }
-    );
+    for (const kind of ["recovery", "override_review"] as const) {
+      this.runStore.settleProviderIntervention(
+        { fromRunId: input.parentRunId, kind },
+        { error: input.reason, outcome: "failed", toRunId: input.runId }
+      );
+    }
     this.logger?.warn(
       {
         issueNumber: input.issue.number,

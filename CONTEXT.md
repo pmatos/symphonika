@@ -124,6 +124,13 @@ DSL — Symphonika never parses issue body text to infer blockers, only GitHub's
 issue-dependencies GraphQL relationship. See ADR-0081 and ADR-0082.
 _Avoid_: dependency graph (the `/issues/graph` display) when referring to this gating check
 
+**Native Parent**:
+An Issue's GitHub-native parent/sub-issue link (`Issue.parent`), recorded on each poll's issue snapshot
+as present, none, or unavailable evidence. Display evidence only: it is fetched separately from
+`blockedBy`, never feeds the Dependency Gate, and a failed read is `unavailable`, never "no parent".
+See ADR-2026-10-23-0852.
+_Avoid_: epic membership or blocker when referring to this link
+
 **Continuation Eligibility**:
 The question "may this already-owned Run lifecycle keep going?", including open state for every Run,
 and label and Dependency Gate (see docs/adr/0081-issue-dependency-gating-and-graph-view.md)

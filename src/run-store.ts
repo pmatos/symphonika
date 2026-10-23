@@ -5,6 +5,7 @@ import DatabaseConstructor from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import type {
+  IssueNativeParent,
   IssueSnapshot,
   RawGitHubIssueDependencyRef
 } from "./issue-polling.js";
@@ -387,6 +388,12 @@ export type ProjectIssueSnapshotRow = {
   issueNumber: number;
   kind: ProjectIssueSnapshotKind;
   labels: string[];
+  // GitHub-native parent evidence (fetchIssueHierarchy, src/issue-polling.ts),
+  // stored beside the heading parse and never derived from blockedBy.
+  // Absent when the poll recorded none (fetcher not configured, or a row
+  // persisted before this column existed) — which is not the same as a
+  // recorded `none` or `unavailable`.
+  nativeParent?: IssueNativeParent;
   // Best-effort "## Parent" heading parse (parseParentIssueNumber,
   // src/issue-polling.ts) — display-only graph clustering, never a
   // gating signal. Absent when the body had no parseable heading.
@@ -425,6 +432,7 @@ export type ReplaceProjectIssueSnapshotsInput = {
     issueNumber: number;
     kind: ProjectIssueSnapshotKind;
     labels: string[];
+    nativeParent?: IssueNativeParent;
     parentIssueNumber?: number;
     priority: number;
     reasons: string[];
@@ -991,6 +999,7 @@ type ProjectIssueSnapshotDbRow = {
   issue_number: number;
   kind: ProjectIssueSnapshotKind;
   labels: string | null;
+  native_parent: string | null;
   parent_issue_number: number | null;
   polled_at: string;
   priority: number;
@@ -2988,12 +2997,12 @@ export class RunStore {
         [
           "insert into project_issue_snapshots (",
           "project_name, issue_number, kind, title, priority, reasons, labels,",
-          "blocked_by, blocked_by_truncated, parent_issue_number, issue_created_at,",
+          "blocked_by, blocked_by_truncated, native_parent, parent_issue_number, issue_created_at,",
           "repository_owner, repository_name, polled_at,",
           "created_at, updated_at",
           ") values (",
           "@project_name, @issue_number, @kind, @title, @priority, @reasons, @labels,",
-          "@blocked_by, @blocked_by_truncated, @parent_issue_number, @issue_created_at,",
+          "@blocked_by, @blocked_by_truncated, @native_parent, @parent_issue_number, @issue_created_at,",
           "@repository_owner, @repository_name, @polled_at,",
           "@created_at, @updated_at",
           ")"
@@ -3008,6 +3017,10 @@ export class RunStore {
           issue_number: row.issueNumber,
           kind: row.kind,
           labels: encodeJsonArrayColumn(row.labels),
+          native_parent:
+            row.nativeParent === undefined
+              ? null
+              : JSON.stringify(row.nativeParent),
           parent_issue_number: row.parentIssueNumber ?? null,
           polled_at: input.polledAt,
           priority: row.priority,
@@ -3052,7 +3065,7 @@ export class RunStore {
       .prepare(
         [
           "select issue_number, kind, title, priority, reasons, labels,",
-          "blocked_by, blocked_by_truncated, parent_issue_number, issue_created_at, polled_at",
+          "blocked_by, blocked_by_truncated, native_parent, parent_issue_number, issue_created_at, polled_at",
           "from project_issue_snapshots where project_name = ?",
           `order by issue_number ${limit === undefined ? "asc" : "desc"}`,
           limit === undefined ? "" : "limit ?"
@@ -3076,7 +3089,7 @@ export class RunStore {
       .prepare(
         [
           "select issue_number, kind, title, priority, reasons, labels,",
-          "blocked_by, blocked_by_truncated, parent_issue_number, polled_at",
+          "blocked_by, blocked_by_truncated, native_parent, parent_issue_number, polled_at",
           "from project_issue_snapshots where project_name = ? and issue_number = ?"
         ].join(" ")
       )
@@ -7835,6 +7848,7 @@ export class RunStore {
         "integer not null default 0"
       ],
       ["project_issue_snapshots", "parent_issue_number", "integer"],
+      ["project_issue_snapshots", "native_parent", "text"],
       ["project_issue_snapshots", "issue_created_at", "text"],
       ["project_issue_snapshots", "repository_owner", "text"],
       ["project_issue_snapshots", "repository_name", "text"],
@@ -8868,6 +8882,49 @@ function snapshotRepository(
   return { owner: row.repository_owner, repo: row.repository_name };
 }
 
+// A column that no longer parses to a recognised shape reads back as
+// `unavailable`, never as a guessed parent or as `none`.
+function decodeNativeParentColumn(value: string): IssueNativeParent {
+  try {
+    const parsed = JSON.parse(value) as {
+      availability?: unknown;
+      crossRepository?: unknown;
+      number?: unknown;
+      owner?: unknown;
+      repo?: unknown;
+      state?: unknown;
+      title?: unknown;
+    } | null;
+    if (parsed === null || typeof parsed !== "object") {
+      return { availability: "unavailable" };
+    }
+    if (parsed.availability === "none") {
+      return { availability: "none" };
+    }
+    if (
+      parsed.availability === "present" &&
+      typeof parsed.number === "number" &&
+      typeof parsed.owner === "string" &&
+      typeof parsed.repo === "string" &&
+      (parsed.state === "OPEN" || parsed.state === "CLOSED") &&
+      typeof parsed.crossRepository === "boolean"
+    ) {
+      return {
+        availability: "present",
+        crossRepository: parsed.crossRepository,
+        number: parsed.number,
+        owner: parsed.owner,
+        repo: parsed.repo,
+        state: parsed.state,
+        title: typeof parsed.title === "string" ? parsed.title : ""
+      };
+    }
+  } catch {
+    // fall through to unavailable
+  }
+  return { availability: "unavailable" };
+}
+
 function mapProjectIssueSnapshotRow(
   row: ProjectIssueSnapshotDbRow
 ): ProjectIssueSnapshotRow {
@@ -8882,6 +8939,9 @@ function mapProjectIssueSnapshotRow(
     issueNumber: row.issue_number,
     kind: row.kind,
     labels: decodeJsonArrayColumn<string>(row.labels),
+    ...(row.native_parent === null
+      ? {}
+      : { nativeParent: decodeNativeParentColumn(row.native_parent) }),
     ...(row.parent_issue_number === null
       ? {}
       : { parentIssueNumber: row.parent_issue_number }),

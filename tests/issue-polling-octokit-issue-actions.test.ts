@@ -208,3 +208,41 @@ describe("OctokitGitHubIssuesApi.getIssueDependencies", () => {
     expect(graphql.mock.calls[0]?.[1]).not.toHaveProperty("request");
   });
 });
+
+describe("OctokitGitHubIssuesApi.getIssueHierarchy", () => {
+  beforeEach(() => {
+    graphql.mockReset().mockResolvedValue({ repository: {} });
+  });
+
+  it("forwards an abort signal under request so the GraphQL call can be bounded", async () => {
+    const controller = new AbortController();
+    const result = await DEFAULT_GITHUB_ISSUES_API.getIssueHierarchy?.({
+      issueNumbers: [7],
+      owner: "pmatos",
+      repo: "symphonika",
+      signal: controller.signal,
+      token: "secret"
+    });
+
+    expect(graphql).toHaveBeenCalledWith(
+      expect.stringContaining("parent"),
+      expect.objectContaining({
+        owner: "pmatos",
+        repo: "symphonika",
+        request: { signal: controller.signal }
+      })
+    );
+    expect(result?.get(7)).toEqual({ availability: "unavailable" });
+  });
+
+  it("sends no request option when no signal is given", async () => {
+    await DEFAULT_GITHUB_ISSUES_API.getIssueHierarchy?.({
+      issueNumbers: [7],
+      owner: "pmatos",
+      repo: "symphonika",
+      token: "secret"
+    });
+
+    expect(graphql.mock.calls[0]?.[1]).not.toHaveProperty("request");
+  });
+});

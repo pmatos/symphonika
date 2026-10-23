@@ -2649,6 +2649,7 @@ function projectIssueSnapshotRows(
   issueNumber: number;
   kind: "candidate" | "filtered";
   labels: string[];
+  nativeParent?: import("./issue-polling.js").IssueNativeParent;
   parentIssueNumber?: number;
   priority: number;
   reasons: string[];
@@ -2669,6 +2670,9 @@ function projectIssueSnapshotRows(
       issueNumber: entry.issue.number,
       kind: "candidate" as const,
       labels: entry.issue.labels,
+      ...(entry.issue.nativeParent === undefined
+        ? {}
+        : { nativeParent: entry.issue.nativeParent }),
       ...(entry.issue.parentIssueNumber === undefined
         ? {}
         : { parentIssueNumber: entry.issue.parentIssueNumber }),
@@ -2691,6 +2695,9 @@ function projectIssueSnapshotRows(
       issueNumber: entry.issue.number,
       kind: "filtered" as const,
       labels: entry.issue.labels,
+      ...(entry.issue.nativeParent === undefined
+        ? {}
+        : { nativeParent: entry.issue.nativeParent }),
       ...(entry.issue.parentIssueNumber === undefined
         ? {}
         : { parentIssueNumber: entry.issue.parentIssueNumber }),

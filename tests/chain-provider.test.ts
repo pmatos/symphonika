@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   findStaleStateOverride,
   isAgentState,
-  resolveEffectiveProvider
+  resolveEffectiveProvider,
+  withReviewedOverride
 } from "../src/lifecycle/chain-provider.js";
 import { stateDefinitionEvidence } from "../src/workflow/state-definition-digest.js";
 
@@ -248,5 +249,45 @@ describe("findStaleStateOverride", () => {
         stateId: "review"
       })
     ).toBeUndefined();
+  });
+});
+
+describe("withReviewedOverride", () => {
+  const stateWith = (prompt: string) => ({
+    action: { kind: "agent" as const, prompt },
+    completeWhen: {},
+    id: "review",
+    transitions: []
+  });
+  const before = stateDefinitionEvidence(stateWith("a.md"));
+  const after = stateDefinitionEvidence(stateWith("b.md"));
+  const plan = {
+    stateDefinitions: { other: before, review: before },
+    stateProviders: { other: "omp" as const, review: "codex" as const }
+  };
+
+  it("rebinds one state's provider and definition and leaves the rest and the input alone", () => {
+    const result = withReviewedOverride(plan, "review", {
+      evidence: after,
+      provider: "claude"
+    });
+
+    expect(result.stateProviders).toEqual({ other: "omp", review: "claude" });
+    expect(result.stateDefinitions).toEqual({ other: before, review: after });
+    expect(plan.stateProviders.review).toBe("codex");
+    expect(
+      findStaleStateOverride({
+        plan: result,
+        state: stateWith("b.md"),
+        stateId: "review"
+      })
+    ).toBeUndefined();
+  });
+
+  it("drops the choice from both maps", () => {
+    const result = withReviewedOverride(plan, "review", null);
+
+    expect(result.stateProviders).toEqual({ other: "omp" });
+    expect(result.stateDefinitions).toEqual({ other: before });
   });
 });

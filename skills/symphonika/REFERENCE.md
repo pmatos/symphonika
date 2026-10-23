@@ -72,7 +72,9 @@ Project's `agent.provider` when omitted. Per-state routing is fully honored; mix
 across states in one FSM. An operator's chain-wide choice made through the Issue page's "Start with
 a provider…" action outranks both for that Run Chain, and a per-state choice made there outranks
 the chain-wide one for that state (and parks the chain before launch if that state's definition
-later changes or disappears, with a `blocked` Run reading `provider_override_review_required`);
+later changes or disappears, with a `blocked` Run reading `provider_override_review_required`,
+resolved from the Issue page's "Review the provider choice…" link: keep, rebind or drop the choice,
+then the chain resumes at the same state; `POST /api/issues/:project/:number/review-override`);
 recovering a stopped state on another provider
 (the Issue page's "Recover … on another provider" link, or `POST /api/issues/:project/:number/recover`)
 outranks all of them for that one state (see

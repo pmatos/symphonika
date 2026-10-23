@@ -29,7 +29,7 @@ const PROVIDER_CHOICES: readonly AgentProviderName[] = [
   "codex"
 ];
 
-const DEFAULT_GITHUB_TIMEOUT_MS = 15_000;
+export const DEFAULT_GITHUB_TIMEOUT_MS = 15_000;
 
 // A Run that stopped and is waiting on a human. A `waiting` Run is not here on
 // purpose: it is a live Run (it holds its claim, its PR and its schedule) and
@@ -165,11 +165,11 @@ export type ProviderRecoveryDeps = {
   }) => boolean;
 };
 
-function claimHeldMessage(held: readonly string[]): string {
+export function claimHeldMessage(held: readonly string[]): string {
   return `the Issue still carries ${held.join(", ")}; clear the stale claim first, or wait for the live Run it belongs to`;
 }
 
-function heldClaimLabels(labels: readonly string[]): string[] {
+export function heldClaimLabels(labels: readonly string[]): string[] {
   return CLAIM_LABELS.filter((claimLabel) =>
     labels.some((label) => label.toLowerCase() === claimLabel)
   );
@@ -188,7 +188,25 @@ function refuse(
   };
 }
 
-function errorMessage(error: unknown): string {
+// The providers an operator may route a state to: configured with a command
+// and registered with the daemon.
+export function availableProviders(
+  deps: Pick<
+    ProviderRecoveryDeps,
+    "getProvidersConfig" | "isProviderRegistered"
+  >
+): AgentProviderName[] {
+  const providersConfig = deps.getProvidersConfig() as Partial<
+    Record<AgentProviderName, { command: string }>
+  >;
+  return PROVIDER_CHOICES.filter(
+    (name) =>
+      (providersConfig[name]?.command ?? "").trim().length > 0 &&
+      deps.isProviderRegistered(name)
+  );
+}
+
+export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -319,7 +337,7 @@ export function createProviderRecoveryService(
     const provider = request.provider;
     if (
       !isAgentProviderName(provider) ||
-      !availableProviders().includes(provider)
+      !availableProviders(deps).includes(provider)
     ) {
       return refuse(
         "provider-unavailable",
@@ -442,17 +460,6 @@ export function createProviderRecoveryService(
     };
   }
 
-  function availableProviders(): AgentProviderName[] {
-    const providersConfig = deps.getProvidersConfig() as Partial<
-      Record<AgentProviderName, { command: string }>
-    >;
-    return PROVIDER_CHOICES.filter(
-      (name) =>
-        (providersConfig[name]?.command ?? "").trim().length > 0 &&
-        deps.isProviderRegistered(name)
-    );
-  }
-
   // The candidate is the Issue's newest Run: recovery only ever re-enters the
   // head of the history, and localRefusal says why a newer Run supersedes an
   // older one. A preview exists whenever the Issue has a Run to describe, even
@@ -495,7 +502,7 @@ export function createProviderRecoveryService(
     if (held.length > 0) {
       blockers.push(claimHeldMessage(held));
     }
-    const providers = availableProviders();
+    const providers = availableProviders(deps);
     if (providers.length === 0) {
       blockers.push("no provider is configured and registered");
     }

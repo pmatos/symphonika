@@ -1641,8 +1641,12 @@ export type ProviderIntervention = {
   id: string;
   kind: InterventionKind;
   lastError: string | null;
+  newDigest: string | null;
+  oldDigest: string | null;
   outcome: ProviderInterventionOutcome;
   requestedVia: string;
+  // `keep`, `rebind` or `drop` for an `override_review`; null for a recovery.
+  resolution: string | null;
   stateId: string;
   toProvider: string;
   toRunId: string | null;
@@ -1657,8 +1661,11 @@ type ProviderInterventionDbRow = {
   id: string;
   kind: string;
   last_error: string | null;
+  new_digest: string | null;
+  old_digest: string | null;
   outcome: string;
   requested_via: string;
+  resolution: string | null;
   state_id: string;
   to_provider: string;
   to_run_id: string | null;
@@ -1671,9 +1678,13 @@ export type CreateProviderInterventionInput = {
   id: string;
   issueNumber: number;
   kind: InterventionKind;
+  // The definition digests an `override_review` decided between.
+  newDigest?: string;
+  oldDigest?: string;
   projectName: string;
   repository: { owner: string; repo: string };
   requestedVia: string;
+  resolution?: string;
   stateId: string;
   toProvider: AgentProviderName;
 };
@@ -1990,11 +2001,11 @@ export class RunStore {
             "insert into chain_provider_interventions (",
             "id, kind, project_name, issue_number, repository_owner, repository_name,",
             "chain_root_run_id, from_run_id, state_id, from_provider, to_provider,",
-            "requested_via, outcome, created_at, updated_at",
+            "requested_via, resolution, old_digest, new_digest, outcome, created_at, updated_at",
             ") values (",
             "@id, @kind, @projectName, @issueNumber, @owner, @repo,",
             "@chainRootRunId, @fromRunId, @stateId, @fromProvider, @toProvider,",
-            "@requestedVia, 'scheduled', @now, @now)"
+            "@requestedVia, @resolution, @oldDigest, @newDigest, 'scheduled', @now, @now)"
           ].join(" ")
         )
         .run({
@@ -2004,11 +2015,14 @@ export class RunStore {
           id: input.id,
           issueNumber: input.issueNumber,
           kind: input.kind,
+          newDigest: input.newDigest ?? null,
           now,
+          oldDigest: input.oldDigest ?? null,
           owner: input.repository.owner,
           projectName: input.projectName,
           repo: input.repository.repo,
           requestedVia: input.requestedVia,
+          resolution: input.resolution ?? null,
           stateId: input.stateId,
           toProvider: input.toProvider
         });
@@ -2044,6 +2058,58 @@ export class RunStore {
     return changes > 0;
   }
 
+  // The one place a consumed plan's per-state choice is rewritten (#864): an
+  // operator's resolved override review, applied together with settling its
+  // intervention as `launched`, so the plan changes only when the resumed
+  // chain actually claimed. Every exit before the claim leaves the plan, and
+  // so the open review, untouched. `override` null drops the choice.
+  settleOverrideReviewLaunch(input: {
+    interventionId: string;
+    override: {
+      evidence: StateDefinitionEvidence;
+      provider: AgentProviderName;
+    } | null;
+    planId: string;
+    stateId: string;
+    toRunId: string;
+  }): void {
+    const apply = this.database.transaction(() => {
+      const row = this.database
+        .prepare(
+          "select state_providers_json from run_chain_provider_plans where id = ?"
+        )
+        .get(input.planId) as
+        { state_providers_json: string | null } | undefined;
+      if (row === undefined) {
+        throw new Error(`provider plan ${input.planId} does not exist`);
+      }
+      const stored: Record<string, unknown> =
+        row.state_providers_json === null
+          ? {}
+          : (JSON.parse(row.state_providers_json) as Record<string, unknown>);
+      if (input.override === null) {
+        delete stored[input.stateId];
+      } else {
+        stored[input.stateId] = {
+          definition: input.override.evidence.definition,
+          definitionDigest: input.override.evidence.digest,
+          provider: input.override.provider
+        };
+      }
+      const now = timestamp();
+      this.database
+        .prepare(
+          "update run_chain_provider_plans set state_providers_json = ?, updated_at = ? where id = ?"
+        )
+        .run(JSON.stringify(stored), now, input.planId);
+      this.settleProviderIntervention(
+        { id: input.interventionId },
+        { outcome: "launched", toRunId: input.toRunId }
+      );
+    });
+    apply();
+  }
+
   // Every intervention recorded for an Issue, oldest first, for the Run Chain
   // timeline. Keyed by Project and Issue number like the Run list it joins.
   listProviderInterventions(input: {
@@ -2054,8 +2120,8 @@ export class RunStore {
       .prepare(
         [
           "select id, kind, chain_root_run_id, from_run_id, to_run_id, state_id,",
-          "from_provider, to_provider, requested_via, outcome, last_error,",
-          "created_at, updated_at",
+          "from_provider, to_provider, requested_via, resolution, old_digest,",
+          "new_digest, outcome, last_error, created_at, updated_at",
           "from chain_provider_interventions",
           "where project_name = ? and issue_number = ?",
           "order by created_at, rowid"
@@ -2070,8 +2136,11 @@ export class RunStore {
       id: row.id,
       kind: row.kind as InterventionKind,
       lastError: row.last_error,
+      newDigest: row.new_digest,
+      oldDigest: row.old_digest,
       outcome: row.outcome as ProviderInterventionOutcome,
       requestedVia: row.requested_via,
+      resolution: row.resolution,
       stateId: row.state_id,
       toProvider: row.to_provider,
       toRunId: row.to_run_id,
@@ -8082,6 +8151,9 @@ export class RunStore {
       ["runs", "provider_plan_id", "text"],
       ["runs", "provider_source", "text"],
       ["run_chain_provider_plans", "state_providers_json", "text"],
+      ["chain_provider_interventions", "resolution", "text"],
+      ["chain_provider_interventions", "old_digest", "text"],
+      ["chain_provider_interventions", "new_digest", "text"],
       // Defensive: workspace_path has been in the base `create table` since
       // this table's first version, so no real database should ever reach
       // this line missing it. It is here only so the new

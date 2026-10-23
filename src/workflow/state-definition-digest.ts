@@ -116,3 +116,51 @@ export function stateDefinitionEvidence(
 export function isCurrentStateDefinitionDigest(digest: string): boolean {
   return digest.startsWith(`${STATE_DEFINITION_DIGEST_VERSION}:`);
 }
+
+export type StateDefinitionChange = {
+  after: string;
+  before: string;
+  field: string;
+};
+
+function describeValue(value: unknown): string {
+  return value === undefined ? "(not set)" : JSON.stringify(value);
+}
+
+// The parts of two canonical definitions that differ, in a fixed order, for
+// the operator's review. Compares the canonical form, so it reports exactly
+// what the digest saw and nothing the parser discards.
+export function diffStateDefinitions(
+  before: StateDefinitionEvidence["definition"],
+  after: StateDefinitionEvidence["definition"]
+): StateDefinitionChange[] {
+  const actionKeys = [
+    "kind",
+    "prompt",
+    "provider",
+    "method",
+    "stateReason",
+    "labels",
+    "body"
+  ] as const;
+  const pairs: Array<[string, unknown, unknown]> = [
+    ...actionKeys.map((key): [string, unknown, unknown] => [
+      `action.${key}`,
+      before.action?.[key],
+      after.action?.[key]
+    ]),
+    ["complete_when", before.completeWhen, after.completeWhen],
+    ["transitions", before.transitions, after.transitions],
+    ["terminal", before.terminal, after.terminal]
+  ];
+  return pairs
+    .filter(
+      ([, was, now]) =>
+        JSON.stringify(was ?? null) !== JSON.stringify(now ?? null)
+    )
+    .map(([field, was, now]) => ({
+      after: describeValue(now),
+      before: describeValue(was),
+      field
+    }));
+}

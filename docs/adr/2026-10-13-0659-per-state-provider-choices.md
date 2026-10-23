@@ -71,3 +71,5 @@ without a record keep the graph-derived description.
   ADR-2026-10-23-0903: a Continuation Run re-enters the stopped state under a new highest-precedence
   `operator_recovery` level that outranks the per-state choice above for that state only, and the
   plan is not rewritten.
+- "Immutable once consumed" has one audited exception: the operator's resolution of an override
+  review (ADR-2026-10-23-1820) rewrites the per-state entry it resolved, at the resumed Run's claim.

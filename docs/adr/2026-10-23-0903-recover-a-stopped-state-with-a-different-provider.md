@@ -172,3 +172,6 @@ gate as Start. The decisions this stage settled:
   "Completed". Each intervention is a row after the Run it acted on, with its outcome. For a
   `launched` recovery the new Run is linked and its current state shown; `failed` and `dropped`
   outcomes carry the recorded reason and leave the stopped Run as the visible failure.
+- Override review (#864) is the one intervention that does rewrite the plan, because its purpose is to
+  repair a stale per-state entry; it shares this recovery's guards and launch route
+  (ADR-2026-10-23-1820).

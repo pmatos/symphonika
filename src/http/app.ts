@@ -65,6 +65,10 @@ import {
   recoveryHttpStatus,
   type ProviderRecoveryService
 } from "../issues/provider-recovery.js";
+import {
+  overrideReviewHttpStatus,
+  type OverrideReviewService
+} from "../issues/provider-override-review.js";
 import type { ProviderStartService } from "../issues/provider-start.js";
 import type { MaestroConfig } from "../maestro/config.js";
 import type { MaestroModel } from "../maestro/model.js";
@@ -372,6 +376,9 @@ export type HttpAppOptions = {
   // #863's guarded "recover a stopped state with a different provider" action.
   // Optional like providerStart; the route answers 503 when it is unwired.
   providerRecovery?: ProviderRecoveryService;
+  // #864's guarded review of a per-state provider choice whose state changed.
+  // Optional like providerRecovery; the route answers 503 when it is unwired.
+  providerOverrideReview?: OverrideReviewService;
   // #308 part 2's label-write action: adds/removes non-sym:* labels on a
   // GitHub issue. See docs/adr/0077-issue-triage-and-label-writes.md.
   writeIssueLabels?: WriteIssueLabelsFn;
@@ -931,6 +938,43 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       }
     );
 
+    // Review of a per-state provider choice after a workflow edit (#864,
+    // ADR-2026-10-23-1738). The JSON route; the dashboard's preview/resolve
+    // page is /issues/:project/:number/review-override (src/http/pages.ts).
+    app.post(
+      "/api/issues/:project/:number/review-override",
+      requireAuthorizedMutation,
+      async (context) => {
+        if (options.providerOverrideReview === undefined) {
+          return context.json({ kind: "unavailable" }, 503);
+        }
+        let body: unknown;
+        try {
+          body = await context.req.json();
+        } catch {
+          return context.json(
+            { kind: "error", error: "invalid JSON body" },
+            400
+          );
+        }
+        const parsed = parseResolveOverrideReviewBody(body);
+        const issueNumber = Number(context.req.param("number"));
+        if (parsed === undefined || !Number.isInteger(issueNumber)) {
+          return context.json(
+            { kind: "error", error: "invalid request body" },
+            400
+          );
+        }
+        const outcome = await options.providerOverrideReview.resolve({
+          ...parsed,
+          issueNumber,
+          projectName: context.req.param("project"),
+          requestedVia: "http"
+        });
+        return context.json(outcome, overrideReviewHttpStatus(outcome));
+      }
+    );
+
     registerPages({
       app,
       csrfSecret,
@@ -1012,6 +1056,9 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       ...(options.providerRecovery === undefined
         ? {}
         : { providerRecovery: options.providerRecovery }),
+      ...(options.providerOverrideReview === undefined
+        ? {}
+        : { providerOverrideReview: options.providerOverrideReview }),
       ...(options.writeIssueLabels === undefined
         ? {}
         : { writeIssueLabels: options.writeIssueLabels })
@@ -1157,6 +1204,37 @@ function parseRecoverStoppedStateBody(
     return undefined;
   }
   return { provider, runId, stateId };
+}
+
+function parseResolveOverrideReviewBody(body: unknown):
+  | {
+      newDigest: string;
+      provider: string;
+      resolution: string;
+      runId: string;
+      stateId: string;
+    }
+  | undefined {
+  if (typeof body !== "object" || body === null) {
+    return undefined;
+  }
+  const { newDigest, provider, resolution, runId, stateId } = body as Record<
+    string,
+    unknown
+  >;
+  if (
+    typeof newDigest !== "string" ||
+    typeof resolution !== "string" ||
+    resolution === "" ||
+    typeof runId !== "string" ||
+    runId === "" ||
+    typeof stateId !== "string" ||
+    stateId === "" ||
+    (provider !== undefined && typeof provider !== "string")
+  ) {
+    return undefined;
+  }
+  return { newDigest, provider: provider ?? "", resolution, runId, stateId };
 }
 
 // Only these five RunArtifactKind values have a Firing evidence-path

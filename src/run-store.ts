@@ -7658,8 +7658,8 @@ export class RunStore {
     // from `runs`/`attempts`/etc.: a chat message is discussion evidence,
     // never Run evidence, and must never be mistaken for completed work. A
     // `scope`/`project_name` pair identifies one durable conversation;
-    // dashboard scope (this slice) always has project_name null. Project
-    // scope (#866) will use the same tables with project_name set.
+    // dashboard scope always has project_name null; Project scope (#866)
+    // uses the same tables with project_name set.
     this.database.exec(`
       create table if not exists maestro_conversations (
         id text primary key,
@@ -8399,12 +8399,13 @@ export class RunStore {
     return filePath;
   }
 
-  // Maestro conversation persistence (#865). Deliberately not surfaced on
-  // `listRuns`/`getRun`/status counts — a chat message is discussion
-  // evidence, never Run evidence (CONTEXT.md's Maestro boundary). The
-  // dashboard scope has exactly one durable conversation, identified by
-  // `scope = 'dashboard' and project_name is null`; project scope (#866)
-  // will reuse these tables keyed by project_name instead.
+  // Maestro conversation persistence (#865, #866). Deliberately not surfaced
+  // on `listRuns`/`getRun`/status counts — a chat message is discussion
+  // evidence, never Run evidence (CONTEXT.md's Maestro boundary). Each scope
+  // owns exactly one durable conversation: the dashboard is
+  // `scope = 'dashboard' and project_name is null`, and a Project is
+  // `scope = 'project' and project_name = <name>`. Histories never share a
+  // conversation id, so navigating between scopes cannot merge or leak them.
   findDashboardMaestroConversation(): { id: string } | undefined {
     const row = this.database
       .prepare(
@@ -8425,6 +8426,34 @@ export class RunStore {
         "insert into maestro_conversations (id, scope, project_name, created_at, updated_at) values (@id, 'dashboard', null, @now, @now)"
       )
       .run({ id: input.id, now });
+    return input.id;
+  }
+
+  findProjectMaestroConversation(
+    projectName: string
+  ): { id: string } | undefined {
+    const row = this.database
+      .prepare(
+        "select id from maestro_conversations where scope = 'project' and project_name = ?"
+      )
+      .get(projectName) as { id: string } | undefined;
+    return row === undefined ? undefined : { id: row.id };
+  }
+
+  ensureProjectMaestroConversation(input: {
+    id: string;
+    projectName: string;
+  }): string {
+    const existing = this.findProjectMaestroConversation(input.projectName);
+    if (existing !== undefined) {
+      return existing.id;
+    }
+    const now = timestamp();
+    this.database
+      .prepare(
+        "insert into maestro_conversations (id, scope, project_name, created_at, updated_at) values (@id, 'project', @projectName, @now, @now)"
+      )
+      .run({ id: input.id, now, projectName: input.projectName });
     return input.id;
   }
 

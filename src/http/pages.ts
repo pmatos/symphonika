@@ -1662,7 +1662,8 @@ export function registerPages(options: RegisterPagesOptions): void {
           renderRoutineHostCapacityStrip(name, projectState, inFlight),
           `<section>${sectionHead("Issues", 0)}<div class="empty"><strong>No issues — this is a Routine Host</strong>A Routine Host (ADR 0062) never polls or dispatches issues; it only hosts Routine Firings, listed below.</div></section>`,
           renderProjectFiringsBlock(firings),
-          `<p class="note"><a href="/runs?project=${encodeURIComponent(name)}">Recent runs →</a></p>`
+          `<p class="note"><a href="/runs?project=${encodeURIComponent(name)}">Recent runs →</a></p>`,
+          renderProjectMaestroLink(name)
         ].join("")
       );
       return context.html(html);
@@ -1738,7 +1739,8 @@ export function registerPages(options: RegisterPagesOptions): void {
         options.getProjectWorkflowPath?.(name) === undefined
           ? ""
           : `<p class="note"><a href="/projects/${encodeURIComponent(name)}/workflow/edit">Edit workflow →</a></p>`,
-        `<p class="note"><a href="/runs?project=${encodeURIComponent(name)}">Recent runs →</a></p>`
+        `<p class="note"><a href="/runs?project=${encodeURIComponent(name)}">Recent runs →</a></p>`,
+        renderProjectMaestroLink(name)
       ].join("")
     );
     return context.html(html);
@@ -3671,6 +3673,10 @@ function renderProjectQueuePolicy(
     `<p class="note"><a href="/projects/${encodeURIComponent(name)}/settings">Edit settings →</a></p>`,
     "</section>"
   ].join("");
+}
+
+function renderProjectMaestroLink(name: string): string {
+  return `<p class="note"><a href="/projects/${encodeURIComponent(name)}/maestro">Ask Maestro about this Project →</a></p>`;
 }
 
 function renderProjectFiringsBlock(firings: RoutineFiringStatus[]): string {

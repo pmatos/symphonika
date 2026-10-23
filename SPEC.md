@@ -3044,9 +3044,9 @@ The v1 mutating local HTTP API actions are explicit active-run cancellation, a m
 trigger that uses the normal daemon scheduler path, daemon-owned manual Routine firing, and a
 manual self-update trigger that uses the normal update-coordinator path (ADR 0087). The
 server-rendered dashboard exposes only cancellation and poll-now controls; manual Routine firing and
-the manual self-update trigger are CLI/API actions (ADR 0067). `POST /maestro/messages` (`#865`) is
-the one exception limited to dashboard scope: it writes only `maestro_conversations`/
-`maestro_messages` rows — never a Run, an Issue label, or a GitHub mutation of any kind.
+the manual self-update trigger are CLI/API actions (ADR 0067). `POST /maestro/messages` (`#865`) and
+`POST /projects/:name/maestro/messages` (`#866`) are the exceptions limited to Maestro chat: each
+writes only `maestro_conversations`/`maestro_messages` rows — never a Run, an Issue label, or a GitHub mutation of any kind.
 
 Every mutating route — those above and every one a later slice adds — requires the request to
 either carry no browser fetch-metadata (`Origin`/`Sec-Fetch-Site` both absent, the CLI's own bare
@@ -3490,10 +3490,26 @@ repository before any git subprocess runs; `none` (the default) offers no reposi
 contents, and search hits are untrusted evidence, secret-shaped paths are withheld, and known token values
 are redacted. The `/maestro` page states the configured disclosure setting.
 
-This slice is dashboard scope only: there is no Project-focused chat yet (`#866`) and no rolling
-7/30-day evidence-linked briefings (`#868`). Apart from the `workspace_*` tools above, no tool calls
-GitHub live; every other tool reads only persisted RunStore snapshots from the daemon's normal poll
-cadence.
+Project focus (`#866`): `GET /projects/:name/maestro` and `POST /projects/:name/maestro/messages`
+are a second scope of the same chat, linked from the Project page (`/projects/:name`, including a
+Routine Host Project, whose conversation stays readable). Each scope owns exactly one durable
+conversation in the same tables: the dashboard is `scope = 'dashboard'` with no `project_name`, a Project is
+`scope = 'project'` with that `project_name` (`RunStore.findProjectMaestroConversation`/
+`ensureProjectMaestroConversation`). Histories never share a conversation id, so navigating between the
+dashboard and Projects never merges, leaks, or overwrites them, and only a scope's own history is resent to
+the model. An unknown Project gets the same 404 page as `/projects/:name`, on both GET and POST (the POST is
+CSRF-checked first, exactly like `POST /maestro/messages`). The conversation lock is per scope, so a slow
+answer in one Project does not block another, while a second submit in the same scope is still refused.
+A focused turn (`runMaestroTurn`'s `focus`) appends a paragraph naming the Project to the system prompt and,
+because a prompt alone is advisory, defaults an omitted `project_name` on `list_issues`, `get_issue`,
+`list_runs`, and `list_pull_requests` — and an omitted workspace target (no `project_name`, `repository`, or
+`run_id`) — to the focus Project. The focus only fills in an omitted argument and never restricts one: an
+operator who names another configured Project gets that Project's evidence, cited like any other. The tool
+surface and read-only boundary are identical in every scope.
+
+This slice does not add rolling 7/30-day evidence-linked briefings (`#868`). Apart from the `workspace_*`
+tools above, no tool calls GitHub live; every other tool reads only persisted RunStore snapshots from the
+daemon's normal poll cadence.
 
 Maestro's model configuration lives under the optional `maestro:` Service Config block (§5.1),
 independent of `providers.codex/claude/omp`: selecting or changing Maestro's model never selects or

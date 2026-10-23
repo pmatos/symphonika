@@ -270,14 +270,22 @@ function parseRepository(
 async function resolveWorkspaceTarget(
   input: unknown,
   reader: MaestroEvidenceReader,
-  workspace: MaestroWorkspaceAccess
+  workspace: MaestroWorkspaceAccess,
+  focusProjectName: string | undefined
 ): Promise<
   | { kind: "refused"; reason: string }
   | { kind: "resolved"; result: MaestroResolveResult }
 > {
-  const projectName = stringField(input, "project_name");
   const repository = stringField(input, "repository");
   const runId = stringField(input, "run_id");
+  // A focused conversation reads its own Project's repository when the
+  // model names no target at all; an explicit repository, run_id, or
+  // project_name always wins, so another Project stays reachable.
+  const projectName =
+    stringField(input, "project_name") ??
+    (repository === undefined && runId === undefined
+      ? focusProjectName
+      : undefined);
 
   if (runId !== undefined) {
     if (repository !== undefined) {
@@ -358,6 +366,7 @@ async function resolveWorkspaceTarget(
 }
 
 async function executeWorkspaceTool(input: {
+  focusProjectName: string | undefined;
   input: unknown;
   name: string;
   reader: MaestroEvidenceReader;
@@ -386,7 +395,8 @@ async function executeWorkspaceTool(input: {
   const target = await resolveWorkspaceTarget(
     input.input,
     input.reader,
-    input.workspace
+    input.workspace,
+    input.focusProjectName
   );
   if (target.kind === "refused") {
     return target;
@@ -532,6 +542,13 @@ function stringField(input: unknown, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function projectNameField(
+  input: unknown,
+  focusProjectName: string | undefined
+): string | undefined {
+  return stringField(input, "project_name") ?? focusProjectName;
+}
+
 function integerField(input: unknown, key: string): number | undefined {
   if (!isRecord(input)) {
     return undefined;
@@ -543,6 +560,10 @@ function integerField(input: unknown, key: string): number | undefined {
 }
 
 export async function executeMaestroTool(input: {
+  // The Project a Project-scope conversation is focused on (#866). It only
+  // defaults an omitted project_name; it never restricts which Project a
+  // tool call may name.
+  focusProjectName?: string | undefined;
   input: unknown;
   name: string;
   reader: MaestroEvidenceReader;
@@ -560,6 +581,7 @@ export async function executeMaestroTool(input: {
       };
     }
     return await executeWorkspaceTool({
+      focusProjectName: input.focusProjectName,
       input: input.input,
       name: input.name,
       reader: input.reader,
@@ -577,7 +599,7 @@ export async function executeMaestroTool(input: {
   }
 
   if (input.name === "list_issues") {
-    const projectName = stringField(input.input, "project_name");
+    const projectName = projectNameField(input.input, input.focusProjectName);
     if (projectName === undefined) {
       return { kind: "refused", reason: "project_name is required" };
     }
@@ -590,7 +612,7 @@ export async function executeMaestroTool(input: {
   }
 
   if (input.name === "get_issue") {
-    const projectName = stringField(input.input, "project_name");
+    const projectName = projectNameField(input.input, input.focusProjectName);
     const issueNumber = integerField(input.input, "issue_number");
     if (projectName === undefined || issueNumber === undefined) {
       return {
@@ -607,7 +629,7 @@ export async function executeMaestroTool(input: {
   }
 
   if (input.name === "list_runs") {
-    const projectName = stringField(input.input, "project_name");
+    const projectName = projectNameField(input.input, input.focusProjectName);
     const runs = input.reader.listRuns(projectName);
     return { citations: runs.map(runCitation), kind: "ok", output: runs };
   }
@@ -626,7 +648,7 @@ export async function executeMaestroTool(input: {
   }
 
   if (input.name === "list_pull_requests") {
-    const projectName = stringField(input.input, "project_name");
+    const projectName = projectNameField(input.input, input.focusProjectName);
     if (projectName === undefined) {
       return { kind: "refused", reason: "project_name is required" };
     }

@@ -553,3 +553,387 @@ describe("Maestro repository content over HTTP (#867)", () => {
     }
   );
 });
+
+describe("Maestro Project-focused chat (#866)", () => {
+  function seedProject(
+    runStore: RunStore,
+    name: string,
+    issueNumber: number,
+    runId: string
+  ): void {
+    runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-10-06T12:00:00.000Z",
+      projectName: name,
+      rows: [
+        {
+          blockedBy: [],
+          blockedByTruncated: false,
+          issueNumber,
+          kind: "candidate",
+          labels: [],
+          priority: 0,
+          reasons: [],
+          title: `${name} issue`
+        }
+      ]
+    });
+    runStore.createRun({
+      id: runId,
+      issue: {
+        body: "",
+        created_at: "2026-10-06T11:00:00Z",
+        id: issueNumber,
+        labels: [],
+        number: issueNumber,
+        priority: 0,
+        state: "open",
+        title: `${name} issue`,
+        updated_at: "2026-10-06T11:00:00Z",
+        url: `https://example.invalid/${issueNumber}`
+      },
+      projectName: name,
+      providerCommand: "codex",
+      providerName: "codex"
+    });
+  }
+
+  async function setupProjects(): Promise<Awaited<ReturnType<typeof setup>>> {
+    const test = await setup();
+    test.runStore.syncProjectStates([{ name: "alpha" }, { name: "beta" }]);
+    seedProject(test.runStore, "alpha", 1, "run-alpha");
+    seedProject(test.runStore, "beta", 2, "run-beta");
+    return test;
+  }
+
+  function makeApp(
+    test: Awaited<ReturnType<typeof setup>>,
+    createMaestroModel: () => MaestroModel,
+    runStore: RunStore = test.runStore
+  ): ReturnType<typeof createHttpApp> {
+    return createHttpApp({
+      createMaestroModel,
+      csrfSecret: TEST_SECRET,
+      getMaestroConfig: () => MAESTRO_CONFIG,
+      runStore,
+      stateRoot: test.stateRoot,
+      version: "0.1.0"
+    });
+  }
+
+  function post(
+    app: ReturnType<typeof createHttpApp>,
+    urlPath: string,
+    message: string,
+    token: string = VALID_TOKEN
+  ): Promise<Response> {
+    return Promise.resolve(
+      app.request(urlPath, {
+        body: formBody({ csrf_token: token, message }),
+        headers: {
+          ...browserHeaders(),
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        method: "POST",
+        redirect: "manual"
+      })
+    );
+  }
+
+  async function page(
+    app: ReturnType<typeof createHttpApp>,
+    urlPath: string
+  ): Promise<string> {
+    return await (
+      await app.request(urlPath, { headers: browserHeaders() })
+    ).text();
+  }
+
+  function scriptedTools(
+    toolUses: Array<{ input: unknown; name: string }>,
+    finalText: string
+  ): () => MaestroModel {
+    return () => {
+      let round = 0;
+      return {
+        nextTurn: () => {
+          round += 1;
+          return Promise.resolve(
+            round === 1
+              ? {
+                  kind: "tool_use" as const,
+                  toolUses: toolUses.map((toolUse, index) => ({
+                    ...toolUse,
+                    id: `toolu_${index}`
+                  }))
+                }
+              : { kind: "message" as const, text: finalText }
+          );
+        }
+      };
+    };
+  }
+
+  it("renders a Project conversation page with a form posting to the Project route", async () => {
+    const test = await setupProjects();
+    try {
+      const app = makeApp(test, () => fakeModel("unused"));
+      const response = await app.request("/projects/alpha/maestro", {
+        headers: browserHeaders()
+      });
+      const html = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(html).toContain('action="/projects/alpha/maestro/messages"');
+      expect(html).toContain('href="/projects/alpha"');
+      expect(html).toContain("No messages yet.");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("links to the Project conversation from the Project page", async () => {
+    const test = await setupProjects();
+    try {
+      const app = makeApp(test, () => fakeModel("unused"));
+      const html = await page(app, "/projects/alpha");
+      expect(html).toContain('href="/projects/alpha/maestro"');
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("returns 404 for an unknown Project on both GET and POST, persisting nothing", async () => {
+    const test = await setupProjects();
+    try {
+      const app = makeApp(test, () => fakeModel("should never run"));
+
+      const get = await app.request("/projects/nope/maestro", {
+        headers: browserHeaders()
+      });
+      const postResponse = await post(
+        app,
+        "/projects/nope/maestro/messages",
+        "hello"
+      );
+
+      expect(get.status).toBe(404);
+      expect(postResponse.status).toBe(404);
+      expect(
+        test.runStore.findProjectMaestroConversation("nope")
+      ).toBeUndefined();
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("rejects a Project POST with a bad CSRF token before doing anything", async () => {
+    const test = await setupProjects();
+    try {
+      const app = makeApp(test, () => fakeModel("should never run"));
+      const response = await post(
+        app,
+        "/projects/alpha/maestro/messages",
+        "hello",
+        "wrong"
+      );
+
+      expect(response.status).toBe(403);
+      expect(
+        test.runStore.findProjectMaestroConversation("alpha")
+      ).toBeUndefined();
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("keeps dashboard, alpha, and beta histories separate, including after a restart", async () => {
+    const test = await setupProjects();
+    const app = makeApp(test, () => fakeModel("Noted."));
+    await post(app, "/maestro/messages", "dashboard-question");
+    const alphaPost = await post(
+      app,
+      "/projects/alpha/maestro/messages",
+      "alpha-question"
+    );
+    await post(app, "/projects/beta/maestro/messages", "beta-question");
+
+    expect(alphaPost.status).toBe(303);
+    expect(alphaPost.headers.get("location")).toBe("/projects/alpha/maestro");
+
+    const check = async (
+      target: ReturnType<typeof createHttpApp>
+    ): Promise<void> => {
+      const dashboard = await page(target, "/maestro");
+      const alpha = await page(target, "/projects/alpha/maestro");
+      const beta = await page(target, "/projects/beta/maestro");
+      expect(dashboard).toContain("dashboard-question");
+      expect(dashboard).not.toContain("alpha-question");
+      expect(dashboard).not.toContain("beta-question");
+      expect(alpha).toContain("alpha-question");
+      expect(alpha).not.toContain("dashboard-question");
+      expect(alpha).not.toContain("beta-question");
+      expect(beta).toContain("beta-question");
+      expect(beta).not.toContain("alpha-question");
+      expect(beta).not.toContain("dashboard-question");
+    };
+    await check(app);
+
+    test.runStore.close();
+    const reopened = openRunStore({ stateRoot: test.stateRoot });
+    try {
+      await check(makeApp(test, () => fakeModel("unused"), reopened));
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("does not resend another scope's history to the model", async () => {
+    const test = await setupProjects();
+    try {
+      const seen: string[][] = [];
+      const app = makeApp(test, () => ({
+        nextTurn: (input) => {
+          seen.push(input.history.map((turn) => JSON.stringify(turn)));
+          return Promise.resolve({ kind: "message", text: "ok" });
+        }
+      }));
+      await post(app, "/maestro/messages", "dashboard-secret-question");
+      await post(app, "/projects/alpha/maestro/messages", "alpha-question");
+
+      expect(seen[1]?.join("")).not.toContain("dashboard-secret-question");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("answers a Project question from that Project's evidence by default", async () => {
+    const test = await setupProjects();
+    try {
+      const app = makeApp(
+        test,
+        scriptedTools([{ input: {}, name: "list_runs" }], "alpha has one run.")
+      );
+      await post(app, "/projects/alpha/maestro/messages", "What is running?");
+      const html = await page(app, "/projects/alpha/maestro");
+
+      expect(html).toContain('href="/runs/run-alpha"');
+      expect(html).not.toContain("run-beta");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("lets an explicit question inspect and cite another Project from a Project conversation", async () => {
+    const test = await setupProjects();
+    try {
+      const app = makeApp(
+        test,
+        scriptedTools(
+          [{ input: { project_name: "beta" }, name: "list_issues" }],
+          "beta#2 is eligible."
+        )
+      );
+      await post(app, "/projects/alpha/maestro/messages", "What about beta?");
+      const html = await page(app, "/projects/alpha/maestro");
+
+      expect(html).toContain('href="/issues/beta/2"');
+      expect(html).toContain("beta#2");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("still refuses write-shaped tool calls from a Project conversation", async () => {
+    const test = await setupProjects();
+    try {
+      const app = makeApp(
+        test,
+        scriptedTools(
+          [{ input: { issue_number: 1, labels: ["done"] }, name: "add_label" }],
+          "I can't do that."
+        )
+      );
+      await post(app, "/projects/alpha/maestro/messages", "label it done");
+      const messages = test.runStore.listMaestroMessages(
+        test.runStore.findProjectMaestroConversation("alpha")?.id ?? ""
+      );
+
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(messages[1]?.citations).toEqual([]);
+      expect(
+        test.runStore
+          .listRuns()
+          .map((run) => run.id)
+          .sort()
+      ).toEqual(["run-alpha", "run-beta"]);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("serializes turns per conversation: a slow Project turn does not block another Project", async () => {
+    const test = await setupProjects();
+    try {
+      let releaseAlpha: ((turn: MaestroModelTurn) => void) | undefined;
+      let notifyStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        notifyStarted = resolve;
+      });
+      let calls = 0;
+      const app = makeApp(test, () => ({
+        nextTurn: () => {
+          calls += 1;
+          if (calls === 1) {
+            return new Promise<MaestroModelTurn>((resolve) => {
+              releaseAlpha = resolve;
+              notifyStarted?.();
+            });
+          }
+          return Promise.resolve({ kind: "message", text: "quick" });
+        }
+      }));
+
+      const slowAlpha = post(app, "/projects/alpha/maestro/messages", "slow");
+      await started;
+      const sameProject = await post(
+        app,
+        "/projects/alpha/maestro/messages",
+        "again"
+      );
+      const otherProject = await post(
+        app,
+        "/projects/beta/maestro/messages",
+        "beta now"
+      );
+
+      expect(sameProject.headers.get("location")).toContain(
+        "/projects/alpha/maestro?error="
+      );
+      expect(otherProject.headers.get("location")).toBe(
+        "/projects/beta/maestro"
+      );
+      releaseAlpha?.({ kind: "message", text: "late" });
+      await slowAlpha;
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("keeps a Routine Host Project's conversation readable", async () => {
+    const test = await setupProjects();
+    try {
+      const app = makeApp(test, () => fakeModel("Noted."));
+      await post(app, "/projects/alpha/maestro/messages", "host question");
+      const response = await app.request("/projects/alpha/maestro", {
+        headers: browserHeaders()
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("host question");
+    } finally {
+      test.cleanup();
+    }
+  });
+});

@@ -1232,7 +1232,9 @@ export function registerPages(options: RegisterPagesOptions): void {
         outcome === undefined ? 404 : overrideReviewHttpStatus(outcome);
       return context.html(
         layout(
-          "No provider override review",
+          accepted === undefined
+            ? "No provider override review"
+            : "Provider override review resolved",
           `<h1 class="page-title">${accepted === undefined ? "No provider override review" : "Review resolved"}</h1>${outcome === undefined ? "" : renderReviewBanner(outcome, issueHref)}<p class="lede">${escapeHtml(projectName)}#${escapeHtml(issueNumberParam)} ${accepted === undefined ? "has no Run parked for a provider override review here: nothing is waiting, the Project is not a dispatch Project, or the action is not wired." : "was resumed."}</p><p class="note"><a href="${issueHref}">← Back to the Issue</a></p>`
         ),
         status

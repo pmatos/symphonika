@@ -401,7 +401,7 @@ export function createOverrideReviewService(
     return undefined;
   }
 
-  function resolutionRefusal(
+  function decideResolution(
     context: ReviewContext,
     request: ResolveOverrideReviewRequest
   ):
@@ -480,14 +480,14 @@ export function createOverrideReviewService(
     }
     const check = ():
       | { refusal: OverrideReviewOutcome }
-      | (Exclude<ReturnType<typeof resolutionRefusal>, { refusal: unknown }> & {
+      | (Exclude<ReturnType<typeof decideResolution>, { refusal: unknown }> & {
           context: ReviewContext;
         }) => {
       const inspection = inspect(project, request);
       if (inspection.kind === "refusal") {
         return { refusal: inspection.refusal };
       }
-      const decided = resolutionRefusal(inspection.context, request);
+      const decided = decideResolution(inspection.context, request);
       if ("refusal" in decided) {
         return decided;
       }

@@ -595,7 +595,9 @@ describe("the provider override review preview and resolve page (#864 stage 2)",
     await waitFor("the walk to finish", () =>
       runRows(harness.root).some((run) => run.terminal_state_id === "done")
     );
-    const unparked = await (await fetch(issueUrl(harness))).text();
+    const unparkedResponse = await fetch(issueUrl(harness));
+    expect(unparkedResponse.status).toBe(200);
+    const unparked = await unparkedResponse.text();
     const unparkedPage = await fetch(reviewUrl(harness));
     expect(unparked).not.toContain("review-override");
     expect(unparkedPage.status).toBe(404);
@@ -617,7 +619,10 @@ describe("the provider override review preview and resolve page (#864 stage 2)",
     await waitFor("the resumed chain to finish", () =>
       runRows(parked.root).some((run) => run.terminal_state_id === "done")
     );
-    const resolved = await (await fetch(issueUrl(parked))).text();
+    const resolvedResponse = await fetch(issueUrl(parked));
+    expect(resolvedResponse.status).toBe(200);
+    const resolved = await resolvedResponse.text();
+    expect(resolved).toContain("Operator override review");
     expect(resolved).not.toContain("review-override");
   });
 

@@ -18,6 +18,7 @@ import {
   type WriteIssueLabelsResult
 } from "./http/app.js";
 import { findLiveRunIdForIssue } from "./http/pages.js";
+import { createProviderRecoveryService } from "./issues/provider-recovery.js";
 import { createProviderStartService } from "./issues/provider-start.js";
 import {
   removeDaemonEndpoint,
@@ -246,6 +247,15 @@ export async function startDaemon(
     logger.warn(
       { recovered: recoveredRoutineFanoutNotifications },
       "symphonika startup: released interrupted routine fan-out notification claims"
+    );
+  }
+  const droppedInterventions = runStore.dropUnsettledProviderInterventions(
+    "the daemon restarted before the recovery launched"
+  );
+  if (droppedInterventions > 0) {
+    logger.warn(
+      { dropped: droppedInterventions },
+      "symphonika startup: dropped unsettled provider interventions"
     );
   }
   const failedLegacyInputRequired = runStore.failLegacyInputRequiredRuns();
@@ -1599,6 +1609,33 @@ export async function startDaemon(
     }
   });
 
+  // Recovery of a stopped state with another provider (#863,
+  // ADR-2026-10-23-0903): shares dispatchMutex and the live-run check with the
+  // claim path, and launches through the RunController's scheduled State
+  // Advance rather than a claim of its own.
+  const providerRecovery = createProviderRecoveryService({
+    checkLiveRun: (projectName, issueNumber) =>
+      findLiveRunIdForIssue({
+        getActiveRuns: getActiveRunsForLiveCheck,
+        getProjectRepoAliases: resolveProjectRepoAliases,
+        getScheduled: getScheduledCallbacks,
+        issueNumber,
+        projectName,
+        runStore
+      }),
+    createInterventionId: randomUUID,
+    dispatchMutex,
+    getProject: (name) => runtimeConfig.projectsByName().get(name),
+    getProvidersConfig: () => runtimeConfig.providersConfig(),
+    githubIssuesApi,
+    hasPendingShutdownResume: (runId) =>
+      runController.hasPendingShutdownResume(runId),
+    isProviderRegistered: (name) => agentProviders[name] !== undefined,
+    resolveToken: (tokenRef) => resolveToken(tokenRef, env),
+    runStore,
+    scheduleRecovery: (input) => runController.scheduleRecovery(input)
+  });
+
   // adopt-pr (ADR-2026-09-03-1158): attaches an already-open pull request to a
   // fresh Run parked at an operator-chosen wait/merge_pr state. Defined as
   // its own const rather than inline in the createHttpApp options object
@@ -2180,6 +2217,7 @@ export async function startDaemon(
         ? { freshState, ok: true }
         : { error: mergeError, freshState, ok: false };
     },
+    providerRecovery,
     providerStart,
     writeIssueLabels: async (input): Promise<WriteIssueLabelsResult> => {
       const project = runtimeConfig.projectsByName().get(input.projectName);

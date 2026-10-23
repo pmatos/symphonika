@@ -62,4 +62,7 @@ without a record keep the graph-derived description.
 - A per-state provider that becomes unconfigured or unregistered mid-chain fails that State
   Advance before the provider starts (`provider_command_missing` / `provider_not_registered`), as a
   chain-wide choice would.
-- Recovering a stopped state with a different provider is #863.
+- Recovering a stopped state with a different provider is #863, decided in
+  ADR-2026-10-23-0903: a Continuation Run re-enters the stopped state under a new highest-precedence
+  `operator_recovery` level that outranks the per-state choice above for that state only, and the
+  plan is not rewritten.

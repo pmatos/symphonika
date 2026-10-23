@@ -71,6 +71,36 @@ describe("resolveEffectiveProvider", () => {
     ).toEqual({ provider: "omp", source: "operator_chain" });
   });
 
+  it("lets a recovery outrank every other level for its own state", () => {
+    expect(
+      resolveEffectiveProvider({
+        plan,
+        projectDefault: "claude",
+        recovery: { provider: "claude", stateId: "review" },
+        state: agent("review", "codex")
+      })
+    ).toEqual({ provider: "claude", source: "operator_recovery" });
+  });
+
+  it("scopes a recovery to its own position and to agent states", () => {
+    expect(
+      resolveEffectiveProvider({
+        plan,
+        projectDefault: "codex",
+        recovery: { provider: "claude", stateId: "review" },
+        state: agent("implement")
+      })
+    ).toEqual({ provider: "omp", source: "operator_chain" });
+    expect(
+      resolveEffectiveProvider({
+        plan: undefined,
+        projectDefault: "codex",
+        recovery: { provider: "claude", stateId: "review" },
+        state: { action: { kind: "wait" }, id: "review" }
+      })
+    ).toEqual({ provider: "codex", source: "project_default" });
+  });
+
   it("prefers the workflow action over the project default", () => {
     expect(
       resolveEffectiveProvider({

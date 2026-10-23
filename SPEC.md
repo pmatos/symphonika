@@ -646,10 +646,26 @@ A **Run-Chain Provider Plan** (ADR-2026-10-09-0743) overrides both for one Run C
 chooses `omp`, `claude` or `codex` for the whole chain, the choice is persisted before the Ready
 Label is added, and every agent state of that chain — the first at fresh claim, later ones at State
 Advance — runs on it. The plan may also carry per-state choices for individual agent states
-(ADR-2026-10-13-0659). Precedence is the plan's per-state choice, then its chain-wide choice, then
-`action.provider`, then `agent.provider`; an unset level reveals the next. Each Run records which
+(ADR-2026-10-13-0659). Precedence is an operator's recovery of that state (below), then the plan's
+per-state choice, then its chain-wide choice, then `action.provider`, then `agent.provider`; an
+unset level reveals the next. Each Run records which
 level chose its provider (`runs.provider_source`), and an Attempt's retry keeps the Run's provider.
 Non-FSM Continuations and PR review follow-ups are not covered and keep Project routing.
+
+An operator can **recover** a stopped state with a different provider (ADR-2026-10-23-0903):
+`POST /api/issues/:project/:number/recover` with `{runId, stateId, provider}` is authenticated and
+CSRF-protected like every mutating route (ADR 0075), JSON-only like adopt-pr (the preview/confirm
+page is a later slice), and answers `202` when accepted, `409` for a live Issue Reservation, a held
+or stale claim or a duplicate request, and `422` for any other refusal. The recovery is a new
+Continuation Run parented to the stopped Run, launched through the scheduled State Advance route so
+it inherits the Run Chain, `current_state_id`, branch and Workspace; earlier states are not
+replayed and the stopped Run is untouched. It is refused unless the Run is `failed`, `blocked` or
+`input_required` at an agent state of the current raw FSM workflow, is the head of its Issue's
+history, and the live Issue is open with no `sym:claimed`, `sym:running` or `sym:stale`; no
+Issue Reservation (in-flight, scheduled retry, waiting) may exist. The new Run records
+`provider_source = operator_recovery`, and each request is audited in `chain_provider_interventions`
+(`scheduled` -> `launched`, `failed` or `dropped`). Once the recovery's own claim lands, `sym:failed`,
+`sym:blocked` and `sym:human-needed` are removed.
 
 Raw FSM workflows declare every state under `workflow.states`; there is no template, import, or
 sub-graph mechanism (ADR-2026-09-30-0848). A `workflow.use` block is a Workflow Contract validation

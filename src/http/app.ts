@@ -61,6 +61,7 @@ import {
 import type { ScheduledCallback } from "../work-briefing.js";
 import { registerBriefingPage } from "./briefing-page.js";
 import { registerMaestroPage } from "./maestro-page.js";
+import type { ProviderRecoveryService } from "../issues/provider-recovery.js";
 import type { ProviderStartService } from "../issues/provider-start.js";
 import type { MaestroConfig } from "../maestro/config.js";
 import type { MaestroModel } from "../maestro/model.js";
@@ -365,6 +366,9 @@ export type HttpAppOptions = {
   // #861's guarded "start with a provider" action (preview, start, retry,
   // cancel). Optional so tests that never exercise it stay unwired.
   providerStart?: ProviderStartService;
+  // #863's guarded "recover a stopped state with a different provider" action.
+  // Optional like providerStart; the route answers 503 when it is unwired.
+  providerRecovery?: ProviderRecoveryService;
   // #308 part 2's label-write action: adds/removes non-sym:* labels on a
   // GitHub issue. See docs/adr/0077-issue-triage-and-label-writes.md.
   writeIssueLabels?: WriteIssueLabelsFn;
@@ -887,6 +891,52 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       }
     );
 
+    // Recovery of a stopped FSM state with another provider (#863, ADR-2026-10-23-0903).
+    // JSON-only like adopt-pr: the preview/confirm page is a later slice.
+    app.post(
+      "/api/issues/:project/:number/recover",
+      requireAuthorizedMutation,
+      async (context) => {
+        if (options.providerRecovery === undefined) {
+          return context.json({ kind: "unavailable" }, 503);
+        }
+        let body: unknown;
+        try {
+          body = await context.req.json();
+        } catch {
+          return context.json(
+            { kind: "error", error: "invalid JSON body" },
+            400
+          );
+        }
+        const parsed = parseRecoverStoppedStateBody(body);
+        const issueNumber = Number(context.req.param("number"));
+        if (parsed === undefined || !Number.isInteger(issueNumber)) {
+          return context.json(
+            { kind: "error", error: "invalid request body" },
+            400
+          );
+        }
+        const outcome = await options.providerRecovery.recover({
+          ...parsed,
+          issueNumber,
+          projectName: context.req.param("project"),
+          requestedVia: "http"
+        });
+        const status =
+          outcome.kind === "accepted"
+            ? 202
+            : outcome.kind === "error"
+              ? 500
+              : outcome.reason === "live-run" ||
+                  outcome.reason === "claim-held" ||
+                  outcome.reason === "duplicate"
+                ? 409
+                : 422;
+        return context.json(outcome, status);
+      }
+    );
+
     registerPages({
       app,
       csrfSecret,
@@ -1090,6 +1140,26 @@ function parseAdoptPullRequestBody(
     return undefined;
   }
   return { entryStateId, issueNumber };
+}
+
+function parseRecoverStoppedStateBody(
+  body: unknown
+): { provider: string; runId: string; stateId: string } | undefined {
+  if (typeof body !== "object" || body === null) {
+    return undefined;
+  }
+  const { provider, runId, stateId } = body as Record<string, unknown>;
+  if (
+    typeof provider !== "string" ||
+    provider === "" ||
+    typeof runId !== "string" ||
+    runId === "" ||
+    typeof stateId !== "string" ||
+    stateId === ""
+  ) {
+    return undefined;
+  }
+  return { provider, runId, stateId };
 }
 
 // Only these five RunArtifactKind values have a Firing evidence-path

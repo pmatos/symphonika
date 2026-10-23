@@ -306,6 +306,7 @@ export type ProviderSource =
   | { kind: "no_provider" }
   | { kind: "not_recorded" }
   | { kind: "operator_chain" }
+  | { kind: "operator_recovery" }
   | { kind: "operator_state" }
   | { kind: "project_default" }
   | { declaredProvider: string; kind: "workflow_state" };

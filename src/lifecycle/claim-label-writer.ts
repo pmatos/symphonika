@@ -25,6 +25,14 @@ type LabelWritingApi = Required<
 > &
   Pick<GitHubIssuesApi, "addIssueComment">;
 
+// What a Run that stopped for good leaves on its Issue: the failure or block
+// verdict and the request for a human.
+const STOPPED_VERDICT_LABELS = [
+  "sym:failed",
+  "sym:blocked",
+  "sym:human-needed"
+] as const;
+
 // The terminal-outcome input the run controller builds once per termination.
 // Moved verbatim from run-controller so the module that owns the label decision
 // also owns its input shape; RunController re-imports it for the 6 build sites.
@@ -339,6 +347,28 @@ export class ClaimLabelWriter {
         ...(input.phase === undefined ? {} : { phase: input.phase })
       }
     );
+  }
+
+  // Withdraws what a stopped Run left on the Issue, for a recovery that is
+  // taking it up again. `sym:claimed` is deliberately not touched: the
+  // recovery's own claim has just (re)applied it.
+  async clearStoppedVerdict(input: IssueTarget): Promise<void> {
+    for (const label of STOPPED_VERDICT_LABELS) {
+      await this.bestEffort(
+        () =>
+          this.api.removeLabelsFromIssue({
+            ...input.repository,
+            issueNumber: input.issueNumber,
+            labels: [label]
+          }),
+        {
+          issueNumber: input.issueNumber,
+          label,
+          operation: "removeLabel",
+          phase: "recovery"
+        }
+      );
+    }
   }
 
   private async markTerminalLabel(

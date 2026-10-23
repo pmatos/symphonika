@@ -15,17 +15,33 @@ export function isAgentState<T extends Pick<ExpandedWorkflowState, "action">>(
   return state?.action?.kind === "agent";
 }
 
-// An operator's per-state choice (#862) outranks their chain-wide choice
-// (#861), which outranks a state's own `action.provider`, which outranks the
-// Project default. An unset level reveals the next one down. `state` is the
-// raw-FSM state being launched, or undefined when none is known (a contract
+// An operator's recovery of a stopped state (#863) outranks their per-state
+// choice (#862), which outranks their chain-wide choice (#861), which
+// outranks a state's own `action.provider`, which outranks the Project
+// default. An unset level reveals the next one down. `state` is the raw-FSM
+// state being launched, or undefined when none is known (a contract
 // workflow, or a workflow that failed to load).
+//
+// `recovery` is passed only by the launch that re-enters the recovered
+// position, never read from the plan: it applies to that one state, and the
+// plan stays exactly as the operator saved it.
 export function resolveEffectiveProvider(input: {
   plan: Pick<ProviderPlan, "provider" | "stateProviders"> | undefined;
   projectDefault: AgentProviderName;
+  recovery?: { provider: AgentProviderName; stateId: string } | undefined;
   state: Pick<ExpandedWorkflowState, "action" | "id"> | undefined;
 }): EffectiveProvider {
   const agentState = isAgentState(input.state) ? input.state : undefined;
+  if (
+    agentState !== undefined &&
+    input.recovery !== undefined &&
+    input.recovery.stateId === agentState.id
+  ) {
+    return {
+      provider: input.recovery.provider,
+      source: "operator_recovery"
+    };
+  }
   // Own keys only: a state named e.g. `constructor` must not resolve to an
   // inherited Object.prototype member.
   if (input.plan !== undefined) {

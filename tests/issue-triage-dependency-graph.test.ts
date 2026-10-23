@@ -3,6 +3,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
+import {
+  buildDependencyGraphElements,
+  type DependencyGraphIssue
+} from "../src/client/dependency-graph-elements.js";
 import { createHttpApp, type HttpAppOptions } from "../src/http/app.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
 
@@ -545,6 +549,149 @@ describe("GET /issues/graph", () => {
         focusIssue?: unknown;
       };
       expect(graph.focusIssue).toBeUndefined();
+    } finally {
+      test.cleanup();
+    }
+  });
+});
+
+describe("GET /issues/graph parent evidence", () => {
+  function snapshotRow(
+    issueNumber: number,
+    overrides: Partial<
+      Parameters<RunStore["replaceProjectIssueSnapshots"]>[0]["rows"][number]
+    >
+  ) {
+    return {
+      blockedBy: [],
+      blockedByTruncated: false,
+      issueNumber,
+      kind: "candidate" as const,
+      labels: [],
+      priority: 1,
+      reasons: [],
+      title: `Issue ${issueNumber}`,
+      ...overrides
+    };
+  }
+
+  function embeddedIssues(html: string): DependencyGraphIssue[] {
+    const match = /window\.__ISSUE_DEPS_GRAPH__ = (\{.*\});<\/script>/.exec(
+      html
+    );
+    expect(match?.[1]).toBeDefined();
+    return (
+      JSON.parse(match?.[1] ?? "{}") as { issues: DependencyGraphIssue[] }
+    ).issues;
+  }
+
+  async function graphFor(
+    test: TestSetup,
+    rows: ReturnType<typeof snapshotRow>[]
+  ) {
+    test.runStore.syncProjectStates([
+      { name: "alpha", validationState: "valid", weight: 1 }
+    ]);
+    test.runStore.replaceProjectIssueSnapshots({
+      polledAt: "2026-08-18T10:00:00.000Z",
+      projectName: "alpha",
+      rows
+    });
+    const html = await (await makeApp(test).request("/issues/graph")).text();
+    return buildDependencyGraphElements(embeddedIssues(html));
+  }
+
+  const nativeParent = (number: number) => ({
+    availability: "present" as const,
+    crossRepository: false,
+    number,
+    owner: "pmatos",
+    repo: "symphonika",
+    state: "OPEN" as const,
+    title: `Epic ${number}`
+  });
+
+  it("clusters under the native parent, not the heading parent, from the persisted snapshot", async () => {
+    const test = await setup();
+    try {
+      const { nodes } = await graphFor(test, [
+        snapshotRow(101, {
+          nativeParent: nativeParent(300),
+          parentIssueNumber: 289
+        })
+      ]);
+
+      expect(
+        nodes.find((node) => node.data.issueNumber === 101)?.data.parent
+      ).toBe("issue:pmatos/symphonika#300");
+      expect(nodes.some((node) => node.data.issueNumber === 289)).toBe(false);
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("does not cluster a native-none issue by its heading", async () => {
+    const test = await setup();
+    try {
+      const { nodes } = await graphFor(test, [
+        snapshotRow(101, {
+          nativeParent: { availability: "none" },
+          parentIssueNumber: 289
+        })
+      ]);
+
+      expect(nodes).toHaveLength(1);
+      expect(nodes[0]?.data.parent).toBeUndefined();
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("labels the heading fallback when native evidence is unavailable or was never recorded", async () => {
+    const test = await setup();
+    try {
+      const { nodes } = await graphFor(test, [
+        snapshotRow(101, {
+          nativeParent: { availability: "unavailable" },
+          parentIssueNumber: 289
+        }),
+        snapshotRow(102, { parentIssueNumber: 289 })
+      ]);
+
+      for (const issueNumber of [101, 102]) {
+        const node = nodes.find((n) => n.data.issueNumber === issueNumber);
+        expect(node?.data.parent).toBe("issue:pmatos/symphonika#289");
+        expect(node?.data.parentSource).toBe("legacy-heading");
+      }
+      expect(
+        nodes.find((n) => n.data.kind === "cluster")?.data.label
+      ).toContain("legacy ## Parent heading");
+    } finally {
+      test.cleanup();
+    }
+  });
+
+  it("never turns a blocker into a parent", async () => {
+    const test = await setup();
+    try {
+      const { nodes } = await graphFor(test, [
+        snapshotRow(101, {
+          blockedBy: [
+            {
+              number: 300,
+              owner: "pmatos",
+              repo: "symphonika",
+              state: "OPEN",
+              title: "Prerequisite"
+            }
+          ],
+          nativeParent: { availability: "none" }
+        })
+      ]);
+
+      expect(
+        nodes.find((node) => node.data.issueNumber === 101)?.data.parent
+      ).toBeUndefined();
     } finally {
       test.cleanup();
     }

@@ -157,6 +157,16 @@ export function IssuesDepsGraphView() {
                 <dd>{selected.state}</dd>
               </>
             )}
+            {selected.parentSource === "legacy-heading" ? (
+              <>
+                <dt>Parent source</dt>
+                <dd className="deps-graph-warning">
+                  Legacy ## Parent heading -- no native GitHub parent evidence
+                  was recorded for{" "}
+                  {selected.kind === "cluster" ? "its children" : "this issue"}.
+                </dd>
+              </>
+            ) : null}
             {selected.truncated === true ? (
               <dd className="deps-graph-warning">
                 ⚠ this issue has more dependency links than could be checked —

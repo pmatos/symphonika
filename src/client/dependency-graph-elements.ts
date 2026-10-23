@@ -6,11 +6,31 @@ type DependencyGraphBlocker = {
   title: string;
 };
 
+// Duplicated from IssueNativeParent (src/issue-polling.ts) -- this module is
+// bundled client-side and does not import across the server tsconfig boundary.
+type DependencyGraphNativeParent =
+  | {
+      availability: "present";
+      crossRepository: boolean;
+      number: number;
+      owner: string;
+      repo: string;
+      state: "CLOSED" | "OPEN";
+      title: string;
+    }
+  | { availability: "none" }
+  | { availability: "unavailable" };
+
 export type DependencyGraphIssue = {
   blockedBy: DependencyGraphBlocker[];
   blockedByTruncated: boolean;
   issueNumber: number;
+  // GitHub-native parent evidence is authoritative whenever it was recorded
+  // as present or none; absent here means no evidence was recorded.
+  nativeParent?: DependencyGraphNativeParent;
   owner: string;
+  // The legacy "## Parent" heading parse. Consulted only when nativeParent
+  // is absent or unavailable (ADR-2026-10-23-1720).
   parentIssueNumber?: number;
   projectName: string;
   repo: string;
@@ -28,6 +48,9 @@ type DependencyGraphNodeData = {
   kind: "cluster" | "external" | "issue";
   owner: string;
   parent?: string;
+  // Where the grouping of this node (or, on a cluster node, of its
+  // children) came from; absent when the node has no recorded parent.
+  parentSource?: "legacy-heading" | "native";
   projectName?: string;
   repo: string;
   state?: "CLOSED" | "OPEN";
@@ -63,6 +86,72 @@ export function issueNodeId(
   return `issue:${owner.toLowerCase()}/${repo.toLowerCase()}#${issueNumber}`;
 }
 
+type ResolvedParent = {
+  number: number;
+  owner: string;
+  repo: string;
+  source: "legacy-heading" | "native";
+  state?: "CLOSED" | "OPEN";
+  title?: string;
+};
+
+// Native evidence is authoritative: a present parent wins over the heading,
+// and an explicit none means the Issue has no parent, so the heading cannot
+// create one. Only unavailable or unrecorded evidence falls back to the
+// legacy heading, which is assumed to name a same-repository Issue.
+function resolveParent(
+  issue: DependencyGraphIssue
+): ResolvedParent | undefined {
+  const native = issue.nativeParent;
+  if (native?.availability === "present") {
+    return {
+      number: native.number,
+      owner: native.owner,
+      repo: native.repo,
+      source: "native",
+      state: native.state,
+      title: native.title
+    };
+  }
+  if (native?.availability === "none") {
+    return undefined;
+  }
+  if (issue.parentIssueNumber === undefined) {
+    return undefined;
+  }
+  return {
+    number: issue.parentIssueNumber,
+    owner: issue.owner,
+    repo: issue.repo,
+    source: "legacy-heading"
+  };
+}
+
+function clusterNode(id: string, parent: ResolvedParent): DependencyGraphNode {
+  const ref = `${parent.owner}/${parent.repo}#${parent.number}`;
+  const base = {
+    id,
+    issueNumber: parent.number,
+    kind: "cluster" as const,
+    owner: parent.owner,
+    parentSource: parent.source,
+    repo: parent.repo
+  };
+  if (parent.source === "native") {
+    return {
+      data: {
+        ...base,
+        label: `${ref}\n${parent.title ?? ""}`,
+        ...(parent.state === undefined ? {} : { state: parent.state }),
+        title: parent.title ?? ref
+      }
+    };
+  }
+  return {
+    data: { ...base, label: `${ref}\n(legacy ## Parent heading)`, title: ref }
+  };
+}
+
 export function buildDependencyGraphElements(
   issues: readonly DependencyGraphIssue[]
 ): DependencyGraphElements {
@@ -88,7 +177,8 @@ export function buildDependencyGraphElements(
   }
 
   for (const issue of issues) {
-    if (issue.parentIssueNumber === undefined) {
+    const parent = resolveParent(issue);
+    if (parent === undefined) {
       continue;
     }
     const childId = issueNodeId(issue.owner, issue.repo, issue.issueNumber);
@@ -97,27 +187,20 @@ export function buildDependencyGraphElements(
     // of the three loops reaches this issue first "wins" its node, and the
     // others just add an edge/parent reference to it, rather than each
     // synthesizing a disconnected duplicate under a different id scheme.
-    const parentId = issueNodeId(
-      issue.owner,
-      issue.repo,
-      issue.parentIssueNumber
-    );
-    if (!nodesById.has(parentId)) {
-      nodesById.set(parentId, {
-        data: {
-          id: parentId,
-          issueNumber: issue.parentIssueNumber,
-          label: `${issue.owner}/${issue.repo}#${issue.parentIssueNumber}`,
-          kind: "cluster",
-          owner: issue.owner,
-          repo: issue.repo,
-          title: `${issue.owner}/${issue.repo}#${issue.parentIssueNumber}`
-        }
-      });
+    const parentId = issueNodeId(parent.owner, parent.repo, parent.number);
+    const existingParent = nodesById.get(parentId);
+    if (
+      existingParent === undefined ||
+      (existingParent.data.kind === "cluster" &&
+        existingParent.data.parentSource === "legacy-heading" &&
+        parent.source === "native")
+    ) {
+      nodesById.set(parentId, clusterNode(parentId, parent));
     }
     const childNode = nodesById.get(childId);
     if (childNode !== undefined) {
       childNode.data.parent = parentId;
+      childNode.data.parentSource = parent.source;
     }
   }
 
@@ -147,6 +230,7 @@ export function buildDependencyGraphElements(
         // "issue" node is never touched here: it's already the most
         // authoritative source for this physical issue.
         existingSource.data.kind = "external";
+        delete existingSource.data.parentSource;
         existingSource.data.label = `${blocker.owner}/${blocker.repo}#${blocker.number}\n${blocker.title}`;
         existingSource.data.owner = blocker.owner;
         existingSource.data.repo = blocker.repo;

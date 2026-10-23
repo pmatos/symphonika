@@ -188,8 +188,9 @@ describe("buildDependencyGraphElements", () => {
         id: clusterId,
         issueNumber: 289,
         kind: "cluster",
-        label: "pmatos/symphonika#289",
+        label: "pmatos/symphonika#289\n(legacy ## Parent heading)",
         owner: "pmatos",
+        parentSource: "legacy-heading",
         repo: "symphonika",
         title: "pmatos/symphonika#289"
       }
@@ -490,5 +491,187 @@ describe("buildDependencyGraphElements", () => {
     ]);
 
     expect(result.nodes[0]?.data.label).toBe("Add graph view");
+  });
+
+  describe("native parent evidence versus the ## Parent heading", () => {
+    const child = {
+      blockedBy: [],
+      blockedByTruncated: false,
+      issueNumber: 101,
+      owner: "pmatos",
+      projectName: "alpha",
+      repo: "symphonika",
+      title: "Add graph view"
+    };
+    const nativeParent = (number: number, overrides = {}) => ({
+      availability: "present" as const,
+      crossRepository: false,
+      number,
+      owner: "pmatos",
+      repo: "symphonika",
+      state: "OPEN" as const,
+      title: `Epic ${number}`,
+      ...overrides
+    });
+    const childNode = (
+      result: ReturnType<typeof buildDependencyGraphElements>
+    ) =>
+      result.nodes.find(
+        (node) => node.data.id === "issue:pmatos/symphonika#101"
+      );
+
+    it("clusters under the native parent when the heading names a different one", () => {
+      const result = buildDependencyGraphElements([
+        { ...child, nativeParent: nativeParent(300), parentIssueNumber: 289 }
+      ]);
+
+      expect(childNode(result)?.data.parent).toBe(
+        "issue:pmatos/symphonika#300"
+      );
+      expect(childNode(result)?.data.parentSource).toBe("native");
+      expect(result.nodes.some((node) => node.data.id.endsWith("#289"))).toBe(
+        false
+      );
+      expect(
+        result.nodes.find((node) => node.data.id.endsWith("#300"))?.data
+      ).toMatchObject({
+        kind: "cluster",
+        label: "pmatos/symphonika#300\nEpic 300",
+        state: "OPEN",
+        title: "Epic 300"
+      });
+    });
+
+    it("nests under the native parent's own node when it is in scope and the heading points elsewhere", () => {
+      const result = buildDependencyGraphElements([
+        { ...child, issueNumber: 300, title: "Real epic" },
+        { ...child, issueNumber: 289, title: "Heading epic" },
+        { ...child, nativeParent: nativeParent(300), parentIssueNumber: 289 }
+      ]);
+
+      expect(childNode(result)?.data.parent).toBe(
+        "issue:pmatos/symphonika#300"
+      );
+      expect(result.nodes.every((node) => node.data.kind === "issue")).toBe(
+        true
+      );
+    });
+
+    it("does not let the heading create membership when native evidence says none", () => {
+      const result = buildDependencyGraphElements([
+        {
+          ...child,
+          nativeParent: { availability: "none" },
+          parentIssueNumber: 289
+        }
+      ]);
+
+      expect(result.nodes).toHaveLength(1);
+      expect(childNode(result)?.data.parent).toBeUndefined();
+      expect(childNode(result)?.data.parentSource).toBeUndefined();
+    });
+
+    it.each([
+      ["unavailable", { availability: "unavailable" as const }],
+      ["unrecorded", undefined]
+    ])(
+      "falls back to a labelled legacy heading cluster when native evidence is %s",
+      (_name, nativeParentEvidence) => {
+        const result = buildDependencyGraphElements([
+          {
+            ...child,
+            ...(nativeParentEvidence === undefined
+              ? {}
+              : { nativeParent: nativeParentEvidence }),
+            parentIssueNumber: 289
+          }
+        ]);
+
+        expect(childNode(result)?.data.parent).toBe(
+          "issue:pmatos/symphonika#289"
+        );
+        expect(childNode(result)?.data.parentSource).toBe("legacy-heading");
+        const cluster = result.nodes.find((node) =>
+          node.data.id.endsWith("#289")
+        );
+        expect(cluster?.data.kind).toBe("cluster");
+        expect(cluster?.data.label).toContain("legacy ## Parent heading");
+      }
+    );
+
+    it("uses the parent's own repository for a cross-repository native parent and a closed badge for a closed one", () => {
+      const result = buildDependencyGraphElements([
+        {
+          ...child,
+          nativeParent: nativeParent(7, {
+            crossRepository: true,
+            owner: "other-org",
+            repo: "shared-lib",
+            state: "CLOSED"
+          }),
+          parentIssueNumber: 7
+        }
+      ]);
+
+      expect(childNode(result)?.data.parent).toBe(
+        "issue:other-org/shared-lib#7"
+      );
+      expect(
+        result.nodes.find((node) => node.data.id.endsWith("shared-lib#7"))?.data
+      ).toMatchObject({
+        owner: "other-org",
+        repo: "shared-lib",
+        state: "CLOSED"
+      });
+      expect(
+        result.nodes.some(
+          (node) => node.data.id === "issue:pmatos/symphonika#7"
+        )
+      ).toBe(false);
+    });
+
+    it("keeps the native cluster when a legacy-heading child shares the same parent", () => {
+      const result = buildDependencyGraphElements([
+        { ...child, issueNumber: 102, parentIssueNumber: 300 },
+        { ...child, nativeParent: nativeParent(300) }
+      ]);
+
+      const cluster = result.nodes.find((node) =>
+        node.data.id.endsWith("#300")
+      );
+      expect(cluster?.data.parentSource).toBe("native");
+      expect(cluster?.data.label).toBe("pmatos/symphonika#300\nEpic 300");
+      expect(
+        result.nodes.find((node) => node.data.issueNumber === 102)?.data
+          .parentSource
+      ).toBe("legacy-heading");
+    });
+
+    it("never creates parentage from blockedBy, whatever the native evidence", () => {
+      const blocker = {
+        number: 289,
+        owner: "pmatos",
+        repo: "symphonika",
+        state: "OPEN" as const,
+        title: "Prerequisite"
+      };
+      for (const nativeParentEvidence of [
+        { availability: "none" as const },
+        { availability: "unavailable" as const },
+        undefined
+      ]) {
+        const result = buildDependencyGraphElements([
+          {
+            ...child,
+            blockedBy: [blocker],
+            ...(nativeParentEvidence === undefined
+              ? {}
+              : { nativeParent: nativeParentEvidence })
+          }
+        ]);
+        expect(childNode(result)?.data.parent).toBeUndefined();
+        expect(result.edges).toHaveLength(1);
+      }
+    });
   });
 });

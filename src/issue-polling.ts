@@ -198,9 +198,9 @@ export type IssueSnapshot = {
   // from `{ availability: "none" }` (confirmed no parent) and
   // `{ availability: "unavailable" }` (the read failed or was partial).
   nativeParent?: IssueNativeParent;
-  // Best-effort "## Parent" heading parse (see parseParentIssueNumber) --
-  // display-only graph clustering, never a gating signal. Undefined when
-  // absent or unparseable, same as no epic membership.
+  // Legacy best-effort "## Parent" heading parse (see parseParentIssueNumber).
+  // Display-only, never a gating signal, and consulted by the graph only when
+  // nativeParent is absent or unavailable (ADR-2026-10-23-1720).
   parentIssueNumber?: number;
   priority: number;
   state: string;
@@ -1796,11 +1796,10 @@ async function readPollingConfig(
   return config;
 }
 
-// Best-effort, display-only signal for the dependency graph's epic
-// clustering (see docs/adr, issue dependency gating) -- never used for
-// gating, unlike blockedBy. An issue with no parseable heading (or none
-// at all) just renders ungrouped in the graph; that's expected, not an
-// error. Matches the real "## Parent\n\n#N" convention already in use
+// Legacy, display-only fallback for the dependency graph's epic clustering
+// (ADR-2026-10-23-1720): native parent evidence wins, and this is read only
+// when that evidence is unavailable or unrecorded. Never used for gating,
+// unlike blockedBy. Matches the real "## Parent\n\n#N" convention already in use
 // across this repo's issues, including trailing parenthetical text after
 // the number (e.g. "#199 (planning parent, kept open)").
 const PARENT_HEADING_REASON = /^##\s*Parent\s*\n+\s*#(\d+)/im;

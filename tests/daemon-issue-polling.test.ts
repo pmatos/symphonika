@@ -4,6 +4,10 @@ import path from "node:path";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import {
+  buildDependencyGraphElements,
+  type DependencyGraphIssue
+} from "../src/client/dependency-graph-elements.js";
 import { startDaemon } from "../src/daemon.js";
 import { createPollNowTrigger } from "../src/daemon-poll-now.js";
 import type { PollNowResult } from "../src/http/app.js";
@@ -12,6 +16,7 @@ import type {
   AgentProviderRegistry,
   ProviderEvent
 } from "../src/provider.js";
+import type { IssueNativeParent } from "../src/issue-polling.js";
 import { openRunStore } from "../src/run-store.js";
 import { resolveStateRoot } from "../src/state.js";
 
@@ -422,6 +427,85 @@ describe("daemon GitHub issue polling", () => {
       expect(html).toMatch(/last successful poll[\s\S]{0,60}ago/);
       expect(html).toContain('href="/issues/symphonika/51"');
       expect(html).toContain('href="/issues/symphonika/52"');
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("clusters the /issues/graph by native parent evidence, using the heading only as a labelled fallback", async () => {
+    const root = await makeTempRoot();
+    await writeValidProject(root, { epicLabels: ["epic"] });
+    const nativeTo = (number: number) => ({
+      availability: "present" as const,
+      crossRepository: false,
+      number,
+      owner: "pmatos",
+      repo: "symphonika",
+      state: "OPEN" as const,
+      title: `epic ${number}`
+    });
+    const githubIssuesApi = {
+      getIssueDependencies: vi.fn().mockResolvedValue(new Map()),
+      getIssueHierarchy: vi.fn().mockResolvedValue(
+        new Map<number, IssueNativeParent>([
+          [60, { availability: "none" as const }],
+          [61, { availability: "none" as const }],
+          [70, nativeTo(61)],
+          [71, { availability: "none" as const }],
+          [72, { availability: "unavailable" as const }]
+        ])
+      ),
+      listOpenIssues: vi.fn().mockResolvedValue([
+        issueFixture({ labels: ["epic"], number: 60, title: "Heading epic" }),
+        issueFixture({ labels: ["epic"], number: 61, title: "Native epic" }),
+        issueFixture({
+          body: "## Parent\n\n#60\n",
+          labels: [],
+          number: 70,
+          title: "Heading A, native B"
+        }),
+        issueFixture({
+          body: "## Parent\n\n#60\n",
+          labels: [],
+          number: 71,
+          title: "Native none with heading"
+        }),
+        issueFixture({
+          body: "## Parent\n\n#60\n",
+          labels: [],
+          number: 72,
+          title: "Unavailable with heading"
+        })
+      ])
+    };
+
+    const daemon = await startDaemon({
+      cwd: root,
+      env: { GITHUB_TOKEN: "secret-token" },
+      githubIssuesApi,
+      logger: pino({ enabled: false }),
+      port: 0
+    });
+    try {
+      await fetch(`${daemon.url}/projects/symphonika`);
+      const html = await (await fetch(`${daemon.url}/issues/graph`)).text();
+      const embedded =
+        /window\.__ISSUE_DEPS_GRAPH__ = (\{.*\});<\/script>/.exec(html);
+      const { nodes } = buildDependencyGraphElements(
+        (
+          JSON.parse(embedded?.[1] ?? "{}") as {
+            issues: DependencyGraphIssue[];
+          }
+        ).issues
+      );
+      const node = (issueNumber: number) =>
+        nodes.find((n) => n.data.issueNumber === issueNumber)?.data;
+
+      expect(node(70)?.parent).toBe("issue:pmatos/symphonika#61");
+      expect(node(70)?.parentSource).toBe("native");
+      expect(node(71)?.parent).toBeUndefined();
+      expect(node(72)?.parent).toBe("issue:pmatos/symphonika#60");
+      expect(node(72)?.parentSource).toBe("legacy-heading");
     } finally {
       await daemon.stop();
     }

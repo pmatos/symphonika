@@ -664,7 +664,7 @@ export function registerPages(options: RegisterPagesOptions): void {
         renderConfigWarningsBanner(snapshot?.reload.warnings ?? []),
         renderHeader(options.version, snapshot),
         DASHBOARD_STREAM_BANNER,
-        `<p class="note"><a href="/briefing">Work briefing: what to do next, with evidence →</a></p>`,
+        `<p class="note"><a href="/briefing">Work briefing: what to do next, with evidence →</a> · <a href="/history">Work history: last 7 or 30 days →</a></p>`,
         renderWorkOverviewSection(
           buildWorkOverview({
             nowMs,
@@ -3930,7 +3930,7 @@ function renderProjectQueuePolicy(
 }
 
 function renderProjectAssistantLinks(name: string): string {
-  return `<p class="note"><a href="/projects/${encodeURIComponent(name)}/briefing">Work briefing for this Project →</a> · <a href="/projects/${encodeURIComponent(name)}/maestro">Ask Maestro about this Project →</a></p>`;
+  return `<p class="note"><a href="/projects/${encodeURIComponent(name)}/briefing">Work briefing for this Project →</a> · <a href="/projects/${encodeURIComponent(name)}/history">Work history for this Project →</a> · <a href="/projects/${encodeURIComponent(name)}/maestro">Ask Maestro about this Project →</a></p>`;
 }
 
 function renderProjectFiringsBlock(firings: RoutineFiringStatus[]): string {

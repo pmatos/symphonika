@@ -133,6 +133,32 @@ const EVIDENCE_TOOLS: MaestroToolSpec[] = [
       type: "object"
     },
     name: "get_work_briefing"
+  },
+  {
+    description:
+      "Get a work history report for a UTC time range: what finished " +
+      "(completed: succeeded Runs, merged pull requests, successful merge " +
+      "attempts; unsuccessful: failed, blocked, stale, cancelled or " +
+      "input-required Runs, closed pull requests, failed merge attempts), " +
+      "each attributed to the recorded time of the event itself, not when " +
+      "the Issue or Run was created, plus the current persisted GitHub " +
+      "observations with freshness (stale poll, failed GitHub read). Pass " +
+      "window as 7d or 30d (rolling from now), or both from and to " +
+      "(YYYY-MM-DD or ISO-8601 with Z; half-open [from, to)). Omit " +
+      "project_name for every Project (or the focus Project). Past Maestro " +
+      "chat is never included. A truncated section reports omitted.",
+    inputSchema: {
+      additionalProperties: false,
+      properties: {
+        from: { type: "string" },
+        project_name: { type: "string" },
+        to: { type: "string" },
+        window: { enum: ["7d", "30d"], type: "string" }
+      },
+      required: [],
+      type: "object"
+    },
+    name: "get_work_history"
   }
 ];
 
@@ -671,6 +697,46 @@ export async function executeMaestroTool(input: {
       ])
     );
     return { citations, kind: "ok", output: briefing };
+  }
+
+  if (input.name === "get_work_history") {
+    const projectName = projectNameField(input.input, input.focusProjectName);
+    const result = input.reader.getWorkHistory(projectName, {
+      from: stringField(input.input, "from"),
+      to: stringField(input.input, "to"),
+      window: stringField(input.input, "window")
+    });
+    if (result.kind === "invalid") {
+      return { kind: "refused", reason: result.error };
+    }
+    if (result.kind === "unknown_project") {
+      return {
+        citations: [],
+        kind: "ok",
+        output: { found: false, projectName }
+      };
+    }
+    const { history } = result;
+    // Like the briefing, the reply cites each item's primary evidence record
+    // and its Project; every item's full citation list stays in the output.
+    const citations = [
+      ...history.completed.items,
+      ...history.unsuccessful.items,
+      ...history.observations.pendingPullRequests.items,
+      ...history.observations.observedMergedPullRequests.items
+    ].flatMap((item) => {
+      const primary =
+        item.kind === "run_outcome"
+          ? item.citations.find((citation) => citation.kind === "run")
+          : (item.citations.find(
+              (citation) => citation.kind === "pull_request"
+            ) ?? item.citations.find((citation) => citation.kind === "run"));
+      return [
+        ...(primary === undefined ? [] : [primary]),
+        ...item.citations.filter((citation) => citation.kind === "project")
+      ];
+    });
+    return { citations, kind: "ok", output: history };
   }
 
   if (input.name === "get_run") {

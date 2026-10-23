@@ -60,6 +60,7 @@ import {
 } from "./pages.js";
 import type { ScheduledCallback } from "../work-briefing.js";
 import { registerBriefingPage } from "./briefing-page.js";
+import { registerHistoryPage } from "./history-page.js";
 import { registerMaestroPage } from "./maestro-page.js";
 import {
   recoveryHttpStatus,
@@ -1071,6 +1072,14 @@ export function createHttpApp(options: HttpAppOptions): Hono {
       app,
       getPollingIntervalMs,
       getScheduled,
+      now,
+      runStore,
+      startedAtMs
+    });
+
+    registerHistoryPage({
+      app,
+      getPollingIntervalMs,
       now,
       runStore,
       startedAtMs

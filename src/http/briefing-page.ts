@@ -73,7 +73,7 @@ function pill(className: string, text: string): string {
   return `<span class="pill ${className}"><span class="pill-dot" aria-hidden="true"></span>${escapeHtml(text)}</span>`;
 }
 
-function renderFreshness(freshness: BriefingFreshness): string {
+export function renderFreshness(freshness: BriefingFreshness): string {
   if (freshness.labels.length === 0) {
     return pill("pill--ok", "fresh");
   }
@@ -86,11 +86,11 @@ function renderFreshness(freshness: BriefingFreshness): string {
   return `${pills}<br><span class="muted">${escapeHtml(freshness.note)}</span>`;
 }
 
-function citationLink(citation: MaestroCitation): string {
+export function citationLink(citation: MaestroCitation): string {
   return `<a href="${escapeHtml(citation.href)}">${escapeHtml(citation.label)}</a>`;
 }
 
-function renderEvidence(item: BriefingItem): string {
+export function renderEvidence(item: { citations: MaestroCitation[] }): string {
   return `<ul class="briefing-evidence">${item.citations
     .map(
       (citation) =>
@@ -157,8 +157,8 @@ function renderWorkBriefing(briefing: WorkBriefing, nowMs: number): string {
       : `Work briefing: ${escapeHtml(scope.projectName)}`;
   const links =
     scope.kind === "all"
-      ? `<a href="/">Dashboard</a> · <a href="/maestro">Maestro</a>`
-      : `<a href="/projects/${encodeURIComponent(scope.projectName)}">Back to ${escapeHtml(scope.projectName)}</a> · <a href="/briefing">All Projects</a> · <a href="/projects/${encodeURIComponent(scope.projectName)}/maestro">Maestro</a>`;
+      ? `<a href="/">Dashboard</a> · <a href="/history">History: last 7 days, 30 days, or a date range</a> · <a href="/maestro">Maestro</a>`
+      : `<a href="/projects/${encodeURIComponent(scope.projectName)}">Back to ${escapeHtml(scope.projectName)}</a> · <a href="/briefing">All Projects</a> · <a href="/projects/${encodeURIComponent(scope.projectName)}/history">History for this Project</a> · <a href="/projects/${encodeURIComponent(scope.projectName)}/maestro">Maestro</a>`;
   const nav = BRIEFING_GROUP_ORDER.map(
     (group) =>
       `<a href="#${GROUP_HEADINGS[group].anchor}">${escapeHtml(GROUP_HEADINGS[group].title)}</a>`

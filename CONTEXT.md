@@ -791,8 +791,10 @@ conversation defaults to that Project's evidence but may inspect and cite anothe
 operator names. Repository content is read only through the Maestro Workspace when the operator enables
 it. Its `get_work_briefing` tool and the `GET /briefing` and `GET /projects/:name/briefing` reports group work
 into needs-attention, ready, ongoing/in-review and not-ready from persisted evidence, citing the Issue, Run or
-PR behind each reason and labelling stale polls and failed GitHub reads; rolling and custom-range history is
-a later slice of #868.
+PR behind each reason and labelling stale polls and failed GitHub reads. Its `get_work_history` tool and the
+`GET /history` and `GET /projects/:name/history` reports cover a rolling last 7 or 30 days or an explicit UTC
+range (half-open `[from, to)`), attributing completed work to the time of the event itself and keeping completed
+work, current GitHub observations, and past Maestro suggestions as separate labelled sections (ADR-2026-10-23-1729).
 _Avoid_: Orchestrator, Coding Agent — Maestro never dispatches, claims, or executes issue work, and has
 no provider-execution posture of its own; chat session, which names an Autonomous Run's own property
 of needing no interactive input, not this assistant

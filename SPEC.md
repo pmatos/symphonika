@@ -3148,6 +3148,21 @@ leak into the sibling Projects. A save the daemon fails to reload is reported as
 active". The Project page shows the Ready Label, priority order (lower number first, with the
 explicit fallback row) and Epic Labels from the live Runtime Config Snapshot, never from the file.
 
+The Project page also renders an "Epics" section (`#858`, `renderEpicViewSection`,
+`src/http/epic-view.ts`, ADR-2026-10-23-1112) built only from the persisted issue snapshot (ADR 0073).
+For each open Issue carrying an Epic Label it lists the Issues whose recorded Native Parent
+(ADR-2026-10-23-0852) is `present`, same-repository, and that epic. Each child row shows its verdict,
+a separate "Blocked by" column (an open blocker renders as gating, a closed one as resolved; a truncated
+fetch is flagged), the repository, and the row's poll age. The section header shows the Project's last
+successful poll, `(pre-restart)` when it predates the daemon, and a "polling failing" pill with the
+error while the latest poll failed (the last successful snapshot is still shown). Membership is
+native-only: `blockedBy` and the `## Parent` heading parse never create it. An Issue whose evidence is
+`unavailable`, unrecorded, cross-repository, or has a closed parent is listed under "Not grouped under
+an epic" with an explicit badge; no parent is invented, and a cross-repository parent never matches a
+same-numbered local epic. Snapshots hold open Issues only, so a closed parent is shown as a badge, never
+given an epic header. The section is server-rendered with no client script, is additive, and never
+changes dispatch eligibility; every Issue remains in the Issues table below it.
+
 `detectGitFileState` (`src/http/git-status.ts`, ADR-0075) gives a future editor the git context the
 issue requires before a save: whether the target path sits inside a git repo, its repo root and
 branch (or, if detached, the current SHA), the whole working tree's dirty state and — separately —

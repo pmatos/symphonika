@@ -140,6 +140,8 @@ async function setup(
   };
   return {
     getIssue,
+    preview: (issueNumber = 7) =>
+      createProviderRecoveryService(deps).preview("widgets", issueNumber),
     recover: (provider = "claude") =>
       createProviderRecoveryService(deps).recover({
         issueNumber: 7,
@@ -297,6 +299,113 @@ describe("createProviderRecoveryService", () => {
     expect(await recover()).toMatchObject({
       kind: "refused",
       reason: "duplicate"
+    });
+  });
+
+  describe("preview", () => {
+    it("describes the stopped Run, its position and the providers to choose from", async () => {
+      const { preview, runStore } = await setup();
+
+      const result = preview();
+
+      expect(result).toMatchObject({
+        blockers: [],
+        defaultProvider: "claude",
+        projectDefaultProvider: "codex",
+        providers: ["claude", "codex"],
+        repository: { owner: "acme", repo: "widgets" },
+        run: { id: "run-1", state: "failed" },
+        state: { actionKind: "agent", id: "autofix" },
+        workflowName: "w"
+      });
+      expect(
+        runStore.listProviderInterventions({
+          issueNumber: 7,
+          projectName: "widgets"
+        })
+      ).toEqual([]);
+    });
+
+    it("proposes the Project default when it is not the provider that stopped", async () => {
+      const { preview, runStore } = await setup({
+        deps: {
+          getProvidersConfig: () => ({
+            claude: { command: "claude" },
+            codex: { command: "codex" },
+            omp: { command: "omp" }
+          })
+        }
+      });
+      expect(preview()?.defaultProvider).toBe("omp");
+      runStore.createRun({
+        id: "run-2",
+        issue: {
+          body: "",
+          created_at: "2026-10-09T09:00:00Z",
+          id: 7,
+          labels: [],
+          number: 7,
+          priority: 0,
+          state: "open",
+          title: "Issue",
+          updated_at: "2026-10-09T09:00:00Z",
+          url: ""
+        },
+        projectName: "widgets",
+        providerCommand: "omp",
+        providerName: "omp"
+      });
+      runStore.setRunCurrentState("run-2", "autofix");
+      runStore.updateRunState("run-2", "failed");
+
+      expect(preview()).toMatchObject({
+        defaultProvider: "codex",
+        run: { id: "run-2" }
+      });
+    });
+
+    it("reports why the head Run cannot be recovered without writing anything", async () => {
+      const { preview, runStore } = await setup();
+      runStore.updateRunState("run-1", "succeeded");
+
+      expect(preview()?.blockers).toEqual([
+        expect.stringContaining("only a failed, blocked or input_required Run")
+      ]);
+    });
+
+    it("blocks on a live reservation and on claim labels in the last snapshot", async () => {
+      const { preview, runStore } = await setup({
+        deps: { checkLiveRun: () => "run-live" }
+      });
+      runStore.replaceProjectIssueSnapshots({
+        polledAt: "2026-10-09T10:00:00.000Z",
+        projectName: "widgets",
+        repository: { owner: "acme", repo: "widgets" },
+        rows: [
+          {
+            blockedBy: [],
+            blockedByTruncated: false,
+            issueNumber: 7,
+            kind: "candidate",
+            labels: ["sym:stale"],
+            priority: 1,
+            reasons: [],
+            title: "Issue"
+          }
+        ]
+      });
+
+      expect(preview()?.blockers).toEqual([
+        expect.stringContaining("reserved by live Run run-live"),
+        expect.stringContaining("sym:stale")
+      ]);
+    });
+
+    it("has no preview for an Issue without Runs or a Project that is not a dispatch Project", async () => {
+      const none = await setup({ project: project({ mode: "routine_host" }) });
+      expect(none.preview()).toBeUndefined();
+      const { preview } = await setup();
+      expect(preview(99)).toBeUndefined();
     });
   });
 });

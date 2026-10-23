@@ -3,7 +3,7 @@
 Status: Accepted
 
 Part of epic #844, slice #863 (backend stage; the preview/confirm page and the timeline entry for an
-intervention are a follow-up stage). Extends ADR-2026-10-09-0743 (Run-Chain Provider Plan) and
+intervention are the follow-up stage recorded under "Operator UI" below). Extends ADR-2026-10-09-0743 (Run-Chain Provider Plan) and
 ADR-2026-10-13-0659 (per-state choices); follows ADR-2026-09-03-1158 (adopt-pr) for the audited
 operator exception to the claim mutex.
 
@@ -135,7 +135,7 @@ of inventing a user.
 ## Consequences
 
 - The stopped Run's Workspace and branch are inherited, not recreated, and recovery adds no reset of
-  its own. Whether the new provider should start from a clean tree is a preview-stage question.
+  its own. The preview states this plainly (see "Operator UI").
 - A Run whose state a workflow edit renamed, removed or turned into a non-agent state cannot be
   recovered (`invalid-position`), and a recovery accepted just before such an edit is failed at the
   launch with the reason recorded.
@@ -145,3 +145,30 @@ of inventing a user.
   deliberately not part of this stage and needs a decision.
 - The preview/confirm page, the timeline entry that joins an intervention to its two Runs, and
   override review (#864) read the same table.
+
+## Operator UI
+
+`GET`/`POST /issues/:project/:number/recover` front the service with the same same-origin and CSRF
+gate as Start. The decisions this stage settled:
+
+- **Candidate and preview.** The preview describes the Issue's newest Run and is built from local state
+  only (the `preview` method on the recovery service reuses the same local and Issue Reservation
+  checks the confirm runs), so the Issue page can ask for it on every render. A claim label in the
+  last poll snapshot is shown as a blocker; the closed-Issue check and the live GitHub claim read stay
+  confirm-time, because a page render must not cost a GitHub call.
+- **Workspace.** The new provider starts in the Workspace exactly as the failed attempt left it: no
+  reset, no clean checkout. The preview says so rather than offering a reset, which would have to
+  discard work the operator has not been shown.
+- **Proposed provider.** The Project default when it differs from the stopped Run's provider,
+  otherwise the first other configured and registered one, otherwise the stopped Run's own provider.
+  The operator can pick any available provider.
+- **Entry point.** The Issue page links to the preview only while it has no blockers. A recoverable
+  Run that is momentarily blocked (a retry still scheduled) has no link, but the preview URL still
+  explains why.
+- **`requested_via`** stays `http` for both the JSON route and the form: the channel is the HTTP
+  surface, not which client used it.
+- **Timeline.** A Run that stopped at an agent state is a "Failed" or "Blocked" row of its own, as a
+  leaf or when a recovery continued from it; previously a stopped Run with a Continuation read
+  "Completed". Each intervention is a row after the Run it acted on, with its outcome. For a
+  `launched` recovery the new Run is linked and its current state shown; `failed` and `dropped`
+  outcomes carry the recorded reason and leave the stopped Run as the visible failure.

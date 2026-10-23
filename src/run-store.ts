@@ -222,6 +222,37 @@ export type RunStateTransition = {
   state: RunState;
 };
 
+// One terminal Run state transition, attributed to the time the transition was
+// recorded (not the Run's creation). Source row for #868's history reports.
+export type RunCompletion = {
+  branchName: string;
+  completedAt: string;
+  issueNumber: number;
+  issueTitle: string;
+  projectName: string;
+  runId: string;
+  state: RunState;
+  terminalReason: string | null;
+};
+
+// Half-open [from, to) over normalized ISO-8601 UTC timestamps
+// (`Date#toISOString`), the same format every event column is written in, so a
+// string comparison orders them correctly.
+export type HistoryRangeFilter = {
+  from: string;
+  projectName?: string | undefined;
+  to: string;
+};
+
+// A Maestro assistant message, surfaced to the history report only as a
+// labelled suggestion. Never Run evidence (ADR 2026-10-07-0813).
+export type MaestroSuggestionRow = {
+  content: string;
+  createdAt: string;
+  id: string;
+  projectName: string | null;
+};
+
 export type RunDetail = RunStatus & {
   attempts: AttemptStatus[];
   transitions: RunStateTransition[];
@@ -6320,6 +6351,142 @@ export class RunStore {
     }));
   }
 
+  // #868: every terminal Run state transition recorded in [from, to), keyed by
+  // the transition's own timestamp so a Run created long before the window but
+  // finished inside it is attributed to the window it finished in.
+  listRunCompletionsBetween(input: HistoryRangeFilter): RunCompletion[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select t.run_id, t.state, t.created_at as completed_at,",
+          "r.project_name, r.issue_number, r.issue_title, r.branch_name,",
+          "r.terminal_reason",
+          "from run_state_transitions t join runs r on r.id = t.run_id",
+          `where t.state in (${TERMINAL_RUN_STATES_SQL_LIST})`,
+          "and t.created_at >= @from and t.created_at < @to",
+          input.projectName === undefined
+            ? ""
+            : "and r.project_name = @project",
+          "order by t.created_at desc, t.id desc"
+        ]
+          .filter((part) => part.length > 0)
+          .join(" ")
+      )
+      .all(rangeParams(input)) as Array<{
+      branch_name: string;
+      completed_at: string;
+      issue_number: number;
+      issue_title: string;
+      project_name: string;
+      run_id: string;
+      state: RunState;
+      terminal_reason: string | null;
+    }>;
+    return rows.map((row) => ({
+      branchName: row.branch_name,
+      completedAt: row.completed_at,
+      issueNumber: row.issue_number,
+      issueTitle: row.issue_title,
+      projectName: row.project_name,
+      runId: row.run_id,
+      state: row.state,
+      terminalReason: row.terminal_reason
+    }));
+  }
+
+  // #868: tracked pull requests whose merged/closed state was last observed in
+  // [from, to). last_observed_at, not updated_at: review-dispatch and re-owner
+  // writes bump updated_at after a PR has already ended.
+  listEndedTrackedPullRequestsBetween(
+    input: HistoryRangeFilter
+  ): TrackedPullRequest[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, issue_number, run_id, pr_number, pr_url,",
+          "branch_name, head_sha_at_dispatch, last_seen_head_sha,",
+          "last_review_dispatch_fingerprint, review_dispatch_count,",
+          "review_followup_cap_reached,",
+          "last_followup_run_id, state, last_observed_at, created_at, updated_at",
+          "from tracked_pull_requests",
+          "where state in ('merged', 'closed')",
+          "and last_observed_at >= @from and last_observed_at < @to",
+          input.projectName === undefined ? "" : "and project_name = @project",
+          "order by last_observed_at desc, id desc"
+        ]
+          .filter((part) => part.length > 0)
+          .join(" ")
+      )
+      .all(rangeParams(input)) as TrackedPullRequestRow[];
+    return rows.map((row) => mapTrackedPullRequestRow(row));
+  }
+
+  listPullRequestMergeAttemptsBetween(
+    input: HistoryRangeFilter
+  ): PullRequestMergeAttempt[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select id, project_name, pr_number, method, ok, error,",
+          "fresh_tracking_state, attempted_at",
+          "from pull_request_merge_attempts",
+          "where attempted_at >= @from and attempted_at < @to",
+          input.projectName === undefined ? "" : "and project_name = @project",
+          "order by attempted_at desc, id desc"
+        ]
+          .filter((part) => part.length > 0)
+          .join(" ")
+      )
+      .all(rangeParams(input)) as PullRequestMergeAttemptDbRow[];
+    return rows.map((row) => ({
+      attemptedAt: row.attempted_at,
+      error: row.error,
+      freshTrackingState: row.fresh_tracking_state,
+      id: row.id,
+      method: row.method,
+      ok: row.ok === 1,
+      prNumber: row.pr_number,
+      projectName: row.project_name
+    }));
+  }
+
+  // #868: assistant messages for the history page's separate "Maestro
+  // suggestions" section. A Project filter selects only that Project's own
+  // conversation; the dashboard conversation (project_name null) belongs to
+  // the all-Projects report alone.
+  listMaestroSuggestionsBetween(
+    input: HistoryRangeFilter
+  ): MaestroSuggestionRow[] {
+    const rows = this.database
+      .prepare(
+        [
+          "select m.id, m.content, m.created_at, c.project_name",
+          "from maestro_messages m",
+          "join maestro_conversations c on c.id = m.conversation_id",
+          "where m.role = 'assistant'",
+          "and m.created_at >= @from and m.created_at < @to",
+          input.projectName === undefined
+            ? ""
+            : "and c.project_name = @project",
+          "order by m.created_at desc, m.id desc"
+        ]
+          .filter((part) => part.length > 0)
+          .join(" ")
+      )
+      .all(rangeParams(input)) as Array<{
+      content: string;
+      created_at: string;
+      id: string;
+      project_name: string | null;
+    }>;
+    return rows.map((row) => ({
+      content: row.content,
+      createdAt: row.created_at,
+      id: row.id,
+      projectName: row.project_name
+    }));
+  }
+
   listProviderEvents(
     runId: string,
     options: ListProviderEventsOptions = {}
@@ -8451,6 +8618,13 @@ export class RunStore {
       on run_state_transitions(run_id, sequence);
     `);
 
+    // #868's history reports range-scan terminal transitions by their own
+    // timestamp; without this every report request scans the whole table.
+    this.database.exec(`
+      create index if not exists run_state_transitions_created_at_idx
+      on run_state_transitions(created_at);
+    `);
+
     // `runs` had no index at all. Every per-Issue lookup against it — the
     // waiting-row probe the PR follow-up loop now makes for each tracked PR on
     // each pass, and its several siblings — was a filtered scan of a table
@@ -9056,6 +9230,14 @@ function parseIssueRepository(
   } catch {
     return undefined;
   }
+}
+
+function rangeParams(input: HistoryRangeFilter): Record<string, string> {
+  return {
+    from: input.from,
+    to: input.to,
+    ...(input.projectName === undefined ? {} : { project: input.projectName })
+  };
 }
 
 function timestamp(): string {

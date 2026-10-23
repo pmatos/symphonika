@@ -3551,7 +3551,7 @@ Maestro's model-facing tool surface (`maestroToolsFor`, `src/maestro/tools.ts`) 
 list of read-only lookups over already-persisted Project/Issue-snapshot/Run/PR-snapshot evidence —
 `list_projects` (each Project's poll validation state, last successful poll time, and last poll
 ok/error outcome — the same provenance `/projects/:name`'s capacity strip shows), `list_issues`,
-`get_issue`, `list_runs`, `get_run`, `list_pull_requests`, and `get_work_briefing` (`#868`, below) in this
+`get_issue`, `list_runs`, `get_run`, `list_pull_requests`, `get_work_briefing`, and `get_work_history` (`#868`, below) in this
 slice. No tool in that list writes
 to GitHub, runs a shell command, or reads a local directory, and `executeMaestroTool` refuses any
 tool name outside that list without executing anything; see ADR-2026-10-07-0813 for why this is a
@@ -3591,7 +3591,7 @@ CSRF-checked first, exactly like `POST /maestro/messages`). The conversation loc
 answer in one Project does not block another, while a second submit in the same scope is still refused.
 A focused turn (`runMaestroTurn`'s `focus`) appends a paragraph naming the Project to the system prompt and,
 because a prompt alone is advisory, defaults an omitted `project_name` on `list_issues`, `get_issue`,
-`list_runs`, `list_pull_requests`, and `get_work_briefing` — and an omitted workspace target (no `project_name`, `repository`, or
+`list_runs`, `list_pull_requests`, `get_work_briefing`, and `get_work_history` — and an omitted workspace target (no `project_name`, `repository`, or
 `run_id`) — to the focus Project. The focus only fills in an omitted argument and never restricts one: an
 operator who names another configured Project gets that Project's evidence, cited like any other. The tool
 surface and read-only boundary are identical in every scope.
@@ -3614,11 +3614,39 @@ dashboard; it never calls GitHub. The tool caps each group at ten items and repo
 omitted `project_name` defaults to the focus Project in a Project conversation like the other evidence tools.
 The two routes are GET-only and render server-side straight from that evidence — never from model prose and
 never from a `maestro_*` table — so a chat claim cannot appear on them as execution evidence, and neither
-route nor the tool writes a Run or any other record. The dashboard and the Project page link to them. Rolling
-last-7/30-day and custom date-range history windows (attributing completed work to its event time, keeping
-pending GitHub observations and Maestro suggestions distinct) are the next slice of `#868`. Apart from the
+route nor the tool writes a Run or any other record. The dashboard and the Project page link to them. Apart from the
 `workspace_*` tools above, no tool calls GitHub live; every other tool reads only persisted RunStore
 snapshots from the daemon's normal poll cadence.
+
+Work history (`#868`, second slice): the briefing answers "what next?"; the history reports answer "what happened
+over the last week or month?". `GET /history` (all Projects) and `GET /projects/:name/history` (404 on an unknown
+Project, even with an invalid range) take `?window=7d|30d` (rolling) or an explicit `?from=&to=`; with no
+parameters they report the rolling last 7 days. Maestro's `get_work_history(project_name?, window | from, to)` is
+the same computation (`buildWorkHistory`, `src/work-history.ts`), capped per section with `omitted`. There is no
+rolling 7/30-day *briefing*: a briefing is the current classification, and history is a separate report over a
+range. The date semantics are fixed (ADR-2026-10-23-1729): times are UTC; a range is half-open `[from, to)`, so an
+event exactly at `from` is included and one exactly at `to` is not; a `from`/`to` is either a `YYYY-MM-DD` date
+(that day's UTC midnight) or an ISO-8601 time that ends in `Z` or carries an explicit offset, and a time without a
+zone, an impossible date, an inverted or empty range, a lone `from` or `to`, a `window` combined with `from`/`to`,
+an unknown window and a range over 366 days are each a readable HTTP 400 (a refused tool call). A rolling window is
+the request time minus 7 or 30 times 24 hours up to the request time.
+Actions are attributed to the time of the event itself, never to when the Issue or Run was created: a Run to the
+time of each terminal state transition (`run_state_transitions`), a tracked pull request to the time its
+merged/closed state was last observed (`tracked_pull_requests.last_observed_at`; this is when Symphonika saw the
+merge, not GitHub's own merge time, and the page says so), and a merge attempt to its `attempted_at`. Reports are
+recomputed on every request and nothing is stored, so a report is revisited by requesting the same explicit
+`from`/`to` again; a rolling request prints the range it resolved to as an exact permalink. Every report keeps
+three things apart and labelled. **Completed work** (succeeded Runs, merged tracked pull requests, successful merge
+attempts) and **ended without success** (failed, blocked, stale, cancelled or input-required Runs, closed pull
+requests, failed merge attempts) are recorded execution evidence, each item linking its Project, Run, Issue and
+pull request. An Issue or PR page renders only from a current poll snapshot, so the report links the Issue or PR
+only when one exists and otherwise names it in plain text. **Current GitHub observations** are not range-bound
+events: the latest persisted open pull requests and merged pull requests seen only in a poll (no tracked event time,
+so shown as observed with their poll time, never as completed), each with its Project's poll freshness (`poll_failed`,
+`stale`, `pre_restart`, `never_polled`). **Maestro suggestions** are past assistant replies in the range, shown only on
+the HTML report in a separate section labelled as suggestions and not evidence; they are never counted as completed
+work, never cited, and the tool does not return them. The computation that builds the first two sections never reads a
+`maestro_*` table.
 
 Maestro's model configuration lives under the optional `maestro:` Service Config block (§5.1),
 independent of `providers.codex/claude/omp`: selecting or changing Maestro's model never selects or

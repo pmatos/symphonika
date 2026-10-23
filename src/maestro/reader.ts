@@ -8,6 +8,12 @@ import {
   type WorkBriefing,
   type WorkGroup
 } from "../work-briefing.js";
+import {
+  buildWorkHistory,
+  parseHistoryRange,
+  type HistoryRangeRequest,
+  type WorkHistory
+} from "../work-history.js";
 
 // The narrow read-only surface Maestro's tool registry (src/maestro/
 // tools.ts) and conversation loop are given over RunStore — never RunStore
@@ -89,10 +95,21 @@ type MaestroRunRevisionEvidence = {
   recordedHeadSha: string | null;
 };
 
+// A history report is five sections of items with up to five citations each,
+// so each is capped tightly; `omitted` reports the rest.
+const MAX_HISTORY_ITEMS_PER_SECTION = 15;
+
 type MaestroWorkBriefing = Omit<WorkBriefing, "groups"> & {
   groups: Record<WorkGroup, { items: BriefingItem[]; omitted: number }>;
   notice: string;
 };
+
+type MaestroWorkHistory = WorkHistory & { notice: string };
+
+type MaestroWorkHistoryResult =
+  | { error: string; kind: "invalid" }
+  | { history: MaestroWorkHistory; kind: "ok" }
+  | { kind: "unknown_project" };
 
 // What the briefing needs beyond RunStore rows: the daemon's in-memory
 // callback schedule (so an Issue with a pending retry classifies the same as
@@ -115,6 +132,12 @@ export type MaestroEvidenceReader = {
   getRunRevision(runId: string): MaestroRunRevisionEvidence | undefined;
   // Undefined when projectName names no Project.
   getWorkBriefing(projectName?: string): MaestroWorkBriefing | undefined;
+  // Read-only history over persisted evidence (#868). Past Maestro chat is
+  // deliberately not part of it.
+  getWorkHistory(
+    projectName: string | undefined,
+    request: HistoryRangeRequest
+  ): MaestroWorkHistoryResult;
   listIssues(projectName: string): MaestroIssueEvidence[];
   listProjects(): MaestroProjectEvidence[];
   listPullRequests(projectName: string): MaestroPullRequestEvidence[];
@@ -264,6 +287,40 @@ export function createMaestroEvidenceReader(
         startedAtMs: briefingInputs.startedAtMs
       });
       return briefing === undefined ? undefined : capBriefing(briefing);
+    },
+    getWorkHistory: (projectName, request) => {
+      const nowMs = (briefingInputs.now ?? Date.now)();
+      const parsed = parseHistoryRange(request, nowMs);
+      if (!parsed.ok) {
+        return { error: parsed.error, kind: "invalid" };
+      }
+      const history = buildWorkHistory({
+        limit: MAX_HISTORY_ITEMS_PER_SECTION,
+        nowMs,
+        pollingIntervalMs:
+          briefingInputs.getPollingIntervalMs?.() ??
+          DEFAULT_POLLING_INTERVAL_MS,
+        projectName,
+        range: parsed.range,
+        runStore,
+        startedAtMs: briefingInputs.startedAtMs
+      });
+      return history === undefined
+        ? { kind: "unknown_project" }
+        : {
+            history: {
+              ...history,
+              notice:
+                "Built from persisted Run transitions, tracked pull requests, " +
+                "merge attempts and poll snapshots; GitHub was not called. " +
+                "completed and unsuccessful are attributed to each event's " +
+                "recorded time inside the half-open UTC range [from, to). " +
+                "observations are the latest persisted GitHub state, not " +
+                "range-bound; check each item's freshness. Past Maestro " +
+                "chat is not included and is never evidence of completed work."
+            },
+            kind: "ok"
+          };
     },
     listIssues,
     // Project status evidence (AC1): poll provenance, age, and failure

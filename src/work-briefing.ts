@@ -38,6 +38,7 @@ import {
   type MaestroCitation,
   type ProjectIssueSnapshotRow,
   type ProjectSnapshotRepository,
+  type ProjectState,
   type RunState,
   type RunStatus,
   type RunStore,
@@ -151,6 +152,23 @@ function isPreRestart(
   );
 }
 
+function toProvenance(
+  projectName: string,
+  projectState: ProjectState | undefined,
+  startedAtMs: number | undefined
+): WorkProjectProvenance | undefined {
+  if (projectState === undefined || projectState.lastPollOk === null) {
+    return undefined;
+  }
+  return {
+    lastPollError: projectState.lastPollError,
+    lastPollOk: projectState.lastPollOk,
+    lastSuccessfulPollAt: projectState.lastSuccessfulPollAt,
+    preRestart: isPreRestart(projectState.lastSuccessfulPollAt, startedAtMs),
+    projectName
+  };
+}
+
 function describeAttentionRun(run: RunStatus): string {
   if (run.state === "input_required") {
     return "provider requested input";
@@ -261,17 +279,9 @@ export function classifyWork(input: {
     // a Project whose poll has been failing since its very first attempt —
     // and so has zero snapshot rows — still surfaces its failure here
     // instead of silently vanishing from the overview.
-    if (projectState !== undefined && projectState.lastPollOk !== null) {
-      projects.push({
-        lastPollError: projectState.lastPollError,
-        lastPollOk: projectState.lastPollOk,
-        lastSuccessfulPollAt: projectState.lastSuccessfulPollAt,
-        preRestart: isPreRestart(
-          projectState.lastSuccessfulPollAt,
-          startedAtMs
-        ),
-        projectName
-      });
+    const provenance = toProvenance(projectName, projectState, startedAtMs);
+    if (provenance !== undefined) {
+      projects.push(provenance);
     }
 
     const snapshots = runStore.listProjectIssueSnapshots(projectName);
@@ -539,7 +549,7 @@ export const BRIEFING_GROUP_ORDER: readonly WorkGroup[] = [
   "notReady"
 ];
 
-function freshnessFor(
+export function freshnessFor(
   provenance: WorkProjectProvenance | undefined,
   nowMs: number,
   pollingIntervalMs: number
@@ -584,12 +594,49 @@ function freshnessFor(
   };
 }
 
-function projectHref(projectName: string): string {
+// Per-Project poll freshness for a report that is not itself a briefing (the
+// history report's "current GitHub observations"), read from the same
+// persisted poll state. A Project that has never attempted a poll (a Routine
+// Host) is omitted unless it is the one explicitly requested.
+export function listProjectFreshness(input: {
+  nowMs: number;
+  pollingIntervalMs: number;
+  projectName?: string | undefined;
+  runStore: RunStore;
+  startedAtMs: number | undefined;
+}): Array<BriefingFreshness & { projectName: string }> {
+  const states = input.runStore.getProjectStatesByName();
+  const result: Array<BriefingFreshness & { projectName: string }> = [];
+  for (const [projectName, state] of states) {
+    if (input.projectName !== undefined && input.projectName !== projectName) {
+      continue;
+    }
+    const provenance = toProvenance(projectName, state, input.startedAtMs);
+    if (provenance === undefined && input.projectName === undefined) {
+      continue;
+    }
+    result.push({
+      ...freshnessFor(provenance, input.nowMs, input.pollingIntervalMs),
+      projectName
+    });
+  }
+  return result.sort((a, b) => a.projectName.localeCompare(b.projectName));
+}
+
+export function projectHref(projectName: string): string {
   return `/projects/${encodeURIComponent(projectName)}`;
 }
 
-function issueHref(projectName: string, issueNumber: number): string {
+export function issueHref(projectName: string, issueNumber: number): string {
   return `/issues/${encodeURIComponent(projectName)}/${issueNumber}`;
+}
+
+export function runHref(runId: string): string {
+  return `/runs/${encodeURIComponent(runId)}`;
+}
+
+export function pullRequestHref(projectName: string, prNumber: number): string {
+  return `/prs/${encodeURIComponent(projectName)}/${prNumber}`;
 }
 
 function toBriefingItem(
@@ -615,7 +662,7 @@ function toBriefingItem(
   const run: MaestroCitation | undefined =
     entry.runId !== undefined && entry.runUpdatedAt !== undefined
       ? {
-          href: `/runs/${encodeURIComponent(entry.runId)}`,
+          href: runHref(entry.runId),
           kind: "run",
           label: `${entry.projectName} run ${entry.runId}`,
           observedAt: entry.runUpdatedAt
@@ -624,7 +671,7 @@ function toBriefingItem(
   const pullRequest: MaestroCitation | undefined =
     entry.prNumber !== undefined && entry.prObservedAt !== undefined
       ? {
-          href: `/prs/${encodeURIComponent(entry.projectName)}/${entry.prNumber}`,
+          href: pullRequestHref(entry.projectName, entry.prNumber),
           kind: "pull_request",
           label: `${entry.projectName}#${entry.prNumber}`,
           observedAt: entry.prObservedAt

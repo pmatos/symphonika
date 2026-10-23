@@ -105,6 +105,7 @@ function planFixture(overrides: Partial<ProviderPlan> = {}): ProviderPlan {
     readyLabel: "agent-ready",
     repository: { owner: "pmatos", repo: "alpha" },
     snapshotPolledAt: POLLED_AT,
+    stateDefinitions: {},
     stateProviders: {},
     status: "pending",
     updatedAt: POLLED_AT,

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  findStaleStateOverride,
   isAgentState,
   resolveEffectiveProvider
 } from "../src/lifecycle/chain-provider.js";
+import { stateDefinitionEvidence } from "../src/workflow/state-definition-digest.js";
 
 const agent = (id: string, provider?: "claude" | "codex" | "omp") => ({
   action: {
@@ -128,5 +130,123 @@ describe("isAgentState", () => {
     expect(isAgentState({ action: { kind: "wait" } })).toBe(false);
     expect(isAgentState({})).toBe(false);
     expect(isAgentState(undefined)).toBe(false);
+  });
+});
+
+describe("findStaleStateOverride", () => {
+  function stateWith(prompt: string) {
+    return {
+      action: { kind: "agent" as const, prompt },
+      completeWhen: {},
+      id: "review",
+      transitions: []
+    };
+  }
+
+  function planWith(digest: string | undefined) {
+    return {
+      stateDefinitions:
+        digest === undefined
+          ? {}
+          : {
+              review: {
+                definition: stateDefinitionEvidence(stateWith("a.md"))
+                  .definition,
+                digest
+              }
+            },
+      stateProviders: { review: "codex" as const }
+    };
+  }
+
+  const current = stateDefinitionEvidence(stateWith("a.md")).digest;
+
+  it("finds nothing when the definition is unchanged", () => {
+    expect(
+      findStaleStateOverride({
+        plan: planWith(current),
+        state: stateWith("a.md"),
+        stateId: "review"
+      })
+    ).toBeUndefined();
+  });
+
+  it("reports a changed definition with both digests and the chosen provider", () => {
+    expect(
+      findStaleStateOverride({
+        plan: planWith(current),
+        state: stateWith("b.md"),
+        stateId: "review"
+      })
+    ).toEqual({
+      kind: "definition_changed",
+      newDigest: stateDefinitionEvidence(stateWith("b.md")).digest,
+      oldDigest: current,
+      provider: "codex",
+      stateId: "review"
+    });
+  });
+
+  it("reports a removed state", () => {
+    expect(
+      findStaleStateOverride({
+        plan: planWith(current),
+        state: undefined,
+        stateId: "review"
+      })
+    ).toMatchObject({ kind: "state_removed", newDigest: null });
+  });
+
+  it("never reports a legacy choice, a foreign digest version or no plan", () => {
+    const edited = stateWith("b.md");
+    expect(
+      findStaleStateOverride({
+        plan: planWith(undefined),
+        state: edited,
+        stateId: "review"
+      })
+    ).toBeUndefined();
+    expect(
+      findStaleStateOverride({
+        plan: planWith("state-def-v0:sha256:old"),
+        state: edited,
+        stateId: "review"
+      })
+    ).toBeUndefined();
+    expect(
+      findStaleStateOverride({ plan: undefined, state: edited, stateId: "x" })
+    ).toBeUndefined();
+  });
+
+  it("ignores a state with no choice, including a chain-wide choice", () => {
+    expect(
+      findStaleStateOverride({
+        plan: planWith(current),
+        state: stateWith("b.md"),
+        stateId: "other"
+      })
+    ).toBeUndefined();
+    expect(
+      findStaleStateOverride({
+        plan: { stateDefinitions: {}, stateProviders: {} },
+        state: undefined,
+        stateId: "review"
+      })
+    ).toBeUndefined();
+  });
+
+  it("ignores a state that is no longer an agent state", () => {
+    expect(
+      findStaleStateOverride({
+        plan: planWith(current),
+        state: {
+          action: { kind: "wait" as const },
+          completeWhen: {},
+          id: "review",
+          transitions: []
+        },
+        stateId: "review"
+      })
+    ).toBeUndefined();
   });
 });

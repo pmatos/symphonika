@@ -654,6 +654,18 @@ unset level reveals the next. Each Run records which
 level chose its provider (`runs.provider_source`), and an Attempt's retry keeps the Run's provider.
 Non-FSM Continuations and PR review follow-ups are not covered and keep Project routing.
 
+A per-state choice records the state's definition when it is made (ADR-2026-10-23-1738): a digest of
+the parsed state's action (`kind`, the prompt path, `provider`, `method`, `labels`, `body`,
+`state_reason`), `complete_when` and ordered transitions, with comments, key order and quoting
+normalised away and the state id, the prompt file's text and other states left out. At State Advance
+(after the target state is resolved from the reloaded or last-known-good workflow) and at the fresh
+claim of the initial state, a choice whose state is gone, or is still an `agent` state with a
+different digest, **parks** the Run Chain before any provider launches: a `blocked` Run with
+`current_state_id` kept and `terminal_reason` `provider_override_review_required: ...`, labelled
+`sym:blocked` and `sym:human-needed` like any blocked Run. A chain-wide choice, a workflow with no
+choices, an unrelated state's edit, a recovery launch, an Attempt retry, and a choice recorded without
+a digest (written before this behaviour) never park.
+
 An operator can **recover** a stopped state with a different provider (ADR-2026-10-23-0903):
 `POST /api/issues/:project/:number/recover` with `{runId, stateId, provider}` is authenticated and
 CSRF-protected like every mutating route (ADR 0075), and answers `202` when accepted, `409` for a live Issue Reservation, a held

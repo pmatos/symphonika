@@ -323,6 +323,105 @@ describe("RunStore provider plans", () => {
     }
   );
 
+  describe("recorded state definitions (#864)", () => {
+    const evidence = {
+      definition: {
+        action: { kind: "agent", prompt: "prompts/review.md" },
+        completeWhen: {},
+        terminal: null,
+        transitions: []
+      },
+      digest: "state-def-v1:sha256:abc"
+    };
+
+    function rawStateProviders(root: string, json: string): void {
+      const db = new Database(databasePath(root));
+      try {
+        db.prepare(
+          "update run_chain_provider_plans set state_providers_json = ? where id = 'plan-1'"
+        ).run(json);
+      } finally {
+        db.close();
+      }
+    }
+
+    it("round-trips a per-state choice with the definition it was made against", async () => {
+      const { store } = await openTempStore();
+      try {
+        const plan = store.createProviderPlan(
+          planInput({
+            stateDefinitions: { review: evidence },
+            stateProviders: { review: "codex" }
+          })
+        );
+        expect(plan.stateProviders).toEqual({ review: "codex" });
+        expect(plan.stateDefinitions).toEqual({ review: evidence });
+      } finally {
+        store.close();
+      }
+    });
+
+    it("stores a choice with no definition in the legacy bare shape", async () => {
+      const { store, root } = await openTempStore();
+      try {
+        store.createProviderPlan(
+          planInput({ stateProviders: { review: "codex" } })
+        );
+        const db = new Database(databasePath(root), { readonly: true });
+        try {
+          expect(
+            db
+              .prepare(
+                "select state_providers_json as json from run_chain_provider_plans"
+              )
+              .get()
+          ).toEqual({ json: '{"review":"codex"}' });
+        } finally {
+          db.close();
+        }
+      } finally {
+        store.close();
+      }
+    });
+
+    it("reads a pre-#864 bare-string row as a choice with no recorded definition", async () => {
+      const { store, root } = await openTempStore();
+      try {
+        store.createProviderPlan(planInput());
+        rawStateProviders(root, '{"review":"codex"}');
+        const plan = store.getProviderPlan("plan-1");
+        expect(plan?.stateProviders).toEqual({ review: "codex" });
+        expect(plan?.stateDefinitions).toEqual({});
+      } finally {
+        store.close();
+      }
+    });
+
+    it.each([
+      [
+        '{"review":{"provider":"gpt","definitionDigest":"d","definition":{}}}',
+        {}
+      ],
+      ['{"review":{"provider":"codex"}}', { review: "codex" }],
+      ['{"review":{"definitionDigest":"d","definition":{}}}', {}],
+      ['{"review":["codex"]}', {}]
+    ])(
+      "reads a malformed object entry %s defensively",
+      async (json, expectedProviders) => {
+        const { store, root } = await openTempStore();
+        try {
+          store.createProviderPlan(planInput());
+          rawStateProviders(root, json);
+          const plan = store.getProviderPlan("plan-1");
+          expect(plan?.stateDefinitions).toEqual({});
+          expect(plan?.stateProviders).toEqual(expectedProviders);
+        } finally {
+          store.close();
+        }
+      }
+    );
+  });
+
   it("ignores an unknown recorded provider source (#862)", async () => {
     const { store, root } = await openTempStore();
     try {

@@ -88,4 +88,7 @@ Candidates with a blocking plan are skipped like suppressed ones.
 - A `label_written` plan whose label is later removed by hand stays until cancelled or superseded
   and could attach to a much later manual Ready Label add; it is visible on the Issue page.
 - Per-state operator exceptions, provenance on the timeline, recovery with another provider and
-  override review after workflow edits are #862-#864.
+  override review after workflow edits are #862-#864. The plan stays immutable once consumed for
+  provider *routing*; the only field a later action is expected to change is a per-state choice's
+  recorded definition and provider when an operator resolves a review
+  (ADR-2026-10-23-1738).

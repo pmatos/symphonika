@@ -1,5 +1,9 @@
 import type { AgentProviderName } from "../provider.js";
 import type { ProviderPlan, ProviderSelectionSource } from "../run-store.js";
+import {
+  isCurrentStateDefinitionDigest,
+  stateDefinitionEvidence
+} from "../workflow/state-definition-digest.js";
 import type { ExpandedWorkflowState } from "../workflow/types.js";
 
 type EffectiveProvider = {
@@ -59,6 +63,67 @@ export function resolveEffectiveProvider(input: {
     return { provider: actionProvider, source: "workflow_action" };
   }
   return { provider: input.projectDefault, source: "project_default" };
+}
+
+export type ProviderOverrideReviewFinding = {
+  kind: "definition_changed" | "state_removed";
+  newDigest: string | null;
+  oldDigest: string;
+  provider: AgentProviderName;
+  stateId: string;
+};
+
+// Whether an operator's per-state choice (#862) still describes the state it
+// was made for (#864). Returns a finding only for a choice that recorded the
+// state's definition at Start and whose state is now gone or is still an
+// agent state with a different definition. Not a finding: a chain-wide
+// choice (it names no state), a choice for another state, a legacy choice
+// with no recorded digest, a digest from another scope version, and a state
+// that is no longer an agent state (its per-state choice is already inert).
+export function findStaleStateOverride(input: {
+  plan: Pick<ProviderPlan, "stateDefinitions" | "stateProviders"> | undefined;
+  state: ExpandedWorkflowState | undefined;
+  stateId: string;
+}): ProviderOverrideReviewFinding | undefined {
+  const { plan, state, stateId } = input;
+  if (
+    plan === undefined ||
+    !Object.hasOwn(plan.stateProviders, stateId) ||
+    !Object.hasOwn(plan.stateDefinitions, stateId)
+  ) {
+    return undefined;
+  }
+  const provider = plan.stateProviders[stateId];
+  const recorded = plan.stateDefinitions[stateId];
+  if (
+    provider === undefined ||
+    recorded === undefined ||
+    !isCurrentStateDefinitionDigest(recorded.digest)
+  ) {
+    return undefined;
+  }
+  if (state === undefined) {
+    return {
+      kind: "state_removed",
+      newDigest: null,
+      oldDigest: recorded.digest,
+      provider,
+      stateId
+    };
+  }
+  if (!isAgentState(state)) {
+    return undefined;
+  }
+  const current = stateDefinitionEvidence(state);
+  return current.digest === recorded.digest
+    ? undefined
+    : {
+        kind: "definition_changed",
+        newDigest: current.digest,
+        oldDigest: recorded.digest,
+        provider,
+        stateId
+      };
 }
 
 // `pending` and `label_written` are what a claim may consume. `label_failed`

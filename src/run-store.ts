@@ -43,6 +43,7 @@ import type {
   TargetedRoutineDeclaration
 } from "./routines/types.js";
 import { runEvidenceDirectoryPath } from "./workflow/evidence-paths.js";
+import type { StateDefinitionEvidence } from "./workflow/state-definition-digest.js";
 import type { ExpandedWorkflow } from "./workflow/types.js";
 
 export type RunState =
@@ -1482,6 +1483,10 @@ export type ProviderPlan = {
   readyLabel: string;
   repository: { owner: string; repo: string };
   snapshotPolledAt: string;
+  // What each per-state exception was chosen against (#864), keyed by state
+  // id. A state in `stateProviders` with no entry here is a legacy choice
+  // recorded before definitions were captured: unverifiable, never parked.
+  stateDefinitions: Readonly<Record<string, StateDefinitionEvidence>>;
   // Per-agent-state exceptions to `provider` (#862), keyed by state id. A
   // state absent here runs on the chain-wide `provider`.
   stateProviders: Readonly<Record<string, AgentProviderName>>;
@@ -1498,6 +1503,7 @@ export type CreateProviderPlanInput = {
   readyLabel: string;
   repository: { owner: string; repo: string };
   snapshotPolledAt: string;
+  stateDefinitions?: Readonly<Record<string, StateDefinitionEvidence>>;
   stateProviders?: Readonly<Record<string, AgentProviderName>>;
 };
 
@@ -1524,35 +1530,84 @@ const PROVIDER_PLAN_LIVE_STATUSES_SQL =
   "('pending', 'label_written', 'label_failed', 'expired')";
 const PROVIDER_PLAN_PENDING_TTL_MS = 60 * 60 * 1000;
 
-// Written only by createProviderPlan from validated input; still parsed
-// defensively so a hand-edited row cannot route a state to an unknown name.
-function parseStoredStateProviders(
-  json: string | null
-): Readonly<Record<string, AgentProviderName>> {
+// `{stateId: provider}` (plans written before #864) or `{stateId: {provider,
+// definitionDigest, definition}}`; a bare provider string carries no
+// definition. Written only by createProviderPlan from validated input; still
+// parsed defensively so a hand-edited row cannot route a state to an unknown
+// name.
+function parseStoredStateOverrides(json: string | null): {
+  stateDefinitions: Readonly<Record<string, StateDefinitionEvidence>>;
+  stateProviders: Readonly<Record<string, AgentProviderName>>;
+} {
+  const stateProviders: Record<string, AgentProviderName> = {};
+  const stateDefinitions: Record<string, StateDefinitionEvidence> = {};
+  const empty = { stateDefinitions, stateProviders };
   if (json === null) {
-    return {};
+    return empty;
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
   } catch {
-    return {};
+    return empty;
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return {};
+    return empty;
   }
-  const result: Record<string, AgentProviderName> = {};
-  for (const [stateId, provider] of Object.entries(
+  for (const [stateId, entry] of Object.entries(
     parsed as Record<string, unknown>
   )) {
-    if (typeof provider === "string" && isAgentProviderName(provider)) {
-      result[stateId] = provider;
+    if (typeof entry === "string") {
+      if (isAgentProviderName(entry)) {
+        stateProviders[stateId] = entry;
+      }
+      continue;
+    }
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      continue;
+    }
+    const { definition, definitionDigest, provider } = entry as Record<
+      string,
+      unknown
+    >;
+    if (typeof provider !== "string" || !isAgentProviderName(provider)) {
+      continue;
+    }
+    stateProviders[stateId] = provider;
+    if (
+      typeof definitionDigest === "string" &&
+      typeof definition === "object" &&
+      definition !== null
+    ) {
+      stateDefinitions[stateId] = {
+        definition: definition as StateDefinitionEvidence["definition"],
+        digest: definitionDigest
+      };
     }
   }
-  return result;
+  return empty;
+}
+
+function serializeStateOverrides(input: CreateProviderPlanInput): string {
+  const stored: Record<string, unknown> = {};
+  for (const [stateId, provider] of Object.entries(
+    input.stateProviders ?? {}
+  )) {
+    const evidence = input.stateDefinitions?.[stateId];
+    stored[stateId] =
+      evidence === undefined
+        ? provider
+        : {
+            definition: evidence.definition,
+            definitionDigest: evidence.digest,
+            provider
+          };
+  }
+  return JSON.stringify(stored);
 }
 
 function mapProviderPlanRow(row: ProviderPlanDbRow): ProviderPlan {
+  const overrides = parseStoredStateOverrides(row.state_providers_json);
   return {
     attemptCount: row.attempt_count,
     consumedRunId: row.consumed_run_id,
@@ -1566,7 +1621,8 @@ function mapProviderPlanRow(row: ProviderPlanDbRow): ProviderPlan {
     readyLabel: row.ready_label,
     repository: { owner: row.repository_owner, repo: row.repository_name },
     snapshotPolledAt: row.snapshot_polled_at,
-    stateProviders: parseStoredStateProviders(row.state_providers_json),
+    stateDefinitions: overrides.stateDefinitions,
+    stateProviders: overrides.stateProviders,
     status: row.status as ProviderPlanStatus,
     updatedAt: row.updated_at
   };
@@ -1737,7 +1793,7 @@ export class RunStore {
           readyLabel: input.readyLabel,
           repo: input.repository.repo,
           snapshotPolledAt: input.snapshotPolledAt,
-          stateProvidersJson: JSON.stringify(input.stateProviders ?? {})
+          stateProvidersJson: serializeStateOverrides(input)
         });
     });
     apply();

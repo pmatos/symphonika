@@ -1,5 +1,6 @@
 import type { ClassifiedTerminal } from "./classify-failure.js";
 import type { RunState } from "../run-store.js";
+import { isProviderOverrideReviewReason } from "./terminal-reason.js";
 import type { WorkflowPredicateMap } from "../workflow/types.js";
 
 // Projects a ClassifiedTerminal (produced by classify-failure.ts) into the two
@@ -29,7 +30,9 @@ const BLOCKED_TERMINAL_REASONS = new Set([
 
 export function isBlockedOutcome(outcome: ClassifiedTerminal): boolean {
   return (
-    outcome.kind === "failed" && BLOCKED_TERMINAL_REASONS.has(outcome.reason)
+    outcome.kind === "failed" &&
+    (BLOCKED_TERMINAL_REASONS.has(outcome.reason) ||
+      isProviderOverrideReviewReason(outcome.reason))
   );
 }
 

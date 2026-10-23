@@ -24,7 +24,8 @@ plan exists, level 3 is reached only by Runs the plan does not cover.
 
 ### Storage
 
-`run_chain_provider_plans.state_providers_json` holds a `{stateId: provider}` object (`{}` for
+`run_chain_provider_plans.state_providers_json` holds a `{stateId: provider}` object (since
+ADR-2026-10-23-1738 a value may instead be `{provider, definitionDigest, definition}`) (`{}` for
 none; `NULL` only on plans written before this change). Start validates it against the previewed
 graph: the state must exist and be selectable, and the provider must be configured and registered;
 blank entries mean chain-wide and are dropped. Retry re-runs the same validation.
@@ -56,9 +57,13 @@ without a record keep the graph-derived description.
 
 ## Consequences
 
-- Per-state choices are keyed by state id and are not re-validated at claim or advance. If a later
-  workflow edit renames or removes a state, its choice silently stops matching and the state falls
-  back to the chain-wide choice. Reviewing overrides after workflow edits is #864.
+- Per-state choices are keyed by state id and, as first built, were not re-validated at claim or
+  advance: if a later workflow edit renames or removes a state, its choice silently stops
+  matching and the state falls back to the chain-wide choice, and an edit that keeps the id but
+  changes what the state does silently rebinds the choice. *Superseded for choices made since
+  ADR-2026-10-23-1738*: they record the state's definition at Start, and a changed or removed
+  state parks the chain before any provider starts. Choices without a recorded definition keep the
+  behaviour described here.
 - A per-state provider that becomes unconfigured or unregistered mid-chain fails that State
   Advance before the provider starts (`provider_command_missing` / `provider_not_registered`), as a
   chain-wide choice would.

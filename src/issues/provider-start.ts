@@ -18,6 +18,10 @@ import {
 } from "../lifecycle/run-controller.js";
 import type { AgentProviderName } from "../provider.js";
 import type { ProviderPlan, RunStore } from "../run-store.js";
+import {
+  stateDefinitionEvidence,
+  type StateDefinitionEvidence
+} from "../workflow/state-definition-digest.js";
 
 const PROVIDER_CHOICES: readonly AgentProviderName[] = [
   "omp",
@@ -168,9 +172,16 @@ function errorMessage(error: unknown): string {
 // provider may be chosen. Blank entries mean "chain-wide" and are dropped.
 function parseStateProviders(
   raw: Readonly<Record<string, string>> | undefined,
-  context: Pick<ProviderStartContext, "providers" | "states">
-): { stateProviders: Record<string, AgentProviderName> } | { error: string } {
+  context: Pick<ProviderStartContext, "providers" | "states">,
+  definitions: Readonly<Record<string, StateDefinitionEvidence>> = {}
+):
+  | {
+      stateDefinitions: Record<string, StateDefinitionEvidence>;
+      stateProviders: Record<string, AgentProviderName>;
+    }
+  | { error: string } {
   const stateProviders: Record<string, AgentProviderName> = {};
+  const stateDefinitions: Record<string, StateDefinitionEvidence> = {};
   for (const [stateId, value] of Object.entries(raw ?? {})) {
     if (value.length === 0) {
       continue;
@@ -190,8 +201,12 @@ function parseStateProviders(
       };
     }
     stateProviders[stateId] = value;
+    const definition = definitions[stateId];
+    if (definition !== undefined) {
+      stateDefinitions[stateId] = definition;
+    }
   }
-  return { stateProviders };
+  return { stateDefinitions, stateProviders };
 }
 
 type LiveReadResult =
@@ -212,6 +227,23 @@ export function createProviderStartService(
       isDispatchProject(project)
       ? project
       : undefined;
+  }
+
+  // What each state of the loaded workflow is defined as right now, recorded
+  // beside a per-state choice so a later edit of that state is noticed (#864).
+  function stateDefinitionsOf(
+    project: DispatchProjectConfig
+  ): Record<string, StateDefinitionEvidence> {
+    const workflow = project.workflow;
+    if (!("expandedWorkflow" in workflow)) {
+      return {};
+    }
+    return Object.fromEntries(
+      workflow.expandedWorkflow.states.map((state) => [
+        state.id,
+        stateDefinitionEvidence(state)
+      ])
+    );
   }
 
   function contextFor(
@@ -525,7 +557,11 @@ export function createProviderStartService(
         "the workflow changed since this preview was rendered; reload the preview"
       );
     }
-    const parsedStates = parseStateProviders(input.stateProviders, context);
+    const parsedStates = parseStateProviders(
+      input.stateProviders,
+      context,
+      stateDefinitionsOf(project)
+    );
     if ("error" in parsedStates) {
       return refuse(parsedStates.error);
     }
@@ -584,6 +620,7 @@ export function createProviderStartService(
         readyLabel: context.readyLabel,
         repository: context.repository,
         snapshotPolledAt: input.snapshotPolledAt,
+        stateDefinitions: parsedStates.stateDefinitions,
         stateProviders: parsedStates.stateProviders
       });
     } finally {

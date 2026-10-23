@@ -12,6 +12,7 @@ import {
   type ProviderStartService
 } from "../src/issues/provider-start.js";
 import { openRunStore, type RunStore } from "../src/run-store.js";
+import { stateDefinitionEvidence } from "../src/workflow/state-definition-digest.js";
 
 const tempRoots: string[] = [];
 const openStores: RunStore[] = [];
@@ -53,19 +54,19 @@ const FSM_STATES = [
     action: { kind: "agent", prompt: "implement" },
     completeWhen: {},
     id: "implement",
-    transitions: [{ to: "review" }]
+    transitions: [{ to: "review", when: {} }]
   },
   {
     action: { kind: "agent", prompt: "review", provider: "claude" },
     completeWhen: {},
     id: "review",
-    transitions: [{ to: "await_checks" }]
+    transitions: [{ to: "await_checks", when: {} }]
   },
   {
     action: { kind: "wait" },
     completeWhen: {},
     id: "await_checks",
-    transitions: [{ to: "done" }]
+    transitions: [{ to: "done", when: {} }]
   },
   { completeWhen: {}, id: "done", terminal: "success", transitions: [] }
 ];
@@ -971,6 +972,26 @@ describe("ProviderStartService per-state choices (#862)", () => {
     expect(outcome).toMatchObject({ kind: "started" });
     expect(runStore.getProviderPlan("plan-1")?.stateProviders).toEqual({
       review: "codex"
+    });
+  });
+
+  it("records the definition each per-state choice was made against (#864)", async () => {
+    const { runStore, service } = await createService();
+
+    await service.start({
+      ...startRequest,
+      stateProviders: { implement: "", review: "codex" }
+    });
+
+    const plan = runStore.getProviderPlan("plan-1");
+    expect(Object.keys(plan?.stateDefinitions ?? {})).toEqual(["review"]);
+    expect(plan?.stateDefinitions.review?.digest).toBe(
+      stateDefinitionEvidence(FSM_STATES[1] as never).digest
+    );
+    expect(plan?.stateDefinitions.review?.definition.action).toMatchObject({
+      kind: "agent",
+      prompt: "review",
+      provider: "claude"
     });
   });
 

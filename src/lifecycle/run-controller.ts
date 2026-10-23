@@ -131,8 +131,10 @@ import {
 import { probeStateClaim, stateGatesOnClaim } from "./claim-probe.js";
 import {
   isAgentState,
+  findStaleStateOverride,
   isConsumableProviderPlan,
-  resolveEffectiveProvider
+  resolveEffectiveProvider,
+  type ProviderOverrideReviewFinding
 } from "./chain-provider.js";
 import {
   DEFAULT_PROGRESS_GUARD_MAX_EDGE_CLAIMS,
@@ -189,6 +191,7 @@ import {
   buildMergePrRefusedReason,
   buildNoPullRequestTrackedReason,
   buildPullRequestDiscoveryExhaustedReason,
+  buildProviderOverrideReviewReason,
   type BranchRemoteState,
   describeBranchRemoteState,
   describeLatestChainRun,
@@ -1186,12 +1189,14 @@ export class RunController {
     // back to the project default for contract workflows or when the
     // initial agent action declares no provider.
     let initialState: ExpandedWorkflowState | undefined;
+    let initialStateId: string | undefined;
     try {
       const loaded = await this.loadWorkflow(target.project.workflow);
       if (
         loaded.errors.length === 0 &&
         loaded.expandedWorkflow.source.kind === "raw_fsm"
       ) {
+        initialStateId = loaded.expandedWorkflow.initial;
         initialState = findWorkflowState(
           loaded.expandedWorkflow,
           loaded.expandedWorkflow.initial
@@ -1231,7 +1236,20 @@ export class RunController {
       providersConfig as Partial<RunControllerProvidersConfig>
     )[providerName]?.command;
 
+    // An operator's per-state choice for the initial state was made against a
+    // definition that has since changed (#864): park the Issue for review
+    // instead of binding that choice to the edited state.
+    const overrideReview =
+      initialStateId === undefined
+        ? undefined
+        : findStaleStateOverride({
+            plan: providerPlan,
+            state: initialState,
+            stateId: initialStateId
+          });
+
     if (
+      overrideReview === undefined &&
       providerPlan !== undefined &&
       (providerCommand === undefined ||
         providerCommand.trim().length === 0 ||
@@ -1250,6 +1268,27 @@ export class RunController {
     }
 
     try {
+      if (overrideReview !== undefined && providerPlan !== undefined) {
+        await this.parkFreshClaimForOverrideReview({
+          ...(claimGuard === undefined ? {} : { claimGuard }),
+          finding: overrideReview,
+          issue: target.candidate.issue,
+          planId: providerPlan.id,
+          project: target.project,
+          providerCommand: providerCommand ?? "",
+          providerName,
+          ...(target.rawFsmWorkflow === undefined
+            ? {}
+            : { rawFsmWorkflow: target.rawFsmWorkflow }),
+          repository,
+          runId
+        });
+        return {
+          kind: "terminal",
+          result: { dispatched: true, runId }
+        };
+      }
+
       if (
         providerCommand === undefined ||
         providerCommand.trim().length === 0
@@ -1410,50 +1449,10 @@ export class RunController {
         projectName: input.project.name,
         rawFsmWorkflow: input.rawFsmWorkflow
       });
-      await this.bestEffort(
-        () =>
-          (
-            this.githubIssuesApi as LabelWritingGitHubIssuesApi
-          ).addLabelsToIssue({
-            ...input.repository,
-            issueNumber: input.issue.number,
-            labels: ["sym:claimed"]
-          }),
-        {
-          issueNumber: input.issue.number,
-          label: "sym:claimed",
-          operation: "addLabel",
-          phase: "fresh-dispatch-provider-resolution",
-          project: input.project.name,
-          runId: input.runId
-        }
+      await this.claimLabelForUnlaunchedFreshRun(
+        input,
+        "fresh-dispatch-provider-resolution"
       );
-      if (this.activeRuns.isShuttingDown()) {
-        // The provider-resolution failure path does not reserve an in-flight
-        // slot, so reserveSlot cannot reject a shutdown-racing claim for it.
-        // Roll back the label before skipping row creation. See ADR 0052.
-        await this.bestEffort(
-          () =>
-            (
-              this.githubIssuesApi as LabelWritingGitHubIssuesApi
-            ).removeLabelsFromIssue({
-              ...input.repository,
-              issueNumber: input.issue.number,
-              labels: ["sym:claimed"]
-            }),
-          {
-            issueNumber: input.issue.number,
-            label: "sym:claimed",
-            operation: "removeLabel",
-            phase: "fresh-dispatch-provider-resolution-shutdown",
-            project: input.project.name,
-            runId: input.runId
-          }
-        );
-        throw new RegistryShutdownError(
-          `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
-        );
-      }
       this.runStore.createRun({
         id: input.runId,
         issue: input.issue,
@@ -1492,6 +1491,264 @@ export class RunController {
     } finally {
       this.dispatchMutex.release();
     }
+  }
+
+  // The `sym:claimed` write for a fresh claim that records a terminal Run
+  // without launching: no in-flight slot is reserved, so reserveSlot cannot
+  // reject a shutdown-racing claim and the label is rolled back here before
+  // the Run row is skipped. See ADR 0052. Requires dispatchMutex.
+  private async claimLabelForUnlaunchedFreshRun(
+    input: {
+      issue: IssueSnapshot;
+      project: RunControllerProjectConfig;
+      repository: GitHubIssueRepositoryInput;
+      runId: string;
+    },
+    phase: string
+  ): Promise<void> {
+    await this.bestEffort(
+      () =>
+        (this.githubIssuesApi as LabelWritingGitHubIssuesApi).addLabelsToIssue({
+          ...input.repository,
+          issueNumber: input.issue.number,
+          labels: ["sym:claimed"]
+        }),
+      {
+        issueNumber: input.issue.number,
+        label: "sym:claimed",
+        operation: "addLabel",
+        phase,
+        project: input.project.name,
+        runId: input.runId
+      }
+    );
+    if (!this.activeRuns.isShuttingDown()) {
+      return;
+    }
+    await this.bestEffort(
+      () =>
+        (
+          this.githubIssuesApi as LabelWritingGitHubIssuesApi
+        ).removeLabelsFromIssue({
+          ...input.repository,
+          issueNumber: input.issue.number,
+          labels: ["sym:claimed"]
+        }),
+      {
+        issueNumber: input.issue.number,
+        label: "sym:claimed",
+        operation: "removeLabel",
+        phase: `${phase}-shutdown`,
+        project: input.project.name,
+        runId: input.runId
+      }
+    );
+    throw new RegistryShutdownError(
+      `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+    );
+  }
+
+  // A fresh claim whose initial state carries an operator's per-state choice
+  // that no longer matches the state's definition (#864). Creates the chain's
+  // root Run directly in `blocked`, consuming the plan in the same mutex hold
+  // as a real claim would: a plan left consumable would park the Issue again
+  // on every poll. No in-flight slot is reserved because nothing runs.
+  private async parkFreshClaimForOverrideReview(input: {
+    claimGuard?: () => boolean;
+    finding: ProviderOverrideReviewFinding;
+    issue: IssueSnapshot;
+    planId: string;
+    project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    rawFsmWorkflow?: LoadedWorkflow;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    if (this.activeRuns.isShuttingDown()) {
+      throw new RegistryShutdownError(
+        `daemon is shutting down; refusing to claim issue ${input.project.name}#${input.issue.number}`
+      );
+    }
+    await this.dispatchMutex.acquire();
+    try {
+      if (input.claimGuard?.() === false) {
+        throw new FreshClaimDeferredError(
+          `fresh issue claim deferred for project ${input.project.name}`
+        );
+      }
+      if (
+        this.runStore.latestRunSuppressesFreshDispatch({
+          issueNumber: input.issue.number,
+          projectName: input.project.name,
+          repository: input.repository
+        })
+      ) {
+        throw new FreshClaimDeferredError(
+          `fresh issue claim suppressed by latest no_workspace_changes outcome for ${input.project.name}#${input.issue.number}`
+        );
+      }
+      if (
+        this.activeRuns.isIssueReserved(input.project.name, input.issue.number)
+      ) {
+        throw new IssueReservedError(
+          `issue ${input.project.name}#${input.issue.number} is already reserved`
+        );
+      }
+      this.throwIfIssueParkedAtRawFsmState({
+        issueNumber: input.issue.number,
+        projectName: input.project.name,
+        rawFsmWorkflow: input.rawFsmWorkflow
+      });
+      const livePlan = this.runStore.getActiveProviderPlan({
+        issueNumber: input.issue.number,
+        repository: input.repository
+      });
+      if (
+        livePlan?.id !== input.planId ||
+        !isConsumableProviderPlan(livePlan)
+      ) {
+        throw new FreshClaimDeferredError(
+          `provider plan for ${input.project.name}#${input.issue.number} changed before the claim; deferring`
+        );
+      }
+      await this.claimLabelForUnlaunchedFreshRun(
+        input,
+        "fresh-dispatch-override-review"
+      );
+      this.runStore.clearProgressFingerprints({
+        issueNumber: input.issue.number,
+        projectName: input.project.name
+      });
+      this.runStore.createRun({
+        id: input.runId,
+        issue: input.issue,
+        projectName: input.project.name,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName
+      });
+      if (!this.runStore.consumeProviderPlan(input.planId, input.runId)) {
+        throw new Error(
+          `provider plan ${input.planId} could not be consumed by run ${input.runId}`
+        );
+      }
+      await this.recordOverrideReviewPark(input);
+    } finally {
+      this.dispatchMutex.release();
+    }
+  }
+
+  // The same parked outcome for a State Advance whose target carries a stale
+  // per-state choice (#864). Like recordStateAdvanceTerminalTarget it creates
+  // the child Run itself, because no claim is made: the Run exists only to
+  // hold the position and the reason.
+  private async parkStateAdvanceForOverrideReview(input: {
+    finding: ProviderOverrideReviewFinding;
+    issue: IssueSnapshot;
+    parentRunId: string;
+    project: RunControllerProjectConfig;
+    providerCommand: string;
+    providerName: AgentProviderName;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    if (this.activeRuns.isShuttingDown()) {
+      await this.cancelRunAfterScheduleCleared({
+        issueNumber: input.issue.number,
+        repository: input.repository,
+        runId: input.parentRunId
+      });
+      this.logger?.debug(
+        { issueNumber: input.issue.number, runId: input.runId },
+        "symphonika state advance skipped: daemon shutting down"
+      );
+      return;
+    }
+    await this.dispatchMutex.acquire();
+    try {
+      await this.bestEffort(
+        () =>
+          (
+            this.githubIssuesApi as LabelWritingGitHubIssuesApi
+          ).addLabelsToIssue({
+            ...input.repository,
+            issueNumber: input.issue.number,
+            labels: ["sym:claimed"]
+          }),
+        {
+          issueNumber: input.issue.number,
+          label: "sym:claimed",
+          operation: "addLabel",
+          phase: "state-advance-override-review",
+          project: input.project.name,
+          runId: input.runId
+        }
+      );
+      if (this.activeRuns.isShuttingDown()) {
+        await this.cancelRunAfterScheduleCleared({
+          issueNumber: input.issue.number,
+          repository: input.repository,
+          runId: input.parentRunId
+        });
+        return;
+      }
+      this.runStore.createContinuationRun({
+        id: input.runId,
+        issue: input.issue,
+        parentRunId: input.parentRunId,
+        projectName: input.project.name,
+        providerCommand: input.providerCommand,
+        providerName: input.providerName
+      });
+      await this.recordOverrideReviewPark(input);
+    } finally {
+      this.dispatchMutex.release();
+    }
+  }
+
+  // Requires dispatchMutex. The Run is `blocked` with `current_state_id` kept
+  // at the state under review, exactly as a workflow-blocked Run is, so the
+  // position survives for whoever resolves the review. Labels and the
+  // sym:human-needed comment come from applyTerminal's blocked branch.
+  private async recordOverrideReviewPark(input: {
+    finding: ProviderOverrideReviewFinding;
+    issue: IssueSnapshot;
+    repository: GitHubIssueRepositoryInput;
+    runId: string;
+  }): Promise<void> {
+    const reason = buildProviderOverrideReviewReason(input.finding);
+    this.runStore.setRunCurrentState(input.runId, input.finding.stateId);
+    this.runStore.recordWorkflowBlocked(input.runId, {
+      stateId: input.finding.stateId,
+      transitionReason: reason
+    });
+    this.runStore.recordTerminalReason(input.runId, reason, "deterministic");
+    this.runStore.updateRunState(input.runId, "blocked");
+    this.markNotificationPendingIfNeeded(input.runId, false);
+    this.logger?.warn(
+      {
+        issueNumber: input.issue.number,
+        kind: input.finding.kind,
+        newDigest: input.finding.newDigest,
+        oldDigest: input.finding.oldDigest,
+        provider: input.finding.provider,
+        runId: input.runId,
+        stateId: input.finding.stateId
+      },
+      "symphonika parked Run before provider launch: per-state provider choice needs review"
+    );
+    await this.claimLabels.applyTerminal({
+      fsmContinuing: false,
+      issueNumber: input.issue.number,
+      outcome: {
+        classification: "deterministic",
+        kind: "failed",
+        reason
+      },
+      repository: input.repository,
+      runId: input.runId,
+      willRetry: false
+    });
   }
 
   async executeRetry(payload: RetryPayload): Promise<void> {
@@ -3257,6 +3514,36 @@ export class RunController {
       loadedWorkflow.expandedWorkflow,
       payload.toStateId
     );
+    const recoveryChoice = this.recoveryChoiceFor(payload);
+
+    // An operator's per-state choice for this state was made against a
+    // definition that has since changed or vanished (#864). A recovery names
+    // its own provider for this one launch, so the stale choice is moot then.
+    const overrideReview =
+      recoveryChoice === undefined
+        ? findStaleStateOverride({
+            plan: this.runStore.getChainProviderPlan(payload.parentRunId),
+            state: targetState,
+            stateId: payload.toStateId
+          })
+        : undefined;
+    if (overrideReview !== undefined) {
+      await this.parkStateAdvanceForOverrideReview({
+        finding: overrideReview,
+        issue: refreshed,
+        parentRunId: payload.parentRunId,
+        project,
+        providerCommand:
+          (providersConfig as Partial<RunControllerProvidersConfig>)[
+            project.agent.provider
+          ]?.command ?? "",
+        providerName: project.agent.provider,
+        repository,
+        runId
+      });
+      return;
+    }
+
     if (targetState === undefined) {
       const providerName = project.agent.provider;
       const providerCommand =
@@ -3276,7 +3563,6 @@ export class RunController {
       return;
     }
 
-    const recoveryChoice = this.recoveryChoiceFor(payload);
     if (recoveryChoice !== undefined && !isAgentState(targetState)) {
       // A workflow edit between the operator's confirm and this launch made
       // the position something no provider can be chosen for.

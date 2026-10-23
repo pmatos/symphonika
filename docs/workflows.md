@@ -615,9 +615,17 @@ The same page can also set a provider for individual `agent` states of a raw FSM
 choice outranks the chain-wide one for that state only, so the full precedence is per-state choice,
 chain-wide choice, `action.provider`, `projects[].agent.provider`. A state left on "Chain-wide
 choice" uses the next level down. Retries of an Attempt keep the provider the Run started with.
-Choices are keyed by state id: renaming a state after Start drops its choice back to the chain-wide
-one. The Issue page's Run Chain timeline shows which level picked each Run's provider. See
-ADR-2026-10-13-0659.
+Choices are keyed by state id and remember what the state looked like when they were made: its
+`action` (`kind`, the `prompt` path, `provider`, `method`, `labels`, `body`, `state_reason`),
+`complete_when` and its transitions, in order. Comments, key order, quoting, the text of the prompt
+file, other states and the state's id do not count. If the walk is about to launch a state whose
+definition then differs, or which no longer exists, the chain parks before any provider starts as a
+`blocked` Run (`provider_override_review_required`, `sym:blocked` and `sym:human-needed`) with its
+position kept, instead of binding the choice to the edited state. A chain-wide choice never parks,
+nor does a workflow without per-state choices, an edit to a different state, or a choice made before
+this check existed. Renaming a state that the walk no longer heads for just leaves its choice unused.
+The Issue page's Run Chain timeline shows which level picked each Run's provider. See
+ADR-2026-10-13-0659 and ADR-2026-10-23-1738.
 
 A state a Run stopped at (`failed`, `blocked` or `input_required`) can be recovered on a different
 provider with `POST /api/issues/:project/:number/recover`. That launches a new Continuation Run at

@@ -381,7 +381,10 @@ links it to the chain's root Run. `pending` and `label_written` plans are consum
 and `expired` plans are live but block dispatch of the Issue until retried or cancelled, so an
 uncertain label write never falls back to the Project default. Outranks `action.provider` and the
 Project's `agent.provider` (ADR-2026-10-09-0743). May also carry per-state choices that outrank the
-chain-wide choice for individual agent states (ADR-2026-10-13-0659).
+chain-wide choice for individual agent states (ADR-2026-10-13-0659), each recorded with a digest of
+the state's definition at the time; if that state is later removed or redefined, the chain parks
+before launch as a `blocked` Run with reason `provider_override_review_required` until an operator
+reviews the choice (ADR-2026-10-23-1738).
 _Avoid_: provider override, provider pin
 
 **Provider Recovery**:

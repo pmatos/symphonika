@@ -1,4 +1,5 @@
 import type { BranchPublication } from "./branch-on-origin.js";
+import type { ProviderOverrideReviewFinding } from "./chain-provider.js";
 
 export type CapReachedKind = "no_commits" | "no_pr" | "work_landed" | "unknown";
 
@@ -67,6 +68,25 @@ export function buildMergePrRefusedReason(
 // the global PR follow-up loop's re-merge guard (pull-request-followup.ts).
 export function isMergePrRefusedReason(reason: string | null): boolean {
   return reason !== null && reason.startsWith(MERGE_PR_REFUSED_PREFIX);
+}
+
+const PROVIDER_OVERRIDE_REVIEW_PREFIX = "provider_override_review_required:";
+
+// Written when a Run chain is parked before a provider launch because the
+// state an operator chose a provider for no longer means what it did (#864).
+// Read by outcome-projection.ts to classify the Run as blocked.
+export function buildProviderOverrideReviewReason(
+  finding: ProviderOverrideReviewFinding
+): string {
+  const what =
+    finding.kind === "state_removed"
+      ? "no longer exists in the workflow"
+      : "has a different definition";
+  return `${PROVIDER_OVERRIDE_REVIEW_PREFIX} state "${finding.stateId}" ${what} since the operator chose ${finding.provider} for it (recorded ${finding.oldDigest}, now ${finding.newDigest ?? "absent"})`;
+}
+
+export function isProviderOverrideReviewReason(reason: string | null): boolean {
+  return reason !== null && reason.startsWith(PROVIDER_OVERRIDE_REVIEW_PREFIX);
 }
 
 const NO_PULL_REQUEST_TRACKED_PREFIX = "no_pull_request_tracked:";

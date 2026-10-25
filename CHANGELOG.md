@@ -1,5 +1,26 @@
 # Changelog
 
+# [0.12.0](https://github.com/pmatos/symphonika/compare/v0.11.0...v0.12.0) (2026-10-25)
+
+
+### Bug Fixes
+
+* record claim-verified cross-branch routine prs ([#911](https://github.com/pmatos/symphonika/issues/911)) ([7a444da](https://github.com/pmatos/symphonika/commit/7a444da34107dca2552e195c424773076e1abb57))
+
+
+### Features
+
+* add an evidence-linked work briefing ([#917](https://github.com/pmatos/symphonika/issues/917)) ([5ff4149](https://github.com/pmatos/symphonika/commit/5ff4149bf9fe9dfca17138c94509898e33f0c196))
+* focus maestro conversations on a project ([#914](https://github.com/pmatos/symphonika/issues/914)) ([b5f7078](https://github.com/pmatos/symphonika/commit/b5f70780fcf3470048d3669e1ed6c189a1310e25))
+* group native sub-issues under their epic ([#918](https://github.com/pmatos/symphonika/issues/918)) ([2b2b987](https://github.com/pmatos/symphonika/commit/2b2b9874ba24a82c134aaf6870a3d986b8c43331))
+* native github parent supersedes the parent heading ([#921](https://github.com/pmatos/symphonika/issues/921)) ([b5dc77e](https://github.com/pmatos/symphonika/commit/b5dc77edc216ce9dd7a64ddb8af1d99e2dbb8836))
+* park a state override when its definition changed ([#920](https://github.com/pmatos/symphonika/issues/920)) ([b4dc599](https://github.com/pmatos/symphonika/commit/b4dc59995180ff3849262c053392f10dd55b5e3b))
+* preview and confirm recovery of a stopped fsm state ([#919](https://github.com/pmatos/symphonika/issues/919)) ([f86c732](https://github.com/pmatos/symphonika/commit/f86c732c7b7f9a188fd662675095437db9f03dcc))
+* record native github parent evidence on issue snapshots ([#916](https://github.com/pmatos/symphonika/issues/916)) ([cfcac75](https://github.com/pmatos/symphonika/commit/cfcac75367e703faa0c4c20ceab38a19010f8f32))
+* recover a stopped fsm state with a different provider (backend) ([#915](https://github.com/pmatos/symphonika/issues/915)) ([9b0e284](https://github.com/pmatos/symphonika/commit/9b0e284012ddf7d47f3e15263d0cc16429ea66c5))
+* report work history over rolling and custom date ranges ([#922](https://github.com/pmatos/symphonika/issues/922)) ([b5e21bb](https://github.com/pmatos/symphonika/commit/b5e21bb889a1d8a4bb4be7219874155cb2b055c4))
+* review and rebind a parked state provider override ([#923](https://github.com/pmatos/symphonika/issues/923)) ([ca6afa5](https://github.com/pmatos/symphonika/commit/ca6afa591ff7bff25db49b45e82c7de6a49801e2))
+
 # [0.11.0](https://github.com/pmatos/symphonika/compare/v0.10.0...v0.11.0) (2026-10-18)
 
 

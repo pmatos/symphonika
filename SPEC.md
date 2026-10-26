@@ -1746,9 +1746,13 @@ existing lifecycle rules. Repository identity is compared case-insensitively; a 
 origin is unknown is treated conservatively as belonging to the current Issue history. See ADR
 0058's issue #683 amendment.
 
-The daemon also applies this same check to its shared poll status, reclassifying a suppressed Issue
-as filtered rather than an eligible candidate — see §4.3. That reclassification is a visibility
-concern for every consumer of the poll status (the tracker-side candidate list, dashboard counts,
+The daemon's Issue Poll Publication module (`src/issue-poll-publication.ts`) also applies this same
+check to its shared poll status, reclassifying a suppressed Issue as filtered rather than an eligible
+candidate — see §4.3. The module owns identity selection, skipped-report carryover, suppression of
+both shared and fresh status, raw-config Project-state reconciliation, and persistence of fresh
+selected reports. Failed or skipped polls retain their last successful issue snapshots, while the
+full Project-state reconciliation still runs on ticks with no fresh reports. That reclassification is
+a visibility concern for every consumer of the poll status (the tracker-side candidate list, dashboard counts,
 poll-now output, and the persisted `/issues` triage snapshot), separate from the dispatch-only scope
 described above.
 

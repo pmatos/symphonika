@@ -104,6 +104,14 @@ _Avoid_: ticket, task
 An open issue that carries a Dispatch Project's Ready Label, avoids excluded labels, is not already claimed by the orchestrator, and has no unresolved GitHub-native issue dependency (see Dependency Gate below). This is the label-based candidate-list check; it does not itself consult Run history. The daemon's displayed candidate list, dashboard counts, and persisted `/issues` triage snapshot go one step further: an Eligible Issue whose newest Run's durable `no_workspace_changes` verdict (see Dispatch Eligibility below) suppresses fresh claim is shown as filtered, not as a candidate, in those surfaces.
 _Avoid_: active issue unless referring to tracker state
 
+**Issue Poll Publication**:
+The operation that merges one tick's fresh Issue Tracker reports into the shared poll status and
+durable Project evidence. `publishIssuePoll` (`src/issue-poll-publication.ts`) owns Project/repository
+identity selection, skipped-report carryover, durable Run-based candidate suppression, raw-config
+Project-state reconciliation, and fresh-only poll/snapshot writes. Failed and skipped polls retain
+their last successful snapshots; Routine Host modes remain visible even when no issues are polled.
+_Avoid_: issue polling when referring only to publishing already-fetched reports
+
 **Dispatch Eligibility**:
 The question "may this Dispatch Project freshly claim this Issue?", including open state, required
 labels, excluded labels, blocking operational labels, the newest Run's durable no-workspace-changes

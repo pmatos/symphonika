@@ -45,7 +45,7 @@
     "cron-parser": "^5.10.2",
     "cytoscape": "^3.34.4",
     "hono": "^4.13.13",
-    "nodemailer": "^10.1.1",
+    "nodemailer": "^10.2.1",
     "pino": "^10.4.0",
     "smol-toml": "^1.9.1",
     "yaml": "^2.9.1",

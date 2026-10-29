@@ -99,8 +99,8 @@ describe("Anthropic-backed Maestro model (#865)", () => {
         .map((tool) => tool.name)
         .sort()
     );
-    expect(call.headers.get("x-api-key")).toBe("sk-test-key");
-    expect(call.headers.get("authorization")).toBeNull();
+    expect(call.headers.get("authorization")).toBe("Bearer sk-test-key");
+    expect(call.headers.get("x-api-key")).toBeNull();
   });
 
   it("maps a tool_use response into a tool_use turn", async () => {

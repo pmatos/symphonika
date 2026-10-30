@@ -1234,6 +1234,30 @@ const RUN_CHAIN_TRACKED_PULL_REQUEST_SUPPRESSION = [
   "  and pr.branch_name = runs.branch_name",
   ")"
 ].join(" ");
+// Whole Run Chain membership for one @runId: expose run_chain(id), walking
+// up to the root and then down through every descendant. A forward-only
+// walk from a continuation misses its ancestors and live sibling branches.
+// Shared by owner liveness, displaced-chain retirement and latest-other
+// context; each consumer retains its own predicate, effects and ordering.
+// Ancestry-only PR lookup and multi-candidate discovery use distinct walks.
+const RUN_CHAIN_MEMBERSHIP_CTE = [
+  "with recursive up(id) as (",
+  "  select @runId as id",
+  "  union all",
+  "  select r.continuation_parent_run_id from runs r",
+  "  join up on r.id = up.id",
+  "  where r.continuation_parent_run_id is not null",
+  "),",
+  "run_chain(id) as (",
+  "  select up.id from up",
+  "  join runs r on r.id = up.id",
+  "  where r.continuation_parent_run_id is null",
+  "  union all",
+  "  select r.id from runs r",
+  "  join run_chain on r.continuation_parent_run_id = run_chain.id",
+  ")"
+].join(" ");
+
 const RUN_CHAIN_ROOT_CTE = [
   "with recursive run_chain_walk(id, ancestor_id) as (",
   "  select id, id from runs",
@@ -6790,29 +6814,14 @@ export class RunStore {
   // ancestor) whenever runId is itself a descendant rather than the root,
   // wrongly reporting the chain as fully terminal and permitting
   // trackPullRequest to reassign ownership out from under that still-live
-  // sibling. Same up/down shape as retirePullRequestDiscoveryChain below,
-  // which retires this same tree once reassignment is permitted.
+  // sibling. RUN_CHAIN_MEMBERSHIP_CTE owns that shared traversal.
   private isRunChainFullyTerminal(runId: string): boolean {
     const alive = this.database
       .prepare(
         [
-          "with recursive up(id) as (",
-          "  select @runId as id",
-          "  union all",
-          "  select r.continuation_parent_run_id from runs r",
-          "  join up on r.id = up.id",
-          "  where r.continuation_parent_run_id is not null",
-          "),",
-          "down(id) as (",
-          "  select up.id from up",
-          "  join runs r on r.id = up.id",
-          "  where r.continuation_parent_run_id is null",
-          "  union all",
-          "  select r.id from runs r",
-          "  join down on r.continuation_parent_run_id = down.id",
-          ")",
-          "select 1 as alive from down",
-          "join runs r on r.id = down.id",
+          RUN_CHAIN_MEMBERSHIP_CTE,
+          "select 1 as alive from run_chain",
+          "join runs r on r.id = run_chain.id",
           `where r.state not in (${TERMINAL_RUN_STATES_SQL_LIST})`,
           "limit 1"
         ].join(" ")
@@ -6829,13 +6838,10 @@ export class RunStore {
   // no longer matches and it falls straight back into
   // listRunsAwaitingPullRequestDiscovery -- rediscovers the same still-open
   // PR, and (being terminal too) reclaims the row right back, oscillating
-  // with the new owner forever. Same up/down walk as isRunChainFullyTerminal
-  // above, for the same reason: the row being displaced can be owned by a
-  // *descendant* continuation rather than its chain's root, so retiring only
-  // that continuation's own descendants would leave the root itself, and any
-  // sibling continuations off it, still eligible to rediscover and reclaim
-  // the row. Reuses pr_discovery_attempts (pinned at the cap) rather than a
-  // dedicated column -- both current callers
+  // with the new owner forever. Shared whole-chain membership includes the
+  // displaced owner's ancestors and sibling continuations, so none remain
+  // eligible to rediscover and reclaim the row. Reuses pr_discovery_attempts
+  // (pinned at the cap) rather than a dedicated column -- both current callers
   // (listRunsAwaitingPullRequestDiscovery, hasPullRequestFollowupWork)
   // always use the MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS default, so this
   // reliably excludes the whole chain; it is not a real attempt count once
@@ -6844,23 +6850,9 @@ export class RunStore {
     this.database
       .prepare(
         [
-          "with recursive up(id) as (",
-          "  select @runId as id",
-          "  union all",
-          "  select r.continuation_parent_run_id from runs r",
-          "  join up on r.id = up.id",
-          "  where r.continuation_parent_run_id is not null",
-          "),",
-          "down(id) as (",
-          "  select up.id from up",
-          "  join runs r on r.id = up.id",
-          "  where r.continuation_parent_run_id is null",
-          "  union all",
-          "  select r.id from runs r",
-          "  join down on r.continuation_parent_run_id = down.id",
-          ")",
+          RUN_CHAIN_MEMBERSHIP_CTE,
           "update runs set pr_discovery_attempts = @maxAttempts, updated_at = @now",
-          "where id in (select id from down) and pr_discovery_attempts < @maxAttempts"
+          "where id in (select id from run_chain) and pr_discovery_attempts < @maxAttempts"
         ].join(" ")
       )
       .run({ maxAttempts: MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS, now, runId });
@@ -7157,23 +7149,9 @@ export class RunStore {
     const row = this.database
       .prepare(
         [
-          "with recursive up(id) as (",
-          "  select @runId as id",
-          "  union all",
-          "  select r.continuation_parent_run_id from runs r",
-          "  join up on r.id = up.id",
-          "  where r.continuation_parent_run_id is not null",
-          "),",
-          "down(id) as (",
-          "  select up.id from up",
-          "  join runs r on r.id = up.id",
-          "  where r.continuation_parent_run_id is null",
-          "  union all",
-          "  select r.id from runs r",
-          "  join down on r.continuation_parent_run_id = down.id",
-          ")",
-          "select runs.id from down",
-          "join runs on runs.id = down.id",
+          RUN_CHAIN_MEMBERSHIP_CTE,
+          "select runs.id from run_chain",
+          "join runs on runs.id = run_chain.id",
           "where runs.id <> @runId",
           "order by runs.created_at desc, runs.rowid desc",
           "limit 1"

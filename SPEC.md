@@ -1096,6 +1096,13 @@ Run-store readers expose evidence as typed values, readable streams, and artifac
 Absolute evidence file paths remain an internal persistence detail used by writers and migrations;
 operator surfaces link artifacts by stable artifact kind rather than by on-disk filename.
 
+Run-store operations that need a whole Run Chain share one private membership relation: walk from
+the requested Run to its root, then through every descendant, including sibling branches. Tracked
+PR owner liveness, displaced-chain discovery retirement, and latest-other-Run context use that
+relation while retaining their own predicates, effects, and ordering. The ancestry-only tracked-PR
+lookup and multi-candidate discovery walks remain distinct; chain membership is derived from
+existing continuation links without a schema change or cache.
+
 ### 7.3 Log Layout
 
 Raw logs live under the state root, outside issue workspaces.

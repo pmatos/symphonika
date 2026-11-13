@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { databasePath, openRunStore } from "../src/run-store.js";
+import {
+  databasePath,
+  MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS,
+  openRunStore
+} from "../src/run-store.js";
+import type { RunState } from "../src/run-store.js";
 
 const tempRoots: string[] = [];
 
@@ -94,6 +99,187 @@ function evidence(branchName: string) {
     workspacePath: "/tmp/workspace"
   };
 }
+
+describe("whole Run Chain membership", () => {
+  it("finds the latest other Run across ancestors and sibling branches, using insertion order for timestamp ties", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-01T00:00:00Z"));
+      seedRun(store, { id: "root" });
+      const continuation = (id: string, parentRunId: string) =>
+        store.createContinuationRun({
+          id,
+          issue: makeIssue(7),
+          parentRunId,
+          projectName: "symphonika",
+          providerCommand: "fake",
+          providerName: "codex"
+        });
+      vi.setSystemTime(new Date("2026-10-02T00:00:00Z"));
+      continuation("owner", "root");
+      vi.setSystemTime(new Date("2026-10-03T00:00:00Z"));
+      continuation("z-sibling", "root");
+      continuation("a-sibling", "root");
+      vi.setSystemTime(new Date("2026-10-04T00:00:00Z"));
+      continuation("leaf", "owner");
+      vi.setSystemTime(new Date("2026-10-05T00:00:00Z"));
+      seedRun(store, { id: "unrelated" });
+      store.updateRunState("z-sibling", "succeeded");
+
+      expect(store.findLatestOtherChainRun("root")?.id).toBe("leaf");
+      expect(store.findLatestOtherChainRun("owner")?.id).toBe("leaf");
+      expect(store.findLatestOtherChainRun("leaf")?.id).toBe("a-sibling");
+      expect(store.findLatestOtherChainRun("a-sibling")?.id).toBe("leaf");
+      expect(store.findLatestOtherChainRun("unrelated")).toBeUndefined();
+      expect(store.findLatestOtherChainRun("missing")).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      store.close();
+    }
+  });
+
+  it.each<[RunState, boolean]>([
+    ["queued", false],
+    ["preparing_workspace", false],
+    ["running", false],
+    ["waiting", false],
+    ["blocked", true],
+    ["cancelled", true],
+    ["failed", true],
+    ["input_required", true],
+    ["stale", true],
+    ["succeeded", true]
+  ])(
+    "checks a sibling in state %s before transferring PR ownership",
+    async (state, transferable) => {
+      const root = await makeTempRoot();
+      const store = openRunStore({ stateRoot: root });
+      try {
+        const branchName = "sym/symphonika/7-chain";
+        seedRun(store, { id: "root" });
+        store.updateRunState("root", "succeeded");
+        for (const id of ["owner", "sibling"]) {
+          store.createContinuationRun({
+            id,
+            issue: makeIssue(7),
+            parentRunId: "root",
+            projectName: "symphonika",
+            providerCommand: "fake",
+            providerName: "codex"
+          });
+        }
+        store.updateRunState("owner", "succeeded");
+        store.updateRunState("sibling", state);
+        const tracking = {
+          branchName,
+          headSha: "sha",
+          issueNumber: 7,
+          projectName: "symphonika",
+          prNumber: 81,
+          prUrl: "https://github.com/pmatos/symphonika/pull/81"
+        };
+        store.trackPullRequest({ ...tracking, runId: "owner" });
+        seedRun(store, { id: "claimant" });
+        store.updateRunState("claimant", "succeeded");
+        store.trackPullRequest({ ...tracking, runId: "claimant" });
+
+        expect(store.findTrackedPullRequestByIssue(tracking)?.runId).toBe(
+          transferable ? "claimant" : "owner"
+        );
+      } finally {
+        store.close();
+      }
+    }
+  );
+
+  it("retires every donor branch while preserving unrelated Runs and counts already above the cap", async () => {
+    const root = await makeTempRoot();
+    const store = openRunStore({ stateRoot: root });
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-01T00:00:00Z"));
+      const branchName = "sym/symphonika/7-chain";
+      seedRun(store, { id: "root" });
+      store.updateRunEvidence("root", evidence(branchName));
+      store.updateRunState("root", "succeeded");
+      for (const [id, parentRunId] of [
+        ["owner", "root"],
+        ["sibling", "root"],
+        ["leaf", "sibling"]
+      ] as const) {
+        store.createContinuationRun({
+          id,
+          issue: makeIssue(7),
+          parentRunId,
+          projectName: "symphonika",
+          providerCommand: "fake",
+          providerName: "codex"
+        });
+        store.updateRunState(id, "succeeded");
+      }
+      for (
+        let index = 0;
+        index < MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS + 2;
+        index++
+      ) {
+        store.recordPullRequestDiscoveryAttempt("sibling");
+      }
+      for (
+        let index = 0;
+        index < MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS;
+        index++
+      ) {
+        store.recordPullRequestDiscoveryAttempt("leaf");
+      }
+      const cappedUpdatedAt = store.getRun("sibling")?.updatedAt;
+      const atCapUpdatedAt = store.getRun("leaf")?.updatedAt;
+      const tracking = {
+        branchName,
+        headSha: "sha",
+        issueNumber: 7,
+        projectName: "symphonika",
+        prNumber: 81,
+        prUrl: "https://github.com/pmatos/symphonika/pull/81"
+      };
+      store.trackPullRequest({ ...tracking, runId: "owner" });
+      seedRun(store, { id: "claimant" });
+      store.updateRunState("claimant", "succeeded");
+      seedRun(store, { id: "unrelated" });
+      store.updateRunEvidence("unrelated", evidence(branchName));
+      store.updateRunState("unrelated", "succeeded");
+      vi.setSystemTime(new Date("2026-10-02T00:00:00Z"));
+      store.trackPullRequest({ ...tracking, runId: "claimant" });
+
+      expect(store.findTrackedPullRequestByIssue(tracking)?.runId).toBe(
+        "claimant"
+      );
+      expect(
+        store.listRunsAwaitingPullRequestDiscovery().map((run) => run.runId)
+      ).toEqual(["unrelated"]);
+      expect(store.getRun("sibling")?.updatedAt).toBe(cappedUpdatedAt);
+      expect(store.getRun("leaf")?.updatedAt).toBe(atCapUpdatedAt);
+      expect(store.recordPullRequestDiscoveryAttempt("root")).toBe(
+        MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS + 1
+      );
+      expect(store.recordPullRequestDiscoveryAttempt("owner")).toBe(
+        MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS + 1
+      );
+      expect(store.recordPullRequestDiscoveryAttempt("sibling")).toBe(
+        MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS + 3
+      );
+      expect(store.recordPullRequestDiscoveryAttempt("leaf")).toBe(
+        MAX_PULL_REQUEST_DISCOVERY_ATTEMPTS + 1
+      );
+      expect(store.recordPullRequestDiscoveryAttempt("claimant")).toBe(1);
+      expect(store.recordPullRequestDiscoveryAttempt("unrelated")).toBe(1);
+    } finally {
+      vi.useRealTimers();
+      store.close();
+    }
+  });
+});
 
 describe("run-store lifecycle CRUD", () => {
   it("persists project cursor and validation state across store reopen", async () => {

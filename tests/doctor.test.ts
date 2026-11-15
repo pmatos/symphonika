@@ -995,6 +995,45 @@ describe("doctor", () => {
     );
   });
 
+  it.each([false, true])(
+    "reserves an invalid Routine's recovered name (invalid first: %s)",
+    async (invalidFirst) => {
+      const root = await makeTempRoot();
+      const configPath = path.join(root, "symphonika.yml");
+      const invalidPath = path.join(root, "invalid.md");
+      const validPath = path.join(root, "valid.md");
+      const paths = invalidFirst
+        ? ["./invalid.md", "./valid.md"]
+        : ["./valid.md", "./invalid.md"];
+      await writeValidConfig(configPath, { routinePaths: paths });
+      await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+      await writeFile(invalidPath, "---\nname: repeated\n---\nReport.\n");
+      await writeFile(
+        validPath,
+        "---\nname: repeated\nkind: report\nschedule:\n  cron: daily\n---\nReport.\n"
+      );
+      process.env.GITHUB_TOKEN = "test-secret-token";
+
+      const report = await runDoctor({
+        agentProviders: fakeAgentProviders(),
+        configPath,
+        githubApi: successfulGitHubApi(),
+        homeDir: root
+      });
+
+      const firstPath = invalidFirst ? invalidPath : validPath;
+      const secondPath = invalidFirst ? validPath : invalidPath;
+      const duplicate = `duplicate routine name "repeated" declared by ${firstPath} and ${secondPath}`;
+      expect(report.errors).toContain(duplicate);
+      expect(report.errors).toContain(
+        `routine at ${invalidPath} kind is required`
+      );
+      expect(
+        report.errors.indexOf(`routine at ${invalidPath} kind is required`)
+      ).toBeLessThan(report.errors.indexOf(duplicate));
+    }
+  );
+
   it("reports duplicate Routine names within one Project", async () => {
     const root = await makeTempRoot();
     const configPath = path.join(root, "symphonika.yml");

@@ -61,7 +61,7 @@ import type { AgentProviderName, AgentProviderRegistry } from "./provider.js";
 import { renderProviderCommandTemplate } from "./provider-command-template.js";
 import { probeProviderCommand } from "./provider-probe.js";
 import { DEFAULT_AGENT_PROVIDERS } from "./providers/index.js";
-import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
+import { createRoutineDeclarationCatalog } from "./routines/declaration-catalog.js";
 import {
   rejectProjectRoutineDeclarations,
   routineServiceConfigFields
@@ -1677,7 +1677,7 @@ async function validateServiceRoutines(
   routineDefaults: RoutineExecutionOverrides
 ): Promise<string[]> {
   const errors: string[] = [];
-  const seenNames = new Map<string, string>();
+  const catalog = createRoutineDeclarationCatalog();
   const hostsByName = new Map<string, RoutineHostProjectConfig>();
   for (const project of declaredProjects) {
     if (project.mode === "routine_host") {
@@ -1722,34 +1722,12 @@ async function validateServiceRoutines(
       }
     }
 
-    const result = await loadRoutineDeclaration(entry.sourcePath);
-    if (result.routine === null) {
-      errors.push(...result.errors);
-      // Reserve an invalid declaration's recovered name too — otherwise a
-      // later declaration in this pass can legitimately claim the same name
-      // while this file remains broken, violating the service-level
-      // global-name uniqueness requirement (ADR 0069).
-      if (result.partialName !== undefined) {
-        const existingForPartialName = seenNames.get(result.partialName);
-        if (existingForPartialName !== undefined) {
-          errors.push(
-            `duplicate routine name "${result.partialName}" declared by ${existingForPartialName} and ${entry.sourcePath}`
-          );
-        } else {
-          seenNames.set(result.partialName, entry.sourcePath);
-        }
-      }
+    const result = await catalog.load(entry.sourcePath);
+    errors.push(...result.errors.map(({ message }) => message));
+    if (result.kind !== "accepted") {
       continue;
     }
     const routine = result.routine;
-    const existing = seenNames.get(routine.name);
-    if (existing !== undefined) {
-      errors.push(
-        `duplicate routine name "${routine.name}" declared by ${existing} and ${routine.sourcePath}`
-      );
-      continue;
-    }
-    seenNames.set(routine.name, routine.sourcePath);
 
     if (routine.provider !== null) {
       const providerConfig = providers[routine.provider];

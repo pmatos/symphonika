@@ -71,13 +71,13 @@
     "eslint-config-prettier": "^10.1.8",
     "fast-check": "^4.10.2",
     "happy-dom": "^21.0.4",
-    "knip": "^6.44.1",
-    "prettier": "^3.9.10",
+    "knip": "^6.45.1",
+    "prettier": "^3.10.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tsx": "^4.23.15",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-eslint": "^8.72.1",
+    "typescript-eslint": "^8.72.2",
     "vitest": "^5.1.0"
   },
   "allowScripts": {

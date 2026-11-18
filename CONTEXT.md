@@ -463,6 +463,14 @@ non-empty list of declared Projects and can launch Coding Agents without GitHub 
 Host owns no routines — Routines point *at* it. There is no target wildcard. See ADR 0069.
 _Avoid_: workflow contract when referring to recurring or one-shot scheduled work
 
+**Routine Declaration Catalog**:
+The per-Service Config pass that loads Routine declarations and reserves their globally unique
+names. `createRoutineDeclarationCatalog` (`src/routines/declaration-catalog.ts`) owns recovered-name
+reservation, duplicate diagnostics, and optional fallback to a previous declaration by source path.
+Doctor uses current declarations only; runtime reload supplies previous declarations and retains
+Routine Target materialization. Target validation and provider checks remain with each reader.
+_Avoid_: Routine Target registry, Runtime Config Snapshot
+
 **Routine Target**:
 The materialized per-Project state for one Routine, durably keyed by `(project_name, name)`. Each
 target owns its schedule position, lifecycle state, and skip counters. When its Project is disabled

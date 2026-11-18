@@ -1648,86 +1648,95 @@ describe("RuntimeConfigReloader concurrency caps", () => {
     ).toBe(false);
   });
 
-  it("still detects a duplicate name when a carried-forward invalid declaration collides with a fresh one", async () => {
-    const root = await makeTempRoot();
-    await writeProjectConfig(root, "WORKFLOW.md");
-    await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
-    const routineAPath = path.join(root, "routine-a.md");
-    await writeFile(
-      routineAPath,
-      [
-        "---",
-        "name: shared-name",
-        "schedule:",
-        "  at: 2026-05-22T10:00:00.000Z",
-        "kind: report",
-        "---",
-        "Report.",
-        ""
-      ].join("\n")
-    );
-    const configPath = path.join(root, "symphonika.yml");
-    const original = await readFile(configPath, "utf8");
-    await writeFile(
-      configPath,
-      original.replace(
-        "    workflow: ./WORKFLOW.md",
+  it.each(["../bad", "renamed"])(
+    "reserves the previous name when an invalid declaration is edited to %s",
+    async (editedName) => {
+      const root = await makeTempRoot();
+      await writeProjectConfig(root, "WORKFLOW.md");
+      await writeFile(path.join(root, "WORKFLOW.md"), "Work.\n");
+      const routineAPath = path.join(root, "routine-a.md");
+      await writeFile(
+        routineAPath,
         [
+          "---",
+          "name: shared-name",
+          "schedule:",
+          "  at: 2026-05-22T10:00:00.000Z",
+          "kind: report",
+          "---",
+          "Report.",
+          ""
+        ].join("\n")
+      );
+      const configPath = path.join(root, "symphonika.yml");
+      const original = await readFile(configPath, "utf8");
+      await writeFile(
+        configPath,
+        original.replace(
           "    workflow: ./WORKFLOW.md",
-          "routines:",
-          "  - projects: [symphonika]",
-          "    path: ./routine-a.md"
-        ].join("\n")
-      )
-    );
+          [
+            "    workflow: ./WORKFLOW.md",
+            "routines:",
+            "  - projects: [symphonika]",
+            "    path: ./routine-a.md"
+          ].join("\n")
+        )
+      );
 
-    const reloader = new RuntimeConfigReloader({ configPath });
-    await reloader.reload();
+      const reloader = new RuntimeConfigReloader({ configPath });
+      await reloader.reload();
 
-    // routine-a.md becomes invalid (carries forward its prior valid
-    // declaration, still named "shared-name") while a brand-new file
-    // legitimately reuses that same name.
-    await writeFile(
-      routineAPath,
-      ["---", "name: ../bad", "kind: report", "---", "Body", ""].join("\n")
-    );
-    const routineBPath = path.join(root, "routine-b.md");
-    await writeFile(
-      routineBPath,
-      [
-        "---",
-        "name: shared-name",
-        "schedule:",
-        "  at: 2026-05-23T10:00:00.000Z",
-        "kind: report",
-        "---",
-        "Report.",
-        ""
-      ].join("\n")
-    );
-    const withSecondRoutine = await readFile(configPath, "utf8");
-    await writeFile(
-      configPath,
-      withSecondRoutine.replace(
-        "    path: ./routine-a.md",
+      // routine-a.md becomes invalid (carries forward its prior valid
+      // declaration, still named "shared-name") while a brand-new file
+      // legitimately reuses that same name.
+      await writeFile(
+        routineAPath,
+        ["---", `name: ${editedName}`, "kind: report", "---", "Body", ""].join(
+          "\n"
+        )
+      );
+      const routineBPath = path.join(root, "routine-b.md");
+      await writeFile(
+        routineBPath,
         [
-          "    path: ./routine-a.md",
-          "  - projects: [symphonika]",
-          "    path: ./routine-b.md"
+          "---",
+          "name: shared-name",
+          "schedule:",
+          "  at: 2026-05-23T10:00:00.000Z",
+          "kind: report",
+          "---",
+          "Report.",
+          ""
         ].join("\n")
-      )
-    );
-    await reloader.reload();
+      );
+      const withSecondRoutine = await readFile(configPath, "utf8");
+      await writeFile(
+        configPath,
+        withSecondRoutine.replace(
+          "    path: ./routine-a.md",
+          [
+            "    path: ./routine-a.md",
+            "  - projects: [symphonika]",
+            "    path: ./routine-b.md"
+          ].join("\n")
+        )
+      );
+      await reloader.reload();
 
-    expect(reloader.getStatus().errors.join("\n")).toContain(
-      'duplicate routine name "shared-name"'
-    );
-    const project = reloader.projectsByName().get("symphonika");
-    const sharedNameRoutines = project?.routines?.filter(
-      (routine) => routine.name === "shared-name"
-    );
-    expect(sharedNameRoutines).toHaveLength(1);
-  });
+      expect(reloader.getStatus().errors.join("\n")).toContain(
+        'duplicate routine name "shared-name"'
+      );
+      expect(reloader.getStatus().routineErrors).toContainEqual({
+        message: `duplicate routine name "shared-name" declared by ${routineAPath} and ${routineBPath}`,
+        sourcePaths: [routineAPath, routineBPath]
+      });
+      const project = reloader.projectsByName().get("symphonika");
+      const sharedNameRoutines = project?.routines?.filter(
+        (routine) => routine.name === "shared-name"
+      );
+      expect(sharedNameRoutines).toHaveLength(1);
+    }
+  );
 
   it("rejects duplicate routine names within a project", async () => {
     const root = await makeTempRoot();

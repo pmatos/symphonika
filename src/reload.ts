@@ -44,7 +44,7 @@ import {
   expandWorkflowDefinition,
   validateExpandedWorkflowReferences
 } from "./workflow/fsm-expansion.js";
-import { loadRoutineDeclaration } from "./routines/declaration-loader.js";
+import { createRoutineDeclarationCatalog } from "./routines/declaration-catalog.js";
 import {
   rejectProjectRoutineDeclarations,
   routineServiceConfigFields
@@ -1449,101 +1449,34 @@ async function readRoutineDeclarations(
     path: string;
     projectName: string;
   }> = [];
-  const seenNames = new Map<string, string>();
-  const previousBySourcePath = new Map(
-    previousRoutines.map((routine) => [routine.sourcePath, routine])
-  );
+  const catalog = createRoutineDeclarationCatalog(previousRoutines);
   for (const entry of entries) {
-    const result = await loadRoutineDeclaration(entry.sourcePath);
-    if (result.routine === null) {
-      errors.push(...result.errors);
-      routineErrors.push(
-        ...result.errors.map((message) => ({
-          message,
-          sourcePaths: [entry.sourcePath]
-        }))
-      );
-      // Carry-forward is keyed on the file's own path, not on the freshly
-      // parsed name — a broken edit can corrupt the name field itself while
-      // the path symphonika.yml references stays the same. Falling back to
-      // name would wrongly treat that as "no prior valid declaration" and
-      // let the removal-detection path in RunStore.syncRoutines demote a
-      // still-configured routine to disabled/removed_from_config.
-      const previous = previousBySourcePath.get(entry.sourcePath);
-      if (previous !== undefined) {
-        // Register the carried-forward name too — otherwise a later file in
-        // this same pass that legitimately (re)uses this name slips past
-        // the duplicate check below, since seenNames would have no record
-        // of it ever being declared.
-        const existingForCarryForward = seenNames.get(previous.name);
-        if (existingForCarryForward !== undefined) {
-          addRoutineReloadError(
-            errors,
-            routineErrors,
-            `duplicate routine name "${previous.name}" declared by ${existingForCarryForward} and ${previous.sourcePath}`,
-            existingForCarryForward,
-            previous.sourcePath
-          );
-        } else {
-          seenNames.set(previous.name, previous.sourcePath);
-          routines.push(
-            ...entry.projectNames.map((projectName) => ({
-              ...previous,
-              projectName
-            }))
-          );
-        }
-      } else {
-        // Reserve a brand-new invalid declaration's recovered name too —
-        // otherwise a later declaration in this same pass (especially one
-        // targeting another Project) can legitimately claim the same name
-        // while this file remains broken, violating the service-level
-        // global-name uniqueness requirement (ADR 0069).
-        if (result.partialName !== undefined) {
-          const existingForPartialName = seenNames.get(result.partialName);
-          if (existingForPartialName !== undefined) {
-            addRoutineReloadError(
-              errors,
-              routineErrors,
-              `duplicate routine name "${result.partialName}" declared by ${existingForPartialName} and ${entry.sourcePath}`,
-              existingForPartialName,
-              entry.sourcePath
-            );
-          } else {
-            seenNames.set(result.partialName, entry.sourcePath);
-          }
-        }
-        invalidNew.push(
-          ...entry.projectNames.map((projectName) => ({
-            ...(result.partialName === undefined
-              ? {}
-              : { name: result.partialName }),
-            path: entry.sourcePath,
-            projectName
-          }))
-        );
-      }
-      continue;
-    }
-    const routine = result.routine;
-    const existing = seenNames.get(routine.name);
-    if (existing !== undefined) {
+    const result = await catalog.load(entry.sourcePath);
+    for (const diagnostic of result.errors) {
       addRoutineReloadError(
         errors,
         routineErrors,
-        `duplicate routine name "${routine.name}" declared by ${existing} and ${routine.sourcePath}`,
-        existing,
-        routine.sourcePath
+        diagnostic.message,
+        ...diagnostic.sourcePaths
       );
-      continue;
     }
-    seenNames.set(routine.name, routine.sourcePath);
-    routines.push(
-      ...entry.projectNames.map((projectName) => ({
-        ...routine,
-        projectName
-      }))
-    );
+    if (result.kind === "accepted") {
+      const routine = result.routine;
+      routines.push(
+        ...entry.projectNames.map((projectName) => ({
+          ...routine,
+          projectName
+        }))
+      );
+    } else if (result.kind === "invalid") {
+      invalidNew.push(
+        ...entry.projectNames.map((projectName) => ({
+          ...(result.name === undefined ? {} : { name: result.name }),
+          path: entry.sourcePath,
+          projectName
+        }))
+      );
+    }
   }
   return { invalidNew, routines };
 }
